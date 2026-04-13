@@ -2,3 +2,5 @@ node_modules/
 dist/
 *.tsbuildinfo
 .env
+docker-compose.override.yml
+.claude/settings.local.json

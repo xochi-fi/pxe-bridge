@@ -11,14 +11,26 @@ export const JsonRpcRequestSchema = z.object({
 export type JsonRpcRequest = z.infer<typeof JsonRpcRequestSchema>;
 
 export type JsonRpcResponse =
-  | { jsonrpc: "2.0"; id: number | string; result: unknown }
-  | { jsonrpc: "2.0"; id: number | string; error: { code: number; message: string } };
+  | { jsonrpc: "2.0"; id: number | string | null; result: unknown }
+  | {
+      jsonrpc: "2.0";
+      id: number | string | null;
+      error: { code: number; message: string };
+    };
 
 // aztec_createNote params
 export const CreateNoteParamsSchema = z.object({
-  recipient: z.string().regex(/^0x[0-9a-fA-F]+$/, "Must be hex address"),
-  token: z.string().regex(/^0x[0-9a-fA-F]+$/, "Must be hex address"),
-  amount: z.string().regex(/^\d+$/, "Must be numeric string"),
+  recipient: z
+    .string()
+    .regex(/^0x[0-9a-fA-F]{64}$/, "Must be 32-byte hex address"),
+  token: z.string().regex(/^0x[0-9a-fA-F]{64}$/, "Must be 32-byte hex address"),
+  amount: z
+    .string()
+    .regex(
+      /^(0|[1-9]\d*)$/,
+      "Must be non-negative integer without leading zeros",
+    )
+    .refine((s) => s.length <= 78, "Amount exceeds uint256 max (78 digits)"),
   chainId: z.number().int().positive(),
 });
 
@@ -28,6 +40,13 @@ export interface CreateNoteResult {
   noteCommitment: string;
   nullifierHash: string;
   l2TxHash: string;
+}
+
+// Abstraction over AztecClient for testability
+export interface IAztecClient {
+  connect(): Promise<void>;
+  createNote(params: CreateNoteParams): Promise<CreateNoteResult>;
+  getVersion(): Promise<string>;
 }
 
 // JSON-RPC error codes
