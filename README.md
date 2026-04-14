@@ -2,16 +2,30 @@
 
 JSON-RPC bridge from EVM intent solvers to Aztec shielded settlement via embedded PXE.
 
-## Overview
+## What is PXE?
 
-pxe-bridge runs a lightweight HTTP server exposing JSON-RPC methods that wrap Aztec SDK operations. It creates an EmbeddedWallet with a Schnorr account, connects to an Aztec L2 node, and provides a simple RPC interface for creating shielded notes.
+PXE (Private eXecution Environment) is an Aztec-specific runtime that executes the private half of transactions locally on your machine, not on the network.
+
+On Ethereum, all execution happens on-chain: every node re-runs your transaction, and everyone sees the inputs. On Aztec, transactions split into a private phase (runs locally in the PXE) and a public phase (runs on the network). The PXE:
+
+- **Holds private keys and encrypted notes.** Aztec uses a UTXO-like note model. Balances are encrypted notes that only the owner's PXE can decrypt and spend.
+- **Executes private functions locally.** Contract logic that touches private state runs inside the PXE, producing a zero-knowledge proof that the execution was correct without revealing the inputs.
+- **Submits proofs to the network.** The Aztec node receives the proof and encrypted outputs, never the plaintext data.
+
+This is fundamentally different from EVM execution. There is no global state that every validator reads. Private state exists only inside the PXE that owns it.
+
+## Why pxe-bridge?
+
+EVM intent solvers speak JSON-RPC and have no concept of private execution, PXEs, or encrypted notes. They can't create shielded positions on Aztec directly.
+
+pxe-bridge embeds a PXE wallet and wraps it in a JSON-RPC interface that solvers already understand. When a solver says "create a shielded note for this token," the bridge handles private execution, proof generation, and note encryption transparently. The solver gets back a transaction hash.
 
 ```
 EVM Solver --JSON-RPC--> pxe-bridge --Aztec SDK--> Aztec L2 Node
                          (this repo)
-                         +- EmbeddedWallet (embedded PXE)
-                         +- Schnorr Account
-                         +- TokenContract calls
+                         +- Embedded PXE (private execution)
+                         +- Schnorr Account (key management)
+                         +- TokenContract calls (note creation)
 ```
 
 ## Quick Start
