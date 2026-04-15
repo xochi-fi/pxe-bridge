@@ -196,4 +196,158 @@ describe("CreateNoteParamsSchema", () => {
       expect(result.success, `should reject missing ${key}`).toBe(false);
     }
   });
+
+  describe("XIP-1 trade context", () => {
+    const tradeContext = {
+      tradeId: "0x" + "b".repeat(64),
+      subTradeIndex: 0,
+      totalSubTrades: 3,
+    };
+
+    it("accepts params with full trade context", () => {
+      const result = CreateNoteParamsSchema.safeParse({
+        ...validParams,
+        ...tradeContext,
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it("accepts params without trade context (backwards compat)", () => {
+      const result = CreateNoteParamsSchema.safeParse(validParams);
+      expect(result.success).toBe(true);
+    });
+
+    it("rejects partial trade context: tradeId only", () => {
+      const result = CreateNoteParamsSchema.safeParse({
+        ...validParams,
+        tradeId: tradeContext.tradeId,
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects partial trade context: subTradeIndex only", () => {
+      const result = CreateNoteParamsSchema.safeParse({
+        ...validParams,
+        subTradeIndex: 0,
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects partial trade context: totalSubTrades only", () => {
+      const result = CreateNoteParamsSchema.safeParse({
+        ...validParams,
+        totalSubTrades: 3,
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects partial trade context: two of three fields", () => {
+      const result = CreateNoteParamsSchema.safeParse({
+        ...validParams,
+        tradeId: tradeContext.tradeId,
+        subTradeIndex: 0,
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects subTradeIndex >= totalSubTrades", () => {
+      const result = CreateNoteParamsSchema.safeParse({
+        ...validParams,
+        tradeId: tradeContext.tradeId,
+        subTradeIndex: 3,
+        totalSubTrades: 3,
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects subTradeIndex > totalSubTrades", () => {
+      const result = CreateNoteParamsSchema.safeParse({
+        ...validParams,
+        tradeId: tradeContext.tradeId,
+        subTradeIndex: 5,
+        totalSubTrades: 3,
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("accepts subTradeIndex at last valid position", () => {
+      const result = CreateNoteParamsSchema.safeParse({
+        ...validParams,
+        tradeId: tradeContext.tradeId,
+        subTradeIndex: 2,
+        totalSubTrades: 3,
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it("rejects negative subTradeIndex", () => {
+      const result = CreateNoteParamsSchema.safeParse({
+        ...validParams,
+        tradeId: tradeContext.tradeId,
+        subTradeIndex: -1,
+        totalSubTrades: 3,
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects totalSubTrades of 0", () => {
+      const result = CreateNoteParamsSchema.safeParse({
+        ...validParams,
+        tradeId: tradeContext.tradeId,
+        subTradeIndex: 0,
+        totalSubTrades: 0,
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects totalSubTrades of 1 (below XIP-1 minimum of 2)", () => {
+      const result = CreateNoteParamsSchema.safeParse({
+        ...validParams,
+        tradeId: tradeContext.tradeId,
+        subTradeIndex: 0,
+        totalSubTrades: 1,
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("accepts totalSubTrades at upper bound (100)", () => {
+      const result = CreateNoteParamsSchema.safeParse({
+        ...validParams,
+        tradeId: tradeContext.tradeId,
+        subTradeIndex: 0,
+        totalSubTrades: 100,
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it("rejects totalSubTrades above max (101)", () => {
+      const result = CreateNoteParamsSchema.safeParse({
+        ...validParams,
+        tradeId: tradeContext.tradeId,
+        subTradeIndex: 0,
+        totalSubTrades: 101,
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("accepts uppercase hex in tradeId", () => {
+      const result = CreateNoteParamsSchema.safeParse({
+        ...validParams,
+        tradeId: "0x" + "A".repeat(64),
+        subTradeIndex: 0,
+        totalSubTrades: 3,
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it("rejects invalid tradeId format", () => {
+      const result = CreateNoteParamsSchema.safeParse({
+        ...validParams,
+        tradeId: "not-a-hex-id",
+        subTradeIndex: 0,
+        totalSubTrades: 3,
+      });
+      expect(result.success).toBe(false);
+    });
+  });
 });

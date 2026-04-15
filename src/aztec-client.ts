@@ -106,7 +106,18 @@ export class AztecClient implements IAztecClient {
 
     const token = await this.getToken(tokenAddress);
 
-    console.log("[pxe-bridge] Creating note for chainId:", params.chainId);
+    if (params.tradeId !== undefined) {
+      console.log(
+        "[pxe-bridge] Creating note for chainId:",
+        params.chainId,
+        "tradeId:",
+        params.tradeId,
+        "subTrade:",
+        params.subTradeIndex + "/" + params.totalSubTrades,
+      );
+    } else {
+      console.log("[pxe-bridge] Creating note for chainId:", params.chainId);
+    }
 
     const result = await withTimeout(
       token.methods

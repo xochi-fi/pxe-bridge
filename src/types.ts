@@ -19,20 +19,53 @@ export type JsonRpcResponse =
     };
 
 // aztec_createNote params
-export const CreateNoteParamsSchema = z.object({
-  recipient: z
-    .string()
-    .regex(/^0x[0-9a-fA-F]{64}$/, "Must be 32-byte hex address"),
-  token: z.string().regex(/^0x[0-9a-fA-F]{64}$/, "Must be 32-byte hex address"),
-  amount: z
-    .string()
-    .regex(
-      /^(0|[1-9]\d*)$/,
-      "Must be non-negative integer without leading zeros",
-    )
-    .refine((s) => s.length <= 78, "Amount exceeds uint256 max (78 digits)"),
-  chainId: z.number().int().positive(),
-});
+export const CreateNoteParamsSchema = z
+  .object({
+    recipient: z
+      .string()
+      .regex(/^0x[0-9a-fA-F]{64}$/, "Must be 32-byte hex address"),
+    token: z
+      .string()
+      .regex(/^0x[0-9a-fA-F]{64}$/, "Must be 32-byte hex address"),
+    amount: z
+      .string()
+      .regex(
+        /^(0|[1-9]\d*)$/,
+        "Must be non-negative integer without leading zeros",
+      )
+      .refine((s) => s.length <= 78, "Amount exceeds uint256 max (78 digits)"),
+    chainId: z.number().int().positive(),
+    // XIP-1 trade context (optional, but all-or-nothing)
+    tradeId: z
+      .string()
+      .regex(/^0x[0-9a-fA-F]{64}$/, "Must be 32-byte hex identifier")
+      .optional(),
+    subTradeIndex: z.number().int().min(0).optional(),
+    totalSubTrades: z.number().int().min(2).max(100).optional(),
+  })
+  .refine(
+    (data) => {
+      const fields = [data.tradeId, data.subTradeIndex, data.totalSubTrades];
+      const provided = fields.filter((f) => f !== undefined).length;
+      return provided === 0 || provided === 3;
+    },
+    {
+      message:
+        "tradeId, subTradeIndex, and totalSubTrades must all be provided together",
+    },
+  )
+  .refine(
+    (data) => {
+      if (
+        data.subTradeIndex !== undefined &&
+        data.totalSubTrades !== undefined
+      ) {
+        return data.subTradeIndex < data.totalSubTrades;
+      }
+      return true;
+    },
+    { message: "subTradeIndex must be less than totalSubTrades" },
+  );
 
 export type CreateNoteParams = z.infer<typeof CreateNoteParamsSchema>;
 

@@ -51,7 +51,7 @@ Five source files, no framework -- plain `node:http` server with zod validation:
 - **`server.ts`** -- HTTP server factory (`createApp(client, opts?)`). Auth (Bearer token, constant-time compare), Content-Type enforcement (CSRF defense), rate limiting (60 req/min sliding window), body size limit (64KB), request timeout (30s). Accepts `IAztecClient` interface for testability.
 - **`rpc.ts`** -- JSON-RPC 2.0 dispatch. Method switch: `aztec_createNote` -> `handleCreateNote`, `aztec_getVersion` -> `handleGetVersion`. Sanitizes internal errors before returning to caller. Uses `null` id for invalid envelopes per spec.
 - **`aztec-client.ts`** -- `AztecClient` class implementing `IAztecClient`, wrapping Aztec SDK v4. Creates `EmbeddedWallet`, derives Schnorr account from secret key (SHA-256 domain-separated salt), deploys account contract on first connect, caches `TokenContract` instances (capped at 100). Secret key zeroed from memory after connect. Transaction timeout of 120s.
-- **`types.ts`** -- Zod schemas, TypeScript types, and `IAztecClient` interface. Addresses validated as 32-byte hex (64 chars). Amounts validated as non-negative integers without leading zeros, capped at 78 digits (uint256 max).
+- **`types.ts`** -- Zod schemas, TypeScript types, and `IAztecClient` interface. Addresses validated as 32-byte hex (64 chars). Amounts validated as non-negative integers without leading zeros, capped at 78 digits (uint256 max). Includes optional XIP-1 trade context fields (`tradeId`, `subTradeIndex`, `totalSubTrades`) -- all three must be provided together or all omitted.
 
 ## Security
 

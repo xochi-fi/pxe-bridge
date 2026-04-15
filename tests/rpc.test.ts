@@ -176,6 +176,34 @@ describe("handleRpcRequest", () => {
         expect(res.error.message).not.toContain("secret");
       }
     });
+
+    it("accepts params with XIP-1 trade context", async () => {
+      const paramsWithTrade = {
+        ...validParams,
+        tradeId: "0x" + "b".repeat(64),
+        subTradeIndex: 1,
+        totalSubTrades: 3,
+      };
+      const res = await handleRpcRequest(
+        rpcRequest("aztec_createNote", [paramsWithTrade]),
+        client,
+      );
+      expect(res).toHaveProperty("result");
+      expect(client.lastCreateNoteParams).toEqual(paramsWithTrade);
+    });
+
+    it("rejects partial XIP-1 trade context", async () => {
+      const res = await handleRpcRequest(
+        rpcRequest("aztec_createNote", [
+          { ...validParams, tradeId: "0x" + "b".repeat(64) },
+        ]),
+        client,
+      );
+      expect(res).toHaveProperty("error");
+      if ("error" in res) {
+        expect(res.error.code).toBe(-32602);
+      }
+    });
   });
 
   describe("params edge cases", () => {
