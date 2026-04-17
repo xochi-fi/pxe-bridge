@@ -6,6 +6,7 @@ import type { AztecAddress } from "@aztec/aztec.js/addresses";
 import type {
   CreateNoteParams,
   CreateNoteResult,
+  FeeJuiceClaim,
   IAztecClient,
 } from "./types.js";
 
@@ -37,6 +38,7 @@ export class AztecClient implements IAztecClient {
   constructor(
     private readonly nodeUrl: string,
     secretKey: string,
+    private readonly feeJuiceClaim?: FeeJuiceClaim,
   ) {
     this.secretKey = secretKey;
   }
@@ -84,39 +86,18 @@ export class AztecClient implements IAztecClient {
     if (!alreadyDeployed) {
       console.log("[pxe-bridge] Deploying solver account...");
 
-      const { SponsoredFeePaymentMethod } = await import(
-        "@aztec/aztec.js/fee/testing"
-      );
-      const { getContractInstanceFromInstantiationParams } = await import(
-        "@aztec/stdlib/contract"
-      );
-
-      // Register Sponsored FPC for fee-less account deployment
-      const sponsoredFPCInstance =
-        await getContractInstanceFromInstantiationParams(
-          SponsoredFPCContract.artifact,
-          { salt: new (await import("@aztec/aztec.js/fields")).Fr(0) },
-        );
-      await this.wallet!.registerContract(
-        sponsoredFPCInstance,
-        SponsoredFPCContract.artifact,
-      );
-      const sponsoredPaymentMethod = new SponsoredFeePaymentMethod(
-        sponsoredFPCInstance.address,
-      );
-
-      const { AztecAddress: AztecAddr } = await import(
-        "@aztec/aztec.js/addresses"
-      );
+      const { NO_FROM } = await import("@aztec/aztec.js/account");
+      const paymentMethod = await this.buildFeePaymentMethod(address);
 
       const deployMethod = await accountManager.getDeployMethod();
-      // Self-deployment: use AztecAddress.ZERO so DeployAccountMethod takes
-      // the self-deploy path (multicall). Passing the account's own address
-      // routes through its entrypoint which fails because the signing key
-      // note doesn't exist yet (constructor hasn't run).
+      // Self-deployment: NO_FROM tells EmbeddedWallet.sendTx() to use
+      // DefaultEntrypoint (bypassing account lookup in WalletDB), and
+      // DeployAccountMethod maps it to deployer=AztecAddress.ZERO which
+      // triggers the multicall self-deploy path where the contract is
+      // constructed before it pays for its own fee.
       await deployMethod.send({
-        from: AztecAddr.ZERO,
-        fee: { paymentMethod: sponsoredPaymentMethod },
+        from: NO_FROM,
+        fee: { paymentMethod },
       });
       console.log("[pxe-bridge] Account deployed");
     } else {
@@ -198,6 +179,40 @@ export class AztecClient implements IAztecClient {
     }
 
     return "unknown";
+  }
+
+  private async buildFeePaymentMethod(
+    accountAddress: AztecAddress,
+  ): Promise<import("@aztec/aztec.js/fee").FeePaymentMethod> {
+    if (this.feeJuiceClaim) {
+      console.log("[pxe-bridge] Using Fee Juice claim for deployment fee");
+      const { FeeJuicePaymentMethodWithClaim } =
+        await import("@aztec/aztec.js/fee");
+      const { Fr } = await import("@aztec/aztec.js/fields");
+      return new FeeJuicePaymentMethodWithClaim(accountAddress, {
+        claimAmount: BigInt(this.feeJuiceClaim.claimAmount),
+        claimSecret: Fr.fromString(this.feeJuiceClaim.claimSecret),
+        messageLeafIndex: BigInt(this.feeJuiceClaim.messageLeafIndex),
+      });
+    }
+
+    console.log("[pxe-bridge] Using SponsoredFPC for deployment fee");
+    const { SponsoredFeePaymentMethod } =
+      await import("@aztec/aztec.js/fee/testing");
+    const { getContractInstanceFromInstantiationParams } =
+      await import("@aztec/stdlib/contract");
+    const { Fr } = await import("@aztec/aztec.js/fields");
+
+    const sponsoredFPCInstance =
+      await getContractInstanceFromInstantiationParams(
+        SponsoredFPCContract.artifact,
+        { salt: new Fr(0) },
+      );
+    await this.wallet!.registerContract(
+      sponsoredFPCInstance,
+      SponsoredFPCContract.artifact,
+    );
+    return new SponsoredFeePaymentMethod(sponsoredFPCInstance.address);
   }
 
   private async getToken(address: AztecAddress): Promise<TokenContract> {

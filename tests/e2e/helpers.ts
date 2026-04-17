@@ -4,9 +4,9 @@ export interface E2EConfig {
   bridgePort: number;
 }
 
-// Well-known Hardhat/Anvil test key #0 -- never use with real funds
+// Test-only key well under BN254 Fr modulus -- never use with real funds
 const DEFAULT_SECRET_KEY =
-  "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+  "0x000000000000000000000000000000000000000000000000000000000000beef";
 
 export function getTestConfig(): E2EConfig {
   return {

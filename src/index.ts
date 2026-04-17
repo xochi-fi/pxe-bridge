@@ -1,5 +1,6 @@
 import { AztecClient } from "./aztec-client.js";
 import { createApp } from "./server.js";
+import { FeeJuiceClaimSchema } from "./types.js";
 
 const PORT = parseInt(process.env["PXE_BRIDGE_PORT"] ?? "8547", 10);
 if (isNaN(PORT) || PORT < 0 || PORT > 65535) {
@@ -30,7 +31,20 @@ if (!API_KEY) {
   );
 }
 
-const client = new AztecClient(AZTEC_NODE_URL, SECRET_KEY);
+let feeJuiceClaim;
+const FEE_JUICE_CLAIM_RAW = process.env["FEE_JUICE_CLAIM"];
+if (FEE_JUICE_CLAIM_RAW) {
+  const parsed = FeeJuiceClaimSchema.safeParse(JSON.parse(FEE_JUICE_CLAIM_RAW));
+  if (!parsed.success) {
+    console.error(
+      "[pxe-bridge] FEE_JUICE_CLAIM must be JSON: {claimAmount, claimSecret, messageLeafIndex}",
+    );
+    process.exit(1);
+  }
+  feeJuiceClaim = parsed.data;
+}
+
+const client = new AztecClient(AZTEC_NODE_URL, SECRET_KEY, feeJuiceClaim);
 const server = createApp(client, { apiKey: API_KEY });
 
 async function main(): Promise<void> {

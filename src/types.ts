@@ -75,6 +75,17 @@ export interface CreateNoteResult {
   l2TxHash: string;
 }
 
+// Fee Juice claim from L1->L2 bridge (one-time account deployment)
+export const FeeJuiceClaimSchema = z.object({
+  claimAmount: z.string().regex(/^\d+$/, "Must be a non-negative integer"),
+  claimSecret: z
+    .string()
+    .regex(/^0x[0-9a-fA-F]{64}$/, "Must be 32-byte hex Fr element"),
+  messageLeafIndex: z.string().regex(/^\d+$/, "Must be a non-negative integer"),
+});
+
+export type FeeJuiceClaim = z.infer<typeof FeeJuiceClaimSchema>;
+
 // Abstraction over AztecClient for testability
 export interface IAztecClient {
   connect(): Promise<void>;
