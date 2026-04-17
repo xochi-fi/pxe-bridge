@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { EmbeddedWallet } from "@aztec/wallets/embedded";
 import { TokenContract } from "@aztec/noir-contracts.js/Token";
+import { SponsoredFPCContract } from "@aztec/noir-contracts.js/SponsoredFPC";
 import type { AztecAddress } from "@aztec/aztec.js/addresses";
 import type {
   CreateNoteParams,
@@ -82,8 +83,33 @@ export class AztecClient implements IAztecClient {
 
     if (!alreadyDeployed) {
       console.log("[pxe-bridge] Deploying solver account...");
+
+      const { SponsoredFeePaymentMethod } = await import(
+        "@aztec/aztec.js/fee/testing"
+      );
+      const { getContractInstanceFromInstantiationParams } = await import(
+        "@aztec/stdlib/contract"
+      );
+
+      // Register Sponsored FPC for fee-less account deployment
+      const sponsoredFPCInstance =
+        await getContractInstanceFromInstantiationParams(
+          SponsoredFPCContract.artifact,
+          { salt: new (await import("@aztec/aztec.js/fields")).Fr(0) },
+        );
+      await this.wallet!.registerContract(
+        sponsoredFPCInstance,
+        SponsoredFPCContract.artifact,
+      );
+      const sponsoredPaymentMethod = new SponsoredFeePaymentMethod(
+        sponsoredFPCInstance.address,
+      );
+
       const deployMethod = await accountManager.getDeployMethod();
-      await deployMethod.send({ from: address });
+      await deployMethod.send({
+        from: address,
+        fee: { paymentMethod: sponsoredPaymentMethod },
+      });
       console.log("[pxe-bridge] Account deployed");
     } else {
       console.log("[pxe-bridge] Account recovered");
