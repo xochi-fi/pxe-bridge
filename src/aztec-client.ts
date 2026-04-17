@@ -79,11 +79,16 @@ export class AztecClient implements IAztecClient {
     const address = account.getAddress();
     this.solverAddress = address;
 
-    // Deploy account contract if first time
-    const existing = await this.wallet.getAccounts();
-    const alreadyDeployed = existing.some(
-      (a) => String(a) === address.toString(),
-    );
+    // Deploy account contract if not already on-chain.
+    // Cannot rely on wallet.getAccounts() since the local WalletDB is
+    // ephemeral (Docker restarts clear it). Query the node instead.
+    const pxe = (
+      this.wallet as unknown as {
+        pxe: { getContractInstance: (addr: AztecAddress) => Promise<unknown> };
+      }
+    ).pxe;
+    const onChainInstance = await pxe.getContractInstance(address);
+    const alreadyDeployed = onChainInstance !== undefined;
 
     if (!alreadyDeployed) {
       console.log("[pxe-bridge] Deploying solver account...");
