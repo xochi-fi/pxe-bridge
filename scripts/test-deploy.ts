@@ -1,14 +1,18 @@
 import { AztecClient } from "../src/aztec-client.js";
 import { FeeJuiceClaimSchema } from "../src/types.js";
 
+const secretKey = process.env["PXE_BRIDGE_SECRET_KEY"];
+if (!secretKey) {
+  console.error("PXE_BRIDGE_SECRET_KEY is required");
+  process.exit(1);
+}
+
 const raw = process.env["FEE_JUICE_CLAIM"];
-const claim = raw
-  ? FeeJuiceClaimSchema.parse(JSON.parse(raw))
-  : undefined;
+const claim = raw ? FeeJuiceClaimSchema.parse(JSON.parse(raw)) : undefined;
 
 const client = new AztecClient(
   process.env["AZTEC_NODE_URL"] ?? "http://localhost:8080",
-  process.env["PXE_BRIDGE_SECRET_KEY"]!,
+  secretKey,
   claim,
 );
 

@@ -82,13 +82,7 @@ export class AztecClient implements IAztecClient {
     // Deploy account contract if not already on-chain.
     // Cannot rely on wallet.getAccounts() since the local WalletDB is
     // ephemeral (Docker restarts clear it). Query the node instead.
-    const pxe = (
-      this.wallet as unknown as {
-        pxe: { getContractInstance: (addr: AztecAddress) => Promise<unknown> };
-      }
-    ).pxe;
-    const onChainInstance = await pxe.getContractInstance(address);
-    const alreadyDeployed = onChainInstance !== undefined;
+    const alreadyDeployed = await this.isContractDeployed(address);
 
     if (!alreadyDeployed) {
       console.log("[pxe-bridge] Deploying solver account...");
@@ -102,11 +96,20 @@ export class AztecClient implements IAztecClient {
       // DeployAccountMethod maps it to deployer=AztecAddress.ZERO which
       // triggers the multicall self-deploy path where the contract is
       // constructed before it pays for its own fee.
-      await deployMethod.send({
-        from: NO_FROM,
-        fee: { paymentMethod },
-      });
-      console.log("[pxe-bridge] Account deployed");
+      try {
+        await deployMethod.send({
+          from: NO_FROM,
+          fee: { paymentMethod },
+        });
+        console.log("[pxe-bridge] Account deployed");
+      } catch (err) {
+        // Another instance may have deployed concurrently
+        if (await this.isContractDeployed(address)) {
+          console.log("[pxe-bridge] Account deployed by another process");
+        } else {
+          throw err;
+        }
+      }
     } else {
       console.log("[pxe-bridge] Account recovered");
     }
@@ -186,6 +189,21 @@ export class AztecClient implements IAztecClient {
     }
 
     return "unknown";
+  }
+
+  private async isContractDeployed(address: AztecAddress): Promise<boolean> {
+    const w = this.wallet as unknown as Record<string, unknown>;
+    if (!w["pxe"] || typeof w["pxe"] !== "object") {
+      throw new Error("Wallet missing PXE interface");
+    }
+    const pxe = w["pxe"] as {
+      getContractInstance: (addr: AztecAddress) => Promise<unknown>;
+    };
+    if (typeof pxe.getContractInstance !== "function") {
+      throw new Error("PXE missing getContractInstance method");
+    }
+    const instance = await pxe.getContractInstance(address);
+    return instance !== undefined;
   }
 
   private async buildFeePaymentMethod(

@@ -18,6 +18,9 @@ import { createHash } from "node:crypto";
 async function main() {
   const SECRET_KEY = process.env["PXE_BRIDGE_SECRET_KEY"];
   const L1_PRIVATE_KEY = process.env["L1_PRIVATE_KEY"];
+  // Clear sensitive env vars from process memory
+  delete process.env["PXE_BRIDGE_SECRET_KEY"];
+  delete process.env["L1_PRIVATE_KEY"];
   const AZTEC_NODE_URL =
     process.env["AZTEC_NODE_URL"] ?? "http://localhost:8080";
   const L1_RPC_URL = process.env["L1_RPC_URL"] ?? "https://eth.llamarpc.com";
@@ -57,18 +60,23 @@ async function main() {
   const aztecAddress = account.getAddress();
   console.log(`Aztec account address: ${aztecAddress.toString()}`);
 
-  // Get L1 contract addresses from the node
-  const nodeInfo = await (
-    wallet as unknown as {
-      getNodeInfo: () => Promise<Record<string, unknown>>;
-    }
-  ).getNodeInfo();
-  const l1Addresses = nodeInfo["l1ContractAddresses"] as Record<
-    string,
-    unknown
-  >;
-  const feeJuicePortalAddress = String(l1Addresses["feeJuicePortalAddress"]);
-  const feeJuiceAddress = String(l1Addresses["feeJuiceAddress"]);
+  // Get L1 contract addresses from the node via JSON-RPC
+  const nodeInfoRes = await fetch(AZTEC_NODE_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      method: "node_getNodeInfo",
+      params: [],
+      id: 1,
+    }),
+  });
+  const nodeInfoJson = (await nodeInfoRes.json()) as {
+    result: { l1ContractAddresses: Record<string, string> };
+  };
+  const l1Addresses = nodeInfoJson.result.l1ContractAddresses;
+  const feeJuicePortalAddress = l1Addresses["feeJuicePortalAddress"];
+  const feeJuiceAddress = l1Addresses["feeJuiceAddress"];
 
   console.log(`Fee Juice Portal: ${feeJuicePortalAddress}`);
   console.log(`Fee Juice Token:  ${feeJuiceAddress}`);

@@ -34,10 +34,17 @@ if (!API_KEY) {
 let feeJuiceClaim;
 const FEE_JUICE_CLAIM_RAW = process.env["FEE_JUICE_CLAIM"];
 if (FEE_JUICE_CLAIM_RAW) {
-  const parsed = FeeJuiceClaimSchema.safeParse(JSON.parse(FEE_JUICE_CLAIM_RAW));
+  let json: unknown;
+  try {
+    json = JSON.parse(FEE_JUICE_CLAIM_RAW);
+  } catch {
+    console.error("[pxe-bridge] FEE_JUICE_CLAIM is not valid JSON");
+    process.exit(1);
+  }
+  const parsed = FeeJuiceClaimSchema.safeParse(json);
   if (!parsed.success) {
     console.error(
-      "[pxe-bridge] FEE_JUICE_CLAIM must be JSON: {claimAmount, claimSecret, messageLeafIndex}",
+      "[pxe-bridge] FEE_JUICE_CLAIM must be: {claimAmount, claimSecret, messageLeafIndex}",
     );
     process.exit(1);
   }
