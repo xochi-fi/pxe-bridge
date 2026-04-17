@@ -105,9 +105,17 @@ export class AztecClient implements IAztecClient {
         sponsoredFPCInstance.address,
       );
 
+      const { AztecAddress: AztecAddr } = await import(
+        "@aztec/aztec.js/addresses"
+      );
+
       const deployMethod = await accountManager.getDeployMethod();
+      // Self-deployment: use AztecAddress.ZERO so DeployAccountMethod takes
+      // the self-deploy path (multicall). Passing the account's own address
+      // routes through its entrypoint which fails because the signing key
+      // note doesn't exist yet (constructor hasn't run).
       await deployMethod.send({
-        from: address,
+        from: AztecAddr.ZERO,
         fee: { paymentMethod: sponsoredPaymentMethod },
       });
       console.log("[pxe-bridge] Account deployed");
