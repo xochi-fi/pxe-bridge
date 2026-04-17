@@ -50,7 +50,9 @@ export class AztecClient implements IAztecClient {
 
     console.log(`[pxe-bridge] Connecting to ${this.nodeUrl}`);
 
-    this.wallet = await EmbeddedWallet.create(this.nodeUrl);
+    this.wallet = await EmbeddedWallet.create(this.nodeUrl, {
+      pxe: { proverEnabled: true },
+    });
     console.log("[pxe-bridge] EmbeddedWallet created");
 
     const { Fr } = await import("@aztec/aztec.js/fields");

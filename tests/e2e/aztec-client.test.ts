@@ -8,7 +8,11 @@ describe("AztecClient (e2e)", () => {
   let client: AztecClient;
 
   beforeAll(async () => {
-    client = new AztecClient(config.nodeUrl, config.secretKey);
+    client = new AztecClient(
+      config.nodeUrl,
+      config.secretKey,
+      config.feeJuiceClaim,
+    );
     await client.connect();
   });
 

@@ -12,7 +12,11 @@ describe("HTTP server (e2e)", () => {
   let baseUrl: string;
 
   beforeAll(async () => {
-    client = new AztecClient(config.nodeUrl, config.secretKey);
+    client = new AztecClient(
+      config.nodeUrl,
+      config.secretKey,
+      config.feeJuiceClaim,
+    );
     await client.connect();
 
     server = createApp(client);

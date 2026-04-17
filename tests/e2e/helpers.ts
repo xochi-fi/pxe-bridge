@@ -1,7 +1,11 @@
+import type { FeeJuiceClaim } from "../../src/types.js";
+import { FeeJuiceClaimSchema } from "../../src/types.js";
+
 export interface E2EConfig {
   nodeUrl: string;
   secretKey: string;
   bridgePort: number;
+  feeJuiceClaim?: FeeJuiceClaim;
 }
 
 // Test-only key well under BN254 Fr modulus -- never use with real funds
@@ -9,10 +13,18 @@ const DEFAULT_SECRET_KEY =
   "0x000000000000000000000000000000000000000000000000000000000000beef";
 
 export function getTestConfig(): E2EConfig {
+  let feeJuiceClaim: FeeJuiceClaim | undefined;
+  const raw = process.env["FEE_JUICE_CLAIM"];
+  if (raw) {
+    const parsed = FeeJuiceClaimSchema.safeParse(JSON.parse(raw));
+    if (parsed.success) feeJuiceClaim = parsed.data;
+  }
+
   return {
     nodeUrl: process.env["AZTEC_NODE_URL"] ?? "http://localhost:8080",
     secretKey: process.env["PXE_BRIDGE_SECRET_KEY"] ?? DEFAULT_SECRET_KEY,
     bridgePort: 0, // let OS pick
+    feeJuiceClaim,
   };
 }
 
