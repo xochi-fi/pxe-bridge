@@ -42,6 +42,7 @@ The Aztec sandbox requires native x86_64 -- barretenberg's ZK prover crashes und
 | `AZTEC_NODE_URL`        | No       | `http://localhost:8080` | Aztec L2 node endpoint                         |
 | `PXE_BRIDGE_HOST`       | No       | `127.0.0.1`             | Bind address (localhost-only by default)       |
 | `PXE_BRIDGE_PORT`       | No       | `8547`                  | HTTP listen port (validated 0-65535)           |
+| `FEE_JUICE_CLAIM`       | No       | --                      | JSON: `{claimAmount, claimSecret, messageLeafIndex}` for L1->L2 bridged deployment fee |
 
 ## Architecture
 

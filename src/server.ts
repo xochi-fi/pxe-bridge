@@ -4,6 +4,7 @@ import {
   type ServerResponse,
   type Server,
 } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { handleRpcRequest } from "./rpc.js";
 import type { IAztecClient } from "./types.js";
 
@@ -16,20 +17,48 @@ export interface ServerOptions {
   apiKey?: string | undefined;
 }
 
+const RATE_LIMIT_CLEANUP_INTERVAL_MS = 300_000; // 5 min
+
 class RateLimiter {
-  private timestamps: number[] = [];
+  private buckets = new Map<string, number[]>();
+  private cleanupTimer: ReturnType<typeof setInterval>;
 
   constructor(
     private readonly max: number,
     private readonly windowMs: number,
-  ) {}
+  ) {
+    // Periodically prune stale buckets to prevent memory growth
+    this.cleanupTimer = setInterval(() => this.cleanup(), RATE_LIMIT_CLEANUP_INTERVAL_MS);
+    this.cleanupTimer.unref();
+  }
 
-  allow(): boolean {
+  allow(key: string): boolean {
     const now = Date.now();
-    this.timestamps = this.timestamps.filter((t) => now - t < this.windowMs);
-    if (this.timestamps.length >= this.max) return false;
-    this.timestamps.push(now);
+    let timestamps = this.buckets.get(key);
+    if (!timestamps) {
+      timestamps = [];
+      this.buckets.set(key, timestamps);
+    }
+    const filtered = timestamps.filter((t) => now - t < this.windowMs);
+    if (filtered.length >= this.max) {
+      this.buckets.set(key, filtered);
+      return false;
+    }
+    filtered.push(now);
+    this.buckets.set(key, filtered);
     return true;
+  }
+
+  private cleanup(): void {
+    const now = Date.now();
+    for (const [key, timestamps] of this.buckets) {
+      const live = timestamps.filter((t) => now - t < this.windowMs);
+      if (live.length === 0) {
+        this.buckets.delete(key);
+      } else {
+        this.buckets.set(key, live);
+      }
+    }
   }
 }
 
@@ -76,14 +105,16 @@ function sendJson(res: ServerResponse, status: number, data: unknown): void {
 function checkAuth(req: IncomingMessage, apiKey: string): boolean {
   const header = req.headers["authorization"];
   if (!header) return false;
-  // Constant-time comparison to prevent timing attacks
-  const expected = `Bearer ${apiKey}`;
-  if (header.length !== expected.length) return false;
-  let mismatch = 0;
-  for (let i = 0; i < header.length; i++) {
-    mismatch |= header.charCodeAt(i) ^ expected.charCodeAt(i);
+  // Constant-time comparison -- hash both sides to fixed length so
+  // we never leak the expected key length via timing or early return.
+  const expected = Buffer.from(`Bearer ${apiKey}`);
+  const actual = Buffer.from(header);
+  if (actual.length !== expected.length) {
+    // Compare against expected twice to keep timing constant
+    timingSafeEqual(expected, expected);
+    return false;
   }
-  return mismatch === 0;
+  return timingSafeEqual(actual, expected);
 }
 
 export function createApp(
@@ -128,8 +159,9 @@ export function createApp(
           return;
         }
 
-        // Rate limit
-        if (!rateLimiter.allow()) {
+        // Rate limit (per-IP)
+        const clientIp = req.socket.remoteAddress ?? "unknown";
+        if (!rateLimiter.allow(clientIp)) {
           sendJson(res, 429, { error: "Too many requests" });
           return;
         }

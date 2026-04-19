@@ -72,8 +72,11 @@ async function main(): Promise<void> {
 
 function shutdown(): void {
   console.log("[pxe-bridge] Shutting down...");
-  server.close(() => process.exit(0));
-  setTimeout(() => process.exit(1), 5000);
+  const timer = setTimeout(() => process.exit(1), 5000);
+  server.close(() => {
+    clearTimeout(timer);
+    process.exit(0);
+  });
 }
 
 process.on("SIGTERM", shutdown);

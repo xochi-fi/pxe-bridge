@@ -27,7 +27,7 @@ export async function handleRpcRequest(
     return rpcError(
       null,
       RPC_ERRORS.INVALID_REQUEST,
-      `Invalid JSON-RPC request: ${parsed.error.message}`,
+      "Invalid JSON-RPC request",
     );
   }
 
@@ -55,10 +55,11 @@ async function handleCreateNote(
   const first = params[0];
   const parsed = CreateNoteParamsSchema.safeParse(first);
   if (!parsed.success) {
+    console.error("[rpc] Invalid createNote params:", parsed.error.message);
     return rpcError(
       id,
       RPC_ERRORS.INVALID_PARAMS,
-      `Invalid params: ${parsed.error.message}`,
+      "Invalid params for aztec_createNote",
     );
   }
 

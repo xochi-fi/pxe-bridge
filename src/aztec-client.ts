@@ -73,6 +73,9 @@ export class AztecClient implements IAztecClient {
 
     keyBytes.fill(0);
     saltBytes.fill(0);
+    // Note: Fr objects (secret, salt) hold key material on the JS heap
+    // until GC'd after connect() returns. The wallet also retains the
+    // signing key internally -- we cannot zero SDK-owned memory.
 
     const accountManager = await this.wallet.createSchnorrAccount(secret, salt);
     const account = await accountManager.getAccount();

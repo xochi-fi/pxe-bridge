@@ -4,3 +4,5 @@ dist/
 .env
 docker-compose.override.yml
 .claude/settings.local.json
+pxe_data_*/
+wallet_data_*/
