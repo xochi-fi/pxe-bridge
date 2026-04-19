@@ -7,16 +7,16 @@ effort and blast-radius reduction. Each phase is independently shippable.
 
 No infra changes. Caps the blast radius of a compromised key or rogue caller.
 
-- [ ] **Per-tx amount ceiling** -- reject `aztec_createNote` above a configurable
+- [x] **Per-tx amount ceiling** -- reject `aztec_createNote` above a configurable
       max (env `PXE_BRIDGE_MAX_AMOUNT`). Log and return RPC error.
-- [ ] **Rolling volume limit** -- 24h sliding window aggregate spend cap
+- [x] **Rolling volume limit** -- 24h sliding window aggregate spend cap
       (env `PXE_BRIDGE_DAILY_LIMIT`). Circuit-breaker: pause all note creation
       when exceeded, require manual re-enable or process restart.
-- [ ] **Structured audit log** -- JSON-lines log of every `createNote` call:
+- [x] **Structured audit log** -- JSON-lines log of every `createNote` call:
       timestamp, recipient, token, amount, txHash, clientIP. Separate from
       application logs. Write to stdout with a parseable prefix or a dedicated
       log file (`PXE_BRIDGE_AUDIT_LOG`).
-- [ ] **Cooldown for large transfers** -- configurable delay (e.g. 30s) for
+- [x] **Cooldown for large transfers** -- configurable delay (e.g. 30s) for
       amounts above a threshold, giving monitoring a window to alert/intervene.
 
 ## Phase 1: Key Management (infra)

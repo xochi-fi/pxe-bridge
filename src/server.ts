@@ -5,8 +5,10 @@ import {
   type Server,
 } from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import { handleRpcRequest } from "./rpc.js";
+import { handleRpcRequest, type RpcContext } from "./rpc.js";
 import type { IAztecClient } from "./types.js";
+import type { TransactionLimits } from "./limits.js";
+import type { AuditLogger } from "./audit.js";
 
 const MAX_BODY_BYTES = 64 * 1024; // 64 KB
 const RATE_LIMIT_WINDOW_MS = 60_000;
@@ -15,6 +17,8 @@ const REQUEST_TIMEOUT_MS = 30_000;
 
 export interface ServerOptions {
   apiKey?: string | undefined;
+  limits?: TransactionLimits | undefined;
+  audit?: AuditLogger | undefined;
 }
 
 const RATE_LIMIT_CLEANUP_INTERVAL_MS = 300_000; // 5 min
@@ -28,7 +32,10 @@ class RateLimiter {
     private readonly windowMs: number,
   ) {
     // Periodically prune stale buckets to prevent memory growth
-    this.cleanupTimer = setInterval(() => this.cleanup(), RATE_LIMIT_CLEANUP_INTERVAL_MS);
+    this.cleanupTimer = setInterval(
+      () => this.cleanup(),
+      RATE_LIMIT_CLEANUP_INTERVAL_MS,
+    );
     this.cleanupTimer.unref();
   }
 
@@ -186,7 +193,12 @@ export function createApp(
           return;
         }
 
-        const result = await handleRpcRequest(parsed, client);
+        const rpcCtx: RpcContext = {
+          limits: opts.limits,
+          audit: opts.audit,
+          clientIp: clientIp,
+        };
+        const result = await handleRpcRequest(parsed, client, rpcCtx);
         sendJson(res, 200, result);
         return;
       }

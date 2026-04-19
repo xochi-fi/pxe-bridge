@@ -43,16 +43,23 @@ The Aztec sandbox requires native x86_64 -- barretenberg's ZK prover crashes und
 | `PXE_BRIDGE_HOST`       | No       | `127.0.0.1`             | Bind address (localhost-only by default)       |
 | `PXE_BRIDGE_PORT`       | No       | `8547`                  | HTTP listen port (validated 0-65535)           |
 | `FEE_JUICE_CLAIM`       | No       | --                      | JSON: `{claimAmount, claimSecret, messageLeafIndex}` for L1->L2 bridged deployment fee |
+| `PXE_BRIDGE_MAX_AMOUNT` | No      | --                      | Per-tx amount ceiling (rejects above this)            |
+| `PXE_BRIDGE_DAILY_LIMIT`| No      | --                      | 24h rolling volume cap; circuit-breaker pauses bridge |
+| `PXE_BRIDGE_COOLDOWN_THRESHOLD` | No | --                  | Amount threshold triggering cooldown delay            |
+| `PXE_BRIDGE_COOLDOWN_DELAY_MS`  | No | --                  | Delay in ms for amounts >= cooldown threshold         |
+| `PXE_BRIDGE_AUDIT_LOG`  | No      | stdout                  | File path for JSON-lines audit log                    |
 
 ## Architecture
 
-Five source files, no framework -- plain `node:http` server with zod validation:
+Seven source files, no framework -- plain `node:http` server with zod validation:
 
 - **`index.ts`** -- Entrypoint: reads env, validates secret key + port range, warns if API key unset, creates `AztecClient`, starts server bound to `PXE_BRIDGE_HOST`.
 - **`server.ts`** -- HTTP server factory (`createApp(client, opts?)`). Auth (Bearer token, constant-time compare), Content-Type enforcement (CSRF defense), rate limiting (60 req/min sliding window), body size limit (64KB), request timeout (30s). Accepts `IAztecClient` interface for testability.
 - **`rpc.ts`** -- JSON-RPC 2.0 dispatch. Method switch: `aztec_createNote` -> `handleCreateNote`, `aztec_getVersion` -> `handleGetVersion`. Sanitizes internal errors before returning to caller. Uses `null` id for invalid envelopes per spec.
 - **`aztec-client.ts`** -- `AztecClient` class implementing `IAztecClient`, wrapping Aztec SDK v4. Creates `EmbeddedWallet`, derives Schnorr account from secret key (SHA-256 domain-separated salt), deploys account contract on first connect, caches `TokenContract` instances (capped at 100). Secret key zeroed from memory after connect. Transaction timeout of 120s.
 - **`types.ts`** -- Zod schemas, TypeScript types, and `IAztecClient` interface. Addresses validated as 32-byte hex (64 chars). Amounts validated as non-negative integers without leading zeros, capped at 78 digits (uint256 max). Includes optional XIP-1 trade context fields (`tradeId`, `subTradeIndex`, `totalSubTrades`) -- all three must be provided together or all omitted.
+- **`limits.ts`** -- `TransactionLimits` class: per-tx ceiling (`PXE_BRIDGE_MAX_AMOUNT`), 24h rolling volume cap with circuit-breaker (`PXE_BRIDGE_DAILY_LIMIT`), configurable cooldown delay for large transfers. Checked before every `createNote`.
+- **`audit.ts`** -- `AuditLogger` class: JSON-lines structured logging of every `createNote` call (success, rejected, error). Writes to file (`PXE_BRIDGE_AUDIT_LOG`) or stdout with `[audit]` prefix.
 
 ## Security
 
