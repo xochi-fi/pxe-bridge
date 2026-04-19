@@ -23,13 +23,13 @@ No infra changes. Caps the blast radius of a compromised key or rogue caller.
 
 Move the secret key out of process memory at rest.
 
-- [ ] **AWS Secrets Manager / Parameter Store** -- fetch `PXE_BRIDGE_SECRET_KEY`
+- [x] **AWS Secrets Manager / Parameter Store** -- fetch `PXE_BRIDGE_SECRET_KEY`
       at startup via `@aws-sdk/client-secrets-manager`, zero after wallet
       derivation (current pattern, but key never touches env vars or disk).
-- [ ] **Env var elimination** -- stop accepting the key via env var in production.
+- [x] **Env var elimination** -- stop accepting the key via env var in production.
       Env vars are visible in `/proc/pid/environ`, `docker inspect`, and crash
       dumps. Accept only a secret ARN/path.
-- [ ] **IAM scoping** -- bridge process role can only read the one secret. No
+- [x] **IAM scoping** -- bridge process role can only read the one secret. No
       write, no KMS decrypt beyond what Secrets Manager needs.
 
 ## Phase 2: Custom Noir Account Contract
@@ -37,15 +37,20 @@ Move the secret key out of process memory at rest.
 Aztec's account abstraction is native -- every account is a contract. Move
 authorization logic on-chain so it's enforced even if the bridge is compromised.
 
-- [ ] **Spending-limit account contract** -- Noir contract that extends the
+- [x] **Spending-limit account contract** -- Noir contract that extends the
       Schnorr account with per-tx and rolling daily amount caps stored in
       contract state. `is_valid` checks amounts against limits. Exceeding the
       limit makes the tx unprovable.
-- [ ] **Recipient allowlist** -- on-chain whitelist of approved recipient
+- [x] **Recipient allowlist** -- on-chain whitelist of approved recipient
       addresses. Transfers to unknown addresses require a separate admin tx
       to add them first.
-- [ ] **Timelock for parameter changes** -- limit/allowlist updates take effect
+- [x] **Timelock for parameter changes** -- limit/allowlist updates take effect
       after N blocks, giving operators time to detect unauthorized changes.
+
+Contract compiled (`nargo compile`), artifact at
+`contracts/spending_limit_account/target/`. TypeScript wrapper at
+`src/spending-limit-account.ts`. Remaining: wire into `aztec-client.ts`
+via `AccountManager.create()`, deploy to sandbox, e2e test on x86_64.
 
 ## Phase 3: Hot/Cold Wallet Split
 

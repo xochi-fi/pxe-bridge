@@ -3,6 +3,7 @@ import { createApp } from "./server.js";
 import { FeeJuiceClaimSchema } from "./types.js";
 import { TransactionLimits, type LimitsConfig } from "./limits.js";
 import { AuditLogger } from "./audit.js";
+import { resolveSecretKey } from "./secrets.js";
 
 const PORT = parseInt(process.env["PXE_BRIDGE_PORT"] ?? "8547", 10);
 if (isNaN(PORT) || PORT < 0 || PORT > 65535) {
@@ -11,21 +12,7 @@ if (isNaN(PORT) || PORT < 0 || PORT > 65535) {
 }
 const HOST = process.env["PXE_BRIDGE_HOST"] ?? "127.0.0.1";
 const AZTEC_NODE_URL = process.env["AZTEC_NODE_URL"] ?? "http://localhost:8080";
-const SECRET_KEY = process.env["PXE_BRIDGE_SECRET_KEY"];
 const API_KEY = process.env["PXE_BRIDGE_API_KEY"];
-
-if (!SECRET_KEY) {
-  console.error("[pxe-bridge] PXE_BRIDGE_SECRET_KEY is required");
-  process.exit(1);
-}
-
-const keyHex = SECRET_KEY.replace(/^0x/, "");
-if (!/^[0-9a-fA-F]{64}$/.test(keyHex)) {
-  console.error(
-    "[pxe-bridge] PXE_BRIDGE_SECRET_KEY must be 32 bytes (64 hex chars)",
-  );
-  process.exit(1);
-}
 
 if (!API_KEY) {
   console.warn(
@@ -33,7 +20,7 @@ if (!API_KEY) {
   );
 }
 
-let feeJuiceClaim;
+let feeJuiceClaim: import("./types.js").FeeJuiceClaim | undefined;
 const FEE_JUICE_CLAIM_RAW = process.env["FEE_JUICE_CLAIM"];
 if (FEE_JUICE_CLAIM_RAW) {
   let json: unknown;
@@ -121,10 +108,13 @@ const limits = hasLimits ? new TransactionLimits(limitsConfig) : undefined;
 const AUDIT_LOG_PATH = process.env["PXE_BRIDGE_AUDIT_LOG"];
 const audit = new AuditLogger(AUDIT_LOG_PATH);
 
-const client = new AztecClient(AZTEC_NODE_URL, SECRET_KEY, feeJuiceClaim);
-const server = createApp(client, { apiKey: API_KEY, limits, audit });
-
 async function main(): Promise<void> {
+  const { key: secretKey, source: keySource } = await resolveSecretKey();
+  console.log(`[pxe-bridge] Secret key loaded from ${keySource}`);
+
+  const client = new AztecClient(AZTEC_NODE_URL, secretKey, feeJuiceClaim);
+  const server = createApp(client, { apiKey: API_KEY, limits, audit });
+
   await client.connect();
 
   server.listen(PORT, HOST, () => {
@@ -149,19 +139,19 @@ async function main(): Promise<void> {
     console.log(`  POST /api/rpc    -- JSON-RPC (alias)`);
     console.log(`  GET  /status     -- Health check`);
   });
-}
 
-function shutdown(): void {
-  console.log("[pxe-bridge] Shutting down...");
-  const timer = setTimeout(() => process.exit(1), 5000);
-  server.close(() => {
-    clearTimeout(timer);
-    process.exit(0);
-  });
-}
+  function shutdown(): void {
+    console.log("[pxe-bridge] Shutting down...");
+    const timer = setTimeout(() => process.exit(1), 5000);
+    server.close(() => {
+      clearTimeout(timer);
+      process.exit(0);
+    });
+  }
 
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
+}
 
 main().catch((err) => {
   console.error("[pxe-bridge] Fatal:", err);
