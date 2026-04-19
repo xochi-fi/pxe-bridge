@@ -49,6 +49,7 @@ The Aztec sandbox requires native x86_64 -- barretenberg's ZK prover crashes und
 | `PXE_BRIDGE_COOLDOWN_THRESHOLD` | No | --                  | Amount threshold triggering cooldown delay            |
 | `PXE_BRIDGE_COOLDOWN_DELAY_MS`  | No | --                  | Delay in ms for amounts >= cooldown threshold         |
 | `PXE_BRIDGE_AUDIT_LOG`  | No      | stdout                  | File path for JSON-lines audit log                    |
+| `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` | No | --               | AztecAddress (32-byte hex) enabling on-chain spending limit account; uses MAX_AMOUNT/DAILY_LIMIT values |
 
 ## Architecture
 

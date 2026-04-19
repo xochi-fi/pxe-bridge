@@ -49,8 +49,9 @@ authorization logic on-chain so it's enforced even if the bridge is compromised.
 
 Contract compiled (`nargo compile`), artifact at
 `contracts/spending_limit_account/target/`. TypeScript wrapper at
-`src/spending-limit-account.ts`. Remaining: wire into `aztec-client.ts`
-via `AccountManager.create()`, deploy to sandbox, e2e test on x86_64.
+`src/spending-limit-account.ts`. Wired into `aztec-client.ts` via
+`AccountManager.create()`. Enabled by setting `PXE_BRIDGE_SPENDING_LIMIT_ADMIN`
+(32-byte hex AztecAddress). Remaining: deploy to sandbox, e2e test on x86_64.
 
 ## Phase 3: Hot/Cold Wallet Split
 

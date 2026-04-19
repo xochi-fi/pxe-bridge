@@ -4,6 +4,7 @@ import { FeeJuiceClaimSchema } from "./types.js";
 import { TransactionLimits, type LimitsConfig } from "./limits.js";
 import { AuditLogger } from "./audit.js";
 import { resolveSecretKey } from "./secrets.js";
+import type { SpendingLimitConfig } from "./spending-limit-account.js";
 
 const PORT = parseInt(process.env["PXE_BRIDGE_PORT"] ?? "8547", 10);
 if (isNaN(PORT) || PORT < 0 || PORT > 65535) {
@@ -108,11 +109,36 @@ const limits = hasLimits ? new TransactionLimits(limitsConfig) : undefined;
 const AUDIT_LOG_PATH = process.env["PXE_BRIDGE_AUDIT_LOG"];
 const audit = new AuditLogger(AUDIT_LOG_PATH);
 
+// On-chain spending limit account (Phase 2).
+// When PXE_BRIDGE_SPENDING_LIMIT_ADMIN is set, deploys a custom Noir account
+// contract that enforces per-tx caps, daily volume limits, and a recipient
+// allowlist on-chain. Uses the same limit values as application-level limits.
+let spendingLimitConfig: SpendingLimitConfig | undefined;
+const SPENDING_LIMIT_ADMIN = process.env["PXE_BRIDGE_SPENDING_LIMIT_ADMIN"];
+if (SPENDING_LIMIT_ADMIN) {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(SPENDING_LIMIT_ADMIN)) {
+    console.error(
+      "[pxe-bridge] PXE_BRIDGE_SPENDING_LIMIT_ADMIN must be a 32-byte hex address",
+    );
+    process.exit(1);
+  }
+  spendingLimitConfig = {
+    maxAmountPerTx: limitsConfig.maxAmount ?? 0n,
+    dailyLimit: limitsConfig.dailyLimit ?? 0n,
+    admin: SPENDING_LIMIT_ADMIN,
+  };
+}
+
 async function main(): Promise<void> {
   const { key: secretKey, source: keySource } = await resolveSecretKey();
   console.log(`[pxe-bridge] Secret key loaded from ${keySource}`);
 
-  const client = new AztecClient(AZTEC_NODE_URL, secretKey, feeJuiceClaim);
+  const client = new AztecClient(
+    AZTEC_NODE_URL,
+    secretKey,
+    feeJuiceClaim,
+    spendingLimitConfig,
+  );
   const server = createApp(client, { apiKey: API_KEY, limits, audit });
 
   await client.connect();

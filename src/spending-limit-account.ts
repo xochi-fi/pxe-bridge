@@ -60,10 +60,27 @@ export interface SpendingLimitConfig {
 // ============================================================
 
 export class SpendingLimitAccountContract implements AccountContract {
+  private _entrypoint: SpendingLimitEntrypoint | null = null;
+
   constructor(
     private signingPrivateKey: GrumpkinScalarType,
     private config: SpendingLimitConfig,
   ) {}
+
+  /**
+   * Set declared spending for the next transaction.
+   * Must be called before each createNote to bind amount/recipient
+   * into the signed hash so the on-chain contract can verify them.
+   */
+  setDeclaredSpending(amount: bigint, recipient: string): void {
+    if (!this._entrypoint) {
+      throw new Error(
+        "Account not initialized -- getAccount() must be called first",
+      );
+    }
+    this._entrypoint.declaredAmount = amount;
+    this._entrypoint.declaredRecipient = recipient;
+  }
 
   async getContractArtifact(): Promise<ContractArtifact> {
     // Dynamic import of the compiled Noir artifact.
@@ -109,6 +126,7 @@ export class SpendingLimitAccountContract implements AccountContract {
       completeAddress.address,
       authProvider,
     );
+    this._entrypoint = entrypoint;
     return new BaseAccount(entrypoint, authProvider, completeAddress);
   }
 }

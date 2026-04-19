@@ -9,6 +9,10 @@ import type {
   FeeJuiceClaim,
   IAztecClient,
 } from "./types.js";
+import {
+  SpendingLimitAccountContract,
+  type SpendingLimitConfig,
+} from "./spending-limit-account.js";
 
 const MAX_TOKEN_CACHE_SIZE = 100;
 const TX_TIMEOUT_MS = 120_000; // 2 minutes
@@ -34,11 +38,13 @@ export class AztecClient implements IAztecClient {
   private solverAddress: AztecAddress | null = null;
   private tokenCache = new Map<string, TokenContract>();
   private secretKey: string | null;
+  private spendingLimitContract: SpendingLimitAccountContract | null = null;
 
   constructor(
     private readonly nodeUrl: string,
     secretKey: string,
     private readonly feeJuiceClaim?: FeeJuiceClaim,
+    private readonly spendingLimitConfig?: SpendingLimitConfig,
   ) {
     this.secretKey = secretKey;
   }
@@ -77,7 +83,10 @@ export class AztecClient implements IAztecClient {
     // until GC'd after connect() returns. The wallet also retains the
     // signing key internally -- we cannot zero SDK-owned memory.
 
-    const accountManager = await this.wallet.createSchnorrAccount(secret, salt);
+    const accountManager = this.spendingLimitConfig
+      ? await this.createSpendingLimitAccount(secret, salt)
+      : await this.wallet.createSchnorrAccount(secret, salt);
+
     const account = await accountManager.getAccount();
     const address = account.getAddress();
     this.solverAddress = address;
@@ -117,7 +126,99 @@ export class AztecClient implements IAztecClient {
       console.log("[pxe-bridge] Account recovered");
     }
 
+    if (this.spendingLimitConfig) {
+      console.log(
+        `[pxe-bridge] Spending limit account active (max/tx: ${this.spendingLimitConfig.maxAmountPerTx}, daily: ${this.spendingLimitConfig.dailyLimit})`,
+      );
+    }
     console.log("[pxe-bridge] Ready");
+  }
+
+  /**
+   * Create a SpendingLimitAccountContract and register it with the wallet.
+   *
+   * The spending limit contract uses the same Schnorr signature scheme but
+   * extends the entrypoint with declared_amount and declared_recipient fields
+   * that are bound to the signed hash and verified on-chain.
+   *
+   * Wallet integration: we store the account in WalletDB as type 'schnorr'
+   * so the wallet's simulation path (gas estimation) can find it. The actual
+   * tx send path is patched to use our custom entrypoint via an override of
+   * getAccountFromAddress. Simulation uses a Schnorr stub which gives
+   * approximate gas estimates; the built-in gas padding covers the delta.
+   */
+  private async createSpendingLimitAccount(
+    secret: import("@aztec/aztec.js/fields").Fr,
+    salt: import("@aztec/aztec.js/fields").Fr,
+  ): Promise<import("@aztec/aztec.js/wallet").AccountManager> {
+    const { AccountManager } = await import("@aztec/aztec.js/wallet");
+    const { deriveSigningKey } = await import("@aztec/stdlib/keys");
+
+    const signingKey = deriveSigningKey(secret);
+
+    this.spendingLimitContract = new SpendingLimitAccountContract(
+      signingKey,
+      this.spendingLimitConfig!,
+    );
+
+    const accountManager = await AccountManager.create(
+      this.wallet! as unknown as Parameters<typeof AccountManager.create>[0],
+      secret,
+      this.spendingLimitContract,
+      salt,
+    );
+
+    // Register the contract artifact with PXE so proving works.
+    const instance = accountManager.getInstance();
+    const w = this.wallet as unknown as Record<string, unknown>;
+    const pxe = w["pxe"] as {
+      getContractInstance: (addr: AztecAddress) => Promise<unknown>;
+      getContractArtifact: (classId: unknown) => Promise<unknown>;
+    };
+    const existingInstance = await pxe.getContractInstance(instance.address);
+    if (!existingInstance) {
+      const existingArtifact = await pxe.getContractArtifact(
+        instance.currentContractClassId,
+      );
+      const artifact = existingArtifact
+        ? undefined
+        : await this.spendingLimitContract.getContractArtifact();
+      await this.wallet!.registerContract(instance, artifact, secret);
+    }
+
+    // Store in WalletDB as 'schnorr' so simulation can find the account.
+    // The actual send uses our custom entrypoint via the patched method below.
+    const db = w["walletDB"] as {
+      storeAccount: (
+        addr: AztecAddress,
+        data: Record<string, unknown>,
+      ) => Promise<void>;
+    };
+    await db.storeAccount(instance.address, {
+      type: "schnorr",
+      secretKey: secret,
+      salt,
+      alias: "",
+      signingKey: signingKey.toBuffer(),
+    });
+
+    // Patch getAccountFromAddress so the real tx send path uses our
+    // custom entrypoint (with declared_amount/declared_recipient) instead
+    // of reconstructing a standard Schnorr account from WalletDB.
+    const customAccount = await accountManager.getAccount();
+    const walletAny = this.wallet as unknown as {
+      getAccountFromAddress: (addr: AztecAddress) => Promise<unknown>;
+    };
+    const originalGetAccount =
+      walletAny.getAccountFromAddress.bind(this.wallet);
+    walletAny.getAccountFromAddress = async (addr: AztecAddress) => {
+      if (addr.equals(instance.address)) {
+        return customAccount;
+      }
+      return originalGetAccount(addr);
+    };
+
+    return accountManager;
   }
 
   async createNote(params: CreateNoteParams): Promise<CreateNoteResult> {
@@ -131,6 +232,13 @@ export class AztecClient implements IAztecClient {
     const recipientAddress = AztecAddress.fromString(params.recipient);
     const amount = BigInt(params.amount);
     const from = this.solverAddress;
+
+    // Bind declared spending to the next tx for on-chain enforcement.
+    // The entrypoint signs over (payloadHash, amount, recipient) so these
+    // values cannot be forged. Must be set before send().
+    if (this.spendingLimitContract) {
+      this.spendingLimitContract.setDeclaredSpending(amount, params.recipient);
+    }
 
     const token = await this.getToken(tokenAddress);
 
