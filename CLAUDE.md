@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-JSON-RPC bridge that connects EVM intent solvers to Aztec L2 shielded settlement. Runs an HTTP server wrapping Aztec SDK operations via an embedded PXE wallet with a Schnorr account.
+JSON-RPC bridge that connects EVM intent solvers to Aztec L2 shielded settlement. Runs an HTTP server wrapping Aztec SDK operations via an embedded PXE wallet. Supports both standard Schnorr accounts and a custom spending-limit account contract (Noir) with on-chain per-tx caps, daily volume limits, recipient allowlist, and timelocked admin.
 
 ```
 EVM Solver --JSON-RPC--> pxe-bridge --Aztec SDK--> Aztec L2 Node
@@ -53,17 +53,18 @@ The Aztec sandbox requires native x86_64 -- barretenberg's ZK prover crashes und
 
 ## Architecture
 
-Nine source files, no framework -- plain `node:http` server with zod validation:
+Nine TypeScript source files plus a Noir contract, no framework -- plain `node:http` server with zod validation:
 
-- **`index.ts`** -- Entrypoint: reads env, resolves secret key (via `secrets.ts`), validates port range, warns if API key unset, creates `AztecClient`, starts server bound to `PXE_BRIDGE_HOST`.
+- **`index.ts`** -- Entrypoint: reads env, resolves secret key (via `secrets.ts`), validates port range, warns if API key unset, constructs spending limit config if admin address is set, creates `AztecClient`, starts server bound to `PXE_BRIDGE_HOST`.
 - **`secrets.ts`** -- Secret key resolution: AWS Secrets Manager fetch (via `PXE_BRIDGE_SECRET_ARN`) or env var fallback (`PXE_BRIDGE_SECRET_KEY`, dev only). Rejects env var when `NODE_ENV=production`. Supports plain hex and JSON `{"key":"..."}` secret formats.
 - **`server.ts`** -- HTTP server factory (`createApp(client, opts?)`). Auth (Bearer token, constant-time compare), Content-Type enforcement (CSRF defense), rate limiting (60 req/min sliding window), body size limit (64KB), request timeout (30s). Accepts `IAztecClient` interface for testability.
 - **`rpc.ts`** -- JSON-RPC 2.0 dispatch. Method switch: `aztec_createNote` -> `handleCreateNote`, `aztec_getVersion` -> `handleGetVersion`. Sanitizes internal errors before returning to caller. Uses `null` id for invalid envelopes per spec.
-- **`aztec-client.ts`** -- `AztecClient` class implementing `IAztecClient`, wrapping Aztec SDK v4. Creates `EmbeddedWallet`, derives Schnorr account from secret key (SHA-256 domain-separated salt), deploys account contract on first connect, caches `TokenContract` instances (capped at 100). Secret key zeroed from memory after connect. Transaction timeout of 120s.
+- **`aztec-client.ts`** -- `AztecClient` class implementing `IAztecClient`, wrapping Aztec SDK v4. Creates `EmbeddedWallet`, derives account from secret key (SHA-256 domain-separated salt). When `spendingLimitConfig` is provided, creates a `SpendingLimitAccountContract` via `AccountManager.create()`, registers artifact with PXE, stores in WalletDB, and patches `getAccountFromAddress` for tx routing; otherwise uses standard Schnorr account. Deploys account contract on first connect, caches `TokenContract` instances (capped at 100). Sets `declaredAmount`/`declaredRecipient` on the entrypoint before each `createNote` when spending limits are active. Secret key zeroed from memory after connect. Transaction timeout of 120s.
 - **`types.ts`** -- Zod schemas, TypeScript types, and `IAztecClient` interface. Addresses validated as 32-byte hex (64 chars). Amounts validated as non-negative integers without leading zeros, capped at 78 digits (uint256 max). Includes optional XIP-1 trade context fields (`tradeId`, `subTradeIndex`, `totalSubTrades`) -- all three must be provided together or all omitted.
-- **`limits.ts`** -- `TransactionLimits` class: per-tx ceiling (`PXE_BRIDGE_MAX_AMOUNT`), 24h rolling volume cap with circuit-breaker (`PXE_BRIDGE_DAILY_LIMIT`), configurable cooldown delay for large transfers. Checked before every `createNote`.
+- **`limits.ts`** -- `TransactionLimits` class: per-tx ceiling (`PXE_BRIDGE_MAX_AMOUNT`), 24h rolling volume cap with circuit-breaker (`PXE_BRIDGE_DAILY_LIMIT`), configurable cooldown delay for large transfers. Checked before every `createNote`. Application-level defense-in-depth; on-chain limits (Phase 2) enforce independently.
 - **`audit.ts`** -- `AuditLogger` class: JSON-lines structured logging of every `createNote` call (success, rejected, error). Writes to file (`PXE_BRIDGE_AUDIT_LOG`) or stdout with `[audit]` prefix.
-- **`spending-limit-account.ts`** -- Custom Aztec account contract TypeScript wrapper. `SpendingLimitAccountContract` implements `AccountContract` with a custom entrypoint that includes declared amount/recipient in the signed hash. Used with the Noir contract in `contracts/spending_limit_account/` for on-chain spending limits, recipient allowlist, and timelocked parameter changes. Requires `nargo compile` to produce the artifact before use.
+- **`spending-limit-account.ts`** -- Custom Aztec account contract TypeScript wrapper. `SpendingLimitAccountContract` implements `AccountContract` with a custom entrypoint that includes declared amount/recipient in the signed hash via `poseidon2HashWithSeparator`. Exposes `setDeclaredSpending(amount, recipient)` for per-tx binding. Used with the Noir contract in `contracts/spending_limit_account/` for on-chain spending limits, recipient allowlist, and timelocked parameter changes.
+- **`contracts/spending_limit_account/`** -- Noir account contract (compiled with `nargo compile`). Extends Schnorr with `check_spending_public`: per-tx cap, epoch-based daily volume, recipient allowlist, timelocked `propose_limits`/`apply_limits`. Artifact at `target/`. Must match Aztec SDK version (currently v4.2.0, set in `Nargo.toml`).
 
 ## Security
 
@@ -81,6 +82,6 @@ Nine source files, no framework -- plain `node:http` server with zod validation:
 
 - ESM-only (`"type": "module"`), all imports use `.js` extension
 - Strict tsconfig: `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`, `verbatimModuleSyntax`
-- Aztec SDK v4.1.3 -- dynamic imports for `@aztec/aztec.js/fields` and `@aztec/aztec.js/addresses` inside methods (tree-shaking friendly)
+- Aztec SDK v4.2.0 -- dynamic imports for `@aztec/aztec.js/fields` and `@aztec/aztec.js/addresses` inside methods (tree-shaking friendly)
 - Docker image requires trixie's libstdc++ for `@aztec/bb.js` GLIBCXX_3.4.32
 - CI pushes to `ghcr.io/xochi-fi/pxe-bridge` on semver tags only
