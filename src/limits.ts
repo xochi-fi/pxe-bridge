@@ -15,24 +15,30 @@ const CLEANUP_INTERVAL_MS = 60_000; // 1 minute
 export class TransactionLimits {
   private spendLog: { amount: bigint; timestamp: number }[] = [];
   private paused = false;
+  private pausedAt = 0;
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly config: LimitsConfig) {
     if (config.dailyLimit !== undefined) {
-      this.cleanupTimer = setInterval(
-        () => this.pruneSpendLog(),
-        CLEANUP_INTERVAL_MS,
-      );
+      this.cleanupTimer = setInterval(() => this.pruneSpendLog(), CLEANUP_INTERVAL_MS);
       this.cleanupTimer.unref();
     }
   }
 
   check(amount: bigint): LimitsCheckResult {
     if (this.paused) {
-      return {
-        allowed: false,
-        reason: "Bridge paused: daily volume limit exceeded",
-      };
+      // Auto-resume once the full window has elapsed since pause
+      if (Date.now() - this.pausedAt >= WINDOW_MS) {
+        this.paused = false;
+        this.pausedAt = 0;
+        this.pruneSpendLog();
+        console.log("[pxe-bridge] Bridge auto-resumed after window elapsed");
+      } else {
+        return {
+          allowed: false,
+          reason: "Bridge paused: daily volume limit exceeded",
+        };
+      }
     }
 
     if (this.config.maxAmount !== undefined && amount > this.config.maxAmount) {
@@ -46,6 +52,7 @@ export class TransactionLimits {
       const windowTotal = this.rollingTotal();
       if (windowTotal + amount > this.config.dailyLimit) {
         this.paused = true;
+        this.pausedAt = Date.now();
         console.error(
           `[pxe-bridge] CIRCUIT BREAKER: daily limit ${this.config.dailyLimit} would be exceeded ` +
             `(current: ${windowTotal}, requested: ${amount}). Bridge paused.`,

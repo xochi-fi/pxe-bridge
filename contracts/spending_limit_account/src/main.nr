@@ -143,6 +143,22 @@ pub contract SpendingLimitAccount {
         );
         assert(!self.storage.initialized.read(), "Already initialized");
 
+        // Validate limit values if non-zero
+        if initial_max_per_tx != (0 as Field) {
+            let max_u64 = initial_max_per_tx as u64;
+            assert(max_u64 as Field == initial_max_per_tx, "Max per-tx exceeds u64 range");
+        }
+        if initial_daily_limit != (0 as Field) {
+            let daily_u64 = initial_daily_limit as u64;
+            assert(daily_u64 as Field == initial_daily_limit, "Daily limit exceeds u64 range");
+            if initial_max_per_tx != (0 as Field) {
+                assert(
+                    initial_daily_limit as u64 >= initial_max_per_tx as u64,
+                    "Daily limit must be >= per-tx max",
+                );
+            }
+        }
+
         self.storage.max_amount_per_tx.write(initial_max_per_tx);
         self.storage.daily_limit.write(initial_daily_limit);
         self.storage.admin.initialize(admin_address);
@@ -316,17 +332,38 @@ pub contract SpendingLimitAccount {
             "Timelock not expired",
         );
 
-        self.storage
-            .max_amount_per_tx
-            .write(self.storage.pending_max_amount.read());
-        self.storage
-            .daily_limit
-            .write(self.storage.pending_daily_limit.read());
+        let new_max = self.storage.pending_max_amount.read();
+        let new_daily = self.storage.pending_daily_limit.read();
+
+        // Validate: daily limit must be >= per-tx max (when both non-zero)
+        if new_max != (0 as Field) {
+            if new_daily != (0 as Field) {
+                assert(
+                    new_daily as u64 >= new_max as u64,
+                    "Daily limit must be >= per-tx max",
+                );
+            }
+        }
+
+        self.storage.max_amount_per_tx.write(new_max);
+        self.storage.daily_limit.write(new_daily);
 
         // Clear pending state
         self.storage.pending_max_amount.write(0);
         self.storage.pending_daily_limit.write(0);
         self.storage.pending_change_block.write(0);
+    }
+
+    /// Admin function to manually reset the daily spending counter.
+    /// Use when epoch-based reset stalls (e.g., block production slowdown).
+    #[external("public")]
+    fn reset_daily_spent() {
+        let caller = self.context.maybe_msg_sender().unwrap();
+        assert(caller == self.storage.admin.read(), "Not admin");
+        self.storage.daily_spent.write(0);
+        let current_block = self.context.block_number() as u64;
+        let epoch = current_block / BLOCKS_PER_EPOCH;
+        self.storage.current_epoch.write(epoch as Field);
     }
 
     #[external("public")]
