@@ -3,12 +3,7 @@ import { EmbeddedWallet } from "@aztec/wallets/embedded";
 import { TokenContract } from "@aztec/noir-contracts.js/Token";
 import { SponsoredFPCContract } from "@aztec/noir-contracts.js/SponsoredFPC";
 import type { AztecAddress } from "@aztec/aztec.js/addresses";
-import type {
-  CreateNoteParams,
-  CreateNoteResult,
-  FeeJuiceClaim,
-  IAztecClient,
-} from "./types.js";
+import type { CreateNoteParams, CreateNoteResult, FeeJuiceClaim, IAztecClient } from "./types.js";
 import {
   SpendingLimitAccountContract,
   type SpendingLimitConfig,
@@ -177,9 +172,7 @@ export class AztecClient implements IAztecClient {
     };
     const existingInstance = await pxe.getContractInstance(instance.address);
     if (!existingInstance) {
-      const existingArtifact = await pxe.getContractArtifact(
-        instance.currentContractClassId,
-      );
+      const existingArtifact = await pxe.getContractArtifact(instance.currentContractClassId);
       const artifact = existingArtifact
         ? undefined
         : await this.spendingLimitContract.getContractArtifact();
@@ -189,10 +182,7 @@ export class AztecClient implements IAztecClient {
     // Store in WalletDB as 'schnorr' so simulation can find the account.
     // The actual send uses our custom entrypoint via the patched method below.
     const db = w["walletDB"] as {
-      storeAccount: (
-        addr: AztecAddress,
-        data: Record<string, unknown>,
-      ) => Promise<void>;
+      storeAccount: (addr: AztecAddress, data: Record<string, unknown>) => Promise<void>;
     };
     await db.storeAccount(instance.address, {
       type: "schnorr",
@@ -209,8 +199,7 @@ export class AztecClient implements IAztecClient {
     const walletAny = this.wallet as unknown as {
       getAccountFromAddress: (addr: AztecAddress) => Promise<unknown>;
     };
-    const originalGetAccount =
-      walletAny.getAccountFromAddress.bind(this.wallet);
+    const originalGetAccount = walletAny.getAccountFromAddress.bind(this.wallet);
     walletAny.getAccountFromAddress = async (addr: AztecAddress) => {
       if (addr.equals(instance.address)) {
         return customAccount;
@@ -256,26 +245,32 @@ export class AztecClient implements IAztecClient {
     }
 
     const result = await withTimeout(
-      token.methods
-        .transfer_to_private(recipientAddress, amount)
-        .send({ from }),
+      token.methods.transfer_to_private(recipientAddress, amount).send({ from }),
       TX_TIMEOUT_MS,
     );
 
     const raw = result as unknown as Record<string, unknown>;
-    const receiptInner = (raw["receipt"] ?? raw) as Record<string, unknown>;
+    const receiptInner =
+      typeof raw["receipt"] === "object" && raw["receipt"] !== null
+        ? (raw["receipt"] as Record<string, unknown>)
+        : raw;
 
-    const txHash = String(receiptInner["txHash"] ?? raw["txHash"]);
-    if (!txHash || txHash === "undefined") {
+    const rawTxHash = receiptInner["txHash"] ?? raw["txHash"];
+    if (rawTxHash === undefined || rawTxHash === null) {
       throw new Error("Missing txHash in transaction receipt");
     }
+    const txHash = String(rawTxHash);
 
-    const commitments = receiptInner["noteCommitments"] as
-      | unknown[]
-      | undefined;
-    const nullifiers = receiptInner["nullifierHashes"] as unknown[] | undefined;
-    const noteCommitment = commitments?.[0]?.toString();
-    const nullifierHash = nullifiers?.[0]?.toString();
+    const commitments = Array.isArray(receiptInner["noteCommitments"])
+      ? receiptInner["noteCommitments"]
+      : undefined;
+    const nullifiers = Array.isArray(receiptInner["nullifierHashes"])
+      ? receiptInner["nullifierHashes"]
+      : undefined;
+    const noteCommitment =
+      commitments !== undefined && commitments.length > 0 ? String(commitments[0]) : undefined;
+    const nullifierHash =
+      nullifiers !== undefined && nullifiers.length > 0 ? String(nullifiers[0]) : undefined;
 
     if (!noteCommitment || !nullifierHash) {
       throw new Error("Incomplete transaction receipt");
@@ -293,9 +288,7 @@ export class AztecClient implements IAztecClient {
 
     const info = this.wallet as unknown as Record<string, unknown>;
     if (typeof info["getNodeInfo"] === "function") {
-      const nodeInfo = await (
-        info["getNodeInfo"] as () => Promise<Record<string, unknown>>
-      )();
+      const nodeInfo = await (info["getNodeInfo"] as () => Promise<Record<string, unknown>>)();
       return String(nodeInfo["nodeVersion"] ?? "unknown");
     }
 
@@ -322,8 +315,7 @@ export class AztecClient implements IAztecClient {
   ): Promise<import("@aztec/aztec.js/fee").FeePaymentMethod> {
     if (this.feeJuiceClaim) {
       console.log("[pxe-bridge] Using Fee Juice claim for deployment fee");
-      const { FeeJuicePaymentMethodWithClaim } =
-        await import("@aztec/aztec.js/fee");
+      const { FeeJuicePaymentMethodWithClaim } = await import("@aztec/aztec.js/fee");
       const { Fr } = await import("@aztec/aztec.js/fields");
       return new FeeJuicePaymentMethodWithClaim(accountAddress, {
         claimAmount: BigInt(this.feeJuiceClaim.claimAmount),
@@ -333,21 +325,15 @@ export class AztecClient implements IAztecClient {
     }
 
     console.log("[pxe-bridge] Using SponsoredFPC for deployment fee");
-    const { SponsoredFeePaymentMethod } =
-      await import("@aztec/aztec.js/fee/testing");
-    const { getContractInstanceFromInstantiationParams } =
-      await import("@aztec/stdlib/contract");
+    const { SponsoredFeePaymentMethod } = await import("@aztec/aztec.js/fee/testing");
+    const { getContractInstanceFromInstantiationParams } = await import("@aztec/stdlib/contract");
     const { Fr } = await import("@aztec/aztec.js/fields");
 
-    const sponsoredFPCInstance =
-      await getContractInstanceFromInstantiationParams(
-        SponsoredFPCContract.artifact,
-        { salt: new Fr(0) },
-      );
-    await this.wallet!.registerContract(
-      sponsoredFPCInstance,
+    const sponsoredFPCInstance = await getContractInstanceFromInstantiationParams(
       SponsoredFPCContract.artifact,
+      { salt: new Fr(0) },
     );
+    await this.wallet!.registerContract(sponsoredFPCInstance, SponsoredFPCContract.artifact);
     return new SponsoredFeePaymentMethod(sponsoredFPCInstance.address);
   }
 

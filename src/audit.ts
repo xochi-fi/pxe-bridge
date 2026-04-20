@@ -1,4 +1,4 @@
-import { appendFile } from "node:fs/promises";
+import { appendFile, open } from "node:fs/promises";
 
 export interface AuditEntry {
   timestamp: string;
@@ -17,12 +17,19 @@ export interface AuditEntry {
 const AUDIT_PREFIX = "[audit] ";
 
 export class AuditLogger {
+  private fileInitialized = false;
+
   constructor(private readonly logPath?: string) {}
 
   async log(entry: AuditEntry): Promise<void> {
     const line = JSON.stringify(entry);
 
     if (this.logPath) {
+      if (!this.fileInitialized) {
+        const fh = await open(this.logPath, "a", 0o600);
+        await fh.close();
+        this.fileInitialized = true;
+      }
       await appendFile(this.logPath, line + "\n");
     } else {
       process.stdout.write(AUDIT_PREFIX + line + "\n");

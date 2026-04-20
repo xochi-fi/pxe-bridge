@@ -8,11 +8,7 @@ describe("AztecClient (e2e)", () => {
   let client: AztecClient;
 
   beforeAll(async () => {
-    client = new AztecClient(
-      config.nodeUrl,
-      config.secretKey,
-      config.feeJuiceClaim,
-    );
+    client = new AztecClient(config.nodeUrl, config.secretKey, config.feeJuiceClaim);
     await client.connect();
   });
 
@@ -43,21 +39,18 @@ describe("AztecClient (e2e)", () => {
     // Skip if no test token address is provided.
     const tokenAddress = process.env["E2E_TOKEN_ADDRESS"];
 
-    it.skipIf(!tokenAddress)(
-      "creates a shielded note with valid receipt fields",
-      async () => {
-        const result = await client.createNote({
-          recipient: tokenAddress!, // use solver's own address for self-transfer
-          token: tokenAddress!,
-          amount: "1000",
-          chainId: 1,
-        });
+    it.skipIf(!tokenAddress)("creates a shielded note with valid receipt fields", async () => {
+      const result = await client.createNote({
+        recipient: tokenAddress!, // use solver's own address for self-transfer
+        token: tokenAddress!,
+        amount: "1000",
+        chainId: 1,
+      });
 
-        expect(result.l2TxHash).toBeTruthy();
-        expect(result.noteCommitment).toBeTruthy();
-        expect(result.nullifierHash).toBeTruthy();
-      },
-    );
+      expect(result.l2TxHash).toBeTruthy();
+      expect(result.noteCommitment).toBeTruthy();
+      expect(result.nullifierHash).toBeTruthy();
+    });
 
     it("rejects a non-existent token contract", async () => {
       const fakeToken = "0x" + "dead".repeat(16);

@@ -40,11 +40,7 @@ function success(id: number | string | null, result: unknown): JsonRpcResponse {
   return { jsonrpc: "2.0", id, result };
 }
 
-function rpcError(
-  id: number | string | null,
-  code: number,
-  message: string,
-): JsonRpcResponse {
+function rpcError(id: number | string | null, code: number, message: string): JsonRpcResponse {
   return { jsonrpc: "2.0", id, error: { code, message } };
 }
 
@@ -55,11 +51,7 @@ export async function handleRpcRequest(
 ): Promise<JsonRpcResponse> {
   const parsed = JsonRpcRequestSchema.safeParse(body);
   if (!parsed.success) {
-    return rpcError(
-      null,
-      RPC_ERRORS.INVALID_REQUEST,
-      "Invalid JSON-RPC request",
-    );
+    return rpcError(null, RPC_ERRORS.INVALID_REQUEST, "Invalid JSON-RPC request");
   }
 
   const { id, method, params } = parsed.data;
@@ -70,11 +62,7 @@ export async function handleRpcRequest(
     case "aztec_getVersion":
       return handleGetVersion(id, client);
     default:
-      return rpcError(
-        id,
-        RPC_ERRORS.METHOD_NOT_FOUND,
-        `Unknown method: ${method}`,
-      );
+      return rpcError(id, RPC_ERRORS.METHOD_NOT_FOUND, `Unknown method: ${method}`);
   }
 }
 
@@ -92,11 +80,7 @@ async function handleCreateNote(
   const parsed = CreateNoteParamsSchema.safeParse(first);
   if (!parsed.success) {
     console.error("[rpc] Invalid createNote params:", parsed.error.message);
-    return rpcError(
-      id,
-      RPC_ERRORS.INVALID_PARAMS,
-      "Invalid params for aztec_createNote",
-    );
+    return rpcError(id, RPC_ERRORS.INVALID_PARAMS, "Invalid params for aztec_createNote");
   }
 
   const noteParams = parsed.data;
@@ -119,9 +103,7 @@ async function handleCreateNote(
 
     // Cooldown for large transfers
     if (check.cooldownMs) {
-      console.log(
-        `[rpc] Cooldown ${check.cooldownMs}ms for amount ${noteParams.amount}`,
-      );
+      console.log(`[rpc] Cooldown ${check.cooldownMs}ms for amount ${noteParams.amount}`);
       await delay(check.cooldownMs);
     }
   }

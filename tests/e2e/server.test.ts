@@ -12,11 +12,7 @@ describe("HTTP server (e2e)", () => {
   let baseUrl: string;
 
   beforeAll(async () => {
-    client = new AztecClient(
-      config.nodeUrl,
-      config.secretKey,
-      config.feeJuiceClaim,
-    );
+    client = new AztecClient(config.nodeUrl, config.secretKey, config.feeJuiceClaim);
     await client.connect();
 
     server = createApp(client);
@@ -37,11 +33,7 @@ describe("HTTP server (e2e)", () => {
     }
   });
 
-  function rpcBody(
-    method: string,
-    params: unknown[] = [],
-    id: number | string = 1,
-  ) {
+  function rpcBody(method: string, params: unknown[] = [], id: number | string = 1) {
     return JSON.stringify({ jsonrpc: "2.0", id, method, params });
   }
 
@@ -91,34 +83,31 @@ describe("HTTP server (e2e)", () => {
   describe("aztec_createNote via JSON-RPC", () => {
     const tokenAddress = process.env["E2E_TOKEN_ADDRESS"];
 
-    it.skipIf(!tokenAddress)(
-      "creates note via full HTTP round-trip",
-      async () => {
-        const params = {
-          recipient: tokenAddress!,
-          token: tokenAddress!,
-          amount: "500",
-          chainId: 1,
-        };
+    it.skipIf(!tokenAddress)("creates note via full HTTP round-trip", async () => {
+      const params = {
+        recipient: tokenAddress!,
+        token: tokenAddress!,
+        amount: "500",
+        chainId: 1,
+      };
 
-        const res = await fetch(baseUrl, {
-          method: "POST",
-          body: rpcBody("aztec_createNote", [params]),
-        });
-        expect(res.status).toBe(200);
+      const res = await fetch(baseUrl, {
+        method: "POST",
+        body: rpcBody("aztec_createNote", [params]),
+      });
+      expect(res.status).toBe(200);
 
-        const body = (await res.json()) as {
-          result: {
-            noteCommitment: string;
-            nullifierHash: string;
-            l2TxHash: string;
-          };
+      const body = (await res.json()) as {
+        result: {
+          noteCommitment: string;
+          nullifierHash: string;
+          l2TxHash: string;
         };
-        expect(body.result.noteCommitment).toBeTruthy();
-        expect(body.result.nullifierHash).toBeTruthy();
-        expect(body.result.l2TxHash).toBeTruthy();
-      },
-    );
+      };
+      expect(body.result.noteCommitment).toBeTruthy();
+      expect(body.result.nullifierHash).toBeTruthy();
+      expect(body.result.l2TxHash).toBeTruthy();
+    });
 
     it("returns error for non-existent token", async () => {
       const params = {

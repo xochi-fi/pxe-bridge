@@ -1,9 +1,4 @@
-import {
-  createServer,
-  type IncomingMessage,
-  type ServerResponse,
-  type Server,
-} from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { handleRpcRequest, type RpcContext } from "./rpc.js";
 import type { IAztecClient } from "./types.js";
@@ -23,7 +18,7 @@ export interface ServerOptions {
 
 const RATE_LIMIT_CLEANUP_INTERVAL_MS = 300_000; // 5 min
 
-class RateLimiter {
+export class RateLimiter {
   private buckets = new Map<string, number[]>();
   private cleanupTimer: ReturnType<typeof setInterval>;
 
@@ -32,10 +27,7 @@ class RateLimiter {
     private readonly windowMs: number,
   ) {
     // Periodically prune stale buckets to prevent memory growth
-    this.cleanupTimer = setInterval(
-      () => this.cleanup(),
-      RATE_LIMIT_CLEANUP_INTERVAL_MS,
-    );
+    this.cleanupTimer = setInterval(() => this.cleanup(), RATE_LIMIT_CLEANUP_INTERVAL_MS);
     this.cleanupTimer.unref();
   }
 
@@ -112,30 +104,34 @@ function sendJson(res: ServerResponse, status: number, data: unknown): void {
 function checkAuth(req: IncomingMessage, apiKey: string): boolean {
   const header = req.headers["authorization"];
   if (!header) return false;
-  // Constant-time comparison -- hash both sides to fixed length so
-  // we never leak the expected key length via timing or early return.
+  // Constant-time comparison -- pad both to the same length so we
+  // never leak the expected key length via timing or early return.
   const expected = Buffer.from(`Bearer ${apiKey}`);
   const actual = Buffer.from(header);
-  if (actual.length !== expected.length) {
-    // Compare against expected twice to keep timing constant
-    timingSafeEqual(expected, expected);
-    return false;
-  }
-  return timingSafeEqual(actual, expected);
+  const maxLen = Math.max(actual.length, expected.length);
+  const paddedExpected = Buffer.alloc(maxLen);
+  const paddedActual = Buffer.alloc(maxLen);
+  expected.copy(paddedExpected);
+  actual.copy(paddedActual);
+  const match = timingSafeEqual(paddedActual, paddedExpected);
+  // Both must match in content AND length
+  return match && actual.length === expected.length;
 }
 
-export function createApp(
-  client: IAztecClient,
-  opts: ServerOptions = {},
-): Server {
+export function createApp(client: IAztecClient, opts: ServerOptions = {}): Server {
   const rateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
 
   const server = createServer(async (req, res) => {
     try {
       const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
 
-      // Health check (no auth required)
+      // Health check (no auth required, rate-limited)
       if (req.method === "GET" && pathname === "/status") {
+        const statusIp = req.socket.remoteAddress ?? "unknown";
+        if (!rateLimiter.allow(statusIp)) {
+          sendJson(res, 429, { error: "Too many requests" });
+          return;
+        }
         try {
           const version = await client.getVersion();
           sendJson(res, 200, { status: "ok", version });
@@ -147,10 +143,7 @@ export function createApp(
       }
 
       // JSON-RPC endpoint
-      if (
-        req.method === "POST" &&
-        (pathname === "/" || pathname === "/api/rpc")
-      ) {
+      if (req.method === "POST" && (pathname === "/" || pathname === "/api/rpc")) {
         // Auth check
         if (opts.apiKey && !checkAuth(req, opts.apiKey)) {
           sendJson(res, 401, { error: "Unauthorized" });

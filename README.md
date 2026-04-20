@@ -69,15 +69,15 @@ Create a shielded note on Aztec L2.
 
 **Params:** `[{ recipient, token, amount, chainId, tradeId?, subTradeIndex?, totalSubTrades? }]`
 
-| Field            | Type     | Description                                  |
-| ---------------- | -------- | -------------------------------------------- |
-| `recipient`      | `string` | Hex Aztec address                            |
-| `token`          | `string` | Hex token contract address                   |
-| `amount`         | `string` | Numeric string (wei)                         |
-| `chainId`        | `number` | L1 chain ID                                  |
-| `tradeId`        | `string` | (Optional) XIP-1 trade identifier (bytes32)  |
-| `subTradeIndex`  | `number` | (Optional) Sub-trade index within the split  |
-| `totalSubTrades` | `number` | (Optional) Total sub-trades in the split     |
+| Field            | Type     | Description                                 |
+| ---------------- | -------- | ------------------------------------------- |
+| `recipient`      | `string` | Hex Aztec address                           |
+| `token`          | `string` | Hex token contract address                  |
+| `amount`         | `string` | Numeric string (wei)                        |
+| `chainId`        | `number` | L1 chain ID                                 |
+| `tradeId`        | `string` | (Optional) XIP-1 trade identifier (bytes32) |
+| `subTradeIndex`  | `number` | (Optional) Sub-trade index within the split |
+| `totalSubTrades` | `number` | (Optional) Total sub-trades in the split    |
 
 Trade context fields (`tradeId`, `subTradeIndex`, `totalSubTrades`) must be provided together or all omitted. When present, the note is tagged with settlement splitting metadata for SettlementRegistry finalization. Backwards compatible -- existing callers are unaffected.
 

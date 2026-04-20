@@ -61,18 +61,12 @@ function parsePositiveBigInt(name: string, raw: string): bigint {
 
 const MAX_AMOUNT_RAW = process.env["PXE_BRIDGE_MAX_AMOUNT"];
 if (MAX_AMOUNT_RAW) {
-  limitsConfig.maxAmount = parsePositiveBigInt(
-    "PXE_BRIDGE_MAX_AMOUNT",
-    MAX_AMOUNT_RAW,
-  );
+  limitsConfig.maxAmount = parsePositiveBigInt("PXE_BRIDGE_MAX_AMOUNT", MAX_AMOUNT_RAW);
 }
 
 const DAILY_LIMIT_RAW = process.env["PXE_BRIDGE_DAILY_LIMIT"];
 if (DAILY_LIMIT_RAW) {
-  limitsConfig.dailyLimit = parsePositiveBigInt(
-    "PXE_BRIDGE_DAILY_LIMIT",
-    DAILY_LIMIT_RAW,
-  );
+  limitsConfig.dailyLimit = parsePositiveBigInt("PXE_BRIDGE_DAILY_LIMIT", DAILY_LIMIT_RAW);
 }
 
 const COOLDOWN_THRESHOLD_RAW = process.env["PXE_BRIDGE_COOLDOWN_THRESHOLD"];
@@ -83,13 +77,8 @@ if (COOLDOWN_THRESHOLD_RAW && COOLDOWN_DELAY_RAW) {
     COOLDOWN_THRESHOLD_RAW,
   );
   limitsConfig.cooldownDelayMs = parseInt(COOLDOWN_DELAY_RAW, 10);
-  if (
-    isNaN(limitsConfig.cooldownDelayMs) ||
-    limitsConfig.cooldownDelayMs <= 0
-  ) {
-    console.error(
-      "[pxe-bridge] PXE_BRIDGE_COOLDOWN_DELAY_MS must be a positive integer",
-    );
+  if (isNaN(limitsConfig.cooldownDelayMs) || limitsConfig.cooldownDelayMs <= 0) {
+    console.error("[pxe-bridge] PXE_BRIDGE_COOLDOWN_DELAY_MS must be a positive integer");
     process.exit(1);
   }
 } else if (COOLDOWN_THRESHOLD_RAW || COOLDOWN_DELAY_RAW) {
@@ -117,9 +106,7 @@ let spendingLimitConfig: SpendingLimitConfig | undefined;
 const SPENDING_LIMIT_ADMIN = process.env["PXE_BRIDGE_SPENDING_LIMIT_ADMIN"];
 if (SPENDING_LIMIT_ADMIN) {
   if (!/^0x[0-9a-fA-F]{64}$/.test(SPENDING_LIMIT_ADMIN)) {
-    console.error(
-      "[pxe-bridge] PXE_BRIDGE_SPENDING_LIMIT_ADMIN must be a 32-byte hex address",
-    );
+    console.error("[pxe-bridge] PXE_BRIDGE_SPENDING_LIMIT_ADMIN must be a 32-byte hex address");
     process.exit(1);
   }
   spendingLimitConfig = {
@@ -133,18 +120,19 @@ async function main(): Promise<void> {
   const { key: secretKey, source: keySource } = await resolveSecretKey();
   console.log(`[pxe-bridge] Secret key loaded from ${keySource}`);
 
-  const client = new AztecClient(
-    AZTEC_NODE_URL,
-    secretKey,
-    feeJuiceClaim,
-    spendingLimitConfig,
-  );
+  const client = new AztecClient(AZTEC_NODE_URL, secretKey, feeJuiceClaim, spendingLimitConfig);
   const server = createApp(client, { apiKey: API_KEY, limits, audit });
 
   await client.connect();
 
   server.listen(PORT, HOST, () => {
     console.log(`[pxe-bridge] Listening on ${HOST}:${PORT}`);
+    if (HOST !== "127.0.0.1" && HOST !== "localhost") {
+      console.warn(
+        "[pxe-bridge] WARNING: Binding to non-localhost address. " +
+          "Deploy behind a TLS-terminating reverse proxy (nginx, AWS ELB, etc.)",
+      );
+    }
     console.log(`[pxe-bridge] Node: ${AZTEC_NODE_URL}`);
     console.log(`[pxe-bridge] Auth: ${API_KEY ? "enabled" : "DISABLED"}`);
     if (limits) {
@@ -159,9 +147,7 @@ async function main(): Promise<void> {
     }
     console.log(`[pxe-bridge] Audit: ${AUDIT_LOG_PATH ?? "stdout"}`);
     console.log(`[pxe-bridge] Endpoints:`);
-    console.log(
-      `  POST /           -- JSON-RPC (aztec_createNote, aztec_getVersion)`,
-    );
+    console.log(`  POST /           -- JSON-RPC (aztec_createNote, aztec_getVersion)`);
     console.log(`  POST /api/rpc    -- JSON-RPC (alias)`);
     console.log(`  GET  /status     -- Health check`);
   });

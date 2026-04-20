@@ -24,10 +24,7 @@
 
 import type { Fr as FrType } from "@aztec/foundation/curves/bn254";
 import type { GrumpkinScalar as GrumpkinScalarType } from "@aztec/foundation/curves/grumpkin";
-import type {
-  ContractArtifact,
-  FunctionAbi,
-} from "@aztec/stdlib/abi";
+import type { ContractArtifact, FunctionAbi } from "@aztec/stdlib/abi";
 import type {
   AuthWitnessProvider,
   EntrypointInterface,
@@ -36,11 +33,7 @@ import type {
 import type { DefaultAccountEntrypointOptions } from "@aztec/entrypoints/account";
 import type { GasSettings } from "@aztec/stdlib/gas";
 import type { CompleteAddress } from "@aztec/stdlib/contract";
-import {
-  BaseAccount,
-  type Account,
-  type AccountContract,
-} from "@aztec/aztec.js/account";
+import { BaseAccount, type Account, type AccountContract } from "@aztec/aztec.js/account";
 
 // Must match DOM_SEP__SPENDING_LIMIT in the Noir contract (main.nr)
 export const DOM_SEP_SPENDING_LIMIT = 10042;
@@ -74,9 +67,7 @@ export class SpendingLimitAccountContract implements AccountContract {
    */
   setDeclaredSpending(amount: bigint, recipient: string): void {
     if (!this._entrypoint) {
-      throw new Error(
-        "Account not initialized -- getAccount() must be called first",
-      );
+      throw new Error("Account not initialized -- getAccount() must be called first");
     }
     this._entrypoint.declaredAmount = amount;
     this._entrypoint.declaredRecipient = recipient;
@@ -122,10 +113,7 @@ export class SpendingLimitAccountContract implements AccountContract {
 
   getAccount(completeAddress: CompleteAddress): Account {
     const authProvider = this.getAuthWitnessProvider(completeAddress);
-    const entrypoint = new SpendingLimitEntrypoint(
-      completeAddress.address,
-      authProvider,
-    );
+    const entrypoint = new SpendingLimitEntrypoint(completeAddress.address, authProvider);
     this._entrypoint = entrypoint;
     return new BaseAccount(entrypoint, authProvider, completeAddress);
   }
@@ -138,7 +126,9 @@ export class SpendingLimitAccountContract implements AccountContract {
 class SpendingLimitAuthWitnessProvider implements AuthWitnessProvider {
   constructor(private signingPrivateKey: GrumpkinScalarType) {}
 
-  async createAuthWit(messageHash: FrType): Promise<import("@aztec/stdlib/auth-witness").AuthWitness> {
+  async createAuthWit(
+    messageHash: FrType,
+  ): Promise<import("@aztec/stdlib/auth-witness").AuthWitness> {
     const { Schnorr } = await import("@aztec/foundation/crypto/schnorr");
     const { AuthWitness } = await import("@aztec/stdlib/auth-witness");
 
@@ -183,37 +173,22 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
     options: DefaultAccountEntrypointOptions,
   ): Promise<import("@aztec/stdlib/tx").TxExecutionRequest> {
     const { Fr } = await import("@aztec/foundation/curves/bn254");
-    const { FunctionSelector, encodeArguments } = await import(
-      "@aztec/stdlib/abi"
-    );
-    const { computeOuterAuthWitHash } = await import(
-      "@aztec/stdlib/auth-witness"
-    );
-    const { HashedValues, TxContext, TxExecutionRequest } = await import(
-      "@aztec/stdlib/tx"
-    );
-    const { EncodedAppEntrypointCalls } = await import(
-      "@aztec/entrypoints/encoding"
-    );
+    const { FunctionSelector, encodeArguments } = await import("@aztec/stdlib/abi");
+    const { computeOuterAuthWitHash } = await import("@aztec/stdlib/auth-witness");
+    const { HashedValues, TxContext, TxExecutionRequest } = await import("@aztec/stdlib/tx");
+    const { EncodedAppEntrypointCalls } = await import("@aztec/entrypoints/encoding");
     const { AztecAddress } = await import("@aztec/aztec.js/addresses");
-    const { poseidon2HashWithSeparator } = await import(
-      "@aztec/foundation/crypto/poseidon"
-    );
+    const { poseidon2HashWithSeparator } = await import("@aztec/foundation/crypto/poseidon");
 
     const { authWitnesses, capsules, extraHashedArgs } = exec;
     const { cancellable, txNonce, feePaymentMethodOptions } = options;
 
     // Encode function calls (same as DefaultAccountEntrypoint)
-    const encodedCalls = await EncodedAppEntrypointCalls.create(
-      exec.calls,
-      txNonce,
-    );
+    const encodedCalls = await EncodedAppEntrypointCalls.create(exec.calls, txNonce);
 
     // Build extended args: standard + declared_amount + declared_recipient
     const declaredAmountFr = new Fr(this.declaredAmount);
-    const declaredRecipientAddr = AztecAddress.fromString(
-      this.declaredRecipient,
-    );
+    const declaredRecipientAddr = AztecAddress.fromString(this.declaredRecipient);
 
     const abi = this.getEntrypointAbi();
     const args = [
@@ -225,10 +200,7 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
     ];
     const encodedArgs = encodeArguments(abi, args);
 
-    const functionSelector = await FunctionSelector.fromNameAndParameters(
-      abi.name,
-      abi.parameters,
-    );
+    const functionSelector = await FunctionSelector.fromNameAndParameters(abi.name, abi.parameters);
 
     // Combined hash: payload + spending info
     const payloadHash = await encodedCalls.hash();
@@ -256,11 +228,7 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
         chainInfo.version.toNumber(),
         gasSettings,
       ),
-      argsOfCalls: [
-        ...encodedCalls.hashedArguments,
-        entrypointHashedArgs,
-        ...extraHashedArgs,
-      ],
+      argsOfCalls: [...encodedCalls.hashedArguments, entrypointHashedArgs, ...extraHashedArgs],
       authWitnesses: [...authWitnesses, payloadAuthWitness],
       capsules,
       salt: Fr.random(),
@@ -278,30 +246,19 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
       FunctionSelector,
       encodeArguments,
     } = await import("@aztec/stdlib/abi");
-    const { computeOuterAuthWitHash } = await import(
-      "@aztec/stdlib/auth-witness"
-    );
+    const { computeOuterAuthWitHash } = await import("@aztec/stdlib/auth-witness");
     const { ExecutionPayload } = await import("@aztec/stdlib/tx");
-    const { EncodedAppEntrypointCalls } = await import(
-      "@aztec/entrypoints/encoding"
-    );
+    const { EncodedAppEntrypointCalls } = await import("@aztec/entrypoints/encoding");
     const { AztecAddress } = await import("@aztec/aztec.js/addresses");
-    const { poseidon2HashWithSeparator } = await import(
-      "@aztec/foundation/crypto/poseidon"
-    );
+    const { poseidon2HashWithSeparator } = await import("@aztec/foundation/crypto/poseidon");
 
     const { authWitnesses, capsules, extraHashedArgs, feePayer } = exec;
     const { cancellable, txNonce, feePaymentMethodOptions } = options;
 
-    const encodedCalls = await EncodedAppEntrypointCalls.create(
-      exec.calls,
-      txNonce,
-    );
+    const encodedCalls = await EncodedAppEntrypointCalls.create(exec.calls, txNonce);
 
     const declaredAmountFr = new Fr(this.declaredAmount);
-    const declaredRecipientAddr = AztecAddress.fromString(
-      this.declaredRecipient,
-    );
+    const declaredRecipientAddr = AztecAddress.fromString(this.declaredRecipient);
 
     const abi = this.getEntrypointAbi();
     const args = [
@@ -312,10 +269,7 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
       declaredRecipientAddr,
     ];
     const encodedArgs = encodeArguments(abi, args);
-    const functionSelector = await FunctionSelector.fromNameAndParameters(
-      abi.name,
-      abi.parameters,
-    );
+    const functionSelector = await FunctionSelector.fromNameAndParameters(abi.name, abi.parameters);
 
     const payloadHash = await encodedCalls.hash();
     const combinedHash = await poseidon2HashWithSeparator(
@@ -401,9 +355,7 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
                         type: {
                           kind: "struct",
                           path: "authwit::aztec::protocol_types::address::AztecAddress",
-                          fields: [
-                            { name: "inner", type: { kind: "field" } },
-                          ],
+                          fields: [{ name: "inner", type: { kind: "field" } }],
                         },
                       },
                       { name: "is_public", type: { kind: "boolean" } },
