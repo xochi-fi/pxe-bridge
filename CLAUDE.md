@@ -35,21 +35,21 @@ The Aztec sandbox requires native x86_64 -- barretenberg's ZK prover crashes und
 
 ## Required Environment
 
-| Variable                | Required | Default                 | Description                                    |
-| ----------------------- | -------- | ----------------------- | ---------------------------------------------- |
-| `PXE_BRIDGE_SECRET_KEY` | Dev only | --                      | 32-byte hex key (rejected when NODE_ENV=production) |
-| `PXE_BRIDGE_SECRET_ARN` | Prod     | --                      | AWS Secrets Manager ARN/name for secret key    |
-| `PXE_BRIDGE_API_KEY`    | No       | --                      | Bearer token for RPC auth (warns if unset)     |
-| `AZTEC_NODE_URL`        | No       | `http://localhost:8080` | Aztec L2 node endpoint                         |
-| `PXE_BRIDGE_HOST`       | No       | `127.0.0.1`             | Bind address (localhost-only by default)       |
-| `PXE_BRIDGE_PORT`       | No       | `8547`                  | HTTP listen port (validated 0-65535)           |
-| `FEE_JUICE_CLAIM`       | No       | --                      | JSON: `{claimAmount, claimSecret, messageLeafIndex}` for L1->L2 bridged deployment fee |
-| `PXE_BRIDGE_MAX_AMOUNT` | No      | --                      | Per-tx amount ceiling (rejects above this)            |
-| `PXE_BRIDGE_DAILY_LIMIT`| No      | --                      | 24h rolling volume cap; circuit-breaker pauses bridge |
-| `PXE_BRIDGE_COOLDOWN_THRESHOLD` | No | --                  | Amount threshold triggering cooldown delay            |
-| `PXE_BRIDGE_COOLDOWN_DELAY_MS`  | No | --                  | Delay in ms for amounts >= cooldown threshold         |
-| `PXE_BRIDGE_AUDIT_LOG`  | No      | stdout                  | File path for JSON-lines audit log                    |
-| `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` | No | --               | AztecAddress (32-byte hex) enabling on-chain spending limit account; uses MAX_AMOUNT/DAILY_LIMIT values |
+| Variable                          | Required | Default                 | Description                                                                                             |
+| --------------------------------- | -------- | ----------------------- | ------------------------------------------------------------------------------------------------------- |
+| `PXE_BRIDGE_SECRET_KEY`           | Dev only | --                      | 32-byte hex key (rejected when NODE_ENV=production)                                                     |
+| `PXE_BRIDGE_SECRET_ARN`           | Prod     | --                      | AWS Secrets Manager ARN/name for secret key                                                             |
+| `PXE_BRIDGE_API_KEY`              | No       | --                      | Bearer token for RPC auth (warns if unset)                                                              |
+| `AZTEC_NODE_URL`                  | No       | `http://localhost:8080` | Aztec L2 node endpoint                                                                                  |
+| `PXE_BRIDGE_HOST`                 | No       | `127.0.0.1`             | Bind address (localhost-only by default)                                                                |
+| `PXE_BRIDGE_PORT`                 | No       | `8547`                  | HTTP listen port (validated 0-65535)                                                                    |
+| `FEE_JUICE_CLAIM`                 | No       | --                      | JSON: `{claimAmount, claimSecret, messageLeafIndex}` for L1->L2 bridged deployment fee                  |
+| `PXE_BRIDGE_MAX_AMOUNT`           | No       | --                      | Per-tx amount ceiling (rejects above this)                                                              |
+| `PXE_BRIDGE_DAILY_LIMIT`          | No       | --                      | 24h rolling volume cap; circuit-breaker pauses bridge                                                   |
+| `PXE_BRIDGE_COOLDOWN_THRESHOLD`   | No       | --                      | Amount threshold triggering cooldown delay                                                              |
+| `PXE_BRIDGE_COOLDOWN_DELAY_MS`    | No       | --                      | Delay in ms for amounts >= cooldown threshold                                                           |
+| `PXE_BRIDGE_AUDIT_LOG`            | No       | stdout                  | File path for JSON-lines audit log                                                                      |
+| `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` | No       | --                      | AztecAddress (32-byte hex) enabling on-chain spending limit account; uses MAX_AMOUNT/DAILY_LIMIT values |
 
 ## Architecture
 
