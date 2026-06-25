@@ -9,8 +9,7 @@ export interface E2EConfig {
 }
 
 // Test-only key well under BN254 Fr modulus -- never use with real funds
-const DEFAULT_SECRET_KEY =
-  "0x000000000000000000000000000000000000000000000000000000000000beef";
+const DEFAULT_SECRET_KEY = "0x000000000000000000000000000000000000000000000000000000000000beef";
 
 export function getTestConfig(): E2EConfig {
   let feeJuiceClaim: FeeJuiceClaim | undefined;
@@ -28,10 +27,7 @@ export function getTestConfig(): E2EConfig {
   };
 }
 
-export async function waitForNode(
-  url: string,
-  timeoutMs = 120_000,
-): Promise<void> {
+export async function waitForNode(url: string, timeoutMs = 120_000): Promise<void> {
   const start = Date.now();
   const statusUrl = url.replace(/\/$/, "") + "/status";
 
@@ -45,9 +41,7 @@ export async function waitForNode(
     await new Promise((r) => setTimeout(r, 2000));
   }
 
-  throw new Error(
-    `Aztec node at ${url} did not become ready within ${timeoutMs}ms`,
-  );
+  throw new Error(`Aztec node at ${url} did not become ready within ${timeoutMs}ms`);
 }
 
 export async function deployTestToken(wallet: unknown): Promise<string> {

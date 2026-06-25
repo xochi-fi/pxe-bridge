@@ -1,7 +1,4 @@
-import {
-  SecretsManagerClient,
-  GetSecretValueCommand,
-} from "@aws-sdk/client-secrets-manager";
+import { SecretsManagerClient, GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
 
 const KEY_PATTERN = /^(0x)?[0-9a-fA-F]{64}$/;
 
@@ -42,9 +39,7 @@ export async function resolveSecretKey(): Promise<SecretKeyResult> {
   }
 
   if (!envKey) {
-    throw new Error(
-      "PXE_BRIDGE_SECRET_KEY or PXE_BRIDGE_SECRET_ARN is required",
-    );
+    throw new Error("PXE_BRIDGE_SECRET_KEY or PXE_BRIDGE_SECRET_ARN is required");
   }
 
   const normalized = validateKey(envKey);
@@ -65,9 +60,7 @@ async function fetchFromSecretsManager(secretId: string): Promise<string> {
 
   const raw = response.SecretString;
   if (!raw) {
-    throw new Error(
-      "Secret in Secrets Manager is binary or empty -- expected a hex string",
-    );
+    throw new Error("Secret in Secrets Manager is binary or empty -- expected a hex string");
   }
 
   // Support both plain hex and JSON {"key": "hex"} formats
@@ -89,9 +82,7 @@ function parseSecretValue(raw: string): string {
     try {
       parsed = JSON.parse(trimmed);
     } catch {
-      throw new Error(
-        "Secret value looks like JSON but failed to parse",
-      );
+      throw new Error("Secret value looks like JSON but failed to parse");
     }
     if (
       typeof parsed === "object" &&
@@ -101,22 +92,16 @@ function parseSecretValue(raw: string): string {
     ) {
       return (parsed as Record<string, unknown>)["key"] as string;
     }
-    throw new Error(
-      'Secret JSON must have a "key" field containing the hex secret',
-    );
+    throw new Error('Secret JSON must have a "key" field containing the hex secret');
   }
 
-  throw new Error(
-    "Secret value must be a 32-byte hex string or JSON with a \"key\" field",
-  );
+  throw new Error('Secret value must be a 32-byte hex string or JSON with a "key" field');
 }
 
 function validateKey(raw: string): string {
   const normalized = raw.replace(/^0x/, "");
   if (!/^[0-9a-fA-F]{64}$/.test(normalized)) {
-    throw new Error(
-      "Secret key must be 32 bytes (64 hex chars)",
-    );
+    throw new Error("Secret key must be 32 bytes (64 hex chars)");
   }
   return normalized;
 }

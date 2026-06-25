@@ -3,11 +3,7 @@ import type { Server } from "node:http";
 import { createApp } from "../src/server.js";
 import { TransactionLimits } from "../src/limits.js";
 import { AuditLogger } from "../src/audit.js";
-import type {
-  CreateNoteParams,
-  CreateNoteResult,
-  IAztecClient,
-} from "../src/types.js";
+import type { CreateNoteParams, CreateNoteResult, IAztecClient } from "../src/types.js";
 import { readFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -50,10 +46,7 @@ describe("limits integration through server", () => {
   let auditPath: string;
 
   beforeAll(async () => {
-    auditPath = join(
-      tmpdir(),
-      `audit-int-${randomBytes(8).toString("hex")}.jsonl`,
-    );
+    auditPath = join(tmpdir(), `audit-int-${randomBytes(8).toString("hex")}.jsonl`);
     const limits = new TransactionLimits({
       maxAmount: 10000n,
       dailyLimit: 50000n,

@@ -174,8 +174,7 @@ describe("CreateNoteParamsSchema", () => {
   it("accepts very large numeric amount (bigint-scale)", () => {
     const result = CreateNoteParamsSchema.safeParse({
       ...validParams,
-      amount:
-        "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+      amount: "115792089237316195423570985008687907853269984665640564039457584007913129639935",
     });
     expect(result.success).toBe(true);
   });

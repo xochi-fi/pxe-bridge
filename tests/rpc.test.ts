@@ -1,10 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { handleRpcRequest } from "../src/rpc.js";
-import type {
-  CreateNoteParams,
-  CreateNoteResult,
-  IAztecClient,
-} from "../src/types.js";
+import type { CreateNoteParams, CreateNoteResult, IAztecClient } from "../src/types.js";
 
 const VALID_ADDR = "0x" + "a".repeat(64);
 
@@ -59,10 +55,7 @@ describe("handleRpcRequest", () => {
     });
 
     it("rejects wrong jsonrpc version", async () => {
-      const res = await handleRpcRequest(
-        { jsonrpc: "1.0", id: 1, method: "test" },
-        client,
-      );
+      const res = await handleRpcRequest({ jsonrpc: "1.0", id: 1, method: "test" }, client);
       expect(res).toHaveProperty("error");
     });
   });
@@ -80,10 +73,7 @@ describe("handleRpcRequest", () => {
 
   describe("aztec_getVersion", () => {
     it("returns version string", async () => {
-      const res = await handleRpcRequest(
-        rpcRequest("aztec_getVersion"),
-        client,
-      );
+      const res = await handleRpcRequest(rpcRequest("aztec_getVersion"), client);
       expect(res).toHaveProperty("result");
       if ("result" in res) {
         expect(res.result).toBe("4.1.3");
@@ -92,10 +82,7 @@ describe("handleRpcRequest", () => {
 
     it("returns INTERNAL_ERROR when client throws", async () => {
       client.versionError = new Error("connection refused");
-      const res = await handleRpcRequest(
-        rpcRequest("aztec_getVersion"),
-        client,
-      );
+      const res = await handleRpcRequest(rpcRequest("aztec_getVersion"), client);
       expect(res).toHaveProperty("error");
       if ("error" in res) {
         expect(res.error.code).toBe(-32603);
@@ -113,10 +100,7 @@ describe("handleRpcRequest", () => {
     };
 
     it("returns note result on success", async () => {
-      const res = await handleRpcRequest(
-        rpcRequest("aztec_createNote", [validParams]),
-        client,
-      );
+      const res = await handleRpcRequest(rpcRequest("aztec_createNote", [validParams]), client);
       expect(res).toHaveProperty("result");
       if ("result" in res) {
         expect(res.result).toEqual(client.createNoteResult);
@@ -124,18 +108,12 @@ describe("handleRpcRequest", () => {
     });
 
     it("passes parsed params to client", async () => {
-      await handleRpcRequest(
-        rpcRequest("aztec_createNote", [validParams]),
-        client,
-      );
+      await handleRpcRequest(rpcRequest("aztec_createNote", [validParams]), client);
       expect(client.lastCreateNoteParams).toEqual(validParams);
     });
 
     it("returns INVALID_PARAMS for missing params", async () => {
-      const res = await handleRpcRequest(
-        rpcRequest("aztec_createNote", []),
-        client,
-      );
+      const res = await handleRpcRequest(rpcRequest("aztec_createNote", []), client);
       expect(res).toHaveProperty("error");
       if ("error" in res) {
         expect(res.error.code).toBe(-32602);
@@ -155,10 +133,7 @@ describe("handleRpcRequest", () => {
 
     it("returns INTERNAL_ERROR when client throws", async () => {
       client.createNoteError = new Error("tx reverted");
-      const res = await handleRpcRequest(
-        rpcRequest("aztec_createNote", [validParams]),
-        client,
-      );
+      const res = await handleRpcRequest(rpcRequest("aztec_createNote", [validParams]), client);
       expect(res).toHaveProperty("error");
       if ("error" in res) {
         expect(res.error.code).toBe(-32603);
@@ -168,10 +143,7 @@ describe("handleRpcRequest", () => {
 
     it("does not leak internal error details", async () => {
       client.createNoteError = new Error("secret internal details");
-      const res = await handleRpcRequest(
-        rpcRequest("aztec_createNote", [validParams]),
-        client,
-      );
+      const res = await handleRpcRequest(rpcRequest("aztec_createNote", [validParams]), client);
       if ("error" in res) {
         expect(res.error.message).not.toContain("secret");
       }
@@ -184,19 +156,14 @@ describe("handleRpcRequest", () => {
         subTradeIndex: 1,
         totalSubTrades: 3,
       };
-      const res = await handleRpcRequest(
-        rpcRequest("aztec_createNote", [paramsWithTrade]),
-        client,
-      );
+      const res = await handleRpcRequest(rpcRequest("aztec_createNote", [paramsWithTrade]), client);
       expect(res).toHaveProperty("result");
       expect(client.lastCreateNoteParams).toEqual(paramsWithTrade);
     });
 
     it("rejects partial XIP-1 trade context", async () => {
       const res = await handleRpcRequest(
-        rpcRequest("aztec_createNote", [
-          { ...validParams, tradeId: "0x" + "b".repeat(64) },
-        ]),
+        rpcRequest("aztec_createNote", [{ ...validParams, tradeId: "0x" + "b".repeat(64) }]),
         client,
       );
       expect(res).toHaveProperty("error");
@@ -208,10 +175,7 @@ describe("handleRpcRequest", () => {
 
   describe("params edge cases", () => {
     it("returns INVALID_PARAMS when params[0] is null", async () => {
-      const res = await handleRpcRequest(
-        rpcRequest("aztec_createNote", [null]),
-        client,
-      );
+      const res = await handleRpcRequest(rpcRequest("aztec_createNote", [null]), client);
       expect(res).toHaveProperty("error");
       if ("error" in res) {
         expect(res.error.code).toBe(-32602);
@@ -219,10 +183,7 @@ describe("handleRpcRequest", () => {
     });
 
     it("returns INVALID_PARAMS when params[0] is a number", async () => {
-      const res = await handleRpcRequest(
-        rpcRequest("aztec_createNote", [123]),
-        client,
-      );
+      const res = await handleRpcRequest(rpcRequest("aztec_createNote", [123]), client);
       expect(res).toHaveProperty("error");
       if ("error" in res) {
         expect(res.error.code).toBe(-32602);
@@ -230,10 +191,7 @@ describe("handleRpcRequest", () => {
     });
 
     it("returns INVALID_PARAMS when params[0] is a string", async () => {
-      const res = await handleRpcRequest(
-        rpcRequest("aztec_createNote", ["hello"]),
-        client,
-      );
+      const res = await handleRpcRequest(rpcRequest("aztec_createNote", ["hello"]), client);
       expect(res).toHaveProperty("error");
       if ("error" in res) {
         expect(res.error.code).toBe(-32602);
@@ -243,10 +201,7 @@ describe("handleRpcRequest", () => {
 
   describe("batch requests", () => {
     it("rejects array body as invalid request", async () => {
-      const batch = [
-        rpcRequest("aztec_getVersion"),
-        rpcRequest("aztec_getVersion"),
-      ];
+      const batch = [rpcRequest("aztec_getVersion"), rpcRequest("aztec_getVersion")];
       const res = await handleRpcRequest(batch, client);
       expect(res).toHaveProperty("error");
       if ("error" in res) {

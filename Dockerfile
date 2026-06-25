@@ -28,5 +28,8 @@ COPY --from=builder /app/package.json .
 ENV NODE_ENV=production
 EXPOSE 8547
 
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD curl -sf http://localhost:8547/status || exit 1
+
 USER node
 CMD ["node", "dist/index.js"]

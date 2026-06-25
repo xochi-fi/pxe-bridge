@@ -18,8 +18,7 @@ vi.mock("@aws-sdk/client-secrets-manager", () => {
 // Dynamic import so the mock is in place first
 const { resolveSecretKey } = await import("../src/secrets.js");
 
-const VALID_KEY =
-  "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd";
+const VALID_KEY = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd";
 
 beforeEach(() => {
   // Clear relevant env vars before each test
@@ -128,9 +127,7 @@ describe("resolveSecretKey", () => {
         SecretString: JSON.stringify({ password: VALID_KEY }),
       });
 
-      await expect(resolveSecretKey()).rejects.toThrow(
-        'must have a "key" field',
-      );
+      await expect(resolveSecretKey()).rejects.toThrow('must have a "key" field');
     });
 
     it("rejects binary/empty secret", async () => {

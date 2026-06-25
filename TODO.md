@@ -51,7 +51,43 @@ Contract compiled (`nargo compile`), artifact at
 `contracts/spending_limit_account/target/`. TypeScript wrapper at
 `src/spending-limit-account.ts`. Wired into `aztec-client.ts` via
 `AccountManager.create()`. Enabled by setting `PXE_BRIDGE_SPENDING_LIMIT_ADMIN`
-(32-byte hex AztecAddress). Remaining: deploy to sandbox, e2e test on x86_64.
+(32-byte hex AztecAddress). Limit values validated at init and apply time
+(`daily_limit >= max_per_tx`, u64 range). Admin `reset_daily_spent()` added
+as stopgap for epoch stall (block production slowdown).
+Remaining: deploy to sandbox, e2e test on x86_64.
+
+## Security Hardening Pass (2026-04-20)
+
+Cross-cutting fixes from security audit against 2026 threat landscape
+($482M stolen YTD, 76% from infrastructure attacks not code exploits).
+
+- [x] **API key timing leak** -- padded both buffers to equal length before
+      `timingSafeEqual`; no more key-length leakage via early return.
+- [x] **Circuit breaker auto-reset** -- `TransactionLimits` now tracks
+      `pausedAt` and auto-resumes after the full 24h window elapses.
+- [x] **Reject zero amounts** -- amount regex requires positive integers
+      (`^[1-9]\d*$`).
+- [x] **Audit log file permissions** -- created with `0o600` on first write.
+- [x] **Rate limiter test coverage** -- 8 tests (burst, per-key, sliding
+      window, edge cases). `RateLimiter` class exported for direct testing.
+- [x] **Health check rate limited** -- `/status` endpoint now rate-limited.
+- [x] **Type-safe receipt handling** -- replaced unsafe `as unknown as
+    Record` casts with explicit `typeof`/`Array.isArray` guards.
+- [x] **Non-localhost TLS warning** -- logs warning when binding to
+      non-localhost, recommends reverse proxy.
+- [x] **Docker HEALTHCHECK** -- 30s interval, curl to `/status`.
+- [x] **Noir contract limit validation** -- `initialize_public_state` and
+      `apply_limits` assert `daily_limit >= max_per_tx` and u64 range.
+- [x] **Admin daily reset** -- `reset_daily_spent()` for manual epoch reset
+      when block production stalls.
+
+Known limitations (acceptable for alpha):
+
+- `Fr` objects hold key material on heap until GC (SDK limitation).
+- Epoch-based daily reset depends on block production rate; admin reset
+  is the manual fallback.
+- Rate limiter uses `socket.remoteAddress`; deploy behind reverse proxy
+  for accurate client IP.
 
 ## Phase 3: Hot/Cold Wallet Split
 

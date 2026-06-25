@@ -1,11 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import type { Server } from "node:http";
 import { createApp, type ServerOptions } from "../src/server.js";
-import type {
-  CreateNoteParams,
-  CreateNoteResult,
-  IAztecClient,
-} from "../src/types.js";
+import type { CreateNoteParams, CreateNoteResult, IAztecClient } from "../src/types.js";
 
 const VALID_ADDR = "0x" + "a".repeat(64);
 const JSON_HEADERS = { "Content-Type": "application/json" };
@@ -53,19 +49,11 @@ afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
-function rpcBody(
-  method: string,
-  params: unknown[] = [],
-  id: number | string = 1,
-) {
+function rpcBody(method: string, params: unknown[] = [], id: number | string = 1) {
   return JSON.stringify({ jsonrpc: "2.0", id, method, params });
 }
 
-function jsonPost(
-  url: string,
-  body: string,
-  extraHeaders: Record<string, string> = {},
-) {
+function jsonPost(url: string, body: string, extraHeaders: Record<string, string> = {}) {
   return fetch(url, {
     method: "POST",
     headers: { ...JSON_HEADERS, ...extraHeaders },
@@ -127,10 +115,7 @@ describe("HTTP server", () => {
         amount: "1000",
         chainId: 1,
       };
-      const res = await jsonPost(
-        baseUrl,
-        rpcBody("aztec_createNote", [params]),
-      );
+      const res = await jsonPost(baseUrl, rpcBody("aztec_createNote", [params]));
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.result).toEqual(client.createNoteResult);
@@ -139,10 +124,7 @@ describe("HTTP server", () => {
 
   describe("POST /api/rpc (alias)", () => {
     it("works same as POST /", async () => {
-      const res = await jsonPost(
-        `${baseUrl}/api/rpc`,
-        rpcBody("aztec_getVersion"),
-      );
+      const res = await jsonPost(`${baseUrl}/api/rpc`, rpcBody("aztec_getVersion"));
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.result).toBe("4.1.3");

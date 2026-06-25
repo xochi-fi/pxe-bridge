@@ -21,18 +21,11 @@ export type JsonRpcResponse =
 // aztec_createNote params
 export const CreateNoteParamsSchema = z
   .object({
-    recipient: z
-      .string()
-      .regex(/^0x[0-9a-fA-F]{64}$/, "Must be 32-byte hex address"),
-    token: z
-      .string()
-      .regex(/^0x[0-9a-fA-F]{64}$/, "Must be 32-byte hex address"),
+    recipient: z.string().regex(/^0x[0-9a-fA-F]{64}$/, "Must be 32-byte hex address"),
+    token: z.string().regex(/^0x[0-9a-fA-F]{64}$/, "Must be 32-byte hex address"),
     amount: z
       .string()
-      .regex(
-        /^(0|[1-9]\d*)$/,
-        "Must be non-negative integer without leading zeros",
-      )
+      .regex(/^[1-9]\d*$/, "Must be positive integer without leading zeros")
       .refine((s) => s.length <= 78, "Amount exceeds uint256 max (78 digits)"),
     chainId: z.number().int().positive(),
     // XIP-1 trade context (optional, but all-or-nothing)
@@ -50,16 +43,12 @@ export const CreateNoteParamsSchema = z
       return provided === 0 || provided === 3;
     },
     {
-      message:
-        "tradeId, subTradeIndex, and totalSubTrades must all be provided together",
+      message: "tradeId, subTradeIndex, and totalSubTrades must all be provided together",
     },
   )
   .refine(
     (data) => {
-      if (
-        data.subTradeIndex !== undefined &&
-        data.totalSubTrades !== undefined
-      ) {
+      if (data.subTradeIndex !== undefined && data.totalSubTrades !== undefined) {
         return data.subTradeIndex < data.totalSubTrades;
       }
       return true;
@@ -78,9 +67,7 @@ export interface CreateNoteResult {
 // Fee Juice claim from L1->L2 bridge (one-time account deployment)
 export const FeeJuiceClaimSchema = z.object({
   claimAmount: z.string().regex(/^\d+$/, "Must be a non-negative integer"),
-  claimSecret: z
-    .string()
-    .regex(/^0x[0-9a-fA-F]{64}$/, "Must be 32-byte hex Fr element"),
+  claimSecret: z.string().regex(/^0x[0-9a-fA-F]{64}$/, "Must be 32-byte hex Fr element"),
   messageLeafIndex: z.string().regex(/^\d+$/, "Must be a non-negative integer"),
 });
 
