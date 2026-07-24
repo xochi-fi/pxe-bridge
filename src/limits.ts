@@ -9,11 +9,17 @@ export type LimitsCheckResult =
   | { allowed: true; cooldownMs?: number }
   | { allowed: false; reason: string };
 
+export type LimitsReservation =
+  | { allowed: true; reservationId: number; cooldownMs?: number }
+  | { allowed: false; reason: string };
+
 const WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
 const CLEANUP_INTERVAL_MS = 60_000; // 1 minute
 
 export class TransactionLimits {
   private spendLog: { amount: bigint; timestamp: number }[] = [];
+  private pending = new Map<number, { amount: bigint; timestamp: number }>();
+  private nextReservationId = 1;
   private paused = false;
   private pausedAt = 0;
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
@@ -23,6 +29,40 @@ export class TransactionLimits {
       this.cleanupTimer = setInterval(() => this.pruneSpendLog(), CLEANUP_INTERVAL_MS);
       this.cleanupTimer.unref();
     }
+  }
+
+  /**
+   * Atomically evaluate limits and reserve `amount` against the rolling window.
+   * The reservation counts toward the daily volume immediately -- before the
+   * (awaited) transaction is sent -- so concurrent in-flight requests cannot
+   * each read a stale total and collectively exceed the cap (TOCTOU race).
+   * Call commit() on success or release() on failure/rejection downstream.
+   */
+  reserve(amount: bigint): LimitsReservation {
+    const result = this.check(amount);
+    if (!result.allowed) {
+      return result;
+    }
+    const reservationId = this.nextReservationId++;
+    this.pending.set(reservationId, { amount, timestamp: Date.now() });
+    return result.cooldownMs !== undefined
+      ? { allowed: true, reservationId, cooldownMs: result.cooldownMs }
+      : { allowed: true, reservationId };
+  }
+
+  /** Convert a reservation into a permanent recorded spend. */
+  commit(reservationId: number): void {
+    const reservation = this.pending.get(reservationId);
+    if (reservation === undefined) {
+      return;
+    }
+    this.pending.delete(reservationId);
+    this.spendLog.push({ amount: reservation.amount, timestamp: Date.now() });
+  }
+
+  /** Discard a reservation without recording a spend (tx failed or rejected). */
+  release(reservationId: number): void {
+    this.pending.delete(reservationId);
   }
 
   check(amount: bigint): LimitsCheckResult {
@@ -93,6 +133,13 @@ export class TransactionLimits {
         total += entry.amount;
       }
     }
+    // In-flight reservations count toward the cap so concurrent requests
+    // cannot each read a stale total and collectively exceed the limit.
+    for (const reservation of this.pending.values()) {
+      if (reservation.timestamp >= cutoff) {
+        total += reservation.amount;
+      }
+    }
     return total;
   }
 
@@ -110,5 +157,12 @@ export class TransactionLimits {
   private pruneSpendLog(): void {
     const cutoff = Date.now() - WINDOW_MS;
     this.spendLog = this.spendLog.filter((e) => e.timestamp >= cutoff);
+    // Drop stale reservations whose tx never committed or released (safety
+    // net for a hung request); the window has fully elapsed for these.
+    for (const [id, reservation] of this.pending) {
+      if (reservation.timestamp < cutoff) {
+        this.pending.delete(id);
+      }
+    }
   }
 }

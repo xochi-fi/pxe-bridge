@@ -136,4 +136,75 @@ describe("TransactionLimits", () => {
       }
     });
   });
+
+  describe("reservation (TOCTOU protection)", () => {
+    it("counts an uncommitted reservation toward the daily volume", () => {
+      const limits = new TransactionLimits({ dailyLimit: 5000n });
+
+      // First request reserves but has not committed yet (tx in flight)
+      const first = limits.reserve(3000n);
+      expect(first.allowed).toBe(true);
+
+      // A concurrent request must see the reserved amount, not a stale zero
+      const second = limits.reserve(3000n);
+      expect(second.allowed).toBe(false);
+    });
+
+    it("blocks concurrent requests from collectively exceeding the cap", () => {
+      const limits = new TransactionLimits({ dailyLimit: 100n, maxAmount: 100n });
+
+      // Two in-flight requests each at the per-tx max; only one may pass
+      const a = limits.reserve(100n);
+      const b = limits.reserve(100n);
+
+      expect(a.allowed).toBe(true);
+      expect(b.allowed).toBe(false);
+    });
+
+    it("commit() makes a reservation a permanent spend", () => {
+      const limits = new TransactionLimits({ dailyLimit: 5000n });
+      const r = limits.reserve(3000n);
+      expect(r.allowed).toBe(true);
+      if (r.allowed) {
+        limits.commit(r.reservationId);
+      }
+
+      // After commit the amount still counts; a further 3000 exceeds 5000
+      const next = limits.reserve(3000n);
+      expect(next.allowed).toBe(false);
+    });
+
+    it("release() frees a reservation so it no longer counts", () => {
+      const limits = new TransactionLimits({ dailyLimit: 5000n });
+      const r = limits.reserve(3000n);
+      expect(r.allowed).toBe(true);
+      if (r.allowed) {
+        limits.release(r.reservationId);
+      }
+
+      // After release the window is clear again
+      const next = limits.reserve(5000n);
+      expect(next.allowed).toBe(true);
+    });
+
+    it("propagates cooldown through the reservation", () => {
+      const limits = new TransactionLimits({
+        cooldownThreshold: 500n,
+        cooldownDelayMs: 30_000,
+      });
+      const r = limits.reserve(500n);
+      expect(r.allowed).toBe(true);
+      if (r.allowed) {
+        expect(r.cooldownMs).toBe(30_000);
+      }
+    });
+
+    it("commit/release on an unknown id is a no-op", () => {
+      const limits = new TransactionLimits({ dailyLimit: 5000n });
+      expect(() => limits.commit(999)).not.toThrow();
+      expect(() => limits.release(999)).not.toThrow();
+      const r = limits.reserve(5000n);
+      expect(r.allowed).toBe(true);
+    });
+  });
 });

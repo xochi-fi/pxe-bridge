@@ -23,12 +23,12 @@ use aztec::macros::aztec;
 pub contract SpendingLimitAccount {
     use aztec::{
         authwit::{
-            account::{AccountActions, AccountFeePaymentMethodOptions},
+            account::AccountFeePaymentMethodOptions,
             auth::{compute_authwit_message_hash, compute_authwit_nullifier},
             entrypoint::app::AppPayload,
         },
         context::PrivateContext,
-        hash::compute_siloed_nullifier,
+        hash::{compute_siloed_nullifier, hash_args},
         macros::{
             functions::{allow_phase_change, external, initializer, noinitcheck, view},
             storage::storage,
@@ -43,7 +43,7 @@ pub contract SpendingLimitAccount {
             address::AztecAddress,
             constants::DOM_SEP__TX_NULLIFIER,
             hash::poseidon2_hash_with_separator,
-            traits::{Hash, ToField},
+            traits::{FromField, Hash, Serialize, ToField},
         },
         state_vars::{Map, PublicImmutable, PublicMutable, SinglePrivateImmutable},
     };
@@ -169,6 +169,13 @@ pub contract SpendingLimitAccount {
     // Entrypoint (private) -- called for every user transaction
     // ================================================================
 
+    // SECURITY -- declared vs. actual binding:
+    // `declared_amount` / `declared_recipient` are caller-supplied. On their
+    // own the spending checks would validate numbers the caller invents, so a
+    // key holder could declare amount=1 while the payload transfers more. To
+    // close that gap, `assert_declared_matches_transfer` (called below) proves
+    // the executed transfer's args hash equals the reconstruction from the
+    // declared values, binding declared == actual. See that helper for detail.
     #[external("private")]
     #[noinitcheck]
     #[allow_phase_change]
@@ -221,6 +228,11 @@ pub contract SpendingLimitAccount {
             self.context.set_as_fee_payer();
         }
 
+        // --- Bind declared spending to the actual transfer ---
+        // Proves the payload's real transfer matches declared_amount/recipient
+        // before the spending checks run on the declared values.
+        assert_declared_matches_transfer(app_payload, declared_amount, declared_recipient);
+
         // --- Execute the actual calls ---
         app_payload.execute_calls(self.context);
 
@@ -249,9 +261,16 @@ pub contract SpendingLimitAccount {
     #[external("private")]
     #[noinitcheck]
     #[view]
-    fn verify_private_authwit(inner_hash: Field) -> Field {
-        let actions = AccountActions::init(self.context, is_valid_impl);
-        actions.verify_private_authwit(inner_hash)
+    fn verify_private_authwit(_inner_hash: Field) -> Field {
+        // Third-party authwit is DISABLED for this account. A valid authwit
+        // would let a token contract move funds without routing through
+        // `entrypoint`, bypassing `check_spending_public` (per-tx cap, daily
+        // limit, recipient allowlist) entirely. Returning 0 (not the
+        // IS_VALID magic value) rejects every authwit request.
+        //
+        // Safe: the bridge's own transfers execute via `entrypoint` with
+        // msg_sender == this account, which needs no third-party authwit.
+        0
     }
 
     // ================================================================
@@ -278,14 +297,18 @@ pub contract SpendingLimitAccount {
         }
 
         // --- Recipient allowlist ---
-        if declared_recipient != AztecAddress::zero() {
-            let allowed = self
-                .storage
-                .recipient_allowlist
-                .at(declared_recipient)
-                .read();
-            assert(allowed, "Recipient not in allowlist");
-        }
+        // Always enforced. The zero address is rejected outright so it cannot
+        // be used as a sentinel to skip the allowlist check.
+        assert(
+            declared_recipient != AztecAddress::zero(),
+            "Recipient must not be zero",
+        );
+        let allowed = self
+            .storage
+            .recipient_allowlist
+            .at(declared_recipient)
+            .read();
+        assert(allowed, "Recipient not in allowlist");
 
         // --- Daily spending limit ---
         let daily_limit = self.storage.daily_limit.read();
@@ -453,6 +476,63 @@ pub contract SpendingLimitAccount {
     // Helpers
     // ================================================================
 
+    // Binds the caller-declared spending to the transfer actually executed by
+    // the payload, so `check_spending_public` cannot be fed values the caller
+    // invents while the payload moves a different amount to a different
+    // recipient.
+    //
+    // createNote issues exactly one private `transfer_to_private(to, amount)`
+    // call. Its `args_hash` is `hash_args([to.to_field(), amount])` -- the same
+    // encoding the SDK uses for private call args. `AppPayload` does not expose
+    // its calls as public fields, so we read them through the derived Serialize
+    // layout: `[FunctionCall; 5]` followed by `tx_nonce`, each FunctionCall
+    // serialized as 6 fields in declaration order
+    // (args_hash, function_selector, target_address, is_public,
+    //  hide_msg_sender, is_static). A call is empty when `target_address == 0`.
+    //
+    // Requiring exactly one non-empty call whose `args_hash` matches the
+    // reconstruction binds BOTH recipient and amount to the real transfer: the
+    // single executed call receives exactly [declared_recipient, declared_amount]
+    // and no hidden second call can ride along.
+    #[contract_library_method]
+    fn assert_declared_matches_transfer(
+        app_payload: AppPayload,
+        declared_amount: Field,
+        declared_recipient: AztecAddress,
+    ) {
+        let expected_args_hash = hash_args([declared_recipient.to_field(), declared_amount]);
+
+        // [FunctionCall; 5] (6 fields each) + tx_nonce = 31 fields
+        let serialized: [Field; 31] = app_payload.serialize();
+
+        assert_single_call_matches(serialized, expected_args_hash);
+    }
+
+    // Core matching logic over the serialized AppPayload, split out so it can be
+    // unit-tested without constructing an AppPayload (its `function_calls` field
+    // is not public outside the aztec crate). Each FunctionCall occupies 6 fields
+    // starting at index i*6, with args_hash at offset 0 and target_address at
+    // offset 2 (see the `function_call_serialize_layout` test).
+    #[contract_library_method]
+    fn assert_single_call_matches(serialized: [Field; 31], expected_args_hash: Field) {
+        let mut nonempty_calls: u32 = 0;
+        let mut matching_calls: u32 = 0;
+        for i in 0..5 {
+            let base = i * 6;
+            let args_hash = serialized[base];
+            let target = serialized[base + 2];
+            if target != 0 {
+                nonempty_calls += 1;
+                if args_hash == expected_args_hash {
+                    matching_calls += 1;
+                }
+            }
+        }
+
+        assert(nonempty_calls == 1, "Expected exactly one call in payload");
+        assert(matching_calls == 1, "Transfer does not match declared spending");
+    }
+
     #[contract_library_method]
     fn assert_amount_within_limit(amount: Field, limit: Field) {
         let a = amount as u64;
@@ -460,5 +540,68 @@ pub contract SpendingLimitAccount {
         let l = limit as u64;
         assert(l as Field == limit, "Limit exceeds u64 range");
         assert(a <= l, "Amount exceeds spending limit");
+    }
+
+    // ================================================================
+    // Tests (run with `nargo test`; no sandbox or proving required)
+    // ================================================================
+
+    // Verifies the FunctionCall serialize order that assert_single_call_matches
+    // relies on: args_hash at offset 0, target_address at offset 2. If a future
+    // aztec version reorders these fields, this test fails instead of silently
+    // breaking the binding.
+    #[test]
+    fn function_call_serialize_layout() {
+        let call = aztec::authwit::entrypoint::FunctionCall {
+            args_hash: 111,
+            function_selector: aztec::protocol::abis::function_selector::FunctionSelector::from_u32(
+                222,
+            ),
+            target_address: AztecAddress::from_field(333),
+            is_public: false,
+            hide_msg_sender: false,
+            is_static: false,
+        };
+        let serialized: [Field; 6] = call.serialize();
+        assert(serialized[0] == 111, "args_hash expected at offset 0");
+        assert(serialized[2] == 333, "target_address expected at offset 2");
+    }
+
+    // A payload with exactly one non-empty call whose args_hash matches the
+    // declared reconstruction is accepted.
+    #[test]
+    fn single_matching_call_passes() {
+        let mut serialized = [0; 31];
+        serialized[0] = 999; // call 0 args_hash == expected
+        serialized[2] = 42; // call 0 target_address != 0
+        assert_single_call_matches(serialized, 999);
+    }
+
+    // Declaring a value that does not match the executed transfer reverts. This
+    // is the core protection: declare amount=1, transfer more -> rejected.
+    #[test(should_fail_with = "Transfer does not match declared spending")]
+    fn mismatched_transfer_reverts() {
+        let mut serialized = [0; 31];
+        serialized[0] = 111; // call 0 args_hash != expected
+        serialized[2] = 42; // call 0 target_address != 0
+        assert_single_call_matches(serialized, 999);
+    }
+
+    // A hidden second call cannot ride along with a matching first call.
+    #[test(should_fail_with = "Expected exactly one call in payload")]
+    fn hidden_second_call_reverts() {
+        let mut serialized = [0; 31];
+        serialized[0] = 999; // call 0 matches
+        serialized[2] = 42;
+        serialized[6] = 999; // call 1 non-empty
+        serialized[8] = 43;
+        assert_single_call_matches(serialized, 999);
+    }
+
+    // An empty payload (no transfer) is rejected.
+    #[test(should_fail_with = "Expected exactly one call in payload")]
+    fn empty_payload_reverts() {
+        let serialized = [0; 31];
+        assert_single_call_matches(serialized, 999);
     }
 }
