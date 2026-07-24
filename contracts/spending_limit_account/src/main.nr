@@ -43,7 +43,7 @@ pub contract SpendingLimitAccount {
             address::AztecAddress,
             constants::DOM_SEP__TX_NULLIFIER,
             hash::poseidon2_hash_with_separator,
-            traits::{Hash, Serialize, ToField},
+            traits::{FromField, Hash, Serialize, ToField},
         },
         state_vars::{Map, PublicImmutable, PublicMutable, SinglePrivateImmutable},
     };
@@ -505,6 +505,16 @@ pub contract SpendingLimitAccount {
         // [FunctionCall; 5] (6 fields each) + tx_nonce = 31 fields
         let serialized: [Field; 31] = app_payload.serialize();
 
+        assert_single_call_matches(serialized, expected_args_hash);
+    }
+
+    // Core matching logic over the serialized AppPayload, split out so it can be
+    // unit-tested without constructing an AppPayload (its `function_calls` field
+    // is not public outside the aztec crate). Each FunctionCall occupies 6 fields
+    // starting at index i*6, with args_hash at offset 0 and target_address at
+    // offset 2 (see the `function_call_serialize_layout` test).
+    #[contract_library_method]
+    fn assert_single_call_matches(serialized: [Field; 31], expected_args_hash: Field) {
         let mut nonempty_calls: u32 = 0;
         let mut matching_calls: u32 = 0;
         for i in 0..5 {
@@ -530,5 +540,68 @@ pub contract SpendingLimitAccount {
         let l = limit as u64;
         assert(l as Field == limit, "Limit exceeds u64 range");
         assert(a <= l, "Amount exceeds spending limit");
+    }
+
+    // ================================================================
+    // Tests (run with `nargo test`; no sandbox or proving required)
+    // ================================================================
+
+    // Verifies the FunctionCall serialize order that assert_single_call_matches
+    // relies on: args_hash at offset 0, target_address at offset 2. If a future
+    // aztec version reorders these fields, this test fails instead of silently
+    // breaking the binding.
+    #[test]
+    fn function_call_serialize_layout() {
+        let call = aztec::authwit::entrypoint::FunctionCall {
+            args_hash: 111,
+            function_selector: aztec::protocol::abis::function_selector::FunctionSelector::from_u32(
+                222,
+            ),
+            target_address: AztecAddress::from_field(333),
+            is_public: false,
+            hide_msg_sender: false,
+            is_static: false,
+        };
+        let serialized: [Field; 6] = call.serialize();
+        assert(serialized[0] == 111, "args_hash expected at offset 0");
+        assert(serialized[2] == 333, "target_address expected at offset 2");
+    }
+
+    // A payload with exactly one non-empty call whose args_hash matches the
+    // declared reconstruction is accepted.
+    #[test]
+    fn single_matching_call_passes() {
+        let mut serialized = [0; 31];
+        serialized[0] = 999; // call 0 args_hash == expected
+        serialized[2] = 42; // call 0 target_address != 0
+        assert_single_call_matches(serialized, 999);
+    }
+
+    // Declaring a value that does not match the executed transfer reverts. This
+    // is the core protection: declare amount=1, transfer more -> rejected.
+    #[test(should_fail_with = "Transfer does not match declared spending")]
+    fn mismatched_transfer_reverts() {
+        let mut serialized = [0; 31];
+        serialized[0] = 111; // call 0 args_hash != expected
+        serialized[2] = 42; // call 0 target_address != 0
+        assert_single_call_matches(serialized, 999);
+    }
+
+    // A hidden second call cannot ride along with a matching first call.
+    #[test(should_fail_with = "Expected exactly one call in payload")]
+    fn hidden_second_call_reverts() {
+        let mut serialized = [0; 31];
+        serialized[0] = 999; // call 0 matches
+        serialized[2] = 42;
+        serialized[6] = 999; // call 1 non-empty
+        serialized[8] = 43;
+        assert_single_call_matches(serialized, 999);
+    }
+
+    // An empty payload (no transfer) is rejected.
+    #[test(should_fail_with = "Expected exactly one call in payload")]
+    fn empty_payload_reverts() {
+        let serialized = [0; 31];
+        assert_single_call_matches(serialized, 999);
     }
 }

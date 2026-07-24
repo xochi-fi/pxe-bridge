@@ -38,15 +38,23 @@ Combined with the rest of this change set:
   the authwit side channel can no longer bypass the spending checks.
 - Per-tx and daily volume caps: enforced against the bound (actual) amount.
 
-### CI validation required
+### Validation
 
-The Noir changes cannot be compiled or e2e-tested on Apple Silicon (barretenberg
-SIGILLs under ARM) and there is no local `nargo`. `assert_declared_matches_transfer`
-depends on the `AppPayload` serialized layout (`[FunctionCall; 5]` + `tx_nonce`
-= 31 fields, each call serialized in declaration order) pinned to Aztec v4.2.0.
-It is fail-closed -- any mismatch reverts the transaction -- so a layout error
-surfaces as failing e2e rather than a silent bypass. The CI `nargo compile` +
-e2e job on x86 is the source of truth; do not merge until it is green.
+The binding depends on the `AppPayload` serialized layout (`[FunctionCall; 5]`
++ `tx_nonce` = 31 fields, each call serialized in declaration order) pinned to
+Aztec v4.2.0. It is validated two ways:
+
+- `nargo test` unit tests in `contracts/spending_limit_account/src/main.nr`:
+  `function_call_serialize_layout` asserts `args_hash`/`target_address` sit at
+  the offsets the guard reads; `mismatched_transfer_reverts`,
+  `hidden_second_call_reverts`, and `empty_payload_reverts` prove the guard
+  rejects a declared/actual mismatch, a hidden second call, and an empty
+  payload. The `contract` CI job runs these and `nargo compile`.
+- The check is fail-closed: any mismatch reverts the transaction, so an error
+  surfaces as a failing tx, never a silent bypass.
+
+Barretenberg proving SIGILLs on Apple Silicon (ARM), so the full sandbox e2e
+runs only on x86 CI; `nargo compile`/`nargo test` run anywhere.
 
 The binding assumes `createNote`'s single-transfer shape. If the bridge later
 issues multi-call payloads, extend the helper to match and sum every
