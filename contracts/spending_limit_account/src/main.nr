@@ -28,7 +28,7 @@ pub contract SpendingLimitAccount {
             entrypoint::app::AppPayload,
         },
         context::PrivateContext,
-        hash::compute_siloed_nullifier,
+        hash::{compute_siloed_nullifier, hash_args},
         macros::{
             functions::{allow_phase_change, external, initializer, noinitcheck, view},
             storage::storage,
@@ -43,7 +43,7 @@ pub contract SpendingLimitAccount {
             address::AztecAddress,
             constants::DOM_SEP__TX_NULLIFIER,
             hash::poseidon2_hash_with_separator,
-            traits::{Hash, ToField},
+            traits::{Hash, Serialize, ToField},
         },
         state_vars::{Map, PublicImmutable, PublicMutable, SinglePrivateImmutable},
     };
@@ -169,25 +169,13 @@ pub contract SpendingLimitAccount {
     // Entrypoint (private) -- called for every user transaction
     // ================================================================
 
-    // SECURITY -- KNOWN RESIDUAL GAP (declared vs. actual binding):
-    // `declared_amount` / `declared_recipient` are caller-supplied and are
-    // NOT proven to equal the amount/recipient of the transfer actually
-    // executed inside `app_payload`. The signature binds the declared values
-    // to the payload, but a key holder chooses both, so `check_spending_public`
-    // validates numbers the caller invents. The recipient allowlist is
-    // meaningfully protected because the executed transfer must ultimately
-    // land on an allowlisted address for funds to be useful, and the zero
-    // sentinel skip has been removed; however the per-tx amount cap and daily
-    // volume cap remain bypassable on this path (declare amount=1, transfer
-    // more).
-    //
-    // COMPLETE FIX (requires the Aztec toolchain to compile/e2e): pass the raw
-    // transfer args into the entrypoint, recompute the token call's args hash
-    // with `hash_args`, and assert it equals the `args_hash` of the matching
-    // `app_payload.function_calls[i]` whose `target_address` is the token and
-    // whose `function_selector` is the transfer selector -- then derive
-    // declared_amount/declared_recipient from those bound args rather than
-    // trusting the caller. Tracked as a follow-up; see SECURITY.md.
+    // SECURITY -- declared vs. actual binding:
+    // `declared_amount` / `declared_recipient` are caller-supplied. On their
+    // own the spending checks would validate numbers the caller invents, so a
+    // key holder could declare amount=1 while the payload transfers more. To
+    // close that gap, `assert_declared_matches_transfer` (called below) proves
+    // the executed transfer's args hash equals the reconstruction from the
+    // declared values, binding declared == actual. See that helper for detail.
     #[external("private")]
     #[noinitcheck]
     #[allow_phase_change]
@@ -239,6 +227,11 @@ pub contract SpendingLimitAccount {
         {
             self.context.set_as_fee_payer();
         }
+
+        // --- Bind declared spending to the actual transfer ---
+        // Proves the payload's real transfer matches declared_amount/recipient
+        // before the spending checks run on the declared values.
+        assert_declared_matches_transfer(app_payload, declared_amount, declared_recipient);
 
         // --- Execute the actual calls ---
         app_payload.execute_calls(self.context);
@@ -482,6 +475,53 @@ pub contract SpendingLimitAccount {
     // ================================================================
     // Helpers
     // ================================================================
+
+    // Binds the caller-declared spending to the transfer actually executed by
+    // the payload, so `check_spending_public` cannot be fed values the caller
+    // invents while the payload moves a different amount to a different
+    // recipient.
+    //
+    // createNote issues exactly one private `transfer_to_private(to, amount)`
+    // call. Its `args_hash` is `hash_args([to.to_field(), amount])` -- the same
+    // encoding the SDK uses for private call args. `AppPayload` does not expose
+    // its calls as public fields, so we read them through the derived Serialize
+    // layout: `[FunctionCall; 5]` followed by `tx_nonce`, each FunctionCall
+    // serialized as 6 fields in declaration order
+    // (args_hash, function_selector, target_address, is_public,
+    //  hide_msg_sender, is_static). A call is empty when `target_address == 0`.
+    //
+    // Requiring exactly one non-empty call whose `args_hash` matches the
+    // reconstruction binds BOTH recipient and amount to the real transfer: the
+    // single executed call receives exactly [declared_recipient, declared_amount]
+    // and no hidden second call can ride along.
+    #[contract_library_method]
+    fn assert_declared_matches_transfer(
+        app_payload: AppPayload,
+        declared_amount: Field,
+        declared_recipient: AztecAddress,
+    ) {
+        let expected_args_hash = hash_args([declared_recipient.to_field(), declared_amount]);
+
+        // [FunctionCall; 5] (6 fields each) + tx_nonce = 31 fields
+        let serialized: [Field; 31] = app_payload.serialize();
+
+        let mut nonempty_calls: u32 = 0;
+        let mut matching_calls: u32 = 0;
+        for i in 0..5 {
+            let base = i * 6;
+            let args_hash = serialized[base];
+            let target = serialized[base + 2];
+            if target != 0 {
+                nonempty_calls += 1;
+                if args_hash == expected_args_hash {
+                    matching_calls += 1;
+                }
+            }
+        }
+
+        assert(nonempty_calls == 1, "Expected exactly one call in payload");
+        assert(matching_calls == 1, "Transfer does not match declared spending");
+    }
 
     #[contract_library_method]
     fn assert_amount_within_limit(amount: Field, limit: Field) {

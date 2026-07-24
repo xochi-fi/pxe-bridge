@@ -11,40 +11,46 @@ compromised and aims to limit the damage via per-transaction amount caps, a
 24h rolling volume cap, and a recipient allowlist, all enforced on-chain and
 independent of the application-level limits in `src/limits.ts`.
 
-## Known residual: declared-vs-actual amount binding (tracked)
+## Declared-vs-actual amount binding
 
 `contracts/spending_limit_account/src/main.nr` enforces spending limits against
 `declared_amount` / `declared_recipient`, which the entrypoint caller supplies.
-These declared values are signed into the payload hash but are **not** proven to
-match the amount/recipient of the transfer actually executed inside
-`app_payload`. The token call's real args are committed behind `args_hash`, so
-the current circuit cannot read them.
+Without further checks these declared values are just numbers the caller
+invents, so a key holder could declare `amount = 1` while the payload transfers
+more.
 
-Impact after the hardening in this change set:
+The entrypoint now binds declared to actual via
+`assert_declared_matches_transfer`: it reconstructs the transfer call's
+`args_hash` as `hash_args([declared_recipient.to_field(), declared_amount])`
+(the same encoding the SDK uses for private call args) and asserts the payload
+contains exactly one non-empty call whose `args_hash` equals it. Because
+`createNote` issues exactly one `transfer_to_private(to, amount)` call, this
+pins both the recipient and the amount of the real transfer to the declared
+values -- no hidden second call can ride along, and a smaller declared amount no
+longer under-reports a larger transfer.
+
+Combined with the rest of this change set:
 
 - Recipient allowlist: enforced. The zero-address sentinel skip was removed, and
   a zero recipient is rejected at both the circuit (`Recipient must not be zero`)
   and the RPC validation layer (`src/types.ts`).
 - Third-party authwit: disabled (`verify_private_authwit` returns invalid), so
   the authwit side channel can no longer bypass the spending checks.
-- Per-tx amount cap and daily volume cap: **still bypassable** on the entrypoint
-  path -- a key holder can declare `amount = 1` while the payload transfers more.
+- Per-tx and daily volume caps: enforced against the bound (actual) amount.
 
-### Required complete fix (follow-up)
+### CI validation required
 
-Bind the declared values to the executed transfer inside the circuit:
+The Noir changes cannot be compiled or e2e-tested on Apple Silicon (barretenberg
+SIGILLs under ARM) and there is no local `nargo`. `assert_declared_matches_transfer`
+depends on the `AppPayload` serialized layout (`[FunctionCall; 5]` + `tx_nonce`
+= 31 fields, each call serialized in declaration order) pinned to Aztec v4.2.0.
+It is fail-closed -- any mismatch reverts the transaction -- so a layout error
+surfaces as failing e2e rather than a silent bypass. The CI `nargo compile` +
+e2e job on x86 is the source of truth; do not merge until it is green.
 
-1. Pass the raw transfer args into `entrypoint`.
-2. Recompute the token call's args hash with `hash_args`.
-3. Assert it equals the `args_hash` of the matching `app_payload.function_calls[i]`
-   whose `target_address` is the token and whose `function_selector` is the
-   transfer selector.
-4. Derive `declared_amount` / `declared_recipient` from those bound args instead
-   of trusting the caller.
-
-This requires the Aztec toolchain (`nargo` + the x86 sandbox) to compile and
-e2e-test and is not implementable on Apple Silicon (barretenberg SIGILLs under
-ARM). Implement and validate it where CI runs.
+The binding assumes `createNote`'s single-transfer shape. If the bridge later
+issues multi-call payloads, extend the helper to match and sum every
+value-moving call rather than requiring exactly one.
 
 ## Application-level limits
 
