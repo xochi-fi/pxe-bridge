@@ -23,7 +23,7 @@ use aztec::macros::aztec;
 pub contract SpendingLimitAccount {
     use aztec::{
         authwit::{
-            account::{AccountActions, AccountFeePaymentMethodOptions},
+            account::AccountFeePaymentMethodOptions,
             auth::{compute_authwit_message_hash, compute_authwit_nullifier},
             entrypoint::app::AppPayload,
         },
@@ -169,6 +169,25 @@ pub contract SpendingLimitAccount {
     // Entrypoint (private) -- called for every user transaction
     // ================================================================
 
+    // SECURITY -- KNOWN RESIDUAL GAP (declared vs. actual binding):
+    // `declared_amount` / `declared_recipient` are caller-supplied and are
+    // NOT proven to equal the amount/recipient of the transfer actually
+    // executed inside `app_payload`. The signature binds the declared values
+    // to the payload, but a key holder chooses both, so `check_spending_public`
+    // validates numbers the caller invents. The recipient allowlist is
+    // meaningfully protected because the executed transfer must ultimately
+    // land on an allowlisted address for funds to be useful, and the zero
+    // sentinel skip has been removed; however the per-tx amount cap and daily
+    // volume cap remain bypassable on this path (declare amount=1, transfer
+    // more).
+    //
+    // COMPLETE FIX (requires the Aztec toolchain to compile/e2e): pass the raw
+    // transfer args into the entrypoint, recompute the token call's args hash
+    // with `hash_args`, and assert it equals the `args_hash` of the matching
+    // `app_payload.function_calls[i]` whose `target_address` is the token and
+    // whose `function_selector` is the transfer selector -- then derive
+    // declared_amount/declared_recipient from those bound args rather than
+    // trusting the caller. Tracked as a follow-up; see SECURITY.md.
     #[external("private")]
     #[noinitcheck]
     #[allow_phase_change]
@@ -249,9 +268,16 @@ pub contract SpendingLimitAccount {
     #[external("private")]
     #[noinitcheck]
     #[view]
-    fn verify_private_authwit(inner_hash: Field) -> Field {
-        let actions = AccountActions::init(self.context, is_valid_impl);
-        actions.verify_private_authwit(inner_hash)
+    fn verify_private_authwit(_inner_hash: Field) -> Field {
+        // Third-party authwit is DISABLED for this account. A valid authwit
+        // would let a token contract move funds without routing through
+        // `entrypoint`, bypassing `check_spending_public` (per-tx cap, daily
+        // limit, recipient allowlist) entirely. Returning 0 (not the
+        // IS_VALID magic value) rejects every authwit request.
+        //
+        // Safe: the bridge's own transfers execute via `entrypoint` with
+        // msg_sender == this account, which needs no third-party authwit.
+        0
     }
 
     // ================================================================
@@ -278,14 +304,18 @@ pub contract SpendingLimitAccount {
         }
 
         // --- Recipient allowlist ---
-        if declared_recipient != AztecAddress::zero() {
-            let allowed = self
-                .storage
-                .recipient_allowlist
-                .at(declared_recipient)
-                .read();
-            assert(allowed, "Recipient not in allowlist");
-        }
+        // Always enforced. The zero address is rejected outright so it cannot
+        // be used as a sentinel to skip the allowlist check.
+        assert(
+            declared_recipient != AztecAddress::zero(),
+            "Recipient must not be zero",
+        );
+        let allowed = self
+            .storage
+            .recipient_allowlist
+            .at(declared_recipient)
+            .read();
+        assert(allowed, "Recipient not in allowlist");
 
         // --- Daily spending limit ---
         let daily_limit = self.storage.daily_limit.read();

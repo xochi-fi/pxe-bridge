@@ -21,7 +21,10 @@ export type JsonRpcResponse =
 // aztec_createNote params
 export const CreateNoteParamsSchema = z
   .object({
-    recipient: z.string().regex(/^0x[0-9a-fA-F]{64}$/, "Must be 32-byte hex address"),
+    recipient: z
+      .string()
+      .regex(/^0x[0-9a-fA-F]{64}$/, "Must be 32-byte hex address")
+      .refine((s) => !/^0x0{64}$/.test(s), "Recipient must not be the zero address"),
     token: z.string().regex(/^0x[0-9a-fA-F]{64}$/, "Must be 32-byte hex address"),
     amount: z
       .string()

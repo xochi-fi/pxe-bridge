@@ -86,34 +86,42 @@ async function handleCreateNote(
   const noteParams = parsed.data;
   const amount = BigInt(noteParams.amount);
 
-  // Enforce transaction limits (ceiling, daily volume, circuit breaker)
+  // Enforce transaction limits (ceiling, daily volume, circuit breaker).
+  // reserve() counts the amount against the rolling window immediately, so
+  // concurrent in-flight requests cannot each pass on a stale total and
+  // collectively exceed the daily cap (TOCTOU). The reservation is committed
+  // on success or released on failure below.
+  let reservationId: number | undefined;
   if (ctx.limits) {
-    const check = ctx.limits.check(amount);
-    if (!check.allowed) {
-      console.error("[rpc] Limit rejected:", check.reason);
+    const reservation = ctx.limits.reserve(amount);
+    if (!reservation.allowed) {
+      console.error("[rpc] Limit rejected:", reservation.reason);
       if (ctx.audit) {
         await ctx.audit.log({
           ...auditBase(noteParams, ctx),
           status: "rejected",
-          error: check.reason,
+          error: reservation.reason,
         });
       }
-      return rpcError(id, RPC_ERRORS.INVALID_PARAMS, check.reason);
+      return rpcError(id, RPC_ERRORS.INVALID_PARAMS, reservation.reason);
     }
 
-    // Cooldown for large transfers
-    if (check.cooldownMs) {
-      console.log(`[rpc] Cooldown ${check.cooldownMs}ms for amount ${noteParams.amount}`);
-      await delay(check.cooldownMs);
+    reservationId = reservation.reservationId;
+
+    // Cooldown for large transfers (amount is already reserved, so this
+    // delay does not widen the race window).
+    if (reservation.cooldownMs) {
+      console.log(`[rpc] Cooldown ${reservation.cooldownMs}ms for amount ${noteParams.amount}`);
+      await delay(reservation.cooldownMs);
     }
   }
 
   try {
     const result = await client.createNote(noteParams);
 
-    // Record spend after successful tx
-    if (ctx.limits) {
-      ctx.limits.recordSpend(amount);
+    // Finalize the reservation as a permanent spend after successful tx
+    if (ctx.limits && reservationId !== undefined) {
+      ctx.limits.commit(reservationId);
     }
 
     if (ctx.audit) {
@@ -127,6 +135,11 @@ async function handleCreateNote(
     return success(id, result);
   } catch (cause) {
     console.error("[rpc] aztec_createNote failed:", cause);
+
+    // Free the reservation so a failed tx does not count against the cap
+    if (ctx.limits && reservationId !== undefined) {
+      ctx.limits.release(reservationId);
+    }
 
     if (ctx.audit) {
       await ctx.audit.log({

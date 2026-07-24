@@ -99,6 +99,14 @@ describe("CreateNoteParamsSchema", () => {
     expect(result.success).toBe(false);
   });
 
+  it("rejects the zero-address recipient", () => {
+    const result = CreateNoteParamsSchema.safeParse({
+      ...validParams,
+      recipient: "0x" + "0".repeat(64),
+    });
+    expect(result.success).toBe(false);
+  });
+
   it("rejects address without 0x prefix", () => {
     const result = CreateNoteParamsSchema.safeParse({
       ...validParams,
