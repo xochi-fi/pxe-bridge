@@ -78,9 +78,14 @@ export class AztecClient implements IAztecClient {
     // until GC'd after connect() returns. The wallet also retains the
     // signing key internally -- we cannot zero SDK-owned memory.
 
+    const { deriveMasterMessageSigningSecretKey } = await import("@aztec/stdlib/keys");
     const accountManager = this.spendingLimitConfig
       ? await this.createSpendingLimitAccount(secret, salt)
-      : await this.wallet.createSchnorrAccount(secret, salt);
+      : await this.wallet.createSchnorrAccount(
+          secret,
+          salt,
+          deriveMasterMessageSigningSecretKey(secret),
+        );
 
     const account = await accountManager.getAccount();
     const address = account.getAddress();
@@ -147,9 +152,9 @@ export class AztecClient implements IAztecClient {
     salt: import("@aztec/aztec.js/fields").Fr,
   ): Promise<import("@aztec/aztec.js/wallet").AccountManager> {
     const { AccountManager } = await import("@aztec/aztec.js/wallet");
-    const { deriveSigningKey } = await import("@aztec/stdlib/keys");
+    const { deriveMasterMessageSigningSecretKey } = await import("@aztec/stdlib/keys");
 
-    const signingKey = deriveSigningKey(secret);
+    const signingKey = deriveMasterMessageSigningSecretKey(secret);
 
     this.spendingLimitContract = new SpendingLimitAccountContract(
       signingKey,
@@ -160,7 +165,7 @@ export class AztecClient implements IAztecClient {
       this.wallet! as unknown as Parameters<typeof AccountManager.create>[0],
       secret,
       this.spendingLimitContract,
-      salt,
+      { salt },
     );
 
     // Register the contract artifact with PXE so proving works.
@@ -217,8 +222,8 @@ export class AztecClient implements IAztecClient {
 
     const { AztecAddress } = await import("@aztec/aztec.js/addresses");
 
-    const tokenAddress = AztecAddress.fromString(params.token);
-    const recipientAddress = AztecAddress.fromString(params.recipient);
+    const tokenAddress = AztecAddress.fromStringUnsafe(params.token);
+    const recipientAddress = AztecAddress.fromStringUnsafe(params.recipient);
     const amount = BigInt(params.amount);
     const from = this.solverAddress;
 
