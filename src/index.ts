@@ -104,15 +104,24 @@ const audit = new AuditLogger(AUDIT_LOG_PATH);
 // allowlist on-chain. Uses the same limit values as application-level limits.
 let spendingLimitConfig: SpendingLimitConfig | undefined;
 const SPENDING_LIMIT_ADMIN = process.env["PXE_BRIDGE_SPENDING_LIMIT_ADMIN"];
+const SPENDING_LIMIT_TOKEN = process.env["PXE_BRIDGE_SPENDING_LIMIT_TOKEN"];
 if (SPENDING_LIMIT_ADMIN) {
   if (!/^0x[0-9a-fA-F]{64}$/.test(SPENDING_LIMIT_ADMIN)) {
     console.error("[pxe-bridge] PXE_BRIDGE_SPENDING_LIMIT_ADMIN must be a 32-byte hex address");
+    process.exit(1);
+  }
+  // Fixed at construction, no setter, so it must be supplied explicitly.
+  if (!SPENDING_LIMIT_TOKEN || !/^0x[0-9a-fA-F]{64}$/.test(SPENDING_LIMIT_TOKEN)) {
+    console.error(
+      "[pxe-bridge] PXE_BRIDGE_SPENDING_LIMIT_TOKEN must be a 32-byte hex address when the spending limit account is enabled",
+    );
     process.exit(1);
   }
   spendingLimitConfig = {
     maxAmountPerTx: limitsConfig.maxAmount ?? 0n,
     dailyLimit: limitsConfig.dailyLimit ?? 0n,
     admin: SPENDING_LIMIT_ADMIN,
+    token: SPENDING_LIMIT_TOKEN,
   };
 }
 

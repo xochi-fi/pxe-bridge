@@ -18,6 +18,7 @@
  *     maxAmountPerTx: 1000000n,
  *     dailyLimit: 10000000n,
  *     admin: adminAddress,
+ *     token: tokenAddress,
  *   });
  *   const manager = await AccountManager.create(wallet, secret, contract, salt);
  */
@@ -46,6 +47,8 @@ export interface SpendingLimitConfig {
   maxAmountPerTx: bigint;
   dailyLimit: bigint;
   admin: string; // AztecAddress as 0x-prefixed 64-char hex
+  /** Single token this account may move. Fixed at construction, no setter. */
+  token: string; // AztecAddress as 0x-prefixed 64-char hex
 }
 
 // ============================================================
@@ -107,6 +110,7 @@ export class SpendingLimitAccountContract implements AccountContract {
         this.config.maxAmountPerTx,
         this.config.dailyLimit,
         AztecAddress.fromStringUnsafe(this.config.admin),
+        AztecAddress.fromStringUnsafe(this.config.token),
       ],
     };
   }

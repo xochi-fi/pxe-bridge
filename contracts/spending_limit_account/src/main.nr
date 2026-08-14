@@ -88,6 +88,22 @@ pub contract SpendingLimitAccount {
         daily_spent: PublicMutable<u128, Context>,
         current_epoch: PublicMutable<Field, Context>,
 
+        // ---- H3: the single asset this account may ever move ----
+        // One set of limits cannot govern several tokens: limits are in base
+        // units, and a limit of 1e10 is 10,000 tokens at 6 decimals and 1e-8 at
+        // 18. A shared counter mixing both measures nothing. Normalising
+        // decimals would not fix it either, since the assets differ in value.
+        //
+        // So the account is single-asset by construction: the token is recorded
+        // at deployment and the payload guard rejects every other call target.
+        // Per-token keying was considered and rejected -- it would give N
+        // correct-per-asset caps and still no aggregate value ceiling, which
+        // needs a price oracle this contract should not contain.
+        //
+        // Read from PRIVATE in `entrypoint`. There is no setter: a wrong
+        // address here is permanent and strands any balance at the account.
+        permitted_token: PublicImmutable<AztecAddress, Context>,
+
         // ---- Recipient allowlist ----
         recipient_allowlist: Map<AztecAddress, PublicMutable<bool, Context>, Context>,
 
@@ -117,6 +133,7 @@ pub contract SpendingLimitAccount {
         initial_max_per_tx: u128,
         initial_daily_limit: u128,
         admin_address: AztecAddress,
+        token_address: AztecAddress,
     ) {
         let pub_key_note = PublicKeyNote {
             x: signing_pub_key_x,
@@ -137,6 +154,7 @@ pub contract SpendingLimitAccount {
                 initial_max_per_tx,
                 initial_daily_limit,
                 admin_address,
+                token_address,
             )
             .enqueue(self.context);
     }
@@ -147,6 +165,7 @@ pub contract SpendingLimitAccount {
         initial_max_per_tx: u128,
         initial_daily_limit: u128,
         admin_address: AztecAddress,
+        token_address: AztecAddress,
     ) {
         let caller = self.context.maybe_msg_sender().unwrap();
         assert(
@@ -159,7 +178,9 @@ pub contract SpendingLimitAccount {
 
         self.storage.max_amount_per_tx.write(initial_max_per_tx);
         self.storage.daily_limit.write(initial_daily_limit);
+        assert(!token_address.is_zero(), "Token must not be zero");
         self.storage.admin.initialize(admin_address);
+        self.storage.permitted_token.initialize(token_address);
         self.storage.initialized.write(true);
     }
 
@@ -227,7 +248,24 @@ pub contract SpendingLimitAccount {
         // --- Bind declared spending to the actual transfer ---
         // Proves the payload's real transfer matches declared_amount/recipient
         // before the spending checks run on the declared values.
-        assert_declared_matches_transfer(app_payload, declared_amount, declared_recipient);
+        // H3: read the pinned token. PublicImmutable::read() in private
+        // context asserts the initialization nullifier exists and then does a
+        // historical public read at the anchor block, while the constructor
+        // only ENQUEUES initialize_public_state. The first transfer is a later
+        // transaction than the deployment, so the nullifier exists by then --
+        // but that composite has no attested v5.1.0 precedent.
+        //
+        // VERIFY (first-tx ordering): if this reverts on the first transfer,
+        // move the pin to a SinglePrivateImmutable note written directly by the
+        // constructor alongside signing_public_key, which avoids historical
+        // public state entirely.
+        let permitted_token = self.storage.permitted_token.read();
+        assert_declared_matches_transfer(
+            app_payload,
+            declared_amount,
+            declared_recipient,
+            permitted_token.to_field(),
+        );
 
         // --- Execute the actual calls ---
         app_payload.execute_calls(self.context);
@@ -477,6 +515,7 @@ pub contract SpendingLimitAccount {
         app_payload: AppPayload,
         declared_amount: u128,
         declared_recipient: AztecAddress,
+        permitted_token: Field,
     ) {
         // transfer_to_private(to: AztecAddress, amount: u128) encodes its args
         // as two fields, and a u128 packs into exactly one, so the widening
@@ -487,7 +526,7 @@ pub contract SpendingLimitAccount {
         // [FunctionCall; 5] (6 fields each) + tx_nonce = 31 fields
         let serialized: [Field; 31] = app_payload.serialize();
 
-        assert_single_call_matches(serialized, expected_args_hash);
+        assert_single_call_matches(serialized, expected_args_hash, permitted_token);
     }
 
     // Core matching logic over the serialized AppPayload, split out so it can be
@@ -496,7 +535,11 @@ pub contract SpendingLimitAccount {
     // starting at index i*6, with args_hash at offset 0 and target_address at
     // offset 2 (see the `function_call_serialize_layout` test).
     #[contract_library_method]
-    fn assert_single_call_matches(serialized: [Field; 31], expected_args_hash: Field) {
+    fn assert_single_call_matches(
+        serialized: [Field; 31],
+        expected_args_hash: Field,
+        permitted_token: Field,
+    ) {
         let mut nonempty_calls: u32 = 0;
         let mut matching_calls: u32 = 0;
         for i in 0..5 {
@@ -515,6 +558,7 @@ pub contract SpendingLimitAccount {
                 // public branch, so unpinning it makes the selector pin dead.
                 let matches = (args_hash == expected_args_hash)
                     & (selector == TRANSFER_TO_PRIVATE_SELECTOR)
+                    & (target == permitted_token)
                     & (is_public == 0)
                     & (hide_msg_sender == 0)
                     & (is_static == 0);
@@ -580,11 +624,13 @@ pub contract SpendingLimitAccount {
 
     // Builds a well-formed single-call payload: matching args_hash, the pinned
     // selector, a non-zero target, and all three flags clear.
+    global TEST_TOKEN: Field = 42;
+
     fn valid_payload(args_hash: Field) -> [Field; 31] {
         let mut serialized = [0; 31];
         serialized[0] = args_hash;
         serialized[1] = TRANSFER_TO_PRIVATE_SELECTOR;
-        serialized[2] = 42;
+        serialized[2] = TEST_TOKEN;
         serialized
     }
 
@@ -592,14 +638,14 @@ pub contract SpendingLimitAccount {
     // declared reconstruction is accepted.
     #[test]
     fn single_matching_call_passes() {
-        assert_single_call_matches(valid_payload(999), 999);
+        assert_single_call_matches(valid_payload(999), 999, TEST_TOKEN);
     }
 
     // Declaring a value that does not match the executed transfer reverts. This
     // is the core protection: declare amount=1, transfer more -> rejected.
     #[test(should_fail_with = "Transfer does not match declared spending")]
     fn mismatched_transfer_reverts() {
-        assert_single_call_matches(valid_payload(111), 999);
+        assert_single_call_matches(valid_payload(111), 999, TEST_TOKEN);
     }
 
     // A call to `fn noop(a: Field, b: Field)` on an attacker-deployed contract:
@@ -608,7 +654,7 @@ pub contract SpendingLimitAccount {
     fn wrong_selector_reverts() {
         let mut serialized = valid_payload(999);
         serialized[1] = 0xdeadbeef;
-        assert_single_call_matches(serialized, 999);
+        assert_single_call_matches(serialized, 999, TEST_TOKEN);
     }
 
     // execute_calls does not pass function_selector on the public branch, so an
@@ -617,21 +663,31 @@ pub contract SpendingLimitAccount {
     fn public_call_reverts() {
         let mut serialized = valid_payload(999);
         serialized[3] = 1;
-        assert_single_call_matches(serialized, 999);
+        assert_single_call_matches(serialized, 999, TEST_TOKEN);
     }
 
     #[test(should_fail_with = "Transfer does not match declared spending")]
     fn hidden_msg_sender_reverts() {
         let mut serialized = valid_payload(999);
         serialized[4] = 1;
-        assert_single_call_matches(serialized, 999);
+        assert_single_call_matches(serialized, 999, TEST_TOKEN);
     }
 
     #[test(should_fail_with = "Transfer does not match declared spending")]
     fn static_call_reverts() {
         let mut serialized = valid_payload(999);
         serialized[5] = 1;
-        assert_single_call_matches(serialized, 999);
+        assert_single_call_matches(serialized, 999, TEST_TOKEN);
+    }
+
+    // H3: the right selector on the WRONG token is not a match. Without the
+    // target pin, any contract exposing transfer_to_private satisfied the
+    // guard, and one set of limits was silently shared across every asset.
+    #[test(should_fail_with = "Transfer does not match declared spending")]
+    fn wrong_target_reverts() {
+        let mut serialized = valid_payload(999);
+        serialized[2] = 43; // a different token
+        assert_single_call_matches(serialized, 999, TEST_TOKEN);
     }
 
     // A hidden second call cannot ride along with a matching first call.
@@ -639,8 +695,8 @@ pub contract SpendingLimitAccount {
     fn hidden_second_call_reverts() {
         let mut serialized = valid_payload(999);
         serialized[6] = 999; // call 1 non-empty
-        serialized[8] = 43;
-        assert_single_call_matches(serialized, 999);
+        serialized[8] = 43; // different target, still non-empty
+        assert_single_call_matches(serialized, 999, TEST_TOKEN);
     }
 
     // The guard must find the match wherever it sits in the five slots.
@@ -649,15 +705,15 @@ pub contract SpendingLimitAccount {
         let mut serialized = [0; 31];
         serialized[12] = 999;
         serialized[13] = TRANSFER_TO_PRIVATE_SELECTOR;
-        serialized[14] = 42;
-        assert_single_call_matches(serialized, 999);
+        serialized[14] = TEST_TOKEN;
+        assert_single_call_matches(serialized, 999, TEST_TOKEN);
     }
 
     // An empty payload (no transfer) is rejected.
     #[test(should_fail_with = "Expected exactly one call in payload")]
     fn empty_payload_reverts() {
         let serialized = [0; 31];
-        assert_single_call_matches(serialized, 999);
+        assert_single_call_matches(serialized, 999, TEST_TOKEN);
     }
 
     // ---- Limit validation ----
