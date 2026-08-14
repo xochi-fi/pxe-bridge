@@ -1,21 +1,15 @@
 mod public_key_note;
 
-// SpendingLimitAccount: Schnorr account contract extended with on-chain spending
-// controls. Enforces per-transaction amount ceilings, rolling daily volume caps,
-// and a recipient allowlist. Parameter changes are timelocked.
+// SpendingLimitAccount: Schnorr account with on-chain per-tx caps, a bucketed
+// daily volume window, a recipient allowlist, and timelocked parameters.
 //
-// Threat model: if the bridge's signing key is compromised, limit the damage.
-// An attacker with the key can sign transactions, but the public spending check
-// rejects amounts above caps or to unlisted recipients. The entire tx reverts
-// atomically if any check fails.
+// Threat model: the bridge's signing key is compromised. The holder can sign
+// anything; the public spending check bounds what that is worth. App-logic
+// reverts are atomic, but the fee is charged regardless -- set_as_fee_payer and
+// end_setup run in the non-revertible setup phase.
 //
-// Deployment flow:
-//   1. Deploy contract (constructor stores signing key + enqueues public init)
-//   2. Call set_recipient() to allowlist recipients before transfers
-//   3. Start processing transactions
-//
-// Build: nargo compile
-// Artifact: target/spending_limit_account_contract-SpendingLimitAccount.json
+// Build: aztec-nargo compile (plain nargo does not transpile public functions;
+// loadContractArtifact rejects the result). Artifact is gitignored, built by CI.
 
 use aztec::macros::aztec;
 
@@ -62,11 +56,20 @@ pub contract SpendingLimitAccount {
         signing_public_key: SinglePrivateImmutable<PublicKeyNote, Context>,
 
         // ---- Spending limits (public state) ----
-        max_amount_per_tx: PublicMutable<Field, Context>,
-        daily_limit: PublicMutable<Field, Context>,
+        // u128, matching the Token contract's own amount type. As Field these
+        // were validated by a round-trip cast through u64, which capped every
+        // limit at 2^64-1 base units == 18.45 tokens at 18 decimals, making the
+        // account unusable for WETH or DAI. The type is now the range, so the
+        // cast-and-compare pattern is gone entirely.
+        //
+        // Zero is not storable (see assert_limits_valid). "0 means unlimited"
+        // was the precondition for the daily-counter reset, so making it
+        // inexpressible removes that reachability rather than guarding it.
+        max_amount_per_tx: PublicMutable<u128, Context>,
+        daily_limit: PublicMutable<u128, Context>,
 
         // ---- Daily spending tracker ----
-        daily_spent: PublicMutable<Field, Context>,
+        daily_spent: PublicMutable<u128, Context>,
         current_epoch: PublicMutable<Field, Context>,
 
         // ---- Recipient allowlist ----
@@ -76,8 +79,10 @@ pub contract SpendingLimitAccount {
         admin: PublicImmutable<AztecAddress, Context>,
 
         // ---- Timelock for pending limit changes ----
-        pending_max_amount: PublicMutable<Field, Context>,
-        pending_daily_limit: PublicMutable<Field, Context>,
+        // u128 too: as Field, propose_limits could store a value apply_limits
+        // then truncates on write.
+        pending_max_amount: PublicMutable<u128, Context>,
+        pending_daily_limit: PublicMutable<u128, Context>,
         pending_change_block: PublicMutable<Field, Context>,
 
         // ---- Initialization flag ----
@@ -93,8 +98,8 @@ pub contract SpendingLimitAccount {
     fn constructor(
         signing_pub_key_x: Field,
         signing_pub_key_y: Field,
-        initial_max_per_tx: Field,
-        initial_daily_limit: Field,
+        initial_max_per_tx: u128,
+        initial_daily_limit: u128,
         admin_address: AztecAddress,
     ) {
         let pub_key_note = PublicKeyNote {
@@ -123,8 +128,8 @@ pub contract SpendingLimitAccount {
     #[external("public")]
     #[noinitcheck]
     fn initialize_public_state(
-        initial_max_per_tx: Field,
-        initial_daily_limit: Field,
+        initial_max_per_tx: u128,
+        initial_daily_limit: u128,
         admin_address: AztecAddress,
     ) {
         let caller = self.context.maybe_msg_sender().unwrap();
@@ -134,21 +139,7 @@ pub contract SpendingLimitAccount {
         );
         assert(!self.storage.initialized.read(), "Already initialized");
 
-        // Validate limit values if non-zero
-        if initial_max_per_tx != (0 as Field) {
-            let max_u64 = initial_max_per_tx as u64;
-            assert(max_u64 as Field == initial_max_per_tx, "Max per-tx exceeds u64 range");
-        }
-        if initial_daily_limit != (0 as Field) {
-            let daily_u64 = initial_daily_limit as u64;
-            assert(daily_u64 as Field == initial_daily_limit, "Daily limit exceeds u64 range");
-            if initial_max_per_tx != (0 as Field) {
-                assert(
-                    initial_daily_limit as u64 >= initial_max_per_tx as u64,
-                    "Daily limit must be >= per-tx max",
-                );
-            }
-        }
+        assert_limits_valid(initial_max_per_tx, initial_daily_limit);
 
         self.storage.max_amount_per_tx.write(initial_max_per_tx);
         self.storage.daily_limit.write(initial_daily_limit);
@@ -174,9 +165,10 @@ pub contract SpendingLimitAccount {
         app_payload: AppPayload,
         fee_payment_method: u8,
         cancellable: bool,
-        // Spending limit enforcement: the caller declares the total amount
-        // and primary recipient. These are bound to the signed hash.
-        declared_amount: Field,
+        // Declared spending, bound into the signed hash below. u128 as a
+        // parameter: argument decoding constrains it below 2^128 before any
+        // line here runs, whereas `Field as u128` would silently truncate.
+        declared_amount: u128,
         declared_recipient: AztecAddress,
     ) {
         // --- Signature verification ---
@@ -187,7 +179,7 @@ pub contract SpendingLimitAccount {
         let combined_hash = poseidon2_hash_with_separator(
             [
                 payload_hash,
-                declared_amount,
+                declared_amount as Field,
                 declared_recipient.to_field(),
             ],
             DOM_SEP__SPENDING_LIMIT,
@@ -270,7 +262,7 @@ pub contract SpendingLimitAccount {
     #[external("public")]
     #[noinitcheck]
     fn check_spending_public(
-        declared_amount: Field,
+        declared_amount: u128,
         declared_recipient: AztecAddress,
     ) {
         let caller = self.context.maybe_msg_sender().unwrap();
@@ -281,10 +273,10 @@ pub contract SpendingLimitAccount {
         assert(self.storage.initialized.read(), "Not initialized");
 
         // --- Per-tx limit ---
+        // Unconditional: zero is not a storable limit (assert_limits_valid),
+        // so there is no `if max_per_tx != 0` branch to fall through.
         let max_per_tx = self.storage.max_amount_per_tx.read();
-        if max_per_tx != 0 {
-            assert_amount_within_limit(declared_amount, max_per_tx);
-        }
+        assert(declared_amount <= max_per_tx, "Amount exceeds per-tx limit");
 
         // --- Recipient allowlist ---
         // Always enforced. The zero address is rejected outright so it cannot
@@ -301,23 +293,31 @@ pub contract SpendingLimitAccount {
         assert(allowed, "Recipient not in allowlist");
 
         // --- Daily spending limit ---
+        // `spent` is u128, so `spent + declared_amount` is a checked add: it
+        // traps on overflow instead of wrapping. As Field this was addition
+        // modulo the BN254 prime, and an addend of p - daily_spent produced a
+        // sum of zero that passed the range check -- the second root cause of
+        // the daily-counter reset.
+        //
+        // The epoch window itself is still the fixed, globally-aligned one that
+        // Nethermind filed as a 2x bypass. It is replaced by a timestamp
+        // anchored bucketed window in a later commit; this commit only changes
+        // the arithmetic's width.
         let daily_limit = self.storage.daily_limit.read();
-        if daily_limit != 0 {
-            let current_block = self.context.block_number() as u64;
-            let epoch = current_block / BLOCKS_PER_EPOCH;
-            let stored_epoch = self.storage.current_epoch.read() as u64;
+        let current_block = self.context.block_number() as u64;
+        let epoch = current_block / BLOCKS_PER_EPOCH;
+        let stored_epoch = self.storage.current_epoch.read() as u64;
 
-            let mut spent = if epoch != stored_epoch {
-                self.storage.current_epoch.write(epoch as Field);
-                0 as Field
-            } else {
-                self.storage.daily_spent.read()
-            };
+        let mut spent = if epoch != stored_epoch {
+            self.storage.current_epoch.write(epoch as Field);
+            0 as u128
+        } else {
+            self.storage.daily_spent.read()
+        };
 
-            spent = spent + declared_amount;
-            assert_amount_within_limit(spent, daily_limit);
-            self.storage.daily_spent.write(spent);
-        }
+        spent = spent + declared_amount;
+        assert(spent <= daily_limit, "Amount exceeds daily spending limit");
+        self.storage.daily_spent.write(spent);
     }
 
     // ================================================================
@@ -325,9 +325,12 @@ pub contract SpendingLimitAccount {
     // ================================================================
 
     #[external("public")]
-    fn propose_limits(new_max_per_tx: Field, new_daily_limit: Field) {
+    fn propose_limits(new_max_per_tx: u128, new_daily_limit: u128) {
         let caller = self.context.maybe_msg_sender().unwrap();
         assert(caller == self.storage.admin.read(), "Not admin");
+        // Validate at PROPOSE time as well as at APPLY time, so an invalid
+        // proposal cannot sit armed for the whole timelock.
+        assert_limits_valid(new_max_per_tx, new_daily_limit);
         self.storage.pending_max_amount.write(new_max_per_tx);
         self.storage.pending_daily_limit.write(new_daily_limit);
 
@@ -348,15 +351,9 @@ pub contract SpendingLimitAccount {
         let new_max = self.storage.pending_max_amount.read();
         let new_daily = self.storage.pending_daily_limit.read();
 
-        // Validate: daily limit must be >= per-tx max (when both non-zero)
-        if new_max != (0 as Field) {
-            if new_daily != (0 as Field) {
-                assert(
-                    new_daily as u64 >= new_max as u64,
-                    "Daily limit must be >= per-tx max",
-                );
-            }
-        }
+        // Same validation as construction: an unvalidated write here can store
+        // limits that make every subsequent spend revert.
+        assert_limits_valid(new_max, new_daily);
 
         self.storage.max_amount_per_tx.write(new_max);
         self.storage.daily_limit.write(new_daily);
@@ -440,10 +437,14 @@ pub contract SpendingLimitAccount {
     #[contract_library_method]
     fn assert_declared_matches_transfer(
         app_payload: AppPayload,
-        declared_amount: Field,
+        declared_amount: u128,
         declared_recipient: AztecAddress,
     ) {
-        let expected_args_hash = hash_args([declared_recipient.to_field(), declared_amount]);
+        // transfer_to_private(to: AztecAddress, amount: u128) encodes its args
+        // as two fields, and a u128 packs into exactly one, so the widening
+        // cast here reproduces the callee's own args_hash.
+        let expected_args_hash =
+            hash_args([declared_recipient.to_field(), declared_amount as Field]);
 
         // [FunctionCall; 5] (6 fields each) + tx_nonce = 31 fields
         let serialized: [Field; 31] = app_payload.serialize();
@@ -476,13 +477,13 @@ pub contract SpendingLimitAccount {
         assert(matching_calls == 1, "Transfer does not match declared spending");
     }
 
+    // Zero is rejected in both slots. It would mean "unlimited", which is a
+    // fail-open default for an operator who omits an env var.
     #[contract_library_method]
-    fn assert_amount_within_limit(amount: Field, limit: Field) {
-        let a = amount as u64;
-        assert(a as Field == amount, "Amount exceeds u64 range");
-        let l = limit as u64;
-        assert(l as Field == limit, "Limit exceeds u64 range");
-        assert(a <= l, "Amount exceeds spending limit");
+    fn assert_limits_valid(max_per_tx: u128, daily_limit: u128) {
+        assert(max_per_tx != 0, "Per-tx limit must be non-zero");
+        assert(daily_limit != 0, "Daily limit must be non-zero");
+        assert(daily_limit >= max_per_tx, "Daily limit must be >= per-tx max");
     }
 
     // ================================================================

@@ -3,12 +3,12 @@
  * spending limits, recipient allowlist, and timelocked parameter changes.
  *
  * Extends the standard Schnorr account by adding two extra parameters to the
- * entrypoint: `declared_amount` (Field) and `declared_recipient` (AztecAddress).
+ * entrypoint: `declared_amount` (u128) and `declared_recipient` (AztecAddress).
  * The contract verifies these against on-chain limits and includes them in the
  * signed hash so they cannot be forged.
  *
  * Usage:
- *   1. Compile the contract: cd contracts/spending_limit_account && nargo compile
+ *   1. Compile: cd contracts/spending_limit_account && aztec-nargo compile
  *   2. Copy artifact to src/artifacts/ (or adjust ARTIFACT_PATH below)
  *   3. Use SpendingLimitAccountContract instead of SchnorrAccountContract
  *      when creating the AccountManager
@@ -38,7 +38,7 @@ import { BaseAccount, type Account, type AccountContract } from "@aztec/aztec.js
 // Must match DOM_SEP__SPENDING_LIMIT in the Noir contract (main.nr)
 export const DOM_SEP_SPENDING_LIMIT = 10042;
 
-// Path to compiled artifact. Update after running `nargo compile`.
+// Built by `aztec-nargo compile`; gitignored, produced by CI.
 const ARTIFACT_PATH =
   "../contracts/spending_limit_account/target/spending_limit_account_contract-SpendingLimitAccount.json";
 
@@ -155,7 +155,7 @@ class SpendingLimitAuthWitnessProvider implements AuthWitnessProvider {
 
 /**
  * Entrypoint that encodes the spending limit contract's extended signature:
- *   entrypoint(AppPayload, u8, bool, Field, AztecAddress)
+ *   entrypoint(AppPayload, u8, bool, u128, AztecAddress)
  *
  * Signs over poseidon2([payloadHash, declaredAmount, declaredRecipient],
  * DOM_SEP_SPENDING_LIMIT) instead of plain payloadHash, binding the
@@ -203,7 +203,8 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
       encodedCalls,
       feePaymentMethodOptions,
       !!cancellable,
-      declaredAmountFr,
+      // Raw bigint: the ABI parameter is a u128 integer, not a field.
+      this.declaredAmount,
       declaredRecipientAddr,
     ];
     const encodedArgs = encodeArguments(abi, args);
@@ -273,7 +274,8 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
       encodedCalls,
       feePaymentMethodOptions,
       !!cancellable,
-      declaredAmountFr,
+      // Raw bigint: the ABI parameter is a u128 integer, not a field.
+      this.declaredAmount,
       declaredRecipientAddr,
     ];
     const encodedArgs = encodeArguments(abi, args);
@@ -388,8 +390,10 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
         },
         // Extended parameters for spending limit enforcement
         {
+          // Hand-maintained pair with `declared_amount: u128` in main.nr.
+          // Drift encodes args at a different width and breaks the binding.
           name: "declared_amount",
-          type: { kind: "field" },
+          type: { kind: "integer", sign: "unsigned", width: 128 },
         },
         {
           name: "declared_recipient",
