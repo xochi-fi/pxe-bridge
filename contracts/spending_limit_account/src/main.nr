@@ -30,6 +30,7 @@ pub contract SpendingLimitAccount {
         messages::delivery::MessageDelivery,
         oracle::auth_witness::get_auth_witness,
         protocol::{
+            abis::function_selector::FunctionSelector,
             address::AztecAddress,
             constants::DOM_SEP__TX_NULLIFIER,
             hash::poseidon2_hash_with_separator,
@@ -54,6 +55,16 @@ pub contract SpendingLimitAccount {
     // Domain separator for combined (payload + spending info) hash.
     // Must match DOM_SEP_SPENDING_LIMIT in the TypeScript entrypoint.
     global DOM_SEP__SPENDING_LIMIT: u32 = 10042;
+
+    // The only call this account may make. 0x89758b40, computed both from the
+    // v5.1.0 Token ABI and from the signature string. from_signature is not
+    // comptime in v5.1.0, hence the explicit wrapper.
+    //
+    // VERIFY: a global `comptime {}` inside an #[aztec] contract has zero
+    // attestations in v5.1.0. Highest-probability compile failure in this file,
+    // and no fallback preserves a compile-time pin.
+    global TRANSFER_TO_PRIVATE_SELECTOR: Field =
+        comptime { FunctionSelector::from_signature("transfer_to_private((Field),u128)").to_field() };
 
     #[storage]
     struct Storage<Context> {
@@ -491,10 +502,23 @@ pub contract SpendingLimitAccount {
         for i in 0..5 {
             let base = i * 6;
             let args_hash = serialized[base];
+            let selector = serialized[base + 1];
             let target = serialized[base + 2];
+            let is_public = serialized[base + 3];
+            let hide_msg_sender = serialized[base + 4];
+            let is_static = serialized[base + 5];
             if target != 0 {
                 nonempty_calls += 1;
-                if args_hash == expected_args_hash {
+                // args_hash alone proved only that SOME contract received two
+                // fields; any fn noop(a: Field, b: Field) satisfied it. is_public
+                // is not belt-and-braces: execute_calls omits the selector on the
+                // public branch, so unpinning it makes the selector pin dead.
+                let matches = (args_hash == expected_args_hash)
+                    & (selector == TRANSFER_TO_PRIVATE_SELECTOR)
+                    & (is_public == 0)
+                    & (hide_msg_sender == 0)
+                    & (is_static == 0);
+                if matches {
                     matching_calls += 1;
                 }
             }
@@ -535,37 +559,97 @@ pub contract SpendingLimitAccount {
         };
         let serialized: [Field; 6] = call.serialize();
         assert(serialized[0] == 111, "args_hash expected at offset 0");
+        assert(serialized[1] == 222, "function_selector expected at offset 1");
         assert(serialized[2] == 333, "target_address expected at offset 2");
+        assert(serialized[3] == 0, "is_public expected at offset 3");
+        assert(serialized[4] == 0, "hide_msg_sender expected at offset 4");
+        assert(serialized[5] == 0, "is_static expected at offset 5");
+    }
+
+    // Pins the selector constant. This is a typo-guard on the signature string,
+    // NOT a check that Aztec's own ABI is unchanged -- it compares a
+    // string-derived constant against a literal and never reads the Token
+    // artifact. The Aztec-side drift check belongs in TypeScript.
+    #[test]
+    fn transfer_to_private_selector_pin() {
+        assert(
+            TRANSFER_TO_PRIVATE_SELECTOR == 0x89758b40,
+            "transfer_to_private selector changed",
+        );
+    }
+
+    // Builds a well-formed single-call payload: matching args_hash, the pinned
+    // selector, a non-zero target, and all three flags clear.
+    fn valid_payload(args_hash: Field) -> [Field; 31] {
+        let mut serialized = [0; 31];
+        serialized[0] = args_hash;
+        serialized[1] = TRANSFER_TO_PRIVATE_SELECTOR;
+        serialized[2] = 42;
+        serialized
     }
 
     // A payload with exactly one non-empty call whose args_hash matches the
     // declared reconstruction is accepted.
     #[test]
     fn single_matching_call_passes() {
-        let mut serialized = [0; 31];
-        serialized[0] = 999; // call 0 args_hash == expected
-        serialized[2] = 42; // call 0 target_address != 0
-        assert_single_call_matches(serialized, 999);
+        assert_single_call_matches(valid_payload(999), 999);
     }
 
     // Declaring a value that does not match the executed transfer reverts. This
     // is the core protection: declare amount=1, transfer more -> rejected.
     #[test(should_fail_with = "Transfer does not match declared spending")]
     fn mismatched_transfer_reverts() {
-        let mut serialized = [0; 31];
-        serialized[0] = 111; // call 0 args_hash != expected
-        serialized[2] = 42; // call 0 target_address != 0
+        assert_single_call_matches(valid_payload(111), 999);
+    }
+
+    // A call to `fn noop(a: Field, b: Field)` on an attacker-deployed contract:
+    // args_hash reconstructs and the target is non-zero, but nothing moves.
+    #[test(should_fail_with = "Transfer does not match declared spending")]
+    fn wrong_selector_reverts() {
+        let mut serialized = valid_payload(999);
+        serialized[1] = 0xdeadbeef;
+        assert_single_call_matches(serialized, 999);
+    }
+
+    // execute_calls does not pass function_selector on the public branch, so an
+    // unpinned is_public would make the selector pin dead data there.
+    #[test(should_fail_with = "Transfer does not match declared spending")]
+    fn public_call_reverts() {
+        let mut serialized = valid_payload(999);
+        serialized[3] = 1;
+        assert_single_call_matches(serialized, 999);
+    }
+
+    #[test(should_fail_with = "Transfer does not match declared spending")]
+    fn hidden_msg_sender_reverts() {
+        let mut serialized = valid_payload(999);
+        serialized[4] = 1;
+        assert_single_call_matches(serialized, 999);
+    }
+
+    #[test(should_fail_with = "Transfer does not match declared spending")]
+    fn static_call_reverts() {
+        let mut serialized = valid_payload(999);
+        serialized[5] = 1;
         assert_single_call_matches(serialized, 999);
     }
 
     // A hidden second call cannot ride along with a matching first call.
     #[test(should_fail_with = "Expected exactly one call in payload")]
     fn hidden_second_call_reverts() {
-        let mut serialized = [0; 31];
-        serialized[0] = 999; // call 0 matches
-        serialized[2] = 42;
+        let mut serialized = valid_payload(999);
         serialized[6] = 999; // call 1 non-empty
         serialized[8] = 43;
+        assert_single_call_matches(serialized, 999);
+    }
+
+    // The guard must find the match wherever it sits in the five slots.
+    #[test]
+    fn matching_call_in_a_later_slot_passes() {
+        let mut serialized = [0; 31];
+        serialized[12] = 999;
+        serialized[13] = TRANSFER_TO_PRIVATE_SELECTOR;
+        serialized[14] = 42;
         assert_single_call_matches(serialized, 999);
     }
 
@@ -574,5 +658,34 @@ pub contract SpendingLimitAccount {
     fn empty_payload_reverts() {
         let serialized = [0; 31];
         assert_single_call_matches(serialized, 999);
+    }
+
+    // ---- Limit validation ----
+
+    #[test]
+    fn valid_limits_accepted() {
+        assert_limits_valid(1_000, 10_000);
+    }
+
+    #[test]
+    fn eighteen_decimal_limits_accepted() {
+        // 1000 tokens at 18 decimals. Rejected outright under the old u64
+        // ceiling, which topped out at 18.45 tokens.
+        assert_limits_valid(1_000_000_000_000_000_000_000, 10_000_000_000_000_000_000_000);
+    }
+
+    #[test(should_fail_with = "Per-tx limit must be non-zero")]
+    fn zero_per_tx_rejected() {
+        assert_limits_valid(0, 10_000);
+    }
+
+    #[test(should_fail_with = "Daily limit must be non-zero")]
+    fn zero_daily_rejected() {
+        assert_limits_valid(1_000, 0);
+    }
+
+    #[test(should_fail_with = "Daily limit must be >= per-tx max")]
+    fn daily_below_per_tx_rejected() {
+        assert_limits_valid(10_000, 1_000);
     }
 }
