@@ -41,16 +41,27 @@ pub contract SpendingLimitAccount {
 
     use crate::public_key_note::PublicKeyNote;
 
-    // Epoch length for daily spending reset (~24h at 12s/block).
-    global BLOCKS_PER_EPOCH: u64 = 7200;
+    // Sliding window: BUCKET_COUNT buckets of BUCKET_SECONDS, summed.
+    //
+    // 25 and not 24. Minimum lookback is (N-1)*W, so 24 hourly buckets enforce
+    // over 23h and admit 2L inside 24h. (N-1)*W == WINDOW_SECONDS is the
+    // invariant; window_parameterisation_is_exact asserts it. Cost: lookback
+    // runs up to 25h, i.e. 25/24 conservatism, not a burst allowance.
+    //
+    // Timestamps, not block height -- block intervals must not be relied on.
+    global WINDOW_SECONDS: u64 = 86400;
+    global BUCKET_COUNT: u32 = 25;
+    global BUCKET_SECONDS: u64 = WINDOW_SECONDS / (BUCKET_COUNT as u64 - 1);
 
-    // Timelock delay for parameter changes (blocks).
-    global TIMELOCK_BLOCKS: u64 = 5;
+    // Timelock delay for parameter changes. Seconds, for the same reason the
+    // window is: the previous 5-block delay was both tiny and dependent on
+    // block production rate.
+    global PARAM_TIMELOCK_SECONDS: u64 = 86400;
 
     // How long a matured proposal stays applicable before it must be
     // re-proposed. Bounds the window in which an armed proposal is useful to a
     // compromised admin; see apply_limits.
-    global APPLY_WINDOW_BLOCKS: u64 = 7200;
+    global PARAM_APPLY_WINDOW_SECONDS: u64 = 86400;
 
     // Domain separator for combined (payload + spending info) hash.
     // Must match DOM_SEP_SPENDING_LIMIT in the TypeScript entrypoint.
@@ -71,37 +82,26 @@ pub contract SpendingLimitAccount {
         // ---- Schnorr signing key (private, set once) ----
         signing_public_key: SinglePrivateImmutable<PublicKeyNote, Context>,
 
-        // ---- Spending limits (public state) ----
-        // u128, matching the Token contract's own amount type. As Field these
-        // were validated by a round-trip cast through u64, which capped every
-        // limit at 2^64-1 base units == 18.45 tokens at 18 decimals, making the
-        // account unusable for WETH or DAI. The type is now the range, so the
-        // cast-and-compare pattern is gone entirely.
-        //
-        // Zero is not storable (see assert_limits_valid). "0 means unlimited"
-        // was the precondition for the daily-counter reset, so making it
-        // inexpressible removes that reachability rather than guarding it.
+        // u128 to match Token's amount type: the type is the range, so no
+        // cast-and-compare. Zero is not storable (assert_limits_valid), which
+        // makes "0 means unlimited" -- the counter-reset precondition --
+        // inexpressible rather than merely guarded.
         max_amount_per_tx: PublicMutable<u128, Context>,
         daily_limit: PublicMutable<u128, Context>,
 
-        // ---- Daily spending tracker ----
-        daily_spent: PublicMutable<u128, Context>,
-        current_epoch: PublicMutable<Field, Context>,
+        // spend_buckets[i] holds volume for absolute bucket indices congruent
+        // to i mod BUCKET_COUNT; spend_bucket is the most recent absolute
+        // index. Expired slots are zeroed lazily on the next spend.
+        //
+        // A Map, not PublicMutable<[u128; N]>: a packed array is one Packable
+        // value, so any write rewrites all 25 slots.
+        spend_buckets: Map<Field, PublicMutable<u128, Context>, Context>,
+        spend_bucket: PublicMutable<u64, Context>,
 
-        // ---- H3: the single asset this account may ever move ----
-        // One set of limits cannot govern several tokens: limits are in base
-        // units, and a limit of 1e10 is 10,000 tokens at 6 decimals and 1e-8 at
-        // 18. A shared counter mixing both measures nothing. Normalising
-        // decimals would not fix it either, since the assets differ in value.
-        //
-        // So the account is single-asset by construction: the token is recorded
-        // at deployment and the payload guard rejects every other call target.
-        // Per-token keying was considered and rejected -- it would give N
-        // correct-per-asset caps and still no aggregate value ceiling, which
-        // needs a price oracle this contract should not contain.
-        //
-        // Read from PRIVATE in `entrypoint`. There is no setter: a wrong
-        // address here is permanent and strands any balance at the account.
+        // The single asset this account may move. Limits are in base units, so
+        // one counter cannot span tokens of differing decimals or value.
+        // Enforced by the payload guard. No setter: a wrong address here is
+        // permanent and strands the balance.
         permitted_token: PublicImmutable<AztecAddress, Context>,
 
         // ---- Recipient allowlist ----
@@ -115,7 +115,7 @@ pub contract SpendingLimitAccount {
         // then truncates on write.
         pending_max_amount: PublicMutable<u128, Context>,
         pending_daily_limit: PublicMutable<u128, Context>,
-        pending_change_block: PublicMutable<Field, Context>,
+        pending_change_time: PublicMutable<u64, Context>,
 
         // ---- Initialization flag ----
         initialized: PublicMutable<bool, Context>,
@@ -347,31 +347,41 @@ pub contract SpendingLimitAccount {
         assert(allowed, "Recipient not in allowlist");
 
         // --- Daily spending limit ---
-        // `spent` is u128, so `spent + declared_amount` is a checked add: it
-        // traps on overflow instead of wrapping. As Field this was addition
-        // modulo the BN254 prime, and an addend of p - daily_spent produced a
-        // sum of zero that passed the range check -- the second root cause of
-        // the daily-counter reset.
-        //
-        // The epoch window itself is still the fixed, globally-aligned one that
-        // Nethermind filed as a 2x bypass. It is replaced by a timestamp
-        // anchored bucketed window in a later commit; this commit only changes
-        // the arithmetic's width.
+        // u128 throughout, so accumulation is a checked add. As Field this was
+        // addition mod p, and an addend of p - spent zeroed the counter.
         let daily_limit = self.storage.daily_limit.read();
-        let current_block = self.context.block_number() as u64;
-        let epoch = current_block / BLOCKS_PER_EPOCH;
-        let stored_epoch = self.storage.current_epoch.read() as u64;
 
-        let mut spent = if epoch != stored_epoch {
-            self.storage.current_epoch.write(epoch as Field);
-            0 as u128
-        } else {
-            self.storage.daily_spent.read()
-        };
+        let now = self.context.timestamp();
+        let current_bucket = now / BUCKET_SECONDS;
+        let last_bucket = self.storage.spend_bucket.read();
 
-        spent = spent + declared_amount;
-        assert(spent <= daily_limit, "Amount exceeds daily spending limit");
-        self.storage.daily_spent.write(spent);
+        let mut buckets: [u128; BUCKET_COUNT] = [0; BUCKET_COUNT];
+        for i in 0..BUCKET_COUNT {
+            buckets[i] = self.storage.spend_buckets.at(i as Field).read();
+        }
+
+        let (updated, total) =
+            advance_window(buckets, last_bucket, current_bucket, declared_amount);
+
+        // Only enforced for a value-moving transfer. Otherwise lowering
+        // daily_limit below the volume already in the window would revert every
+        // transaction, including a zero-amount one, until the window drained --
+        // an admin action that bricks the account for up to a full window.
+        if declared_amount != 0 {
+            assert(total <= daily_limit, "Amount exceeds daily spending limit");
+        }
+
+        // Write back only what changed. `total` is recomputed from the array
+        // every call, so no cached aggregate can desync from these slots.
+        //
+        // VERIFY: conditional storage write in a bounded loop. If the compiler
+        // rejects it, write unconditionally -- only the write count changes.
+        for i in 0..BUCKET_COUNT {
+            if updated[i] != buckets[i] {
+                self.storage.spend_buckets.at(i as Field).write(updated[i]);
+            }
+        }
+        self.storage.spend_bucket.write(current_bucket);
     }
 
     // ================================================================
@@ -388,9 +398,9 @@ pub contract SpendingLimitAccount {
         self.storage.pending_max_amount.write(new_max_per_tx);
         self.storage.pending_daily_limit.write(new_daily_limit);
 
-        let effective_block =
-            (self.context.block_number() as u64 + TIMELOCK_BLOCKS) as Field;
-        self.storage.pending_change_block.write(effective_block);
+        self.storage.pending_change_time.write(
+            self.context.timestamp() + PARAM_TIMELOCK_SECONDS,
+        );
     }
 
     #[external("public")]
@@ -400,15 +410,15 @@ pub contract SpendingLimitAccount {
         let caller = self.context.maybe_msg_sender().unwrap();
         assert(caller == self.storage.admin.read(), "Not admin");
 
-        let change_block = self.storage.pending_change_block.read() as u64;
-        assert(change_block != 0, "No pending changes");
-        let now = self.context.block_number() as u64;
-        assert(now >= change_block, "Timelock not expired");
+        let change_time = self.storage.pending_change_time.read();
+        assert(change_time != 0, "No pending changes");
+        let now = self.context.timestamp();
+        assert(now >= change_time, "Timelock not expired");
         // Proposals expire. Without an upper bound the timelock delivers public
         // notice but no enforcement: a compromised admin proposes maximum
         // limits on day 0, waits weeks until the account is at peak balance,
         // then applies and drains in a single block.
-        assert(now < change_block + APPLY_WINDOW_BLOCKS, "Proposal expired");
+        assert(now < change_time + PARAM_APPLY_WINDOW_SECONDS, "Proposal expired");
 
         let new_max = self.storage.pending_max_amount.read();
         let new_daily = self.storage.pending_daily_limit.read();
@@ -423,7 +433,7 @@ pub contract SpendingLimitAccount {
         // Clear pending state
         self.storage.pending_max_amount.write(0);
         self.storage.pending_daily_limit.write(0);
-        self.storage.pending_change_block.write(0);
+        self.storage.pending_change_time.write(0);
     }
 
     // Withdraw a proposal before it is applied.
@@ -432,12 +442,12 @@ pub contract SpendingLimitAccount {
         let caller = self.context.maybe_msg_sender().unwrap();
         assert(caller == self.storage.admin.read(), "Not admin");
         assert(
-            self.storage.pending_change_block.read() != 0,
+            self.storage.pending_change_time.read() != 0,
             "No pending changes",
         );
         self.storage.pending_max_amount.write(0);
         self.storage.pending_daily_limit.write(0);
-        self.storage.pending_change_block.write(0);
+        self.storage.pending_change_time.write(0);
     }
 
     // There is deliberately no admin reset of the spending counter: an
@@ -570,6 +580,53 @@ pub contract SpendingLimitAccount {
 
         assert(nonempty_calls == 1, "Expected exactly one call in payload");
         assert(matching_calls == 1, "Transfer does not match declared spending");
+    }
+
+    // Advances the ring to current_bucket, zeroing slots that fell out of the
+    // window, adds amount to the current slot, returns (array, window total).
+    //
+    // Moving from last_bucket to current_bucket newly enters absolute buckets
+    // (last_bucket, current_bucket]; whatever those slots hold is from a
+    // previous wrap. Clearing is capped at BUCKET_COUNT so a long idle wipes
+    // the window instead of wrapping and preserving stale volume.
+    //
+    // Pure, so nargo test can exercise every boundary with no sandbox.
+    #[contract_library_method]
+    fn advance_window(
+        buckets: [u128; BUCKET_COUNT],
+        last_bucket: u64,
+        current_bucket: u64,
+        amount: u128,
+    ) -> ([u128; BUCKET_COUNT], u128) {
+        // u64 subtraction is checked, so a backwards timestamp would be a
+        // constraint failure rather than a wraparound. Assert it explicitly so
+        // the failure names the cause.
+        assert(current_bucket >= last_bucket, "Block timestamp went backwards");
+        let elapsed = current_bucket - last_bucket;
+
+        let bucket_count = BUCKET_COUNT as u64;
+        let clear_count = if elapsed >= bucket_count { bucket_count } else { elapsed };
+
+        let mut updated = buckets;
+        // k runs 1..=BUCKET_COUNT so a full-window idle clears every slot.
+        // VERIFY: dynamic index on an array write. Permitted in Noir, but the
+        // loop bound is constant either way.
+        for k in 1..(BUCKET_COUNT + 1) {
+            if (k as u64) <= clear_count {
+                let idx = ((last_bucket + k as u64) % bucket_count) as u32;
+                updated[idx] = 0;
+            }
+        }
+
+        let slot = (current_bucket % bucket_count) as u32;
+        updated[slot] = updated[slot] + amount;
+
+        let mut total: u128 = 0;
+        for i in 0..BUCKET_COUNT {
+            total = total + updated[i];
+        }
+
+        (updated, total)
     }
 
     // Zero is rejected in both slots. It would mean "unlimited", which is a
@@ -714,6 +771,102 @@ pub contract SpendingLimitAccount {
     fn empty_payload_reverts() {
         let serialized = [0; 31];
         assert_single_call_matches(serialized, 999, TEST_TOKEN);
+    }
+
+    // ---- M1: bucketed sliding window ----
+
+    // The invariant the whole guarantee rests on. Deleting this test deletes
+    // the only mechanical link between WINDOW_SECONDS and actual behaviour: a
+    // retune to 24 buckets would otherwise compile and ship a 23-hour window.
+    #[test]
+    fn window_parameterisation_is_exact() {
+        assert(
+            (BUCKET_COUNT as u64 - 1) * BUCKET_SECONDS == WINDOW_SECONDS,
+            "(N-1)*W must equal WINDOW_SECONDS",
+        );
+        assert(BUCKET_SECONDS == 3600, "hourly buckets expected");
+    }
+
+    fn empty_buckets() -> [u128; BUCKET_COUNT] {
+        [0; BUCKET_COUNT]
+    }
+
+    #[test]
+    fn cold_start_does_not_underflow() {
+        let (_updated, total) = advance_window(empty_buckets(), 0, 500_000, 100);
+        assert(total == 100, "first spend accumulates");
+    }
+
+    #[test]
+    fn same_bucket_accumulates() {
+        let (b1, _t1) = advance_window(empty_buckets(), 0, 1_000, 100);
+        let (_b2, total) = advance_window(b1, 1_000, 1_000, 50);
+        assert(total == 150, "two spends in one bucket sum");
+    }
+
+    // Crossing a bucket boundary must not reset anything.
+    #[test]
+    fn boundary_crossing_does_not_reset() {
+        let (b1, _t1) = advance_window(empty_buckets(), 0, 1_000, 100);
+        let (_b2, total) = advance_window(b1, 1_000, 1_001, 50);
+        assert(total == 150, "crossing a bucket must not reset the window");
+    }
+
+    // Still inside a 25-bucket window. A 24-bucket design expires this, which
+    // is what lets 2L fit inside 24 hours.
+    #[test]
+    fn spend_24_buckets_ago_is_still_counted() {
+        let (b1, _t1) = advance_window(empty_buckets(), 0, 1_000, 100);
+        let (_b2, total) = advance_window(b1, 1_000, 1_024, 50);
+        assert(total == 150, "24 buckets ago must still be in the window");
+    }
+
+    #[test]
+    fn spend_25_buckets_ago_has_expired() {
+        let (b1, _t1) = advance_window(empty_buckets(), 0, 1_000, 100);
+        let (_b2, total) = advance_window(b1, 1_000, 1_025, 50);
+        assert(total == 50, "25 buckets ago must have left the window");
+    }
+
+    // An idle of exactly one window must clear everything. Computing the clear
+    // count as `elapsed % BUCKET_COUNT` instead of `min(elapsed, BUCKET_COUNT)`
+    // clears nothing here and silently preserves a full window of stale volume.
+    #[test]
+    fn idle_of_exactly_one_window_clears_all() {
+        let (b1, _t1) = advance_window(empty_buckets(), 0, 1_000, 100);
+        let (_b2, total) = advance_window(b1, 1_000, 1_000 + BUCKET_COUNT as u64, 10);
+        assert(total == 10, "a full-window idle must clear every slot");
+    }
+
+    #[test]
+    fn long_idle_clears_all() {
+        let (b1, _t1) = advance_window(empty_buckets(), 0, 1_000, 100);
+        let (_b2, total) = advance_window(b1, 1_000, 9_999, 10);
+        assert(total == 10, "a long idle must clear every slot");
+    }
+
+    #[test]
+    fn partial_expiry_clears_only_stale_slots() {
+        let (b1, _t1) = advance_window(empty_buckets(), 0, 1_000, 100);
+        let (b2, t2) = advance_window(b1, 1_000, 1_010, 30);
+        assert(t2 == 130, "both spends live");
+        // Now push past the first spend only.
+        let (_b3, t3) = advance_window(b2, 1_010, 1_026, 5);
+        assert(t3 == 35, "only the expired slot is cleared");
+    }
+
+    // 18-decimal scale, which the old u64 ceiling made unrepresentable.
+    #[test]
+    fn window_handles_18_decimal_scale() {
+        let one_thousand_tokens: u128 = 1_000_000_000_000_000_000_000;
+        let (b1, _t1) = advance_window(empty_buckets(), 0, 1_000, one_thousand_tokens);
+        let (_b2, total) = advance_window(b1, 1_000, 1_001, one_thousand_tokens);
+        assert(total == one_thousand_tokens * 2, "18-decimal amounts accumulate");
+    }
+
+    #[test(should_fail_with = "Block timestamp went backwards")]
+    fn window_rejects_backwards_timestamp() {
+        let _ = advance_window(empty_buckets(), 1_000, 999, 1);
     }
 
     // ---- Limit validation ----
