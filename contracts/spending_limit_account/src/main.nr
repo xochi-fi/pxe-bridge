@@ -367,17 +367,8 @@ pub contract SpendingLimitAccount {
         self.storage.pending_change_block.write(0);
     }
 
-    /// Admin function to manually reset the daily spending counter.
-    /// Use when epoch-based reset stalls (e.g., block production slowdown).
-    #[external("public")]
-    fn reset_daily_spent() {
-        let caller = self.context.maybe_msg_sender().unwrap();
-        assert(caller == self.storage.admin.read(), "Not admin");
-        self.storage.daily_spent.write(0);
-        let current_block = self.context.block_number() as u64;
-        let epoch = current_block / BLOCKS_PER_EPOCH;
-        self.storage.current_epoch.write(epoch as Field);
-    }
+    // There is deliberately no admin reset of the spending counter: an
+    // untimelocked write of zero is the counter-reset impact by another route.
 
     #[external("public")]
     fn set_recipient(recipient: AztecAddress, allowed: bool) {

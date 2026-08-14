@@ -52,8 +52,7 @@ Contract compiled (`nargo compile`), artifact at
 `src/spending-limit-account.ts`. Wired into `aztec-client.ts` via
 `AccountManager.create()`. Enabled by setting `PXE_BRIDGE_SPENDING_LIMIT_ADMIN`
 (32-byte hex AztecAddress). Limit values validated at init and apply time
-(`daily_limit >= max_per_tx`, u64 range). Admin `reset_daily_spent()` added
-as stopgap for epoch stall (block production slowdown).
+(`daily_limit >= max_per_tx`, u64 range).
 Remaining: deploy to sandbox, e2e test on x86_64.
 
 ## Security Hardening Pass (2026-04-20)
@@ -78,14 +77,18 @@ Cross-cutting fixes from security audit against 2026 threat landscape
 - [x] **Docker HEALTHCHECK** -- 30s interval, curl to `/status`.
 - [x] **Noir contract limit validation** -- `initialize_public_state` and
       `apply_limits` assert `daily_limit >= max_per_tx` and u64 range.
-- [x] **Admin daily reset** -- `reset_daily_spent()` for manual epoch reset
-      when block production stalls.
+- [ ] ~~**Admin daily reset**~~ -- `reset_daily_spent()` was REMOVED. An
+      untimelocked admin write of `daily_spent = 0` is the same impact as
+      NM-1019 [High] "Daily counter can be reset to zero", just reached
+      through the admin instead of through field arithmetic.
 
 Known limitations (acceptable for alpha):
 
 - `Fr` objects hold key material on heap until GC (SDK limitation).
-- Epoch-based daily reset depends on block production rate; admin reset
-  is the manual fallback.
+- Epoch-based daily reset still depends on block production rate, and the
+  admin fallback has been removed as unsafe. A stalled chain can therefore
+  wedge the counter until the epoch rolls. Resolved when the window becomes
+  timestamp-anchored (NM-1019 [Medium], fixed epoch -> bucketed window).
 - Rate limiter uses `socket.remoteAddress`; deploy behind reverse proxy
   for accurate client IP.
 
