@@ -6,3 +6,8 @@ docker-compose.override.yml
 .claude/settings.local.json
 pxe_data_*/
 wallet_data_*/
+
+# Compiled Noir artifact -- built by `aztec-nargo compile` (CI `contract` job).
+# Not committed: it is 1.6MB of machine-generated JSON and must match the
+# toolchain, not the tree.
+contracts/**/target/

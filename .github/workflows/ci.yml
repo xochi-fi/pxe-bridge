@@ -25,25 +25,36 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  # Builds the contract artifact, which is no longer committed to git.
+  # aztec-nargo, not plain nargo: public functions must be transpiled to AVM
+  # bytecode or loadContractArtifact() rejects the result at runtime with
+  # "Contract's public bytecode has not been transpiled". That is exactly how
+  # the previously committed artifact was broken.
   contract:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Noir toolchain
+      - name: Install Aztec toolchain
         run: |
-          curl -L https://raw.githubusercontent.com/noir-lang/noirup/main/install | bash
-          echo "$HOME/.nargo/bin" >> "$GITHUB_PATH"
-      - name: Select pinned toolchain
-        run: noirup --version 1.0.0-beta.20
+          curl -fsSL https://install.aztec.network | bash
+          echo "$HOME/.aztec/bin" >> "$GITHUB_PATH"
+      - name: Pin toolchain to the SDK version
+        run: aztec-up -v 5.1.0
       - name: Contract unit tests (spending-limit guard)
         working-directory: contracts/spending_limit_account
-        run: nargo test
-      - name: Contract compiles
+        run: aztec-nargo test
+      - name: Compile and transpile contract
         working-directory: contracts/spending_limit_account
-        run: nargo compile
+        run: aztec-nargo compile
+      - name: Upload contract artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-artifact
+          path: contracts/spending_limit_account/target/*.json
+          if-no-files-found: error
 
   e2e:
-    needs: check
+    needs: [check, contract]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -52,17 +63,28 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Fetch contract artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: contract-artifact
+          path: contracts/spending_limit_account/target
       - run: npm run test:e2e:up
         env:
           # Well-known Hardhat/Anvil test key #0 -- never use with real funds
           PXE_BRIDGE_SECRET_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 
   docker:
-    needs: check
+    needs: [check, contract]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The image COPYs this in; it is no longer committed to git.
+      - name: Fetch contract artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: contract-artifact
+          path: contracts/spending_limit_account/target
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io

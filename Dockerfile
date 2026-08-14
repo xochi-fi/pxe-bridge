@@ -25,6 +25,13 @@ COPY --from=builder /app/dist dist/
 COPY --from=builder /app/node_modules node_modules/
 COPY --from=builder /app/package.json .
 
+# The compiled Noir artifact is no longer committed to git; it is produced by
+# `aztec-nargo compile` (the CI `contract` job, or locally before building).
+# spending-limit-account.js resolves it at runtime as ../contracts/... from
+# dist/, so it must land at /app/contracts/. Without this the image cannot use
+# the spending-limit account at all -- it was missing entirely before.
+COPY contracts/spending_limit_account/target/ contracts/spending_limit_account/target/
+
 ENV NODE_ENV=production
 EXPOSE 8547
 

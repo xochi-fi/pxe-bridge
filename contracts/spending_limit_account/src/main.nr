@@ -24,21 +24,17 @@ pub contract SpendingLimitAccount {
     use aztec::{
         authwit::{
             account::AccountFeePaymentMethodOptions,
-            auth::{compute_authwit_message_hash, compute_authwit_nullifier},
+            auth::compute_authwit_message_hash,
             entrypoint::app::AppPayload,
         },
         context::PrivateContext,
-        hash::{compute_siloed_nullifier, hash_args},
+        hash::hash_args,
         macros::{
             functions::{allow_phase_change, external, initializer, noinitcheck, view},
             storage::storage,
         },
-        messages::message_delivery::MessageDelivery,
-        oracle::{
-            auth_witness::get_auth_witness,
-            get_nullifier_membership_witness::get_low_nullifier_membership_witness,
-            notes::{get_sender_for_tags, set_sender_for_tags},
-        },
+        messages::delivery::MessageDelivery,
+        oracle::auth_witness::get_auth_witness,
         protocol::{
             address::AztecAddress,
             constants::DOM_SEP__TX_NULLIFIER,
@@ -106,18 +102,13 @@ pub contract SpendingLimitAccount {
             y: signing_pub_key_y,
         };
 
-        // Safety: oracle calls for tag management, no security impact.
-        let original_sender = unsafe { get_sender_for_tags().unwrap_or(self.address) };
-        // Safety: setting sender tag for note delivery, no security impact.
-        unsafe { set_sender_for_tags(self.address) };
-
-        self.storage
-            .signing_public_key
-            .initialize(pub_key_note)
-            .deliver(MessageDelivery.ONCHAIN_CONSTRAINED);
-
-        // Safety: restoring original sender tag, no security impact.
-        unsafe { set_sender_for_tags(original_sender) };
+        // Unconstrained delivery, matching the v5.1.0 reference SchnorrAccount.
+        // Constrained delivery is handshake-backed and a fresh account has no
+        // handshake with itself. Getting this wrong bricks the account:
+        // SinglePrivateImmutable initializes once, with no re-delivery path.
+        self.storage.signing_public_key.initialize(pub_key_note).deliver(
+            MessageDelivery::onchain_unconstrained().with_sender(self.address),
+        );
 
         // Enqueue public initialization (immediate, no timelock for initial values).
         SpendingLimitAccount::at(self.context.this_address())
@@ -188,9 +179,6 @@ pub contract SpendingLimitAccount {
         declared_amount: Field,
         declared_recipient: AztecAddress,
     ) {
-        // Safety: tag management oracle, no security impact.
-        unsafe { set_sender_for_tags(self.address) };
-
         // --- Signature verification ---
         // Sign over the combined hash of (payload + declared spending info).
         // This binds the declared amount/recipient to the payload so an
@@ -250,7 +238,9 @@ pub contract SpendingLimitAccount {
                 [app_payload.tx_nonce],
                 DOM_SEP__TX_NULLIFIER,
             );
-            self.context.push_nullifier(tx_nullifier);
+            // v5.1.0 renamed PrivateContext::push_nullifier to
+            // push_nullifier_unsafe.
+            self.context.push_nullifier_unsafe(tx_nullifier);
         }
     }
 
@@ -411,23 +401,24 @@ pub contract SpendingLimitAccount {
         let storage = Storage::init(context);
         let public_key = storage.signing_public_key.get_note();
 
-        // Safety: reading auth witness from oracle is safe -- the
-        // signature is verified against the stored public key below.
-        let witness: [Field; 64] = unsafe { get_auth_witness(outer_hash) };
-        let mut signature: [u8; 64] = [0; 64];
-        for i in 0..64 {
-            signature[i] = witness[i] as u8;
-        }
+        // Safety: the witness is only used as a "magical value" that makes the
+        // signature verification below pass, against the stored public key.
+        //
+        // v5.1.0 / schnorr v0.4.0: the witness is FOUR limb Fields forming two
+        // EmbeddedCurveScalars, and the message is the Field itself -- not the
+        // v4.2.0 shape of 64 bytes plus `outer_hash.to_be_bytes::<32>()`. The
+        // TypeScript side must emit `signature.toLimbFields()` in lockstep.
+        let limbs: [Field; 4] = unsafe { get_auth_witness(outer_hash) };
+        let signature = (
+            std::embedded_curve_ops::EmbeddedCurveScalar::new(limbs[0], limbs[1]),
+            std::embedded_curve_ops::EmbeddedCurveScalar::new(limbs[2], limbs[3]),
+        );
 
         let pub_key = std::embedded_curve_ops::EmbeddedCurvePoint {
             x: public_key.x,
             y: public_key.y,
         };
-        schnorr::verify_signature(
-            pub_key,
-            signature,
-            outer_hash.to_be_bytes::<32>(),
-        )
+        schnorr::verify_signature(pub_key, signature, outer_hash)
     }
 
     // ================================================================
@@ -435,65 +426,26 @@ pub contract SpendingLimitAccount {
     // ================================================================
 
     #[external("utility")]
-    unconstrained fn lookup_validity(
-        consumer: AztecAddress,
-        inner_hash: Field,
-    ) -> bool {
-        let public_key = self.storage.signing_public_key.view_note();
-        let message_hash = compute_authwit_message_hash(
-            consumer,
-            self.context.chain_id(),
-            self.context.version(),
-            inner_hash,
-        );
-        let signature_fields: [Field; 64] = get_auth_witness(message_hash);
-        let mut signature: [u8; 64] = [0; 64];
-        for i in 0..64 {
-            signature[i] = signature_fields[i] as u8;
-        }
-        let pub_key = std::embedded_curve_ops::EmbeddedCurvePoint {
-            x: public_key.x,
-            y: public_key.y,
-        };
-        let valid_in_private = schnorr::verify_signature(
-            pub_key,
-            signature,
-            message_hash.to_be_bytes::<32>(),
-        );
-        let nullifier = compute_authwit_nullifier(self.address, inner_hash);
-        let siloed_nullifier =
-            compute_siloed_nullifier(consumer, nullifier);
-        let low_nullifier_witness = get_low_nullifier_membership_witness(
-            self.context.block_header(),
-            siloed_nullifier,
-        );
-        let is_spent =
-            low_nullifier_witness.leaf_preimage.nullifier == siloed_nullifier;
-        !is_spent & valid_in_private
+    unconstrained fn lookup_validity(_consumer: AztecAddress, _inner_hash: Field) -> bool {
+        // Third-party authwit is disabled (see verify_private_authwit), so no
+        // authwit is ever valid. The stock implementation would report true for
+        // one that verify_private_authwit then rejects, telling an off-chain
+        // caller to submit a transaction guaranteed to revert.
+        false
     }
 
     // ================================================================
     // Helpers
     // ================================================================
 
-    // Binds the caller-declared spending to the transfer actually executed by
-    // the payload, so `check_spending_public` cannot be fed values the caller
-    // invents while the payload moves a different amount to a different
-    // recipient.
+    // Binds the caller-declared spending to the transfer the payload actually
+    // executes, so check_spending_public cannot be fed invented values.
     //
-    // createNote issues exactly one private `transfer_to_private(to, amount)`
-    // call. Its `args_hash` is `hash_args([to.to_field(), amount])` -- the same
-    // encoding the SDK uses for private call args. `AppPayload` does not expose
-    // its calls as public fields, so we read them through the derived Serialize
-    // layout: `[FunctionCall; 5]` followed by `tx_nonce`, each FunctionCall
-    // serialized as 6 fields in declaration order
-    // (args_hash, function_selector, target_address, is_public,
-    //  hide_msg_sender, is_static). A call is empty when `target_address == 0`.
-    //
-    // Requiring exactly one non-empty call whose `args_hash` matches the
-    // reconstruction binds BOTH recipient and amount to the real transfer: the
-    // single executed call receives exactly [declared_recipient, declared_amount]
-    // and no hidden second call can ride along.
+    // AppPayload does not expose its calls, so they are read through the derived
+    // Serialize layout: [FunctionCall; 5] then tx_nonce, each call 6 fields in
+    // declaration order (args_hash, selector, target, is_public,
+    // hide_msg_sender, is_static). Empty when target == 0. Pinned by
+    // function_call_serialize_layout.
     #[contract_library_method]
     fn assert_declared_matches_transfer(
         app_payload: AppPayload,

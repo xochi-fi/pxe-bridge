@@ -144,7 +144,8 @@ class SpendingLimitAuthWitnessProvider implements AuthWitnessProvider {
       messageHash,
       this.signingPrivateKey,
     );
-    return new AuthWitness(messageHash, [...signature.toBuffer()]);
+    // Four limb Fields, not 64 bytes. is_valid_impl reads [Field; 4].
+    return new AuthWitness(messageHash, signature.toLimbFields());
   }
 }
 
