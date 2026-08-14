@@ -46,6 +46,11 @@ pub contract SpendingLimitAccount {
     // Timelock delay for parameter changes (blocks).
     global TIMELOCK_BLOCKS: u64 = 5;
 
+    // How long a matured proposal stays applicable before it must be
+    // re-proposed. Bounds the window in which an armed proposal is useful to a
+    // compromised admin; see apply_limits.
+    global APPLY_WINDOW_BLOCKS: u64 = 7200;
+
     // Domain separator for combined (payload + spending info) hash.
     // Must match DOM_SEP_SPENDING_LIMIT in the TypeScript entrypoint.
     global DOM_SEP__SPENDING_LIMIT: u32 = 10042;
@@ -341,12 +346,20 @@ pub contract SpendingLimitAccount {
 
     #[external("public")]
     fn apply_limits() {
+        // Without this, anyone -- including the signing-key holder -- could
+        // apply an abandoned proposal at a moment of their choosing.
+        let caller = self.context.maybe_msg_sender().unwrap();
+        assert(caller == self.storage.admin.read(), "Not admin");
+
         let change_block = self.storage.pending_change_block.read() as u64;
         assert(change_block != 0, "No pending changes");
-        assert(
-            self.context.block_number() as u64 >= change_block,
-            "Timelock not expired",
-        );
+        let now = self.context.block_number() as u64;
+        assert(now >= change_block, "Timelock not expired");
+        // Proposals expire. Without an upper bound the timelock delivers public
+        // notice but no enforcement: a compromised admin proposes maximum
+        // limits on day 0, waits weeks until the account is at peak balance,
+        // then applies and drains in a single block.
+        assert(now < change_block + APPLY_WINDOW_BLOCKS, "Proposal expired");
 
         let new_max = self.storage.pending_max_amount.read();
         let new_daily = self.storage.pending_daily_limit.read();
@@ -359,6 +372,20 @@ pub contract SpendingLimitAccount {
         self.storage.daily_limit.write(new_daily);
 
         // Clear pending state
+        self.storage.pending_max_amount.write(0);
+        self.storage.pending_daily_limit.write(0);
+        self.storage.pending_change_block.write(0);
+    }
+
+    // Withdraw a proposal before it is applied.
+    #[external("public")]
+    fn cancel_limits() {
+        let caller = self.context.maybe_msg_sender().unwrap();
+        assert(caller == self.storage.admin.read(), "Not admin");
+        assert(
+            self.storage.pending_change_block.read() != 0,
+            "No pending changes",
+        );
         self.storage.pending_max_amount.write(0);
         self.storage.pending_daily_limit.write(0);
         self.storage.pending_change_block.write(0);
