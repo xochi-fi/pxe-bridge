@@ -45,6 +45,28 @@ export async function waitForNode(url: string, timeoutMs = 120_000): Promise<voi
 }
 
 /**
+ * SponsoredFPC payment method, so a test account with no fee juice can still
+ * send transactions. The bridge uses the same mechanism for its own account
+ * deployment; without it every send() fails with "Not enough balance for fee
+ * payer to pay for transaction".
+ */
+export async function sponsoredFee(wallet: unknown): Promise<unknown> {
+  const { SponsoredFPCContract } = await import("@aztec/noir-contracts.js/SponsoredFPC");
+  const { SponsoredFeePaymentMethod } = await import("@aztec/aztec.js/fee/testing");
+  const { getContractInstanceFromInstantiationParams } = await import("@aztec/stdlib/contract");
+  const { Fr } = await import("@aztec/aztec.js/fields");
+
+  const instance = await getContractInstanceFromInstantiationParams(
+    SponsoredFPCContract.artifact,
+    { salt: new Fr(0) },
+  );
+  await (wallet as {
+    registerContract: (i: unknown, a: unknown) => Promise<unknown>;
+  }).registerContract(instance, SponsoredFPCContract.artifact);
+  return new SponsoredFeePaymentMethod(instance.address);
+}
+
+/**
  * Deploys an 18-decimal test token with `admin` as its minter.
  *
  * v5.1.0 requires an explicit `from` on send(), and send() resolves to
@@ -66,14 +88,14 @@ export async function deployTestToken(wallet: unknown, admin: string): Promise<s
         symbol: string,
         decimals: number,
       ) => {
-        send: (o: { from: unknown }) => Promise<{
+        send: (o: { from: unknown; fee: unknown }) => Promise<{
           contract: { address: { toString: () => string } };
         }>;
       };
     }
   )
     .deploy(wallet, adminAddress, "TestToken", "TST", 18)
-    .send({ from: adminAddress });
+    .send({ from: adminAddress, fee: { paymentMethod: await sponsoredFee(wallet) } });
 
   return contract.address.toString();
 }

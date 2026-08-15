@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { AztecClient } from "../../src/aztec-client.js";
 import type { SpendingLimitConfig } from "../../src/spending-limit-account.js";
-import { getTestConfig, deployTestToken } from "./helpers.js";
+import { getTestConfig, deployTestToken, sponsoredFee } from "./helpers.js";
 
 /**
  * The first e2e coverage of the on-chain spending-limit account.
@@ -196,12 +196,16 @@ async function removeRecipient(
   const c = await (
     Contract as unknown as {
       at: (a: unknown, art: unknown, w: unknown) => Promise<{
-        methods: Record<string, (...a: unknown[]) => { send: (o: { from: unknown }) => Promise<unknown> }>;
+        methods: Record<
+        string,
+        (...a: unknown[]) => { send: (o: { from: unknown; fee: unknown }) => Promise<unknown> }
+      >;
       }>;
     }
   ).at(AztecAddress.fromStringUnsafe(account), artifact, wallet);
   await c.methods["remove_recipient"]!(AztecAddress.fromStringUnsafe(recipient)).send({
     from: AztecAddress.fromStringUnsafe(admin),
+    fee: { paymentMethod: await sponsoredFee(wallet) },
   });
 }
 
@@ -217,14 +221,20 @@ async function mintTo(
   const contract = await (
     TokenContract as unknown as {
       at: (a: unknown, w: unknown) => Promise<{
-        methods: Record<string, (...a: unknown[]) => { send: (o: { from: unknown }) => Promise<unknown> }>;
+        methods: Record<
+        string,
+        (...a: unknown[]) => { send: (o: { from: unknown; fee: unknown }) => Promise<unknown> }
+      >;
       }>;
     }
   ).at(AztecAddress.fromStringUnsafe(token), wallet);
   await contract.methods["mint_to_private"]!(
     AztecAddress.fromStringUnsafe(to),
     amount,
-  ).send({ from: AztecAddress.fromStringUnsafe(minter) });
+  ).send({
+    from: AztecAddress.fromStringUnsafe(minter),
+    fee: { paymentMethod: await sponsoredFee(wallet) },
+  });
 }
 
 async function balanceOf(
