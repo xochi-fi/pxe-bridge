@@ -683,6 +683,7 @@ pub contract SpendingLimitAccount {
     // selector, a non-zero target, and all three flags clear.
     global TEST_TOKEN: Field = 42;
 
+    #[contract_library_method]
     fn valid_payload(args_hash: Field) -> [Field; 31] {
         let mut serialized = [0; 31];
         serialized[0] = args_hash;
@@ -787,6 +788,7 @@ pub contract SpendingLimitAccount {
         assert(BUCKET_SECONDS == 3600, "hourly buckets expected");
     }
 
+    #[contract_library_method]
     fn empty_buckets() -> [u128; BUCKET_COUNT] {
         [0; BUCKET_COUNT]
     }
