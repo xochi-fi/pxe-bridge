@@ -106,6 +106,11 @@ let spendingLimitConfig: SpendingLimitConfig | undefined;
 const SPENDING_LIMIT_ADMIN = process.env["PXE_BRIDGE_SPENDING_LIMIT_ADMIN"];
 const SPENDING_LIMIT_TOKEN = process.env["PXE_BRIDGE_SPENDING_LIMIT_TOKEN"];
 const SPENDING_LIMIT_SEED = process.env["PXE_BRIDGE_SPENDING_LIMIT_SEED_RECIPIENT"];
+// Defaults to 1 (no floor), which is the only value a freshly seeded
+// single-entry allowlist can satisfy. Raise it as the allowlist grows.
+const SPENDING_LIMIT_MIN_ANON = Number(
+  process.env["PXE_BRIDGE_SPENDING_LIMIT_MIN_ANONYMITY"] ?? "1",
+);
 if (SPENDING_LIMIT_ADMIN) {
   if (!/^0x[0-9a-fA-F]{64}$/.test(SPENDING_LIMIT_ADMIN)) {
     console.error("[pxe-bridge] PXE_BRIDGE_SPENDING_LIMIT_ADMIN must be a 32-byte hex address");
@@ -126,12 +131,23 @@ if (SPENDING_LIMIT_ADMIN) {
     );
     process.exit(1);
   }
+  if (
+    !Number.isInteger(SPENDING_LIMIT_MIN_ANON) ||
+    SPENDING_LIMIT_MIN_ANON < 1 ||
+    SPENDING_LIMIT_MIN_ANON > 8
+  ) {
+    console.error(
+      "[pxe-bridge] PXE_BRIDGE_SPENDING_LIMIT_MIN_ANONYMITY must be an integer in [1, 8]",
+    );
+    process.exit(1);
+  }
   spendingLimitConfig = {
     maxAmountPerTx: limitsConfig.maxAmount ?? 0n,
     dailyLimit: limitsConfig.dailyLimit ?? 0n,
     admin: SPENDING_LIMIT_ADMIN,
     token: SPENDING_LIMIT_TOKEN,
     seedRecipient: SPENDING_LIMIT_SEED,
+    minAnonymitySet: SPENDING_LIMIT_MIN_ANON,
   };
 }
 

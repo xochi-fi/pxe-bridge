@@ -59,6 +59,14 @@ export interface SpendingLimitConfig {
    * bridge could not transfer for 24 hours after each cutover.
    */
   seedRecipient: string; // AztecAddress as 0x-prefixed 64-char hex
+  /**
+   * How many allowlist slots a transfer must carry, so a degenerate client
+   * cannot publish the recipient by carrying only its slot. 1 means no floor.
+   * Stored on-chain and changed only through the limits timelock, so it cannot
+   * rise underneath an already-proven transaction. Raise it as the allowlist
+   * grows; the contract does not do so automatically.
+   */
+  minAnonymitySet: number;
 }
 
 // ============================================================
@@ -126,6 +134,7 @@ export class SpendingLimitAccountContract implements AccountContract {
         AztecAddress.fromStringUnsafe(this.config.admin),
         AztecAddress.fromStringUnsafe(this.config.token),
         AztecAddress.fromStringUnsafe(this.config.seedRecipient),
+        this.config.minAnonymitySet,
       ],
     };
   }

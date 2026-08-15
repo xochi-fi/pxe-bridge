@@ -70,17 +70,23 @@ pub contract SpendingLimitAccount {
     global ALLOWLIST_SIZE: u32 = 8;
 
     // Floor on how many allowlist slots a transfer must carry, so a degenerate
-    // client cannot publish the recipient by carrying only its slot. Floored at
-    // live_count, since you cannot hide among more entries than exist.
+    // client cannot publish the recipient by carrying only its slot.
+    //
+    // STORED, not derived from live_count. Deriving it meant an addition that
+    // grew the list past the floor raised it underneath transactions that were
+    // already proven, reverting them after their fee had been committed. A
+    // stored floor cannot move except through propose_limits/apply_limits, so
+    // it can only change with the full timelock's notice and never surprises an
+    // in-flight transaction.
     //
     // This is a BACKSTOP, not the anonymity mechanism. The set the recipient
     // actually hides in is whatever the client carries, and the client rule is
     // to carry every live slot. The contract cannot enforce that the mask is
-    // chosen independently of the recipient, so what it guarantees is a count,
-    // not unlinkability. Four is half of ALLOWLIST_SIZE: high enough to make a
-    // one-slot hint useless, low enough that additions rarely cross it (see
-    // assert_hint_masks_live).
-    global MIN_ANONYMITY_SET: u32 = 4;
+    // chosen independently of the recipient, so it guarantees a count, not
+    // unlinkability.
+    //
+    // Raising it is an operator responsibility as the allowlist grows: an
+    // account left at the construction value keeps the weaker guarantee.
 
     // Domain separator for combined (payload + spending info) hash.
     // Must match DOM_SEP_SPENDING_LIMIT in the TypeScript entrypoint.
@@ -131,6 +137,9 @@ pub contract SpendingLimitAccount {
         // recipient out of the per-transfer call does not make the list secret.
         allowlist: Map<Field, PublicMutable<AztecAddress, Context>, Context>,
 
+        // See the note above ALLOWLIST_SIZE. 1 means "no floor".
+        min_anonymity_set: PublicMutable<u32, Context>,
+
         // Timelocked pending addition.
         pending_recipient: PublicMutable<AztecAddress, Context>,
         pending_recipient_time: PublicMutable<u64, Context>,
@@ -143,6 +152,7 @@ pub contract SpendingLimitAccount {
         // then truncates on write.
         pending_max_amount: PublicMutable<u128, Context>,
         pending_daily_limit: PublicMutable<u128, Context>,
+        pending_min_anonymity: PublicMutable<u32, Context>,
         pending_change_time: PublicMutable<u64, Context>,
 
         // ---- Initialization flag ----
@@ -163,6 +173,7 @@ pub contract SpendingLimitAccount {
         admin_address: AztecAddress,
         token_address: AztecAddress,
         seed_recipient: AztecAddress,
+        initial_min_anonymity: u32,
     ) {
         let pub_key_note = PublicKeyNote {
             x: signing_pub_key_x,
@@ -185,6 +196,7 @@ pub contract SpendingLimitAccount {
                 admin_address,
                 token_address,
                 seed_recipient,
+                initial_min_anonymity,
             )
             .enqueue(self.context);
     }
@@ -197,6 +209,7 @@ pub contract SpendingLimitAccount {
         admin_address: AztecAddress,
         token_address: AztecAddress,
         seed_recipient: AztecAddress,
+        initial_min_anonymity: u32,
     ) {
         let caller = self.context.maybe_msg_sender().unwrap();
         assert(
@@ -216,6 +229,8 @@ pub contract SpendingLimitAccount {
         // hours after each cutover.
         assert(!seed_recipient.is_zero(), "Seed recipient must not be zero");
         self.storage.allowlist.at(0 as Field).write(seed_recipient);
+        assert_anonymity_valid(initial_min_anonymity);
+        self.storage.min_anonymity_set.write(initial_min_anonymity);
         self.storage.admin.initialize(admin_address);
         self.storage.permitted_token.initialize(token_address);
         self.storage.initialized.write(true);
@@ -397,7 +412,7 @@ pub contract SpendingLimitAccount {
         for i in 0..ALLOWLIST_SIZE {
             live[i] = self.storage.allowlist.at(i as Field).read().to_field();
         }
-        assert_hint_masks_live(allowlist_hint, live);
+        assert_hint_masks_live(allowlist_hint, live, self.storage.min_anonymity_set.read());
 
         // --- Per-tx limit ---
         // Unconditional: zero is not a storable limit (assert_limits_valid),
@@ -448,14 +463,16 @@ pub contract SpendingLimitAccount {
     // ================================================================
 
     #[external("public")]
-    fn propose_limits(new_max_per_tx: u128, new_daily_limit: u128) {
+    fn propose_limits(new_max_per_tx: u128, new_daily_limit: u128, new_min_anonymity: u32) {
         let caller = self.context.maybe_msg_sender().unwrap();
         assert(caller == self.storage.admin.read(), "Not admin");
         // Validate at PROPOSE time as well as at APPLY time, so an invalid
         // proposal cannot sit armed for the whole timelock.
         assert_limits_valid(new_max_per_tx, new_daily_limit);
+        assert_anonymity_valid(new_min_anonymity);
         self.storage.pending_max_amount.write(new_max_per_tx);
         self.storage.pending_daily_limit.write(new_daily_limit);
+        self.storage.pending_min_anonymity.write(new_min_anonymity);
 
         self.storage.pending_change_time.write(
             self.context.timestamp() + PARAM_TIMELOCK_SECONDS,
@@ -481,17 +498,21 @@ pub contract SpendingLimitAccount {
 
         let new_max = self.storage.pending_max_amount.read();
         let new_daily = self.storage.pending_daily_limit.read();
+        let new_anon = self.storage.pending_min_anonymity.read();
 
         // Same validation as construction: an unvalidated write here can store
         // limits that make every subsequent spend revert.
         assert_limits_valid(new_max, new_daily);
+        assert_anonymity_valid(new_anon);
 
         self.storage.max_amount_per_tx.write(new_max);
         self.storage.daily_limit.write(new_daily);
+        self.storage.min_anonymity_set.write(new_anon);
 
         // Clear pending state
         self.storage.pending_max_amount.write(0);
         self.storage.pending_daily_limit.write(0);
+        self.storage.pending_min_anonymity.write(0);
         self.storage.pending_change_time.write(0);
     }
 
@@ -506,6 +527,7 @@ pub contract SpendingLimitAccount {
         );
         self.storage.pending_max_amount.write(0);
         self.storage.pending_daily_limit.write(0);
+        self.storage.pending_min_anonymity.write(0);
         self.storage.pending_change_time.write(0);
     }
 
@@ -559,8 +581,8 @@ pub contract SpendingLimitAccount {
         // apparent anonymity set without adding a candidate.
         assert(!is_allowlisted(entries, recipient.to_field()), "Already allowlisted");
 
-        let (found, index) = first_free_slot(entries);
-        assert(found, "Allowlist is full");
+        let index = first_free_slot(entries);
+        assert(index < ALLOWLIST_SIZE, "Allowlist is full");
         self.storage.allowlist.at(index as Field).write(recipient);
 
         self.storage.pending_recipient.write(AztecAddress::from_field(0));
@@ -799,17 +821,19 @@ pub contract SpendingLimitAccount {
         n
     }
 
+    // Returns ALLOWLIST_SIZE when the list is full. An earlier version returned
+    // (bool, u32) with index 0 on failure, so a caller who ignored the flag
+    // silently overwrote slot 0 -- the seed recipient. An out-of-range index
+    // cannot be used by accident: writing it would be a bounds failure.
     #[contract_library_method]
-    fn first_free_slot(entries: [Field; ALLOWLIST_SIZE]) -> (bool, u32) {
-        let mut found = false;
-        let mut index: u32 = 0;
+    fn first_free_slot(entries: [Field; ALLOWLIST_SIZE]) -> u32 {
+        let mut index: u32 = ALLOWLIST_SIZE;
         for i in 0..ALLOWLIST_SIZE {
-            if (entries[i] == 0) & !found {
-                found = true;
+            if (entries[i] == 0) & (index == ALLOWLIST_SIZE) {
                 index = i;
             }
         }
-        (found, index)
+        index
     }
 
     // The hint must be `live` with some slots blanked IN PLACE.
@@ -829,6 +853,7 @@ pub contract SpendingLimitAccount {
     fn assert_hint_masks_live(
         hint: [Field; ALLOWLIST_SIZE],
         live: [Field; ALLOWLIST_SIZE],
+        floor: u32,
     ) {
         for i in 0..ALLOWLIST_SIZE {
             assert(
@@ -840,14 +865,21 @@ pub contract SpendingLimitAccount {
         // Anonymity floor. Duplicates are impossible, so a count of non-zero
         // entries is the size of the set the recipient hides in.
         //
-        // Known interaction: an addition that raises live_count from below
-        // MIN_ANONYMITY_SET to at or above it invalidates in-flight
-        // transactions, because the floor rises under them. Bounded to that one
-        // transition, and at those sizes the anonymity set is weak regardless.
-        let live_count = count_nonzero(live);
-        let hint_count = count_nonzero(hint);
-        let floor = if live_count < MIN_ANONYMITY_SET { live_count } else { MIN_ANONYMITY_SET };
-        assert(hint_count >= floor, "Hint below minimum anonymity set");
+        // The floor is passed in from stored state rather than derived from
+        // `live`. An earlier revision computed it as min(k, live_count), which
+        // meant an addition growing the list past k raised the floor underneath
+        // transactions that were already proven and reverted them after their
+        // fee had been committed. A stored floor only moves through
+        // apply_limits, i.e. with the full timelock's notice.
+        assert(count_nonzero(hint) >= floor, "Hint below minimum anonymity set");
+    }
+
+    // A floor of 1 means no floor: the recipient may be the only entry carried.
+    // It cannot exceed the allowlist, which would make every hint unbuildable.
+    #[contract_library_method]
+    fn assert_anonymity_valid(floor: u32) {
+        assert(floor >= 1, "Anonymity floor must be at least 1");
+        assert(floor <= ALLOWLIST_SIZE, "Anonymity floor exceeds allowlist size");
     }
 
     // Zero is rejected in both slots. It would mean "unlimited", which is a
@@ -1014,7 +1046,7 @@ pub contract SpendingLimitAccount {
 
     #[test]
     fn full_hint_is_accepted() {
-        assert_hint_masks_live(live4(), live4());
+        assert_hint_masks_live(live4(), live4(), 4);
     }
 
     #[test]
@@ -1039,7 +1071,7 @@ pub contract SpendingLimitAccount {
         let hint = live4();
         let mut after_removal = live4();
         after_removal[2] = 0; // C revoked
-        assert_hint_masks_live(hint, after_removal);
+        assert_hint_masks_live(hint, after_removal, 4);
     }
 
     // A fabricated entry is not live at its position.
@@ -1047,7 +1079,7 @@ pub contract SpendingLimitAccount {
     fn fabricated_hint_entry_is_rejected() {
         let mut hint = live4();
         hint[1] = 0x9999;
-        assert_hint_masks_live(hint, live4());
+        assert_hint_masks_live(hint, live4(), 4);
     }
 
     // Positional, so a permutation of the same set is not a valid mask. A set
@@ -1057,7 +1089,7 @@ pub contract SpendingLimitAccount {
         let mut hint = live4();
         hint[0] = B;
         hint[1] = A;
-        assert_hint_masks_live(hint, live4());
+        assert_hint_masks_live(hint, live4(), 4);
     }
 
     // THE M2 GUARANTEE. A hint carrying only the recipient publishes it, so the
@@ -1066,7 +1098,7 @@ pub contract SpendingLimitAccount {
     fn minimal_hint_is_rejected() {
         let mut hint: [Field; ALLOWLIST_SIZE] = [0; ALLOWLIST_SIZE];
         hint[2] = C;
-        assert_hint_masks_live(hint, live4());
+        assert_hint_masks_live(hint, live4(), 4);
     }
 
     // Duplicates cannot inflate the count past the floor, because position is
@@ -1078,7 +1110,7 @@ pub contract SpendingLimitAccount {
         hint[1] = C;
         hint[2] = C;
         hint[3] = C;
-        assert_hint_masks_live(hint, live4());
+        assert_hint_masks_live(hint, live4(), 4);
     }
 
     // ADDITIONS must not invalidate in-flight transactions: a slot empty at
@@ -1089,7 +1121,7 @@ pub contract SpendingLimitAccount {
         let hint = live4();
         let mut after_addition = live4();
         after_addition[4] = 0xeeee;
-        assert_hint_masks_live(hint, after_addition);
+        assert_hint_masks_live(hint, after_addition, 4);
     }
 
     // Below the floor the requirement degrades to live_count: you cannot hide
@@ -1099,14 +1131,48 @@ pub contract SpendingLimitAccount {
         let mut live: [Field; ALLOWLIST_SIZE] = [0; ALLOWLIST_SIZE];
         live[0] = A;
         live[1] = B;
-        assert_hint_masks_live(live, live);
+        // Floor of 2 is what an operator would set for a 2-entry allowlist.
+        assert_hint_masks_live(live, live, 2);
+    }
+
+    // REGRESSION. With the floor derived as min(k, live_count), growing the
+    // list past k raised the floor under already-proven transactions and
+    // reverted them. The floor is stored now, so an addition cannot move it and
+    // a hint built before the addition still passes.
+    #[test]
+    fn addition_past_the_floor_does_not_invalidate_an_inflight_hint() {
+        let mut live_before: [Field; ALLOWLIST_SIZE] = [0; ALLOWLIST_SIZE];
+        live_before[0] = A;
+        live_before[1] = B;
+        let hint = live_before; // carries both live slots, floor was 2
+
+        let mut live_after = live_before;
+        live_after[2] = C;
+        live_after[3] = D; // list grows to 4, past the old derived floor
+
+        assert_hint_masks_live(hint, live_after, 2);
+    }
+
+    #[test]
+    fn floor_is_enforced_as_given() {
+        let mut hint = live4();
+        hint[3] = 0; // carry 3 of 4
+        assert_hint_masks_live(hint, live4(), 3);
+    }
+
+    #[test(should_fail_with = "Anonymity floor must be at least 1")]
+    fn zero_anonymity_floor_rejected() {
+        assert_anonymity_valid(0);
+    }
+
+    #[test(should_fail_with = "Anonymity floor exceeds allowlist size")]
+    fn oversized_anonymity_floor_rejected() {
+        assert_anonymity_valid(ALLOWLIST_SIZE + 1);
     }
 
     #[test]
     fn first_free_slot_finds_the_lowest_gap() {
-        let (found, index) = first_free_slot(live4());
-        assert(found, "a gap exists");
-        assert(index == 4, "lowest free slot is 4");
+        assert(first_free_slot(live4()) == 4, "lowest free slot is 4");
     }
 
     #[test]
@@ -1115,8 +1181,10 @@ pub contract SpendingLimitAccount {
         for i in 0..ALLOWLIST_SIZE {
             e[i] = (i as Field) + 1;
         }
-        let (found, _index) = first_free_slot(e);
-        assert(!found, "a full allowlist has no free slot");
+        assert(
+            first_free_slot(e) == ALLOWLIST_SIZE,
+            "a full allowlist reports an out-of-range slot",
+        );
     }
 
     // ---- M1: bucketed sliding window ----
