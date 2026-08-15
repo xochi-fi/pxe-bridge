@@ -95,10 +95,10 @@ jobs:
         with:
           name: contract-artifact
           path: contracts/spending_limit_account/target
+      # No PXE_BRIDGE_SECRET_KEY override: tests/e2e/helpers.ts supplies a valid
+      # BN254 field element. This used to pass the Anvil secp256k1 test key,
+      # which exceeds the BN254 modulus and cannot be an Aztec secret at all.
       - run: npm run test:e2e:up
-        env:
-          # Well-known Hardhat/Anvil test key #0 -- never use with real funds
-          PXE_BRIDGE_SECRET_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 
   docker:
     needs: [check, contract]

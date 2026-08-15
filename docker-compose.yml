@@ -39,8 +39,10 @@ services:
     ports:
       - "8547:8547"
     environment:
-      # Well-known Hardhat/Anvil test key #0 -- never use with real funds
-      PXE_BRIDGE_SECRET_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+      # Local development only. Must be a BN254 field element: the Anvil
+      # secp256k1 test key that used to sit here exceeds the modulus and is
+      # rejected by Fr.fromBuffer.
+      PXE_BRIDGE_SECRET_KEY: "0x000000000000000000000000000000000000000000000000000000000000beef"
       AZTEC_NODE_URL: http://aztec-sandbox:8080
     depends_on:
       aztec-sandbox:
