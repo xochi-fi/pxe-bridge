@@ -5,6 +5,7 @@ import { SponsoredFPCContract } from "@aztec/noir-contracts.js/SponsoredFPC";
 import type { AztecAddress } from "@aztec/aztec.js/addresses";
 import type { CreateNoteParams, CreateNoteResult, FeeJuiceClaim, IAztecClient } from "./types.js";
 import {
+  ALLOWLIST_SIZE,
   SpendingLimitAccountContract,
   type SpendingLimitConfig,
 } from "./spending-limit-account.js";
@@ -102,16 +103,34 @@ export class AztecClient implements IAztecClient {
       const { NO_FROM } = await import("@aztec/aztec.js/account");
       const paymentMethod = await this.buildFeePaymentMethod(address);
 
+      // The spending-limit account cannot deploy itself. Self-deployment routes
+      // through the account's OWN entrypoint (only the account can name itself
+      // fee payer), and that call carries a fee-related payload rather than a
+      // transfer, so the single-call guard rejects it with "Transfer does not
+      // match declared spending". This is NM-1019 [Info], reproduced in e2e.
+      //
+      // Deploying from a separate funded account runs only the constructor, so
+      // the guard is never reached. DeployAccountMethod hardcodes
+      // universalDeploy, i.e. deployer = AztecAddress.ZERO in the address
+      // preimage, so which account pays does not move the address.
+      //
+      // A standard Schnorr account has no such guard and still self-deploys.
+      const deployer = this.spendingLimitConfig
+        ? await this.ensureDeployer(secret, salt)
+        : NO_FROM;
+
       const deployMethod = await accountManager.getDeployMethod();
-      // Self-deployment: NO_FROM tells EmbeddedWallet.sendTx() to use
-      // DefaultEntrypoint (bypassing account lookup in WalletDB), and
-      // DeployAccountMethod maps it to deployer=AztecAddress.ZERO which
-      // triggers the multicall self-deploy path where the contract is
-      // constructed before it pays for its own fee.
       try {
         await deployMethod.send({
-          from: NO_FROM,
+          from: deployer,
           fee: { paymentMethod },
+          // Both default to true, which leaves the account initialized but
+          // unpublished: the node cannot resolve it and its public functions
+          // cannot execute. Publication costs more than a self-paying account
+          // could cover, which is why it only became affordable once a
+          // separately funded deployer pays.
+          skipClassPublication: false,
+          skipInstancePublication: false,
         });
         console.log("[pxe-bridge] Account deployed");
       } catch (err) {
@@ -265,6 +284,49 @@ export class AztecClient implements IAztecClient {
     return accountManager;
   }
 
+  /**
+   * Deploys (once) a plain Schnorr account to act as deployer for the
+   * spending-limit account, and returns its address.
+   *
+   * Derived from the same master secret under a different salt, so it needs no
+   * separate key material and is reproducible across restarts. It self-deploys
+   * via SponsoredFPC, which a standard Schnorr account can do because its
+   * entrypoint has no single-call restriction.
+   */
+  private async ensureDeployer(
+    secret: import("@aztec/aztec.js/fields").Fr,
+    baseSalt: import("@aztec/aztec.js/fields").Fr,
+  ): Promise<AztecAddress> {
+    const { NO_FROM } = await import("@aztec/aztec.js/account");
+    const { deriveMasterMessageSigningSecretKey } = await import("@aztec/stdlib/keys");
+    const { Fr } = await import("@aztec/aztec.js/fields");
+
+    const deployerSalt = new Fr(baseSalt.toBigInt() + 1n);
+    const manager = await this.wallet!.createSchnorrAccount(
+      secret,
+      deployerSalt,
+      deriveMasterMessageSigningSecretKey(secret),
+    );
+    const deployerAddress = (await manager.getAccount()).getAddress();
+
+    if (!(await this.isContractDeployed(deployerAddress))) {
+      console.log("[pxe-bridge] Deploying deployer account...");
+      const paymentMethod = await this.buildFeePaymentMethod(deployerAddress);
+      try {
+        await (await manager.getDeployMethod()).send({
+          from: NO_FROM,
+          fee: { paymentMethod },
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (!message.includes("Existing nullifier")) {
+          throw err;
+        }
+      }
+    }
+    return deployerAddress;
+  }
+
   /** Deployed account address. Null until connect() completes. */
   getAddress(): string | null {
     return this.solverAddress ? this.solverAddress.toString() : null;
@@ -377,11 +439,27 @@ export class AztecClient implements IAztecClient {
       artifact as Parameters<typeof Contract.at>[1],
       this.wallet as unknown as Parameters<typeof Contract.at>[2],
     );
-    const entries = (await account.methods["get_allowlist"]!().simulate()) as unknown as unknown[];
-    if (!Array.isArray(entries)) {
-      throw new Error("get_allowlist did not return an array");
+    // `from` scopes the utility execution. Without it PXE throws, and its own
+    // error formatter then crashes on undefined args, masking the cause.
+    const entries = (await account.methods["get_allowlist"]!().simulate({
+      from: this.solverAddress,
+    })) as unknown;
+
+    // simulate() resolves to { result, offchainEffects, offchainMessages };
+    // the utility's [Field; N] return value is under `result`.
+    const value = (entries as { result?: unknown })?.result ?? entries;
+    const raw: unknown[] = Array.isArray(value)
+      ? value
+      : value && typeof value === "object"
+        ? Object.values(value as Record<string, unknown>)
+        : [];
+    if (raw.length !== ALLOWLIST_SIZE) {
+      throw new Error(
+        `get_allowlist returned ${raw.length} entries, expected ${ALLOWLIST_SIZE}`,
+      );
     }
-    return entries.map((e) => {
+
+    return raw.map((e) => {
       const v = typeof e === "bigint" ? e : BigInt((e as { toString(): string }).toString());
       return "0x" + v.toString(16).padStart(64, "0");
     });
