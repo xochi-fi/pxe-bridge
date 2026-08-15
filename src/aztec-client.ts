@@ -112,11 +112,24 @@ export class AztecClient implements IAztecClient {
         await deployMethod.send({
           from: NO_FROM,
           fee: { paymentMethod },
+          // Both default to true. Without publication the account is
+          // initialized but invisible to node.getContract(), so every connect()
+          // decides it must deploy again and the second attempt dies on the
+          // init nullifier. Publication is also required for the account's
+          // public functions to execute at all.
+          skipClassPublication: false,
+          skipInstancePublication: false,
         });
         console.log("[pxe-bridge] Account deployed");
       } catch (err) {
-        // Another instance may have deployed concurrently
-        if (await this.isContractDeployed(address)) {
+        // A concurrent deploy of the same account is not an error. The init
+        // nullifier is the authoritative signal: it can only already exist if
+        // the constructor has run, and it is emitted before the instance
+        // becomes visible to the node, so checking it avoids the window where
+        // isContractDeployed still reports false.
+        const message = err instanceof Error ? err.message : String(err);
+        const alreadyInitialized = message.includes("Existing nullifier");
+        if (alreadyInitialized || (await this.isContractDeployed(address))) {
           console.log("[pxe-bridge] Account deployed by another process");
         } else {
           throw err;
@@ -175,14 +188,15 @@ export class AztecClient implements IAztecClient {
       getContractInstance: (addr: AztecAddress) => Promise<unknown>;
       getContractArtifact: (classId: unknown) => Promise<unknown>;
     };
-    const existingInstance = await pxe.getContractInstance(instance.address);
-    if (!existingInstance) {
-      const existingArtifact = await pxe.getContractArtifact(instance.currentContractClassId);
-      const artifact = existingArtifact
-        ? undefined
-        : await this.spendingLimitContract.getContractArtifact();
-      await this.wallet!.registerContract(instance, artifact, secret);
-    }
+    // Register unconditionally. This was guarded on
+    // pxe.getContractInstance(address) being empty, but AccountManager.create()
+    // has already registered the instance by this point, so the guard always
+    // skipped and our artifact was never associated with the class. The wallet
+    // then resolved the address against the default account artifact and
+    // rejected our entrypoint selector with "Function with selector ... not
+    // found in the registered artifact ... (SimulatedSchnorrAccount)".
+    const artifact = await this.spendingLimitContract.getContractArtifact();
+    await this.wallet!.registerContract(instance, artifact, secret);
 
     // Store in WalletDB as 'schnorr' so simulation can find the account.
     // The actual send uses our custom entrypoint via the patched method below.
