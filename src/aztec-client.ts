@@ -112,13 +112,6 @@ export class AztecClient implements IAztecClient {
         await deployMethod.send({
           from: NO_FROM,
           fee: { paymentMethod },
-          // Both default to true. Without publication the account is
-          // initialized but invisible to node.getContract(), so every connect()
-          // decides it must deploy again and the second attempt dies on the
-          // init nullifier. Publication is also required for the account's
-          // public functions to execute at all.
-          skipClassPublication: false,
-          skipInstancePublication: false,
         });
         console.log("[pxe-bridge] Account deployed");
       } catch (err) {
@@ -211,19 +204,62 @@ export class AztecClient implements IAztecClient {
       signingKey: signingKey.toBuffer(),
     });
 
-    // Patch getAccountFromAddress so the real tx send path uses our
-    // custom entrypoint (with declared_amount/declared_recipient) instead
-    // of reconstructing a standard Schnorr account from WalletDB.
+    // EmbeddedWallet simulates through a STUB account: buildAccountOverrides
+    // rewrites the address's currentContractClassId to the stub class, and
+    // simulateTx builds the request with a 3-parameter DefaultAccountEntrypoint
+    // chosen from the WalletDB `type`. The SDK does this deliberately to skip
+    // the private kernel and real authorization during simulation.
+    //
+    // That is incompatible with a custom entrypoint. Ours takes six parameters,
+    // so its selector is absent from the stub artifact and simulation fails
+    // with "Function with selector ... not found in the registered artifact ...
+    // (SimulatedSchnorrAccount)". The override is also why gas was
+    // mis-estimated: under the stub class, check_spending_public is never
+    // enqueued, so the estimate omits the entire public half of the tx.
+    //
+    // Three patches, all scoped to this one address, so every other account
+    // keeps the fast stub path:
+    //   1. getAccountFromAddress  -- the send path builds our entrypoint
+    //   2. createStubAccount      -- simulation builds it too
+    //   3. buildAccountOverrides  -- simulation keeps our real contract class
+    // 2 and 3 must move together: our entrypoint against the stub class fails
+    // on the selector, and the stub entrypoint against our class omits the
+    // spending check.
     const customAccount = await accountManager.getAccount();
     const walletAny = this.wallet as unknown as {
       getAccountFromAddress: (addr: AztecAddress) => Promise<unknown>;
+      buildAccountOverrides: (addrs: AztecAddress[]) => Promise<Record<string, unknown>>;
+      accountContracts: {
+        createStubAccount: (completeAddress: unknown, type: string) => Promise<unknown>;
+      };
     };
+
     const originalGetAccount = walletAny.getAccountFromAddress.bind(this.wallet);
     walletAny.getAccountFromAddress = async (addr: AztecAddress) => {
       if (addr.equals(instance.address)) {
         return customAccount;
       }
       return originalGetAccount(addr);
+    };
+
+    const provider = walletAny.accountContracts;
+    const originalCreateStub = provider.createStubAccount.bind(provider);
+    provider.createStubAccount = async (completeAddress: unknown, type: string) => {
+      const addr = (completeAddress as { address: AztecAddress }).address;
+      if (addr && addr.equals(instance.address)) {
+        return customAccount;
+      }
+      return originalCreateStub(completeAddress, type);
+    };
+
+    const originalOverrides = walletAny.buildAccountOverrides.bind(this.wallet);
+    walletAny.buildAccountOverrides = async (addrs: AztecAddress[]) => {
+      const overrides = await originalOverrides(addrs);
+      // Leave our class intact. Simulation then runs the real private kernel
+      // for this account, which is slower but is the only way the simulated
+      // transaction matches the one that gets sent.
+      delete overrides[instance.address.toString()];
+      return overrides;
     };
 
     return accountManager;
@@ -352,7 +388,7 @@ export class AztecClient implements IAztecClient {
   }
 
   /**
-   * Whether the account is published ON CHAIN.
+   * Whether the account exists ON CHAIN.
    *
    * This must ask the node, not the PXE. AccountManager.create() registers the
    * instance with the local PXE before anything is deployed, so a PXE-side
@@ -367,6 +403,11 @@ export class AztecClient implements IAztecClient {
     const node = createAztecNodeClient(this.nodeUrl);
     const instance = await node.getContract(address);
     return instance !== undefined;
+    // NOTE: this reflects PUBLICATION. We do not force publication on deploy
+    // (it raised the fee beyond what SponsoredFPC covers), so a deployed but
+    // unpublished account reads as absent here. That is why the concurrent
+    // deploy path also treats "Existing nullifier" as success -- the init
+    // nullifier is the signal that survives either way.
   }
 
   private async buildFeePaymentMethod(
