@@ -215,6 +215,11 @@ export class AztecClient implements IAztecClient {
     return accountManager;
   }
 
+  /** Deployed account address. Null until connect() completes. */
+  getAddress(): string | null {
+    return this.solverAddress ? this.solverAddress.toString() : null;
+  }
+
   async createNote(params: CreateNoteParams): Promise<CreateNoteResult> {
     if (!this.wallet || !this.solverAddress) {
       throw new Error("Client not connected");
