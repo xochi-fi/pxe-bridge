@@ -39,7 +39,7 @@ jobs:
           curl -fsSL https://install.aztec.network | bash
           echo "$HOME/.aztec/bin" >> "$GITHUB_PATH"
       - name: Pin toolchain to the SDK version
-        run: aztec-up -v 5.1.0
+        run: aztec-up install 5.1.0
       - name: Contract unit tests (spending-limit guard)
         working-directory: contracts/spending_limit_account
         run: aztec-nargo test
