@@ -337,18 +337,21 @@ export class AztecClient implements IAztecClient {
     });
   }
 
+  /**
+   * Whether the account is published ON CHAIN.
+   *
+   * This must ask the node, not the PXE. AccountManager.create() registers the
+   * instance with the local PXE before anything is deployed, so a PXE-side
+   * lookup always answers "yes": connect() would log "Account recovered", skip
+   * the constructor, and leave the signing-key note uncreated. Every later
+   * transaction then fails inside is_valid_impl with "Failed to get a note".
+   * That went unnoticed because no test ever sent a transaction from an
+   * account this client had deployed.
+   */
   private async isContractDeployed(address: AztecAddress): Promise<boolean> {
-    const w = this.wallet as unknown as Record<string, unknown>;
-    if (!w["pxe"] || typeof w["pxe"] !== "object") {
-      throw new Error("Wallet missing PXE interface");
-    }
-    const pxe = w["pxe"] as {
-      getContractInstance: (addr: AztecAddress) => Promise<unknown>;
-    };
-    if (typeof pxe.getContractInstance !== "function") {
-      throw new Error("PXE missing getContractInstance method");
-    }
-    const instance = await pxe.getContractInstance(address);
+    const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
+    const node = createAztecNodeClient(this.nodeUrl);
+    const instance = await node.getContract(address);
     return instance !== undefined;
   }
 
