@@ -69,12 +69,34 @@ export interface SpendingLimitConfig {
   minAnonymitySet: number;
 }
 
+const ZERO_ADDRESS = "0x" + "0".repeat(64);
+
+/**
+ * Declared spending for the next transaction.
+ *
+ * Held by the contract and handed to every entrypoint BY REFERENCE. The SDK
+ * calls AccountContract.getAccount() afresh on each resolution and does not
+ * memoize, so an entrypoint owning its own copy of the declaration is reliably
+ * not the one that ends up building the request: the values are written to an
+ * orphan and the payload carries (0, zero address), which the on-chain guard
+ * rejects with "Transfer does not match declared spending".
+ */
+interface DeclaredSpending {
+  amount: bigint;
+  recipient: string;
+  allowlistHint: string[];
+}
+
 // ============================================================
 // Account contract
 // ============================================================
 
 export class SpendingLimitAccountContract implements AccountContract {
-  private _entrypoint: SpendingLimitEntrypoint | null = null;
+  private declared: DeclaredSpending = {
+    amount: 0n,
+    recipient: ZERO_ADDRESS,
+    allowlistHint: new Array(ALLOWLIST_SIZE).fill(ZERO_ADDRESS),
+  };
 
   constructor(
     private signingPrivateKey: GrumpkinScalarType,
@@ -87,15 +109,14 @@ export class SpendingLimitAccountContract implements AccountContract {
    * into the signed hash so the on-chain contract can verify them.
    */
   setDeclaredSpending(amount: bigint, recipient: string, allowlistHint: string[]): void {
-    if (!this._entrypoint) {
-      throw new Error("Account not initialized -- getAccount() must be called first");
-    }
     if (allowlistHint.length !== ALLOWLIST_SIZE) {
       throw new Error(`allowlistHint must have ${ALLOWLIST_SIZE} entries, got ${allowlistHint.length}`);
     }
-    this._entrypoint.declaredAmount = amount;
-    this._entrypoint.declaredRecipient = recipient;
-    this._entrypoint.allowlistHint = allowlistHint;
+    // Mutate in place. Replacing the object would strand the entrypoints
+    // already holding the old one, which is the bug this shape exists to stop.
+    this.declared.amount = amount;
+    this.declared.recipient = recipient;
+    this.declared.allowlistHint = allowlistHint;
   }
 
   // v5 AccountContract interface member. Address derivation includes an
@@ -156,8 +177,11 @@ export class SpendingLimitAccountContract implements AccountContract {
 
   getAccount(completeAddress: CompleteAddress): Account {
     const authProvider = this.getAuthWitnessProvider(completeAddress);
-    const entrypoint = new SpendingLimitEntrypoint(completeAddress.address, authProvider);
-    this._entrypoint = entrypoint;
+    const entrypoint = new SpendingLimitEntrypoint(
+      completeAddress.address,
+      authProvider,
+      this.declared,
+    );
     return new BaseAccount(entrypoint, authProvider, completeAddress);
   }
 }
@@ -201,15 +225,9 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
   constructor(
     private address: import("@aztec/stdlib/aztec-address").AztecAddress,
     private auth: AuthWitnessProvider,
+    /** Shared with the contract and every sibling entrypoint. Never reassign. */
+    private declared: DeclaredSpending,
   ) {}
-
-  /**
-   * The declared amount and recipient for the next transaction.
-   * Set this before calling createTxExecutionRequest.
-   */
-  public declaredAmount: bigint = 0n;
-  public declaredRecipient: string = "0x" + "0".repeat(64);
-  public allowlistHint: string[] = new Array(ALLOWLIST_SIZE).fill("0x" + "0".repeat(64));
 
   async createTxExecutionRequest(
     exec: import("@aztec/stdlib/tx").ExecutionPayload,
@@ -232,8 +250,8 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
     const encodedCalls = await EncodedAppEntrypointCalls.create(exec.calls, txNonce);
 
     // Build extended args: standard + declared_amount + declared_recipient
-    const declaredAmountFr = new Fr(this.declaredAmount);
-    const declaredRecipientAddr = AztecAddress.fromStringUnsafe(this.declaredRecipient);
+    const declaredAmountFr = new Fr(this.declared.amount);
+    const declaredRecipientAddr = AztecAddress.fromStringUnsafe(this.declared.recipient);
 
     const abi = this.getEntrypointAbi();
     const args = [
@@ -241,9 +259,9 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
       feePaymentMethodOptions,
       !!cancellable,
       // Raw bigint: the ABI parameter is a u128 integer, not a field.
-      this.declaredAmount,
+      this.declared.amount,
       declaredRecipientAddr,
-      this.allowlistHint.map((h) => Fr.fromString(h)),
+      this.declared.allowlistHint.map((h) => Fr.fromString(h)),
     ];
     const encodedArgs = encodeArguments(abi, args);
 
@@ -304,8 +322,8 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
 
     const encodedCalls = await EncodedAppEntrypointCalls.create(exec.calls, txNonce);
 
-    const declaredAmountFr = new Fr(this.declaredAmount);
-    const declaredRecipientAddr = AztecAddress.fromStringUnsafe(this.declaredRecipient);
+    const declaredAmountFr = new Fr(this.declared.amount);
+    const declaredRecipientAddr = AztecAddress.fromStringUnsafe(this.declared.recipient);
 
     const abi = this.getEntrypointAbi();
     const args = [
@@ -313,9 +331,9 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
       feePaymentMethodOptions,
       !!cancellable,
       // Raw bigint: the ABI parameter is a u128 integer, not a field.
-      this.declaredAmount,
+      this.declared.amount,
       declaredRecipientAddr,
-      this.allowlistHint.map((h) => Fr.fromString(h)),
+      this.declared.allowlistHint.map((h) => Fr.fromString(h)),
     ];
     const encodedArgs = encodeArguments(abi, args);
     const functionSelector = await FunctionSelector.fromNameAndParameters(abi.name, abi.parameters);

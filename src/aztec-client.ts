@@ -13,6 +13,18 @@ import {
 const MAX_TOKEN_CACHE_SIZE = 100;
 const TX_TIMEOUT_MS = 120_000; // 2 minutes
 
+/** The slice of AztecNode createNote needs to read a tx effect back. */
+interface TxEffectFields {
+  noteHashes?: { toString(): string }[];
+  nullifiers?: { toString(): string }[];
+}
+interface AztecNodeLike {
+  getTxReceipt(
+    txHash: never,
+    options: { includeTxEffect: true },
+  ): Promise<{ txEffect?: (TxEffectFields & { data?: TxEffectFields }) | undefined } | undefined>;
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
   const timeout = new Promise<never>((_, reject) => {
@@ -389,16 +401,17 @@ export class AztecClient implements IAztecClient {
     }
     const txHash = String(rawTxHash);
 
-    const commitments = Array.isArray(receiptInner["noteCommitments"])
-      ? receiptInner["noteCommitments"]
-      : undefined;
-    const nullifiers = Array.isArray(receiptInner["nullifierHashes"])
-      ? receiptInner["nullifierHashes"]
-      : undefined;
-    const noteCommitment =
-      commitments !== undefined && commitments.length > 0 ? String(commitments[0]) : undefined;
-    const nullifierHash =
-      nullifiers !== undefined && nullifiers.length > 0 ? String(nullifiers[0]) : undefined;
+    // v5 dropped noteCommitments/nullifierHashes from the receipt. The note
+    // hashes and nullifiers live on the tx effect, which send() does not
+    // attach, so it has to be fetched. Reading the old fields silently yielded
+    // undefined and every successful transfer reported "Incomplete transaction
+    // receipt".
+    const node = (this.wallet as unknown as { aztecNode: AztecNodeLike }).aztecNode;
+    const detailed = await node.getTxReceipt(rawTxHash as never, { includeTxEffect: true });
+    const effect = detailed?.txEffect?.data ?? detailed?.txEffect;
+
+    const noteCommitment = effect?.noteHashes?.[0]?.toString();
+    const nullifierHash = effect?.nullifiers?.[0]?.toString();
 
     if (!noteCommitment || !nullifierHash) {
       throw new Error("Incomplete transaction receipt");
@@ -491,7 +504,14 @@ export class AztecClient implements IAztecClient {
   private async buildFeePaymentMethod(
     accountAddress: AztecAddress,
   ): Promise<import("@aztec/aztec.js/fee").FeePaymentMethod> {
-    if (this.feeJuiceClaim) {
+    // A claim commits to its L2 recipient in the message hash, so it can only
+    // pay for the account it was bridged to. The deployer is a different
+    // account; handing it the solver's claim fails the message lookup with
+    // "No L1 to L2 message found for message hash".
+    const claimIsForThisAccount =
+      this.solverAddress !== null && this.solverAddress.equals(accountAddress);
+
+    if (this.feeJuiceClaim && claimIsForThisAccount) {
       console.log("[pxe-bridge] Using Fee Juice claim for deployment fee");
       const { FeeJuicePaymentMethodWithClaim } = await import("@aztec/aztec.js/fee");
       const { Fr } = await import("@aztec/aztec.js/fields");

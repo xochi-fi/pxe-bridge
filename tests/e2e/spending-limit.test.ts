@@ -1,7 +1,13 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { AztecClient } from "../../src/aztec-client.js";
 import type { SpendingLimitConfig } from "../../src/spending-limit-account.js";
-import { getTestConfig, deployTestToken, sponsoredFee } from "./helpers.js";
+import {
+  getTestConfig,
+  deployTestToken,
+  sponsoredFee,
+  fundFeeJuice,
+  mintOne,
+} from "./helpers.js";
 
 /**
  * The first e2e coverage of the on-chain spending-limit account.
@@ -33,6 +39,10 @@ const FUNDER_KEY = "0x0000000000000000000000000000000000000000000000000000000000
 const MAX_PER_TX = 1_000_000_000_000_000_000_000n; // 1000 tokens at 18 decimals
 const DAILY_LIMIT = 5_000_000_000_000_000_000_000n; // 5000 tokens
 const MINT_AMOUNT = 100_000_000_000_000_000_000_000n; // 100k tokens
+
+// Covers the deployment claim plus the transfers below, which the daily-window
+// test repeats until a limit rejects one.
+const FEE_JUICE_AMOUNT = 1_000_000_000_000_000_000_000n;
 
 // Any well-formed address works: the allowlist only ever compares equality.
 const SEED_RECIPIENT = "0x" + "11".repeat(32);
@@ -84,6 +94,17 @@ describe("spending limit account (e2e)", () => {
       await client.connect();
       accountAddress = client.getAddress()!;
       await mintTo(funderWallet, tokenAddress, accountAddress, MINT_AMOUNT, adminAddress);
+      // Must happen after deployment: the account pays for its own transfers
+      // out of a pre-existing fee juice balance and has no way to acquire one
+      // itself. See fundFeeJuice.
+      await fundFeeJuice(
+        config.nodeUrl,
+        funderWallet,
+        adminAddress,
+        accountAddress,
+        FEE_JUICE_AMOUNT,
+        () => mintOne(funderWallet, tokenAddress, adminAddress),
+      );
     } catch (err) {
       deployFailure = err;
     }
@@ -228,7 +249,11 @@ async function mintTo(
       }>;
     }
   ).at(AztecAddress.fromStringUnsafe(token), wallet);
-  await contract.methods["mint_to_private"]!(
+  // transfer_to_private moves the sender's PUBLIC balance into a private note
+  // for the recipient, so the account has to be funded publicly. Minting to
+  // private leaves the public balance at zero and the transfer fails inside the
+  // token with "attempt to subtract with overflow".
+  await contract.methods["mint_to_public"]!(
     AztecAddress.fromStringUnsafe(to),
     amount,
   ).send({
@@ -248,12 +273,19 @@ async function balanceOf(
   const contract = await (
     TokenContract as unknown as {
       at: (a: unknown, w: unknown) => Promise<{
-        methods: Record<string, (...a: unknown[]) => { simulate: () => Promise<unknown> }>;
+        methods: Record<string, (...a: unknown[]) => { simulate: (o?: unknown) => Promise<unknown> }>;
       }>;
     }
   ).at(AztecAddress.fromStringUnsafe(token), wallet);
-  const bal = await contract.methods["balance_of_private"]!(
+  // The public balance is the one transfer_to_private debits, so it is the one
+  // that shows whether a rejected transfer nonetheless committed.
+  //
+  // `from` scopes the execution. Without it PXE throws and its own error
+  // formatter then crashes on undefined args, reporting "Cannot read properties
+  // of undefined (reading 'toString')" instead of the real cause.
+  const bal = await contract.methods["balance_of_public"]!(
     AztecAddress.fromStringUnsafe(owner),
-  ).simulate();
-  return typeof bal === "bigint" ? bal : BigInt(String(bal));
+  ).simulate({ from: AztecAddress.fromStringUnsafe(owner) });
+  const value = (bal as { result?: unknown })?.result ?? bal;
+  return typeof value === "bigint" ? value : BigInt(String(value));
 }

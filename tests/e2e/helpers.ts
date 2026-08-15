@@ -66,6 +66,153 @@ export async function sponsoredFee(wallet: unknown): Promise<unknown> {
   return new SponsoredFeePaymentMethod(instance.address);
 }
 
+// Anvil's first default account. docker-compose starts anvil with the stock
+// mnemonic, so this key is funded on L1 and is test-only by construction.
+const ANVIL_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+const L1_RPC = process.env["L1_RPC_URL"] ?? "http://localhost:8545";
+
+/**
+ * Gives `recipient` a fee juice balance, bridging from L1 and then claiming on
+ * its behalf from `wallet`.
+ *
+ * The spending-limit account has to pay its own way with PREEXISTING_FEE_JUICE,
+ * and it cannot obtain that fee juice itself. Every other payment method
+ * contributes a call -- SponsoredFPC adds `sponsor_unconditionally`,
+ * FeeJuicePaymentMethodWithClaim adds `claim_and_end_setup` -- and BaseWallet
+ * merges that call into the SAME AppPayload the entrypoint receives
+ * (mergeExecutionPayloads). It would arrive alongside the transfer and the
+ * single-call guard would reject the tx with "Expected exactly one call in
+ * payload".
+ *
+ * FeeJuice.claim names its recipient in an argument rather than taking the
+ * caller, so a third party can consume the message and credit this account.
+ * PREEXISTING_FEE_JUICE is also the only entrypoint branch that calls
+ * end_setup(), which is the phase boundary the over-limit test exists to pin.
+ */
+export async function fundFeeJuice(
+  nodeUrl: string,
+  wallet: unknown,
+  payer: string,
+  recipient: string,
+  amount: bigint,
+  onBlockNeeded: () => Promise<void>,
+): Promise<void> {
+  const claim = await bridgeFeeJuice(nodeUrl, recipient, amount, onBlockNeeded);
+
+  const { FeeJuiceContract } = await import("@aztec/noir-contracts.js/FeeJuice");
+  const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+  const { ProtocolContractAddress } = await import("@aztec/protocol-contracts");
+  const { Fr } = await import("@aztec/aztec.js/fields");
+
+  const feeJuice = await (
+    FeeJuiceContract as unknown as {
+      at: (a: unknown, w: unknown) => Promise<{
+        methods: Record<
+          string,
+          (...a: unknown[]) => { send: (o: { from: unknown; fee: unknown }) => Promise<unknown> }
+        >;
+      }>;
+    }
+  ).at(ProtocolContractAddress.FeeJuice, wallet);
+
+  await feeJuice.methods["claim"]!(
+    AztecAddress.fromStringUnsafe(recipient),
+    BigInt(claim.claimAmount),
+    Fr.fromString(claim.claimSecret),
+    new Fr(BigInt(claim.messageLeafIndex)),
+  ).send({
+    from: AztecAddress.fromStringUnsafe(payer),
+    fee: { paymentMethod: await sponsoredFee(wallet) },
+  });
+}
+
+/** Bridges fee juice from L1 to `recipient` and returns the unclaimed claim. */
+export async function bridgeFeeJuice(
+  nodeUrl: string,
+  recipient: string,
+  amount: bigint,
+  onBlockNeeded: () => Promise<void>,
+): Promise<FeeJuiceClaim> {
+  const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
+  const { L1FeeJuicePortalManager } = await import("@aztec/aztec.js/ethereum");
+  const { createExtendedL1Client } = await import("@aztec/ethereum/client");
+  const { createLogger } = await import("@aztec/aztec.js/log");
+  const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+
+  const node = createAztecNodeClient(nodeUrl);
+  const l1Client = createExtendedL1Client([L1_RPC], ANVIL_KEY);
+  const manager = await L1FeeJuicePortalManager.new(
+    node as Parameters<typeof L1FeeJuicePortalManager.new>[0],
+    l1Client,
+    createLogger("e2e:fee-juice"),
+  );
+
+  const claim = await manager.bridgeTokensPublic(
+    AztecAddress.fromStringUnsafe(recipient),
+    amount,
+    true,
+  );
+
+  // The message is only spendable once the sequencer has pulled it off L1 and
+  // built it into the tree, which needs L2 blocks. Claiming earlier fails with
+  // "No L1 to L2 message found for message hash".
+  await waitForL1ToL2Message(node, claim.messageHash, onBlockNeeded);
+
+  return {
+    claimAmount: claim.claimAmount.toString(),
+    claimSecret: claim.claimSecret.toString(),
+    messageLeafIndex: claim.messageLeafIndex.toString(),
+  };
+}
+
+async function waitForL1ToL2Message(
+  node: { getL1ToL2MessageMembershipWitness: (b: string, m: unknown) => Promise<unknown> },
+  messageHash: string,
+  onBlockNeeded: () => Promise<void>,
+  attempts = 12,
+): Promise<void> {
+  const { Fr } = await import("@aztec/aztec.js/fields");
+  const message = Fr.fromString(messageHash);
+
+  for (let i = 0; i < attempts; i++) {
+    const witness = await node.getL1ToL2MessageMembershipWitness("latest", message);
+    if (witness !== undefined) return;
+    // An idle sandbox may not build a block on its own, so drive one.
+    await onBlockNeeded();
+  }
+
+  throw new Error(`L1 to L2 message ${messageHash} was not synced after ${attempts} blocks`);
+}
+
+/**
+ * Sends one cheap transaction, so the sequencer builds an L2 block. Mints are
+ * the cheapest thing the funder is already able to do.
+ */
+export async function mintOne(
+  wallet: unknown,
+  token: string,
+  minter: string,
+): Promise<void> {
+  const { TokenContract } = await import("@aztec/noir-contracts.js/Token");
+  const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+  const minterAddress = AztecAddress.fromStringUnsafe(minter);
+  const contract = await (
+    TokenContract as unknown as {
+      at: (a: unknown, w: unknown) => Promise<{
+        methods: Record<
+          string,
+          (...a: unknown[]) => { send: (o: { from: unknown; fee: unknown }) => Promise<unknown> }
+        >;
+      }>;
+    }
+  ).at(AztecAddress.fromStringUnsafe(token), wallet);
+
+  await contract.methods["mint_to_public"]!(minterAddress, 1n).send({
+    from: minterAddress,
+    fee: { paymentMethod: await sponsoredFee(wallet) },
+  });
+}
+
 /**
  * Deploys an 18-decimal test token with `admin` as its minter.
  *
