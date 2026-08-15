@@ -64,6 +64,24 @@ pub contract SpendingLimitAccount {
     // compromised admin; see apply_limits.
     global PARAM_APPLY_WINDOW_SECONDS: u64 = 86400;
 
+    // Allowlist capacity. Fixed at compile time: it is the length of the
+    // private entrypoint hint and the number of public reads on the hot path,
+    // so it is part of the entrypoint ABI and therefore of the account address.
+    global ALLOWLIST_SIZE: u32 = 8;
+
+    // Floor on how many allowlist slots a transfer must carry, so a degenerate
+    // client cannot publish the recipient by carrying only its slot. Floored at
+    // live_count, since you cannot hide among more entries than exist.
+    //
+    // This is a BACKSTOP, not the anonymity mechanism. The set the recipient
+    // actually hides in is whatever the client carries, and the client rule is
+    // to carry every live slot. The contract cannot enforce that the mask is
+    // chosen independently of the recipient, so what it guarantees is a count,
+    // not unlinkability. Four is half of ALLOWLIST_SIZE: high enough to make a
+    // one-slot hint useless, low enough that additions rarely cross it (see
+    // assert_hint_masks_live).
+    global MIN_ANONYMITY_SET: u32 = 4;
+
     // Domain separator for combined (payload + spending info) hash.
     // Must match DOM_SEP_SPENDING_LIMIT in the TypeScript entrypoint.
     global DOM_SEP__SPENDING_LIMIT: u32 = 10042;
@@ -106,7 +124,16 @@ pub contract SpendingLimitAccount {
         permitted_token: PublicImmutable<AztecAddress, Context>,
 
         // ---- Recipient allowlist ----
-        recipient_allowlist: Map<AztecAddress, PublicMutable<bool, Context>, Context>,
+        // Index-keyed: slot i holds an allowlisted recipient or the zero
+        // address. Public by construction -- propose_recipient and
+        // remove_recipient take the address as an ordinary public argument, so
+        // every entry is published by the admin's own transactions. Keeping the
+        // recipient out of the per-transfer call does not make the list secret.
+        allowlist: Map<Field, PublicMutable<AztecAddress, Context>, Context>,
+
+        // Timelocked pending addition.
+        pending_recipient: PublicMutable<AztecAddress, Context>,
+        pending_recipient_time: PublicMutable<u64, Context>,
 
         // ---- Admin (immutable after init) ----
         admin: PublicImmutable<AztecAddress, Context>,
@@ -135,6 +162,7 @@ pub contract SpendingLimitAccount {
         initial_daily_limit: u128,
         admin_address: AztecAddress,
         token_address: AztecAddress,
+        seed_recipient: AztecAddress,
     ) {
         let pub_key_note = PublicKeyNote {
             x: signing_pub_key_x,
@@ -156,6 +184,7 @@ pub contract SpendingLimitAccount {
                 initial_daily_limit,
                 admin_address,
                 token_address,
+                seed_recipient,
             )
             .enqueue(self.context);
     }
@@ -167,6 +196,7 @@ pub contract SpendingLimitAccount {
         initial_daily_limit: u128,
         admin_address: AztecAddress,
         token_address: AztecAddress,
+        seed_recipient: AztecAddress,
     ) {
         let caller = self.context.maybe_msg_sender().unwrap();
         assert(
@@ -180,6 +210,12 @@ pub contract SpendingLimitAccount {
         self.storage.max_amount_per_tx.write(initial_max_per_tx);
         self.storage.daily_limit.write(initial_daily_limit);
         assert(!token_address.is_zero(), "Token must not be zero");
+        // Genesis seeding: the only untimelocked write to the allowlist.
+        // Without it the list is empty at deployment and every addition waits
+        // out PARAM_TIMELOCK_SECONDS, so the bridge could not transfer for 24
+        // hours after each cutover.
+        assert(!seed_recipient.is_zero(), "Seed recipient must not be zero");
+        self.storage.allowlist.at(0 as Field).write(seed_recipient);
         self.storage.admin.initialize(admin_address);
         self.storage.permitted_token.initialize(token_address);
         self.storage.initialized.write(true);
@@ -208,6 +244,23 @@ pub contract SpendingLimitAccount {
         // line here runs, whereas `Field as u128` would silently truncate.
         declared_amount: u128,
         declared_recipient: AztecAddress,
+        // The live allowlist with some slots blanked to zero, supplied by the
+        // caller. NOT signed and NOT trusted.
+        //
+        // INVARIANT -- FIVE asserts make this parameter safe, across two
+        // execution contexts. Removing any one of them makes an unsigned,
+        // caller-supplied array the sole authority on who may be paid:
+        //   1. !declared_recipient.is_zero()          (private, below)
+        //   2. the `recipient != 0` guard in is_allowlisted (private)
+        //   3. recipient IN hint                      (private, below)
+        //   4. hint[i] IN {live[i], 0} for all i      (PUBLIC, inclusion time)
+        //   5. hint carries at least the floor        (PUBLIC, inclusion time)
+        //
+        // (4) looks redundant beside (3) and is the one a maintainer would
+        // delete. It is the only check evaluated at inclusion time and so the
+        // only thing that makes revocation immediate. `stale_hint_is_rejected`
+        // fails if it goes.
+        allowlist_hint: [Field; ALLOWLIST_SIZE],
     ) {
         // --- Signature verification ---
         // Sign over the combined hash of (payload + declared spending info).
@@ -268,6 +321,15 @@ pub contract SpendingLimitAccount {
             permitted_token.to_field(),
         );
 
+        // The membership decision is made HERE, in private, against the hint.
+        // The enqueued public call never sees the recipient; it only re-binds
+        // the hint to current storage.
+        assert(!declared_recipient.is_zero(), "Recipient must not be zero");
+        assert(
+            is_allowlisted(allowlist_hint, declared_recipient.to_field()),
+            "Recipient not in allowlist",
+        );
+
         // --- Execute the actual calls ---
         app_payload.execute_calls(self.context);
 
@@ -276,7 +338,7 @@ pub contract SpendingLimitAccount {
         // limits are stored in public state. If limits are exceeded, the
         // entire tx reverts atomically (including the private calls above).
         SpendingLimitAccount::at(self.context.this_address())
-            .check_spending_public(declared_amount, declared_recipient)
+            .check_spending_public(declared_amount, allowlist_hint)
             .enqueue(self.context);
 
         // --- Cancellation nullifier ---
@@ -318,7 +380,7 @@ pub contract SpendingLimitAccount {
     #[noinitcheck]
     fn check_spending_public(
         declared_amount: u128,
-        declared_recipient: AztecAddress,
+        allowlist_hint: [Field; ALLOWLIST_SIZE],
     ) {
         let caller = self.context.maybe_msg_sender().unwrap();
         assert(
@@ -327,25 +389,21 @@ pub contract SpendingLimitAccount {
         );
         assert(self.storage.initialized.read(), "Not initialized");
 
+        // Bind the private membership proof to the allowlist AS IT IS NOW.
+        // Evaluated at inclusion time, so a transaction proven against a
+        // superseded allowlist cannot be included however far through proving
+        // it already is. This is what makes revocation immediate.
+        let mut live: [Field; ALLOWLIST_SIZE] = [0; ALLOWLIST_SIZE];
+        for i in 0..ALLOWLIST_SIZE {
+            live[i] = self.storage.allowlist.at(i as Field).read().to_field();
+        }
+        assert_hint_masks_live(allowlist_hint, live);
+
         // --- Per-tx limit ---
         // Unconditional: zero is not a storable limit (assert_limits_valid),
         // so there is no `if max_per_tx != 0` branch to fall through.
         let max_per_tx = self.storage.max_amount_per_tx.read();
         assert(declared_amount <= max_per_tx, "Amount exceeds per-tx limit");
-
-        // --- Recipient allowlist ---
-        // Always enforced. The zero address is rejected outright so it cannot
-        // be used as a sentinel to skip the allowlist check.
-        assert(
-            declared_recipient != AztecAddress::zero(),
-            "Recipient must not be zero",
-        );
-        let allowed = self
-            .storage
-            .recipient_allowlist
-            .at(declared_recipient)
-            .read();
-        assert(allowed, "Recipient not in allowlist");
 
         // --- Daily spending limit ---
         // u128 throughout, so accumulation is a checked add. As Field this was
@@ -455,13 +513,93 @@ pub contract SpendingLimitAccount {
     // untimelocked write of zero is the counter-reset impact by another route.
 
     #[external("public")]
-    fn set_recipient(recipient: AztecAddress, allowed: bool) {
+    // Additions are TIMELOCKED, removals are IMMEDIATE. The asymmetry is
+    // deliberate: the threat is a compromised admin adding an address they
+    // control, and a compromised admin must not be able to delay a legitimate
+    // revocation.
+    fn propose_recipient(recipient: AztecAddress) {
         let caller = self.context.maybe_msg_sender().unwrap();
         assert(caller == self.storage.admin.read(), "Not admin");
-        self.storage
-            .recipient_allowlist
-            .at(recipient)
-            .write(allowed);
+        assert(!recipient.is_zero(), "Recipient must not be zero");
+
+        // A pending proposal blocks another, so a proposal watched for its full
+        // notice period cannot be swapped just before it matures. An EXPIRED
+        // proposal does not block: otherwise one abandoned proposal would wedge
+        // every future addition until someone thought to cancel it.
+        let pending = self.storage.pending_recipient_time.read();
+        let expired = (pending != 0)
+            & (self.context.timestamp() >= pending + PARAM_APPLY_WINDOW_SECONDS);
+        assert((pending == 0) | expired, "Proposal already pending");
+
+        self.storage.pending_recipient.write(recipient);
+        self.storage.pending_recipient_time.write(
+            self.context.timestamp() + PARAM_TIMELOCK_SECONDS,
+        );
+    }
+
+    #[external("public")]
+    fn apply_recipient() {
+        let caller = self.context.maybe_msg_sender().unwrap();
+        assert(caller == self.storage.admin.read(), "Not admin");
+
+        let change_time = self.storage.pending_recipient_time.read();
+        assert(change_time != 0, "No pending recipient");
+        let now = self.context.timestamp();
+        assert(now >= change_time, "Timelock not expired");
+        assert(now < change_time + PARAM_APPLY_WINDOW_SECONDS, "Proposal expired");
+
+        let recipient = self.storage.pending_recipient.read();
+        assert(!recipient.is_zero(), "Recipient must not be zero");
+
+        let mut entries: [Field; ALLOWLIST_SIZE] = [0; ALLOWLIST_SIZE];
+        for i in 0..ALLOWLIST_SIZE {
+            entries[i] = self.storage.allowlist.at(i as Field).read().to_field();
+        }
+        // A duplicate would silently consume a second slot and inflate the
+        // apparent anonymity set without adding a candidate.
+        assert(!is_allowlisted(entries, recipient.to_field()), "Already allowlisted");
+
+        let (found, index) = first_free_slot(entries);
+        assert(found, "Allowlist is full");
+        self.storage.allowlist.at(index as Field).write(recipient);
+
+        self.storage.pending_recipient.write(AztecAddress::from_field(0));
+        self.storage.pending_recipient_time.write(0);
+    }
+
+    #[external("public")]
+    fn cancel_recipient() {
+        let caller = self.context.maybe_msg_sender().unwrap();
+        assert(caller == self.storage.admin.read(), "Not admin");
+        assert(self.storage.pending_recipient_time.read() != 0, "No pending recipient");
+        self.storage.pending_recipient.write(AztecAddress::from_field(0));
+        self.storage.pending_recipient_time.write(0);
+    }
+
+    // IMMEDIATE. Takes effect in the next block and additionally invalidates
+    // every in-flight transaction whose hint carried this address, because
+    // check_spending_public re-reads these slots at inclusion time.
+    //
+    // Address-keyed, not index-keyed: an off-by-one on the emergency path would
+    // delete the wrong recipient.
+    //
+    // Removing the last entry leaves the allowlist empty and the bridge unable
+    // to transfer until an addition clears its timelock. That is accepted: the
+    // pause is the lever for stopping everything, and this one is for removing
+    // a specific recipient.
+    #[external("public")]
+    fn remove_recipient(recipient: AztecAddress) {
+        let caller = self.context.maybe_msg_sender().unwrap();
+        assert(caller == self.storage.admin.read(), "Not admin");
+        assert(!recipient.is_zero(), "Recipient must not be zero");
+        let mut removed = false;
+        for i in 0..ALLOWLIST_SIZE {
+            if self.storage.allowlist.at(i as Field).read() == recipient {
+                self.storage.allowlist.at(i as Field).write(AztecAddress::from_field(0));
+                removed = true;
+            }
+        }
+        assert(removed, "Recipient not in allowlist");
     }
 
     // ================================================================
@@ -499,6 +637,17 @@ pub contract SpendingLimitAccount {
     // ================================================================
     // Utility (unconstrained)
     // ================================================================
+
+    // Lets a client build allowlist_hint. The list is public storage anyway;
+    // this only saves the caller from deriving eight Map slots by hand.
+    #[external("utility")]
+    unconstrained fn get_allowlist() -> pub [Field; ALLOWLIST_SIZE] {
+        let mut entries: [Field; ALLOWLIST_SIZE] = [0; ALLOWLIST_SIZE];
+        for i in 0..ALLOWLIST_SIZE {
+            entries[i] = self.storage.allowlist.at(i as Field).read().to_field();
+        }
+        entries
+    }
 
     #[external("utility")]
     unconstrained fn lookup_validity(_consumer: AztecAddress, _inner_hash: Field) -> bool {
@@ -628,6 +777,77 @@ pub contract SpendingLimitAccount {
         }
 
         (updated, total)
+    }
+
+    #[contract_library_method]
+    fn is_allowlisted(entries: [Field; ALLOWLIST_SIZE], recipient: Field) -> bool {
+        let mut found = false;
+        for i in 0..ALLOWLIST_SIZE {
+            found = found | ((entries[i] == recipient) & (recipient != 0));
+        }
+        found
+    }
+
+    #[contract_library_method]
+    fn count_nonzero(entries: [Field; ALLOWLIST_SIZE]) -> u32 {
+        let mut n: u32 = 0;
+        for i in 0..ALLOWLIST_SIZE {
+            if entries[i] != 0 {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    #[contract_library_method]
+    fn first_free_slot(entries: [Field; ALLOWLIST_SIZE]) -> (bool, u32) {
+        let mut found = false;
+        let mut index: u32 = 0;
+        for i in 0..ALLOWLIST_SIZE {
+            if (entries[i] == 0) & !found {
+                found = true;
+                index = i;
+            }
+        }
+        (found, index)
+    }
+
+    // The hint must be `live` with some slots blanked IN PLACE.
+    //
+    // Positional, not set membership. One O(n) check gives three properties:
+    // no address that is not live can appear, no duplicates can appear (live
+    // holds none and position is pinned), and no reordering can appear. A set
+    // check would need O(n^2) and would still admit [R,R,R,R,0,0,0,0], whose
+    // four non-zero entries hide nothing.
+    //
+    // The zero branch is what lets a hint survive an ADDITION: a slot empty at
+    // proof time reads zero here and passes whatever was later written.
+    //
+    // Zero is safe as a blank marker only because a zero recipient is rejected
+    // in private, both at the entrypoint and inside is_allowlisted.
+    #[contract_library_method]
+    fn assert_hint_masks_live(
+        hint: [Field; ALLOWLIST_SIZE],
+        live: [Field; ALLOWLIST_SIZE],
+    ) {
+        for i in 0..ALLOWLIST_SIZE {
+            assert(
+                (hint[i] == live[i]) | (hint[i] == 0),
+                "Allowlist changed since this transaction was proven",
+            );
+        }
+
+        // Anonymity floor. Duplicates are impossible, so a count of non-zero
+        // entries is the size of the set the recipient hides in.
+        //
+        // Known interaction: an addition that raises live_count from below
+        // MIN_ANONYMITY_SET to at or above it invalidates in-flight
+        // transactions, because the floor rises under them. Bounded to that one
+        // transition, and at those sizes the anonymity set is weak regardless.
+        let live_count = count_nonzero(live);
+        let hint_count = count_nonzero(hint);
+        let floor = if live_count < MIN_ANONYMITY_SET { live_count } else { MIN_ANONYMITY_SET };
+        assert(hint_count >= floor, "Hint below minimum anonymity set");
     }
 
     // Zero is rejected in both slots. It would mean "unlimited", which is a
@@ -773,6 +993,130 @@ pub contract SpendingLimitAccount {
     fn empty_payload_reverts() {
         let serialized = [0; 31];
         assert_single_call_matches(serialized, 999, TEST_TOKEN);
+    }
+
+    // ---- M2/L2: allowlist masking ----
+
+    global A: Field = 0xaaaa;
+    global B: Field = 0xbbbb;
+    global C: Field = 0xcccc;
+    global D: Field = 0xdddd;
+
+    #[contract_library_method]
+    fn live4() -> [Field; ALLOWLIST_SIZE] {
+        let mut e: [Field; ALLOWLIST_SIZE] = [0; ALLOWLIST_SIZE];
+        e[0] = A;
+        e[1] = B;
+        e[2] = C;
+        e[3] = D;
+        e
+    }
+
+    #[test]
+    fn full_hint_is_accepted() {
+        assert_hint_masks_live(live4(), live4());
+    }
+
+    #[test]
+    fn membership_is_proven_against_the_hint() {
+        assert(is_allowlisted(live4(), C), "C is allowlisted");
+        assert(!is_allowlisted(live4(), 0x9999), "unlisted address rejected");
+    }
+
+    // The zero recipient must not match a blanked slot. This is guard (2) of
+    // the five-assert invariant on allowlist_hint.
+    #[test]
+    fn zero_recipient_never_matches_a_blank_slot() {
+        let e: [Field; ALLOWLIST_SIZE] = [0; ALLOWLIST_SIZE];
+        assert(!is_allowlisted(e, 0), "zero must never be allowlisted");
+    }
+
+    // THE L2 GUARANTEE. A hint proven before a removal no longer masks live,
+    // so the transaction cannot be included. Deleting the masking check in
+    // check_spending_public makes this test fail.
+    #[test(should_fail_with = "Allowlist changed since this transaction was proven")]
+    fn stale_hint_is_rejected() {
+        let hint = live4();
+        let mut after_removal = live4();
+        after_removal[2] = 0; // C revoked
+        assert_hint_masks_live(hint, after_removal);
+    }
+
+    // A fabricated entry is not live at its position.
+    #[test(should_fail_with = "Allowlist changed since this transaction was proven")]
+    fn fabricated_hint_entry_is_rejected() {
+        let mut hint = live4();
+        hint[1] = 0x9999;
+        assert_hint_masks_live(hint, live4());
+    }
+
+    // Positional, so a permutation of the same set is not a valid mask. A set
+    // subset check would accept this.
+    #[test(should_fail_with = "Allowlist changed since this transaction was proven")]
+    fn permuted_hint_is_rejected() {
+        let mut hint = live4();
+        hint[0] = B;
+        hint[1] = A;
+        assert_hint_masks_live(hint, live4());
+    }
+
+    // THE M2 GUARANTEE. A hint carrying only the recipient publishes it, so the
+    // floor rejects it.
+    #[test(should_fail_with = "Hint below minimum anonymity set")]
+    fn minimal_hint_is_rejected() {
+        let mut hint: [Field; ALLOWLIST_SIZE] = [0; ALLOWLIST_SIZE];
+        hint[2] = C;
+        assert_hint_masks_live(hint, live4());
+    }
+
+    // Duplicates cannot inflate the count past the floor, because position is
+    // pinned: [C,C,C,C,...] does not mask live at any slot.
+    #[test(should_fail_with = "Allowlist changed since this transaction was proven")]
+    fn duplicated_hint_cannot_fake_the_floor() {
+        let mut hint: [Field; ALLOWLIST_SIZE] = [0; ALLOWLIST_SIZE];
+        hint[0] = C;
+        hint[1] = C;
+        hint[2] = C;
+        hint[3] = C;
+        assert_hint_masks_live(hint, live4());
+    }
+
+    // ADDITIONS must not invalidate in-flight transactions: a slot empty at
+    // proof time reads zero in the hint and passes whatever was written later.
+    // This is what the whole-array digest design got wrong.
+    #[test]
+    fn addition_does_not_invalidate_an_inflight_hint() {
+        let hint = live4();
+        let mut after_addition = live4();
+        after_addition[4] = 0xeeee;
+        assert_hint_masks_live(hint, after_addition);
+    }
+
+    // Below the floor the requirement degrades to live_count: you cannot hide
+    // among more entries than exist.
+    #[test]
+    fn floor_degrades_to_live_count() {
+        let mut live: [Field; ALLOWLIST_SIZE] = [0; ALLOWLIST_SIZE];
+        live[0] = A;
+        live[1] = B;
+        assert_hint_masks_live(live, live);
+    }
+
+    #[test]
+    fn first_free_slot_finds_the_lowest_gap() {
+        let (found, index) = first_free_slot(live4());
+        assert(found, "a gap exists");
+        assert(index == 4, "lowest free slot is 4");
+    }
+
+    #[test]
+    fn first_free_slot_reports_a_full_allowlist() {
+        let mut e: [Field; ALLOWLIST_SIZE] = [0; ALLOWLIST_SIZE];
+        for i in 0..ALLOWLIST_SIZE {
+            e[i] = (i as Field) + 1;
+        }
+        let (found, _index) = first_free_slot(e);
+        assert(!found, "a full allowlist has no free slot");
     }
 
     // ---- M1: bucketed sliding window ----

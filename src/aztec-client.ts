@@ -231,7 +231,13 @@ export class AztecClient implements IAztecClient {
     // The entrypoint signs over (payloadHash, amount, recipient) so these
     // values cannot be forged. Must be set before send().
     if (this.spendingLimitContract) {
-      this.spendingLimitContract.setDeclaredSpending(amount, params.recipient);
+      // The hint must mask live storage POSITIONALLY, so it has to be read
+      // fresh: check_spending_public re-derives the allowlist at inclusion time
+      // and rejects a hint built against a superseded list. Carrying every live
+      // slot maximises the set the recipient hides in; the contract only
+      // enforces a floor.
+      const allowlistHint = await this.readAllowlist();
+      this.spendingLimitContract.setDeclaredSpending(amount, params.recipient, allowlistHint);
     }
 
     const token = await this.getToken(tokenAddress);
@@ -298,6 +304,32 @@ export class AztecClient implements IAztecClient {
     }
 
     return "unknown";
+  }
+
+  /**
+   * Reads the account's allowlist slots via its get_allowlist utility function.
+   * Returns entries in slot order, zero-padded, which is the shape the
+   * entrypoint's allowlist_hint expects.
+   */
+  private async readAllowlist(): Promise<string[]> {
+    if (!this.wallet || !this.solverAddress || !this.spendingLimitContract) {
+      throw new Error("Spending limit account not initialized");
+    }
+    const { Contract } = await import("@aztec/aztec.js/contracts");
+    const artifact = await this.spendingLimitContract.getContractArtifact();
+    const account = await Contract.at(
+      this.solverAddress as Parameters<typeof Contract.at>[0],
+      artifact as Parameters<typeof Contract.at>[1],
+      this.wallet as unknown as Parameters<typeof Contract.at>[2],
+    );
+    const entries = (await account.methods["get_allowlist"]!().simulate()) as unknown as unknown[];
+    if (!Array.isArray(entries)) {
+      throw new Error("get_allowlist did not return an array");
+    }
+    return entries.map((e) => {
+      const v = typeof e === "bigint" ? e : BigInt((e as { toString(): string }).toString());
+      return "0x" + v.toString(16).padStart(64, "0");
+    });
   }
 
   private async isContractDeployed(address: AztecAddress): Promise<boolean> {

@@ -105,6 +105,7 @@ const audit = new AuditLogger(AUDIT_LOG_PATH);
 let spendingLimitConfig: SpendingLimitConfig | undefined;
 const SPENDING_LIMIT_ADMIN = process.env["PXE_BRIDGE_SPENDING_LIMIT_ADMIN"];
 const SPENDING_LIMIT_TOKEN = process.env["PXE_BRIDGE_SPENDING_LIMIT_TOKEN"];
+const SPENDING_LIMIT_SEED = process.env["PXE_BRIDGE_SPENDING_LIMIT_SEED_RECIPIENT"];
 if (SPENDING_LIMIT_ADMIN) {
   if (!/^0x[0-9a-fA-F]{64}$/.test(SPENDING_LIMIT_ADMIN)) {
     console.error("[pxe-bridge] PXE_BRIDGE_SPENDING_LIMIT_ADMIN must be a 32-byte hex address");
@@ -117,11 +118,20 @@ if (SPENDING_LIMIT_ADMIN) {
     );
     process.exit(1);
   }
+  // Seeded into allowlist slot 0 by the constructor. Without it the account
+  // cannot transfer until an addition clears the 24h timelock.
+  if (!SPENDING_LIMIT_SEED || !/^0x[0-9a-fA-F]{64}$/.test(SPENDING_LIMIT_SEED)) {
+    console.error(
+      "[pxe-bridge] PXE_BRIDGE_SPENDING_LIMIT_SEED_RECIPIENT must be a 32-byte hex address when the spending limit account is enabled",
+    );
+    process.exit(1);
+  }
   spendingLimitConfig = {
     maxAmountPerTx: limitsConfig.maxAmount ?? 0n,
     dailyLimit: limitsConfig.dailyLimit ?? 0n,
     admin: SPENDING_LIMIT_ADMIN,
     token: SPENDING_LIMIT_TOKEN,
+    seedRecipient: SPENDING_LIMIT_SEED,
   };
 }
 

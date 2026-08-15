@@ -39,6 +39,10 @@ import { BaseAccount, type Account, type AccountContract } from "@aztec/aztec.js
 // Must match DOM_SEP__SPENDING_LIMIT in the Noir contract (main.nr)
 export const DOM_SEP_SPENDING_LIMIT = 10042;
 
+// Must match ALLOWLIST_SIZE in main.nr. It is part of the entrypoint ABI, so a
+// mismatch changes the selector and the account address.
+export const ALLOWLIST_SIZE = 8;
+
 // Built by `aztec compile`; gitignored, produced by CI.
 const ARTIFACT_PATH =
   "../contracts/spending_limit_account/target/spending_limit_account_contract-SpendingLimitAccount.json";
@@ -49,6 +53,12 @@ export interface SpendingLimitConfig {
   admin: string; // AztecAddress as 0x-prefixed 64-char hex
   /** Single token this account may move. Fixed at construction, no setter. */
   token: string; // AztecAddress as 0x-prefixed 64-char hex
+  /**
+   * Written to allowlist slot 0 by the constructor. Without it the allowlist is
+   * empty at deployment and every addition waits out the timelock, so the
+   * bridge could not transfer for 24 hours after each cutover.
+   */
+  seedRecipient: string; // AztecAddress as 0x-prefixed 64-char hex
 }
 
 // ============================================================
@@ -68,12 +78,16 @@ export class SpendingLimitAccountContract implements AccountContract {
    * Must be called before each createNote to bind amount/recipient
    * into the signed hash so the on-chain contract can verify them.
    */
-  setDeclaredSpending(amount: bigint, recipient: string): void {
+  setDeclaredSpending(amount: bigint, recipient: string, allowlistHint: string[]): void {
     if (!this._entrypoint) {
       throw new Error("Account not initialized -- getAccount() must be called first");
     }
+    if (allowlistHint.length !== ALLOWLIST_SIZE) {
+      throw new Error(`allowlistHint must have ${ALLOWLIST_SIZE} entries, got ${allowlistHint.length}`);
+    }
     this._entrypoint.declaredAmount = amount;
     this._entrypoint.declaredRecipient = recipient;
+    this._entrypoint.allowlistHint = allowlistHint;
   }
 
   // v5 AccountContract interface member. Address derivation includes an
@@ -111,6 +125,7 @@ export class SpendingLimitAccountContract implements AccountContract {
         this.config.dailyLimit,
         AztecAddress.fromStringUnsafe(this.config.admin),
         AztecAddress.fromStringUnsafe(this.config.token),
+        AztecAddress.fromStringUnsafe(this.config.seedRecipient),
       ],
     };
   }
@@ -159,7 +174,7 @@ class SpendingLimitAuthWitnessProvider implements AuthWitnessProvider {
 
 /**
  * Entrypoint that encodes the spending limit contract's extended signature:
- *   entrypoint(AppPayload, u8, bool, u128, AztecAddress)
+ *   entrypoint(AppPayload, u8, bool, u128, AztecAddress, [Field; 8])
  *
  * Signs over poseidon2([payloadHash, declaredAmount, declaredRecipient],
  * DOM_SEP_SPENDING_LIMIT) instead of plain payloadHash, binding the
@@ -177,6 +192,7 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
    */
   public declaredAmount: bigint = 0n;
   public declaredRecipient: string = "0x" + "0".repeat(64);
+  public allowlistHint: string[] = new Array(ALLOWLIST_SIZE).fill("0x" + "0".repeat(64));
 
   async createTxExecutionRequest(
     exec: import("@aztec/stdlib/tx").ExecutionPayload,
@@ -210,6 +226,7 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
       // Raw bigint: the ABI parameter is a u128 integer, not a field.
       this.declaredAmount,
       declaredRecipientAddr,
+      this.allowlistHint.map((h) => Fr.fromString(h)),
     ];
     const encodedArgs = encodeArguments(abi, args);
 
@@ -281,6 +298,7 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
       // Raw bigint: the ABI parameter is a u128 integer, not a field.
       this.declaredAmount,
       declaredRecipientAddr,
+      this.allowlistHint.map((h) => Fr.fromString(h)),
     ];
     const encodedArgs = encodeArguments(abi, args);
     const functionSelector = await FunctionSelector.fromNameAndParameters(abi.name, abi.parameters);
@@ -406,6 +424,12 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
             path: "authwit::aztec::protocol_types::address::AztecAddress",
             fields: [{ name: "inner", type: { kind: "field" } }],
           },
+        },
+        {
+          // Hand-maintained pair with `allowlist_hint: [Field; ALLOWLIST_SIZE]`
+          // in main.nr's entrypoint.
+          name: "allowlist_hint",
+          type: { kind: "array", length: ALLOWLIST_SIZE, type: { kind: "field" } },
         },
       ],
       returnTypes: [],
