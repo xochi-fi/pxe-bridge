@@ -8,8 +8,9 @@ mod public_key_note;
 // reverts are atomic, but the fee is charged regardless -- set_as_fee_payer and
 // end_setup run in the non-revertible setup phase.
 //
-// Build: aztec-nargo compile (plain nargo does not transpile public functions;
-// loadContractArtifact rejects the result). Artifact is gitignored, built by CI.
+// Build: `aztec compile`. Not `aztec-nargo compile` -- aztec-nargo is a symlink
+// to plain nargo and emits transpiled=false, which loadContractArtifact rejects.
+// Artifact is gitignored and built by CI.
 
 use aztec::macros::aztec;
 

@@ -8,7 +8,7 @@
  * signed hash so they cannot be forged.
  *
  * Usage:
- *   1. Compile: cd contracts/spending_limit_account && aztec-nargo compile
+ *   1. Compile: cd contracts/spending_limit_account && aztec compile
  *   2. Copy artifact to src/artifacts/ (or adjust ARTIFACT_PATH below)
  *   3. Use SpendingLimitAccountContract instead of SchnorrAccountContract
  *      when creating the AccountManager
@@ -39,7 +39,7 @@ import { BaseAccount, type Account, type AccountContract } from "@aztec/aztec.js
 // Must match DOM_SEP__SPENDING_LIMIT in the Noir contract (main.nr)
 export const DOM_SEP_SPENDING_LIMIT = 10042;
 
-// Built by `aztec-nargo compile`; gitignored, produced by CI.
+// Built by `aztec compile`; gitignored, produced by CI.
 const ARTIFACT_PATH =
   "../contracts/spending_limit_account/target/spending_limit_account_contract-SpendingLimitAccount.json";
 

@@ -55,9 +55,24 @@ jobs:
       - name: Contract unit tests (spending-limit guard)
         working-directory: contracts/spending_limit_account
         run: aztec-nargo test
+      # `aztec compile`, not `aztec-nargo compile`. aztec-nargo is a symlink to
+      # plain nargo and emits an artifact with transpiled=false, which
+      # loadContractArtifact rejects with "public bytecode has not been
+      # transpiled". `aztec compile` runs nargo then postprocesses to transpile
+      # public functions to AVM bytecode and generate verification keys.
       - name: Compile and transpile contract
         working-directory: contracts/spending_limit_account
-        run: aztec-nargo compile
+        run: aztec compile
+      - name: Assert artifact is loadable
+        run: |
+          node -e "
+            const { readFileSync } = require('fs');
+            const p = 'contracts/spending_limit_account/target/spending_limit_account_contract-SpendingLimitAccount.json';
+            const a = JSON.parse(readFileSync(p, 'utf8'));
+            if (!a.transpiled) { console.error('artifact not transpiled'); process.exit(1); }
+            if (!a.aztec_version) { console.error('artifact has no aztec_version'); process.exit(1); }
+            console.log('artifact ok: aztec', a.aztec_version, '/ noir', a.noir_version);
+          "
       - name: Upload contract artifact
         uses: actions/upload-artifact@v4
         with:
