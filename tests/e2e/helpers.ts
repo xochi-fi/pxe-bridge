@@ -44,11 +44,20 @@ export async function waitForNode(url: string, timeoutMs = 120_000): Promise<voi
   throw new Error(`Aztec node at ${url} did not become ready within ${timeoutMs}ms`);
 }
 
-export async function deployTestToken(wallet: unknown): Promise<string> {
+/**
+ * Deploys an 18-decimal test token with `admin` as its minter.
+ *
+ * v5.1.0 requires an explicit `from` on send(), and send() resolves to
+ * { contract, instance, receipt } after waiting -- not to the contract itself.
+ * This helper had never been called (the note tests skip without
+ * E2E_TOKEN_ADDRESS) so both mismatches went unnoticed.
+ */
+export async function deployTestToken(wallet: unknown, admin: string): Promise<string> {
   const { TokenContract } = await import("@aztec/noir-contracts.js/Token");
+  const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+  const adminAddress = AztecAddress.fromStringUnsafe(admin);
 
-  // Deploy a new token with the wallet as admin
-  const deployed = await (
+  const { contract } = await (
     TokenContract as unknown as {
       deploy: (
         wallet: unknown,
@@ -56,11 +65,15 @@ export async function deployTestToken(wallet: unknown): Promise<string> {
         name: string,
         symbol: string,
         decimals: number,
-      ) => { send: () => Promise<{ address: { toString: () => string } }> };
+      ) => {
+        send: (o: { from: unknown }) => Promise<{
+          contract: { address: { toString: () => string } };
+        }>;
+      };
     }
   )
-    .deploy(wallet, wallet, "TestToken", "TST", 18)
-    .send();
+    .deploy(wallet, adminAddress, "TestToken", "TST", 18)
+    .send({ from: adminAddress });
 
-  return deployed.address.toString();
+  return contract.address.toString();
 }

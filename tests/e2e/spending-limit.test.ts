@@ -55,10 +55,10 @@ describe("spending limit account (e2e)", () => {
     await funder.connect();
 
     funderWallet = (funder as unknown as { wallet: unknown }).wallet;
-    tokenAddress = await deployTestToken(funderWallet);
     // The funder is the admin, so the admin paths are actually reachable. A
     // dummy address would make every admin function untestable.
     adminAddress = funder.getAddress()!;
+    tokenAddress = await deployTestToken(funderWallet, adminAddress);
 
     const spendingLimitConfig: SpendingLimitConfig = {
       maxAmountPerTx: MAX_PER_TX,
@@ -83,7 +83,7 @@ describe("spending limit account (e2e)", () => {
     try {
       await client.connect();
       accountAddress = client.getAddress()!;
-      await mintTo(funderWallet, tokenAddress, accountAddress, MINT_AMOUNT);
+      await mintTo(funderWallet, tokenAddress, accountAddress, MINT_AMOUNT, adminAddress);
     } catch (err) {
       deployFailure = err;
     }
@@ -167,7 +167,7 @@ describe("spending limit account (e2e)", () => {
   // L2 REVOCATION. remove_recipient is untimelocked and must bite immediately.
   it("stops transfers to a recipient the admin removes", async () => {
     if (deployFailure) return;
-    await removeRecipient(funderWallet, client, accountAddress, SEED_RECIPIENT);
+    await removeRecipient(funderWallet, client, accountAddress, SEED_RECIPIENT, adminAddress);
 
     await expect(
       client.createNote({
@@ -185,6 +185,7 @@ async function removeRecipient(
   client: AztecClient,
   account: string,
   recipient: string,
+  admin: string,
 ): Promise<void> {
   const { Contract } = await import("@aztec/aztec.js/contracts");
   const { AztecAddress } = await import("@aztec/aztec.js/addresses");
@@ -195,11 +196,13 @@ async function removeRecipient(
   const c = await (
     Contract as unknown as {
       at: (a: unknown, art: unknown, w: unknown) => Promise<{
-        methods: Record<string, (...a: unknown[]) => { send: () => Promise<unknown> }>;
+        methods: Record<string, (...a: unknown[]) => { send: (o: { from: unknown }) => Promise<unknown> }>;
       }>;
     }
   ).at(AztecAddress.fromStringUnsafe(account), artifact, wallet);
-  await c.methods["remove_recipient"]!(AztecAddress.fromStringUnsafe(recipient)).send();
+  await c.methods["remove_recipient"]!(AztecAddress.fromStringUnsafe(recipient)).send({
+    from: AztecAddress.fromStringUnsafe(admin),
+  });
 }
 
 async function mintTo(
@@ -207,20 +210,21 @@ async function mintTo(
   token: string,
   to: string,
   amount: bigint,
+  minter: string,
 ): Promise<void> {
   const { TokenContract } = await import("@aztec/noir-contracts.js/Token");
   const { AztecAddress } = await import("@aztec/aztec.js/addresses");
   const contract = await (
     TokenContract as unknown as {
       at: (a: unknown, w: unknown) => Promise<{
-        methods: Record<string, (...a: unknown[]) => { send: () => Promise<unknown> }>;
+        methods: Record<string, (...a: unknown[]) => { send: (o: { from: unknown }) => Promise<unknown> }>;
       }>;
     }
   ).at(AztecAddress.fromStringUnsafe(token), wallet);
   await contract.methods["mint_to_private"]!(
     AztecAddress.fromStringUnsafe(to),
     amount,
-  ).send();
+  ).send({ from: AztecAddress.fromStringUnsafe(minter) });
 }
 
 async function balanceOf(
