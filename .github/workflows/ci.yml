@@ -38,8 +38,20 @@ jobs:
         run: |
           curl -fsSL https://install.aztec.network | bash
           echo "$HOME/.aztec/bin" >> "$GITHUB_PATH"
-      - name: Pin toolchain to the SDK version
-        run: aztec-up install 5.1.0
+      - name: Pin toolchain and expose it on PATH
+        run: |
+          aztec-up install 5.1.0
+          # aztec-up keeps versioned binaries outside ~/.aztec/bin and only
+          # updates PATH for a login shell, which workflow steps do not get.
+          bin=$(find "$HOME/.aztec" \( -type f -o -type l \) -name aztec-nargo | head -1)
+          if [ -z "$bin" ]; then
+            echo "aztec-nargo not found; tree under ~/.aztec:"
+            find "$HOME/.aztec" -maxdepth 3 -name '*nargo*'
+            exit 1
+          fi
+          dirname "$bin" >> "$GITHUB_PATH"
+      - name: Toolchain versions
+        run: aztec-nargo --version
       - name: Contract unit tests (spending-limit guard)
         working-directory: contracts/spending_limit_account
         run: aztec-nargo test
