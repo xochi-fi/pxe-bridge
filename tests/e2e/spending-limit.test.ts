@@ -98,8 +98,8 @@ describe("spending limit account (e2e)", () => {
     expect(accountAddress).toMatch(/^0x[0-9a-f]{64}$/i);
   });
 
-  it("transfers within the per-tx limit", async () => {
-    if (deployFailure) return;
+  it("transfers within the per-tx limit", async (ctx) => {
+    if (deployFailure) return ctx.skip();
     const res = await client.createNote({
       chainId: 1,
       token: tokenAddress,
@@ -113,8 +113,8 @@ describe("spending limit account (e2e)", () => {
   // PHASE ORDERING. Reverting is necessary but not sufficient: the transfer
   // must not have been committed. If this passes only the "rejects" half,
   // end_setup() has moved below execute_calls and every limit is advisory.
-  it("rejects a transfer above the per-tx limit and commits no note", async () => {
-    if (deployFailure) return;
+  it("rejects a transfer above the per-tx limit and commits no note", async (ctx) => {
+    if (deployFailure) return ctx.skip();
     const before = await balanceOf(client, tokenAddress, accountAddress);
 
     await expect(
@@ -130,8 +130,8 @@ describe("spending limit account (e2e)", () => {
     expect(after).toBe(before);
   });
 
-  it("rejects a recipient that is not allowlisted", async () => {
-    if (deployFailure) return;
+  it("rejects a recipient that is not allowlisted", async (ctx) => {
+    if (deployFailure) return ctx.skip();
     await expect(
       client.createNote({
         chainId: 1,
@@ -142,8 +142,8 @@ describe("spending limit account (e2e)", () => {
     ).rejects.toThrow();
   });
 
-  it("rejects a transfer that would exceed the daily window", async () => {
-    if (deployFailure) return;
+  it("rejects a transfer that would exceed the daily window", async (ctx) => {
+    if (deployFailure) return ctx.skip();
     // The window is 25 hourly buckets summed, so repeated max-size transfers
     // accumulate until the daily limit rejects one. DAILY_LIMIT / MAX_PER_TX
     // is 5, and one transfer has already landed above.
@@ -165,8 +165,8 @@ describe("spending limit account (e2e)", () => {
   }, 600_000);
 
   // L2 REVOCATION. remove_recipient is untimelocked and must bite immediately.
-  it("stops transfers to a recipient the admin removes", async () => {
-    if (deployFailure) return;
+  it("stops transfers to a recipient the admin removes", async (ctx) => {
+    if (deployFailure) return ctx.skip();
     await removeRecipient(funderWallet, client, accountAddress, SEED_RECIPIENT, adminAddress);
 
     await expect(
