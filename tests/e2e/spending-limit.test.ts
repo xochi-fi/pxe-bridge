@@ -185,10 +185,58 @@ describe("spending limit account (e2e)", () => {
     expect(rejected).toBe(true);
   }, 600_000);
 
-  // L2 REVOCATION. remove_recipient is untimelocked and must bite immediately.
+  // Control for the revocation test below. The same hand-rolled prove-then-
+  // submit path has to land a transfer when nothing revokes it: without this,
+  // a proven transfer failing after a removal would be equally consistent with
+  // proveTransfer simply building a broken transaction.
+  it("lands a transfer that is proven and submitted separately", async (ctx) => {
+    if (deployFailure) return ctx.skip();
+    const before = await balanceOf(client, tokenAddress, accountAddress);
+
+    const proven = await proveTransfer(client, tokenAddress, SEED_RECIPIENT, 1000n);
+    expect(await proven.submit()).toBe("success");
+
+    expect(await balanceOf(client, tokenAddress, accountAddress)).toBe(before - 1000n);
+  }, 600_000);
+
+  // L2 REVOCATION, the strong half: a removal must reach a transaction that is
+  // ALREADY PROVEN. A private proof commits to the allowlist as it stood when
+  // the proof was made, so nothing inside it can notice a later removal. Only
+  // check_spending_public re-derives the list at inclusion and rebinds the hint
+  // to it (invariant 4 on the entrypoint). That check alone is the immediacy
+  // claim, and this is the only test that reaches it: every other rejection in
+  // this file happens in private, before a proof exists.
+  //
+  // Amount is small on purpose. The daily-window test above left the window
+  // near its cap, and a rejection for volume would prove nothing about
+  // revocation.
+  //
+  // This test performs the removal that the next one then observes.
+  it("invalidates a transfer proven before the recipient was removed", async (ctx) => {
+    if (deployFailure) return ctx.skip();
+
+    // Proven while SEED_RECIPIENT is still allowlisted. Proving is what makes
+    // this test meaningful: the private half is now fixed and signed.
+    const proven = await proveTransfer(client, tokenAddress, SEED_RECIPIENT, 1000n);
+    const before = await balanceOf(client, tokenAddress, accountAddress);
+
+    await removeRecipient(funderWallet, client, accountAddress, SEED_RECIPIENT, adminAddress);
+
+    // "reverted", not a refusal at admission, is the result that carries the
+    // claim: the proof was valid, the node accepted the transaction and put it
+    // in a block, and the public phase killed it there. Pinned rather than
+    // loosened to "not success" so that a check migrating out of
+    // check_spending_public -- into private, where it could not see a later
+    // removal -- shows up here instead of passing quietly.
+    expect(await proven.submit()).toBe("reverted");
+    expect(await balanceOf(client, tokenAddress, accountAddress)).toBe(before);
+  }, 600_000);
+
+  // L2 REVOCATION, the weak half: once removed, a transfer built from scratch
+  // never gets as far as proving, because is_allowlisted rejects it in private.
+  // The removal happened in the test above.
   it("stops transfers to a recipient the admin removes", async (ctx) => {
     if (deployFailure) return ctx.skip();
-    await removeRecipient(funderWallet, client, accountAddress, SEED_RECIPIENT, adminAddress);
 
     await expect(
       client.createNote({
@@ -200,6 +248,137 @@ describe("spending limit account (e2e)", () => {
     ).rejects.toThrow();
   }, 600_000);
 });
+
+/** A transfer whose proof exists but which has not been submitted. */
+interface ProvenTransfer {
+  txHash: string;
+  /**
+   * Submits it and waits, reporting how the network settled it: "success",
+   * "reverted", "dropped", or a refusal at admission. Reported rather than
+   * thrown because which of those happens is the substance of the revocation
+   * claim, not an incidental detail.
+   */
+  submit: () => Promise<string>;
+}
+
+/** The slice of BaseWallet needed to split proving from submission. */
+interface WalletInternals {
+  pxe: {
+    proveTx: (
+      request: unknown,
+      opts: unknown,
+    ) => Promise<{ toTx: () => Promise<{ getTxHash: () => { toString: () => string } }> }>;
+  };
+  aztecNode: {
+    sendTx: (tx: unknown) => Promise<void>;
+    getTxReceipt: (txHash: unknown) => Promise<{ status: string; executionResult?: string }>;
+  };
+  completeFeeOptions: (opts: unknown) => Promise<unknown>;
+  createTxExecutionRequestFromPayloadAndFee: (
+    payload: unknown,
+    from: unknown,
+    feeOptions: unknown,
+  ) => Promise<unknown>;
+}
+
+/**
+ * Builds and PROVES a transfer without submitting it.
+ *
+ * The interaction API has no prove/send split -- send() does both in one call
+ * -- so this repeats the three steps BaseWallet.sendTx takes between them:
+ * complete the fee options, build the tx request, prove it. Holding a proven
+ * transaction across an admin action is the only way to show that revocation
+ * binds at inclusion rather than at proving time.
+ */
+async function proveTransfer(
+  client: AztecClient,
+  token: string,
+  recipient: string,
+  amount: bigint,
+): Promise<ProvenTransfer> {
+  const { TokenContract } = await import("@aztec/noir-contracts.js/Token");
+  const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+
+  const inner = client as unknown as {
+    wallet: WalletInternals;
+    solverAddress: unknown;
+    spendingLimitContract: {
+      setDeclaredSpending: (amount: bigint, recipient: string, hint: string[]) => void;
+    };
+    readAllowlist: () => Promise<string[]>;
+  };
+  const wallet = inner.wallet;
+  const from = inner.solverAddress;
+
+  // The binding createNote performs before it sends. The entrypoint signs the
+  // declaration, so it has to be set before the payload is built, and the hint
+  // is read against the allowlist as it stands now -- which is the state this
+  // test is about to invalidate.
+  const hint = await inner.readAllowlist.call(client);
+  inner.spendingLimitContract.setDeclaredSpending(amount, recipient, hint);
+
+  const contract = await (
+    TokenContract as unknown as {
+      at: (a: unknown, w: unknown) => Promise<{
+        methods: Record<
+          string,
+          (...a: unknown[]) => { request: (o: { from: unknown }) => Promise<{ feePayer: unknown }> }
+        >;
+      }>;
+    }
+  ).at(AztecAddress.fromStringUnsafe(token), wallet);
+
+  const payload = await contract.methods["transfer_to_private"]!(
+    AztecAddress.fromStringUnsafe(recipient),
+    amount,
+  ).request({ from });
+
+  const feeOptions = await wallet.completeFeeOptions({ from, feePayer: payload.feePayer });
+  const txRequest = await wallet.createTxExecutionRequestFromPayloadAndFee(
+    payload,
+    from,
+    feeOptions,
+  );
+  // scopesFrom(from, [], undefined) is [from]; senderForTagsFrom(from, undefined) is from.
+  const provingResult = await wallet.pxe.proveTx(txRequest, {
+    scopes: [from],
+    senderForTags: from,
+  });
+  const tx = await provingResult.toTx();
+  const txHash = tx.getTxHash();
+
+  return {
+    txHash: txHash.toString(),
+    submit: async () => {
+      try {
+        await wallet.aztecNode.sendTx(tx);
+      } catch (err) {
+        return `refused at admission: ${(err as Error).message}`;
+      }
+      return waitForExecution(wallet, txHash);
+    },
+  };
+}
+
+/** Polls until the node reports how `txHash` executed. */
+async function waitForExecution(
+  wallet: WalletInternals,
+  txHash: unknown,
+  timeoutMs = 180_000,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const receipt = await wallet.aztecNode.getTxReceipt(txHash);
+    if (receipt.executionResult !== undefined) {
+      return receipt.executionResult;
+    }
+    if (receipt.status === "dropped") {
+      return "dropped";
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  return "not mined within the timeout";
+}
 
 async function removeRecipient(
   wallet: unknown,
