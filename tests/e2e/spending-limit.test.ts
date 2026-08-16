@@ -17,7 +17,7 @@ import {
  * bytecode that actually executes check_spending_public. These tests are what
  * make the on-chain claims checkable.
  *
- * Two of them are load-bearing for the audit response and are marked so:
+ * Three of them are load-bearing for the audit response and are marked so:
  *
  *   PHASE ORDERING -- an over-limit transfer must revert AND leave no note.
  *   If end_setup() ever moves below execute_calls the transfer lands in the
@@ -25,16 +25,24 @@ import {
  *   Noir tests still pass. Nothing but this test can catch that.
  *
  *   L2 REVOCATION -- an immediate removal must stop further transfers to that
- *   recipient. NOT YET COVERED: that a removal invalidates a transaction which
- *   was already PROVEN. That needs prove-then-remove-then-send ordering and is
- *   the only evidence that will ever exist for the stronger half of the L2
- *   claim, so it must be written before that half is published.
+ *   recipient, and must also invalidate a transaction that was already PROVEN.
+ *   The second half is the stronger claim and needs prove-then-remove-then-send
+ *   ordering; it is the only evidence that will ever exist for that half.
+ *
+ *   ADMIN AUTH -- a non-admin must not be able to apply a pending proposal.
+ *   The check is a public assert on msg_sender, so it exists only on-chain and
+ *   no Noir test can reach it.
  */
 
 const config = getTestConfig();
 
 // Distinct from the bridge key so the two accounts do not collide.
 const FUNDER_KEY = "0x000000000000000000000000000000000000000000000000000000000000cafe";
+
+// A third account that is neither the admin nor the bridge. Needed because
+// every other wallet in this file is privileged: the funder IS the admin, and
+// the limit account can only ever call transfer_to_private on the pinned token.
+const OUTSIDER_KEY = "0x000000000000000000000000000000000000000000000000000000000000d00d";
 
 const MAX_PER_TX = 1_000_000_000_000_000_000_000n; // 1000 tokens at 18 decimals
 const DAILY_LIMIT = 5_000_000_000_000_000_000_000n; // 5000 tokens
@@ -56,6 +64,8 @@ describe("spending limit account (e2e)", () => {
   let deployFailure: unknown;
   let funderWallet: unknown;
   let adminAddress: string;
+  let outsiderWallet: unknown;
+  let outsiderAddress: string;
 
   beforeAll(async () => {
     // A plain Schnorr client owns and mints the token. Keeping it separate
@@ -69,6 +79,11 @@ describe("spending limit account (e2e)", () => {
     // dummy address would make every admin function untestable.
     adminAddress = funder.getAddress()!;
     tokenAddress = await deployTestToken(funderWallet, adminAddress);
+
+    const outsider = new AztecClient(config.nodeUrl, OUTSIDER_KEY);
+    await outsider.connect();
+    outsiderWallet = (outsider as unknown as { wallet: unknown }).wallet;
+    outsiderAddress = outsider.getAddress()!;
 
     const spendingLimitConfig: SpendingLimitConfig = {
       maxAmountPerTx: MAX_PER_TX,
@@ -245,7 +260,115 @@ describe("spending limit account (e2e)", () => {
       }),
     ).rejects.toThrow();
   }, 600_000);
+
+  // ADMIN AUTH. apply_limits originally had no caller check at all, so anyone
+  // could apply an abandoned proposal at a moment of their choosing. Not filed
+  // by Nethermind; found and fixed in 97b0ba8. The check is a public assert on
+  // msg_sender, which only exists on-chain, so no Noir test can reach it.
+  //
+  // The timelock is 24h and warping the sandbox clock that far would disturb
+  // every other test sharing this node, so both calls below revert. What
+  // separates them is where: the outsider is stopped by the caller check, the
+  // admin gets past it and is stopped by the timelock, which is the assertion
+  // immediately after. That difference is the evidence the caller check exists
+  // and runs first.
+  //
+  // The last assertion does not depend on revert reasons at all. cancel_limits
+  // requires a pending proposal, so its succeeding proves the proposal is still
+  // armed and therefore that neither failed call applied it.
+  it("rejects apply_limits from a non-admin", async (ctx) => {
+    if (deployFailure) return ctx.skip();
+
+    // Valid under assert_limits_valid, and far enough from the live values that
+    // applying them would be a material change rather than a no-op.
+    expect(
+      await callAccount(client, accountAddress, funderWallet, adminAddress, "propose_limits", [
+        MAX_PER_TX * 2n,
+        DAILY_LIMIT * 2n,
+        1,
+      ]),
+    ).toBe("success");
+
+    const outsider = await callAccount(
+      client,
+      accountAddress,
+      outsiderWallet,
+      outsiderAddress,
+      "apply_limits",
+      [],
+    );
+    const admin = await callAccount(
+      client,
+      accountAddress,
+      funderWallet,
+      adminAddress,
+      "apply_limits",
+      [],
+    );
+
+    expect(outsider).toMatch(/Not admin/);
+    expect(admin).toMatch(/Timelock not expired/);
+
+    expect(
+      await callAccount(client, accountAddress, funderWallet, adminAddress, "cancel_limits", []),
+    ).toBe("success");
+  }, 600_000);
 });
+
+/**
+ * Calls `method` on the spending-limit account as `caller` and reports how the
+ * network settled it: "success", or the revert reason.
+ *
+ * Reported rather than thrown because a rejection is the expected result for
+ * most of these calls and the reason is the substance of the claim. A public
+ * assert can surface either as a throw from the simulation send() runs before
+ * proving, or as a reverted receipt if it reaches a block. Which of the two
+ * happens is a property of the SDK, not of the contract, so both are collapsed
+ * into the same string.
+ */
+async function callAccount(
+  client: AztecClient,
+  account: string,
+  wallet: unknown,
+  caller: string,
+  method: string,
+  args: unknown[],
+): Promise<string> {
+  const { Contract } = await import("@aztec/aztec.js/contracts");
+  const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+  const slc = (client as unknown as {
+    spendingLimitContract: { getContractArtifact: () => Promise<unknown> };
+  }).spendingLimitContract;
+  const artifact = await slc.getContractArtifact();
+  const c = await (
+    Contract as unknown as {
+      at: (a: unknown, art: unknown, w: unknown) => Promise<{
+        methods: Record<
+          string,
+          (...a: unknown[]) => {
+            send: (o: { from: unknown; fee: unknown; wait: unknown }) => Promise<{
+              receipt: { status: string; executionResult?: string; error?: string };
+            }>;
+          }
+        >;
+      }>;
+    }
+  ).at(AztecAddress.fromStringUnsafe(account), artifact, wallet);
+
+  try {
+    const { receipt } = await c.methods[method]!(...args).send({
+      from: AztecAddress.fromStringUnsafe(caller),
+      fee: { paymentMethod: await sponsoredFee(wallet) },
+      // Without this a revert throws, which would discard the reason that
+      // distinguishes the caller check from the timelock.
+      wait: { dontThrowOnRevert: true, timeout: 180 },
+    });
+    if (receipt.error) return `${receipt.executionResult}: ${receipt.error}`;
+    return receipt.executionResult ?? receipt.status;
+  } catch (err) {
+    return (err as Error).message;
+  }
+}
 
 /** A transfer whose proof exists but which has not been submitted. */
 interface ProvenTransfer {
