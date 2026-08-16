@@ -20,6 +20,29 @@ const TX_TIMEOUT_MS = 120_000; // 2 minutes
 // during a congestion spike.
 const DEPLOY_FEE_HEADROOM = 10n;
 
+/**
+ * Builds a function that runs its callbacks one at a time, in call order.
+ *
+ * The declared-spending binding is state on the shared contract object, not an
+ * argument to the send. Two overlapping `createNote` calls each set it, and
+ * whichever builds its payload second signs the other's declaration, so the
+ * first transfer reverts on `assert_single_call_matches`. Fail-closed and no
+ * funds move, but it is a spurious failure under concurrent load.
+ */
+export function createSerializer(): <T>(fn: () => Promise<T>) => Promise<T> {
+  let tail: Promise<unknown> = Promise.resolve();
+  return <T>(fn: () => Promise<T>): Promise<T> => {
+    // Queued on both settlement paths: one caller's rejection must not wedge
+    // every later call behind it.
+    const run = tail.then(fn, fn);
+    tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  };
+}
+
 /** The slice of AztecNode createNote needs to read a tx effect back. */
 interface TxEffectFields {
   noteHashes?: { toString(): string }[];
@@ -54,6 +77,7 @@ export class AztecClient implements IAztecClient {
   private tokenCache = new Map<string, TokenContract>();
   private secretKey: string | null;
   private spendingLimitContract: SpendingLimitAccountContract | null = null;
+  private readonly serialize = createSerializer();
 
   constructor(
     private readonly nodeUrl: string,
@@ -370,19 +394,6 @@ export class AztecClient implements IAztecClient {
     const amount = BigInt(params.amount);
     const from = this.solverAddress;
 
-    // Bind declared spending to the next tx for on-chain enforcement.
-    // The entrypoint signs over (payloadHash, amount, recipient) so these
-    // values cannot be forged. Must be set before send().
-    if (this.spendingLimitContract) {
-      // The hint must mask live storage POSITIONALLY, so it has to be read
-      // fresh: check_spending_public re-derives the allowlist at inclusion time
-      // and rejects a hint built against a superseded list. Carrying every live
-      // slot maximises the set the recipient hides in; the contract only
-      // enforces a floor.
-      const allowlistHint = await this.readAllowlist();
-      this.spendingLimitContract.setDeclaredSpending(amount, params.recipient, allowlistHint);
-    }
-
     const token = await this.getToken(tokenAddress);
 
     if (params.tradeId !== undefined) {
@@ -398,10 +409,31 @@ export class AztecClient implements IAztecClient {
       console.log("[pxe-bridge] Creating note for chainId:", params.chainId);
     }
 
-    const result = await withTimeout(
-      token.methods.transfer_to_private(recipientAddress, amount).send({ from }),
-      TX_TIMEOUT_MS,
-    );
+    const submit = async () => {
+      // Bind declared spending to the next tx for on-chain enforcement. The
+      // entrypoint signs over (payloadHash, amount, recipient) so these values
+      // cannot be forged. Must be set before send(), and must still be this
+      // call's values when send() builds the payload -- hence the serializer.
+      if (this.spendingLimitContract) {
+        // The hint must mask live storage POSITIONALLY, so it has to be read
+        // fresh: check_spending_public re-derives the allowlist at inclusion
+        // time and rejects a hint built against a superseded list. Carrying
+        // every live slot maximises the set the recipient hides in; the
+        // contract only enforces a floor.
+        const allowlistHint = await this.readAllowlist();
+        this.spendingLimitContract.setDeclaredSpending(amount, params.recipient, allowlistHint);
+      }
+
+      return withTimeout(
+        token.methods.transfer_to_private(recipientAddress, amount).send({ from }),
+        TX_TIMEOUT_MS,
+      );
+    };
+
+    // Only the spending-limit path shares mutable per-tx state. A plain Schnorr
+    // account carries everything in the payload, so serializing it would cost
+    // throughput and buy nothing.
+    const result = this.spendingLimitContract ? await this.serialize(submit) : await submit();
 
     const raw = result as unknown as Record<string, unknown>;
     const receiptInner =
