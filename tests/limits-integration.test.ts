@@ -8,6 +8,7 @@ import { readFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
+import { rpcJson } from "./helpers.js";
 
 const VALID_ADDR = "0x" + "a".repeat(64);
 const JSON_HEADERS = { "Content-Type": "application/json" };
@@ -78,9 +79,9 @@ describe("limits integration through server", () => {
       body: createNoteBody("10001"),
     });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = await rpcJson(res);
     expect(body.error).toBeDefined();
-    expect(body.error.message).toContain("per-transaction maximum");
+    expect(body.error?.message).toContain("per-transaction maximum");
   });
 
   it("allows amount within ceiling", async () => {
@@ -90,9 +91,9 @@ describe("limits integration through server", () => {
       body: createNoteBody("5000"),
     });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = await rpcJson<CreateNoteResult>(res);
     expect(body.result).toBeDefined();
-    expect(body.result.l2TxHash).toBe("0xtx");
+    expect(body.result?.l2TxHash).toBe("0xtx");
   });
 
   it("writes audit log entries for success and rejection", async () => {

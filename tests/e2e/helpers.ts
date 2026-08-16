@@ -1,3 +1,4 @@
+import type { AztecNode } from "@aztec/aztec.js/node";
 import type { FeeJuiceClaim } from "../../src/types.js";
 import { FeeJuiceClaimSchema } from "../../src/types.js";
 
@@ -23,7 +24,9 @@ export function getTestConfig(): E2EConfig {
     nodeUrl: process.env["AZTEC_NODE_URL"] ?? "http://localhost:8080",
     secretKey: process.env["PXE_BRIDGE_SECRET_KEY"] ?? DEFAULT_SECRET_KEY,
     bridgePort: 0, // let OS pick
-    feeJuiceClaim,
+    // Spread rather than assign: exactOptionalPropertyTypes distinguishes an
+    // absent key from one set to undefined, and E2EConfig declares it optional.
+    ...(feeJuiceClaim ? { feeJuiceClaim } : {}),
   };
 }
 
@@ -166,7 +169,7 @@ export async function bridgeFeeJuice(
 }
 
 async function waitForL1ToL2Message(
-  node: { getL1ToL2MessageMembershipWitness: (b: string, m: unknown) => Promise<unknown> },
+  node: Pick<AztecNode, "getL1ToL2MessageMembershipWitness">,
   messageHash: string,
   onBlockNeeded: () => Promise<void>,
   attempts = 12,

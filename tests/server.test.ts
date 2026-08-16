@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import type { Server } from "node:http";
 import { createApp, type ServerOptions } from "../src/server.js";
 import type { CreateNoteParams, CreateNoteResult, IAztecClient } from "../src/types.js";
+import { rpcJson } from "./helpers.js";
 
 const VALID_ADDR = "0x" + "a".repeat(64);
 const JSON_HEADERS = { "Content-Type": "application/json" };
@@ -104,7 +105,7 @@ describe("HTTP server", () => {
       const res = await jsonPost(baseUrl, rpcBody("aztec_getVersion"));
       expect(res.status).toBe(200);
       expect(res.headers.get("content-type")).toBe("application/json");
-      const body = await res.json();
+      const body = await rpcJson(res);
       expect(body).toEqual({ jsonrpc: "2.0", id: 1, result: "4.1.3" });
     });
 
@@ -117,7 +118,7 @@ describe("HTTP server", () => {
       };
       const res = await jsonPost(baseUrl, rpcBody("aztec_createNote", [params]));
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = await rpcJson<CreateNoteResult>(res);
       expect(body.result).toEqual(client.createNoteResult);
     });
   });
@@ -126,7 +127,7 @@ describe("HTTP server", () => {
     it("works same as POST /", async () => {
       const res = await jsonPost(`${baseUrl}/api/rpc`, rpcBody("aztec_getVersion"));
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = await rpcJson<string>(res);
       expect(body.result).toBe("4.1.3");
     });
   });
@@ -163,15 +164,15 @@ describe("HTTP server", () => {
     it("returns INVALID_REQUEST for JSON string body", async () => {
       const res = await jsonPost(baseUrl, JSON.stringify("hello"));
       expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(body.error.code).toBe(-32600);
+      const body = await rpcJson(res);
+      expect(body.error?.code).toBe(-32600);
     });
 
     it("returns INVALID_REQUEST for JSON number body", async () => {
       const res = await jsonPost(baseUrl, JSON.stringify(42));
       expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(body.error.code).toBe(-32600);
+      const body = await rpcJson(res);
+      expect(body.error?.code).toBe(-32600);
     });
   });
 
@@ -194,7 +195,7 @@ describe("HTTP server", () => {
       expect(Buffer.byteLength(body)).toBe(64 * 1024);
       const res = await jsonPost(baseUrl, body);
       expect(res.status).toBe(200);
-      const json = await res.json();
+      const json = await rpcJson<string>(res);
       expect(json.result).toBe("4.1.3");
     });
   });
@@ -203,8 +204,8 @@ describe("HTTP server", () => {
     it("returns 400 for invalid JSON", async () => {
       const res = await jsonPost(baseUrl, "not json{{{");
       expect(res.status).toBe(400);
-      const body = await res.json();
-      expect(body.error.code).toBe(-32700);
+      const body = await rpcJson(res);
+      expect(body.error?.code).toBe(-32700);
     });
 
     it("returns 400 for empty body", async () => {
@@ -295,7 +296,7 @@ describe("HTTP server with auth", () => {
       Authorization: `Bearer ${TEST_API_KEY}`,
     });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = await rpcJson<string>(res);
     expect(body.result).toBe("4.1.3");
   });
 

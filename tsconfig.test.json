@@ -1,0 +1,12 @@
+// Type-checks the test suite, which tsconfig.json deliberately excludes: it
+// sets rootDir/outDir for the build, so including tests there would emit them
+// into dist/. Vitest transpiles without checking types, so without this config
+// nothing type-checks tests/ at all.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src/**/*", "tests/**/*"]
+}
