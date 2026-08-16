@@ -71,8 +71,6 @@ describe("spending limit account (e2e)", () => {
   let deployFailure: unknown;
   let funderWallet: unknown;
   let adminAddress: string;
-  let outsiderWallet: unknown;
-  let outsiderAddress: string;
 
   beforeAll(async () => {
     // A plain Schnorr client owns and mints the token. Keeping it separate
@@ -86,11 +84,6 @@ describe("spending limit account (e2e)", () => {
     // dummy address would make every admin function untestable.
     adminAddress = funder.getAddress()!;
     tokenAddress = await deployTestToken(funderWallet, adminAddress);
-
-    const outsider = new AztecClient(config.nodeUrl, OUTSIDER_KEY);
-    await outsider.connect();
-    outsiderWallet = (outsider as unknown as { wallet: unknown }).wallet;
-    outsiderAddress = outsider.getAddress()!;
 
     const spendingLimitConfig: SpendingLimitConfig = {
       maxAmountPerTx: MAX_PER_TX,
@@ -285,6 +278,17 @@ describe("spending limit account (e2e)", () => {
   // armed and therefore that neither failed call applied it.
   it("rejects apply_limits from a non-admin", async (ctx) => {
     if (deployFailure) return ctx.skip();
+
+    // Deployed here rather than in beforeAll. An extra account deployment ahead
+    // of the limit account's own raises the sandbox base fee, and the limit
+    // account then fails its deployment against a max fee estimated when fees
+    // were lower ("maxFeesPerGas.feePerL2Gas must be greater than or equal to
+    // gasFees.feePerL2Gas"). Nothing above this line should see fee conditions
+    // it did not see before this test existed.
+    const outsiderClient = new AztecClient(config.nodeUrl, OUTSIDER_KEY);
+    await outsiderClient.connect();
+    const outsiderWallet = (outsiderClient as unknown as { wallet: unknown }).wallet;
+    const outsiderAddress = outsiderClient.getAddress()!;
 
     // Valid under assert_limits_valid, and far enough from the live values that
     // applying them would be a material change rather than a no-op.
