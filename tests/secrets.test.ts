@@ -18,7 +18,14 @@ vi.mock("@aws-sdk/client-secrets-manager", () => {
 // Dynamic import so the mock is in place first
 const { resolveSecretKey } = await import("../src/secrets.js");
 
-const VALID_KEY = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd";
+// Below the BN254 Fr modulus. The old value here started with 0xaa, which is
+// about 0.67 of 2^256 and so was never a usable secret key -- the format check
+// was the only thing it had to pass.
+const VALID_KEY = "0abbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd";
+
+// One increment above the modulus, so it is well-formed hex of the right length
+// and fails only the range check.
+const ABOVE_MODULUS = "30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000002";
 
 beforeEach(() => {
   // Clear relevant env vars before each test
@@ -60,6 +67,20 @@ describe("resolveSecretKey", () => {
       process.env["PXE_BRIDGE_SECRET_KEY"] = "aabb";
 
       await expect(resolveSecretKey()).rejects.toThrow("32 bytes");
+    });
+
+    it("rejects a key at or above the BN254 Fr modulus", async () => {
+      process.env["PXE_BRIDGE_SECRET_KEY"] = ABOVE_MODULUS;
+
+      await expect(resolveSecretKey()).rejects.toThrow("valid BN254 field element");
+    });
+
+    it("accepts the largest key below the modulus", async () => {
+      const maxKey = "30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000";
+      process.env["PXE_BRIDGE_SECRET_KEY"] = maxKey;
+
+      const result = await resolveSecretKey();
+      expect(result.key).toBe(maxKey);
     });
 
     it("throws when neither ARN nor env var set", async () => {
@@ -128,6 +149,13 @@ describe("resolveSecretKey", () => {
       });
 
       await expect(resolveSecretKey()).rejects.toThrow('must have a "key" field');
+    });
+
+    it("rejects an out-of-range key from Secrets Manager", async () => {
+      process.env["PXE_BRIDGE_SECRET_ARN"] = "arn:aws:secretsmanager:us-east-1:1:secret:k";
+      sendStub.mockResolvedValue({ SecretString: ABOVE_MODULUS });
+
+      await expect(resolveSecretKey()).rejects.toThrow("valid BN254 field element");
     });
 
     it("rejects binary/empty secret", async () => {

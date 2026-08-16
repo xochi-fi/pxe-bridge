@@ -34,11 +34,22 @@ EVM Solver --JSON-RPC--> pxe-bridge --Aztec SDK--> Aztec L2 Node
 
 | Variable                | Required | Default                 | Description                                    |
 | ----------------------- | -------- | ----------------------- | ---------------------------------------------- |
-| `PXE_BRIDGE_SECRET_KEY` | Yes      | --                      | 32-byte hex key for Schnorr account derivation |
+| `PXE_BRIDGE_SECRET_KEY` | Yes      | --                      | 32-byte hex key, below the BN254 Fr modulus    |
 | `PXE_BRIDGE_API_KEY`    | No       | --                      | Bearer token for RPC auth (warns if unset)     |
 | `AZTEC_NODE_URL`        | No       | `http://localhost:8080` | Aztec L2 node RPC endpoint                     |
 | `PXE_BRIDGE_HOST`       | No       | `127.0.0.1`             | Bind address (localhost-only by default)       |
 | `PXE_BRIDGE_PORT`       | No       | `8547`                  | HTTP listen port (0-65535)                     |
+
+The secret key is a BN254 scalar, not an arbitrary 32 bytes. About 81% of
+random 32-byte values are at or above the field modulus and are rejected at
+startup, so generate one by retrying until it is in range:
+
+```bash
+node -e 'const {randomBytes} = require("crypto");
+const MODULUS = BigInt("0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001");
+let k; do { k = randomBytes(32).toString("hex"); } while (BigInt("0x" + k) >= MODULUS);
+console.log("0x" + k);'
+```
 
 ### Docker
 
