@@ -42,7 +42,12 @@ const FUNDER_KEY = "0x0000000000000000000000000000000000000000000000000000000000
 // A third account that is neither the admin nor the bridge. Needed because
 // every other wallet in this file is privileged: the funder IS the admin, and
 // the limit account can only ever call transfer_to_private on the pinned token.
-const OUTSIDER_KEY = "0x000000000000000000000000000000000000000000000000000000000000d00d";
+//
+// Not any valid key will do. AztecClient derives the account salt as a raw
+// sha256 digest and passes it to Fr.fromBuffer, which rejects anything at or
+// above the BN254 Fr modulus -- only ~19% of digests are below it. This key,
+// like the two above, is one that happens to land in range.
+const OUTSIDER_KEY = "0x000000000000000000000000000000000000000000000000000000000000f00d";
 
 const MAX_PER_TX = 1_000_000_000_000_000_000_000n; // 1000 tokens at 18 decimals
 const DAILY_LIMIT = 5_000_000_000_000_000_000_000n; // 5000 tokens
