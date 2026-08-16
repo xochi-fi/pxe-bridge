@@ -5,7 +5,10 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
-    branches: [main]
+    # `fix/**` so a PR stacked on another feature branch still gets CI. Without
+    # it a stacked PR reports no checks at all and is unverifiable until it
+    # retargets to main, which is exactly when review is least useful.
+    branches: [main, "fix/**"]
 
 permissions:
   contents: read
