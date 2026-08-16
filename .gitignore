@@ -4,10 +4,15 @@ dist/
 .env
 docker-compose.override.yml
 .claude/settings.local.json
+# PXE and wallet state. The nested form is what `aztec-wallet` writes: the
+# stores inside it are named with a hyphen (pxe_data-stores), so the underscore
+# patterns above do not reach them and the parent has to be named outright.
 pxe_data_*/
 wallet_data_*/
+aztec-wallet-data/
 
-# Compiled Noir artifact -- built by `aztec-nargo compile` (CI `contract` job).
-# Not committed: it is 1.6MB of machine-generated JSON and must match the
-# toolchain, not the tree.
+# Compiled Noir artifact -- built by `aztec compile` (CI `contract` job), not
+# `aztec-nargo compile`, which emits an untranspiled artifact. Not committed:
+# it is ~2MB of machine-generated JSON and must match the toolchain, not the
+# tree.
 contracts/**/target/
