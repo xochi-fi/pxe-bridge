@@ -83,7 +83,12 @@ export class AztecClient implements IAztecClient {
       .update(Buffer.from("pxe-bridge-account-salt-v1"))
       .update(keyBytes)
       .digest();
-    const salt = Fr.fromBuffer(saltBytes);
+    // Reduce, not fromBuffer. A sha256 digest is a uniform 256-bit value and
+    // the BN254 Fr modulus is ~0.189 of 2^256, so ~81% of otherwise valid keys
+    // produced a digest the field could not hold and connect() threw here
+    // before deriving or deploying anything. Reduction is the identity for a
+    // digest already in range, so no account that ever deployed moves.
+    const salt = Fr.fromBufferReduce(saltBytes);
 
     keyBytes.fill(0);
     saltBytes.fill(0);

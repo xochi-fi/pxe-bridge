@@ -43,11 +43,13 @@ const FUNDER_KEY = "0x0000000000000000000000000000000000000000000000000000000000
 // every other wallet in this file is privileged: the funder IS the admin, and
 // the limit account can only ever call transfer_to_private on the pinned token.
 //
-// Not any valid key will do. AztecClient derives the account salt as a raw
-// sha256 digest and passes it to Fr.fromBuffer, which rejects anything at or
-// above the BN254 Fr modulus -- only ~19% of digests are below it. This key,
-// like the two above, is one that happens to land in range.
-const OUTSIDER_KEY = "0x000000000000000000000000000000000000000000000000000000000000f00d";
+// Chosen because its salt overflows. AztecClient derives the account salt as a
+// sha256 digest, and only ~19% of digests are below the BN254 Fr modulus; this
+// key is one of the ~81% that are not. It connects only because the derivation
+// reduces rather than rejecting, so it is also the only end-to-end coverage of
+// that reduction. The two keys above happen to land in range and would pass
+// either way.
+const OUTSIDER_KEY = "0x000000000000000000000000000000000000000000000000000000000000d00d";
 
 const MAX_PER_TX = 1_000_000_000_000_000_000_000n; // 1000 tokens at 18 decimals
 const DAILY_LIMIT = 5_000_000_000_000_000_000_000n; // 5000 tokens
