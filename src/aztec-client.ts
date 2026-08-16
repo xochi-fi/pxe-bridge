@@ -3,6 +3,7 @@ import { EmbeddedWallet } from "@aztec/wallets/embedded";
 import { TokenContract } from "@aztec/noir-contracts.js/Token";
 import { SponsoredFPCContract } from "@aztec/noir-contracts.js/SponsoredFPC";
 import type { AztecAddress } from "@aztec/aztec.js/addresses";
+import type { GasFees } from "@aztec/stdlib/gas";
 import type { CreateNoteParams, CreateNoteResult, FeeJuiceClaim, IAztecClient } from "./types.js";
 import {
   ALLOWLIST_SIZE,
@@ -12,6 +13,12 @@ import {
 
 const MAX_TOKEN_CACHE_SIZE = 100;
 const TX_TIMEOUT_MS = 120_000; // 2 minutes
+
+// Multiplier applied to the worst predicted base fee when deploying the
+// account. Deployment happens once at startup and the max is a ceiling rather
+// than a charge, so this trades an unused allowance for not failing to boot
+// during a congestion spike.
+const DEPLOY_FEE_HEADROOM = 10n;
 
 /** The slice of AztecNode createNote needs to read a tx effect back. */
 interface TxEffectFields {
@@ -140,7 +147,7 @@ export class AztecClient implements IAztecClient {
       try {
         await deployMethod.send({
           from: deployer,
-          fee: { paymentMethod },
+          fee: { paymentMethod, gasSettings: await this.deployGasSettings() },
           // Both default to true, which leaves the account initialized but
           // unpublished: the node cannot resolve it and its public functions
           // cannot execute. Publication costs more than a self-paying account
@@ -332,7 +339,9 @@ export class AztecClient implements IAztecClient {
       try {
         await (await manager.getDeployMethod()).send({
           from: NO_FROM,
-          fee: { paymentMethod },
+          // Same headroom as the account it exists to deploy. This one runs
+          // first, so a spike here strands the account deployment behind it.
+          fee: { paymentMethod, gasSettings: await this.deployGasSettings() },
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -508,6 +517,47 @@ export class AztecClient implements IAztecClient {
     // unpublished account reads as absent here. That is why the concurrent
     // deploy path also treats "Existing nullifier" as success -- the init
     // nullifier is the signal that survives either way.
+  }
+
+  /**
+   * `maxFeesPerGas` for the account deployment, with headroom over the worst
+   * fee predicted for the inclusion window.
+   *
+   * The SDK's own estimate is a point prediction and goes stale. A single
+   * unrelated account deployment landing between the estimate and validation
+   * was enough to fail this with "maxFeesPerGas.feePerL2Gas must be greater
+   * than or equal to gasFees.feePerL2Gas" at 9748636365 against a base fee of
+   * 95484800000, roughly 10x.
+   *
+   * `getPredictedMinFees` returns the current slot's fees followed by one entry
+   * per predicted slot, so taking the maximum covers the whole window rather
+   * than the instant of the estimate. The multiplier is on top of that.
+   *
+   * Overshooting is close to free: the max is a ceiling, and what is actually
+   * charged is the base fee at inclusion. Undershooting fails startup, so the
+   * asymmetry justifies a wide margin.
+   */
+  private async deployGasSettings(): Promise<{ maxFeesPerGas: GasFees }> {
+    const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
+    const { GasFees, ManaUsageEstimate } = await import("@aztec/stdlib/gas");
+
+    const node = createAztecNodeClient(this.nodeUrl);
+    const predicted = await node.getPredictedMinFees(ManaUsageEstimate.Limit);
+
+    const worst = predicted.reduce(
+      (acc, fees) => ({
+        da: fees.feePerDaGas > acc.da ? fees.feePerDaGas : acc.da,
+        l2: fees.feePerL2Gas > acc.l2 ? fees.feePerL2Gas : acc.l2,
+      }),
+      { da: 0n, l2: 0n },
+    );
+
+    return {
+      maxFeesPerGas: new GasFees(
+        worst.da * DEPLOY_FEE_HEADROOM,
+        worst.l2 * DEPLOY_FEE_HEADROOM,
+      ),
+    };
   }
 
   private async buildFeePaymentMethod(
