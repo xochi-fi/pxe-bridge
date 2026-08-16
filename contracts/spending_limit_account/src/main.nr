@@ -95,10 +95,6 @@ pub contract SpendingLimitAccount {
     // The only call this account may make. 0x89758b40, computed both from the
     // v5.1.0 Token ABI and from the signature string. from_signature is not
     // comptime in v5.1.0, hence the explicit wrapper.
-    //
-    // VERIFY: a global `comptime {}` inside an #[aztec] contract has zero
-    // attestations in v5.1.0. Highest-probability compile failure in this file,
-    // and no fallback preserves a compile-time pin.
     global TRANSFER_TO_PRIVATE_SELECTOR: Field =
         comptime { FunctionSelector::from_signature("transfer_to_private((Field),u128)").to_field() };
 
@@ -439,10 +435,8 @@ pub contract SpendingLimitAccount {
         }
 
         // Write back only what changed. `total` is recomputed from the array
-        // every call, so no cached aggregate can desync from these slots.
-        //
-        // VERIFY: conditional storage write in a bounded loop. If the compiler
-        // rejects it, write unconditionally -- only the write count changes.
+        // every call, so no cached aggregate can desync from these slots. The
+        // condition saves public data writes; it cannot change the result.
         for i in 0..BUCKET_COUNT {
             if updated[i] != buckets[i] {
                 self.storage.spend_buckets.at(i as Field).write(updated[i]);
@@ -778,9 +772,8 @@ pub contract SpendingLimitAccount {
         let clear_count = if elapsed >= bucket_count { bucket_count } else { elapsed };
 
         let mut updated = buckets;
-        // k runs 1..=BUCKET_COUNT so a full-window idle clears every slot.
-        // VERIFY: dynamic index on an array write. Permitted in Noir, but the
-        // loop bound is constant either way.
+        // k runs 1..=BUCKET_COUNT so a full-window idle clears every slot. The
+        // bound is constant, so constraint count does not vary with elapsed.
         for k in 1..(BUCKET_COUNT + 1) {
             if (k as u64) <= clear_count {
                 let idx = ((last_bucket + k as u64) % bucket_count) as u32;
