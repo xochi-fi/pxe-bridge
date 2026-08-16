@@ -15,9 +15,14 @@ const JSON_HEADERS = { "Content-Type": "application/json" };
 
 class FakeAztecClient implements IAztecClient {
   createNoteResult: CreateNoteResult = {
+    // Two note hashes and three nullifiers, matching what a real
+    // transfer_to_private emits: a fake with one of each would hide the reason
+    // the scalar fields below are ambiguous.
+    noteHashes: ["0xcommit", "0xcommit2"],
+    nullifiers: ["0xnullifier", "0xnullifier2", "0xnullifier3"],
+    l2TxHash: "0xtx",
     noteCommitment: "0xcommit",
     nullifierHash: "0xnullifier",
-    l2TxHash: "0xtx",
   };
 
   async connect(): Promise<void> {}

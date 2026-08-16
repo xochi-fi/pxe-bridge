@@ -62,9 +62,29 @@ export const CreateNoteParamsSchema = z
 export type CreateNoteParams = z.infer<typeof CreateNoteParamsSchema>;
 
 export interface CreateNoteResult {
-  noteCommitment: string;
-  nullifierHash: string;
+  /**
+   * Every note hash the transaction emitted, in emission order. A
+   * `transfer_to_private` emits two, so a single value cannot identify "the"
+   * note without the caller deciding which one it means.
+   */
+  noteHashes: string[];
+  /**
+   * Every nullifier the transaction emitted, in emission order. Index 0 is the
+   * protocol (transaction) nullifier rather than a note's: this transfer
+   * spends the public balance and so nullifies no note.
+   */
+  nullifiers: string[];
   l2TxHash: string;
+  /**
+   * @deprecated `noteHashes[0]`. Kept so existing callers keep parsing, but the
+   * pick is arbitrary; read `noteHashes` and choose deliberately.
+   */
+  noteCommitment: string;
+  /**
+   * @deprecated `nullifiers[0]`, which is the protocol nullifier and not the
+   * nullifier of any note this transfer created. Read `nullifiers` instead.
+   */
+  nullifierHash: string;
 }
 
 // Fee Juice claim from L1->L2 bridge (one-time account deployment)

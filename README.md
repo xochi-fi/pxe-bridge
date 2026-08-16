@@ -92,7 +92,22 @@ Create a shielded note on Aztec L2.
 
 Trade context fields (`tradeId`, `subTradeIndex`, `totalSubTrades`) must be provided together or all omitted. When present, the note is tagged with settlement splitting metadata for SettlementRegistry finalization. Backwards compatible -- existing callers are unaffected.
 
-**Returns:** `{ noteCommitment, nullifierHash, l2TxHash }`
+**Returns:** `{ noteHashes, nullifiers, l2TxHash, noteCommitment, nullifierHash }`
+
+| Field            | Type       | Description                                                        |
+| ---------------- | ---------- | ------------------------------------------------------------------ |
+| `noteHashes`     | `string[]` | Every note hash the transaction emitted, in emission order          |
+| `nullifiers`     | `string[]` | Every nullifier the transaction emitted, in emission order          |
+| `l2TxHash`       | `string`   | Transaction hash on L2                                              |
+| `noteCommitment` | `string`   | Deprecated. `noteHashes[0]`                                         |
+| `nullifierHash`  | `string`   | Deprecated. `nullifiers[0]`, the protocol nullifier                 |
+
+A `transfer_to_private` emits two note hashes and three nullifiers, so no single
+value identifies the note. `nullifiers[0]` in particular is the protocol
+(transaction) nullifier, not a note's: the transfer spends the public balance
+and nullifies no note. The two scalar fields are the historical shape and are
+retained so existing callers keep parsing; read the arrays and pick
+deliberately.
 
 ### `aztec_getVersion`
 

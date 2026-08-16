@@ -6,9 +6,14 @@ const VALID_ADDR = "0x" + "a".repeat(64);
 
 class FakeAztecClient implements IAztecClient {
   createNoteResult: CreateNoteResult = {
+    // Two note hashes and three nullifiers, matching what a real
+    // transfer_to_private emits: a fake with one of each would hide the reason
+    // the scalar fields below are ambiguous.
+    noteHashes: ["0xcommit", "0xcommit2"],
+    nullifiers: ["0xnullifier", "0xnullifier2", "0xnullifier3"],
+    l2TxHash: "0xtx",
     noteCommitment: "0xcommit",
     nullifierHash: "0xnullifier",
-    l2TxHash: "0xtx",
   };
   createNoteError: Error | null = null;
   versionResult = "4.1.3";
@@ -104,6 +109,21 @@ describe("handleRpcRequest", () => {
       expect(res).toHaveProperty("result");
       if ("result" in res) {
         expect(res.result).toEqual(client.createNoteResult);
+      }
+    });
+
+    it("returns every note hash and nullifier, not just the first", async () => {
+      const res = await handleRpcRequest(rpcRequest("aztec_createNote", [validParams]), client);
+      expect(res).toHaveProperty("result");
+      if ("result" in res) {
+        const result = res.result as CreateNoteResult;
+        // The whole point of the shape: a transfer emits more than one of each,
+        // so truncating to a scalar loses the values a caller may actually want.
+        expect(result.noteHashes).toHaveLength(2);
+        expect(result.nullifiers).toHaveLength(3);
+        // The deprecated scalars stay consistent with the arrays they alias.
+        expect(result.noteCommitment).toBe(result.noteHashes[0]);
+        expect(result.nullifierHash).toBe(result.nullifiers[0]);
       }
     });
 
