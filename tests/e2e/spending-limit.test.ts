@@ -185,20 +185,6 @@ describe("spending limit account (e2e)", () => {
     expect(rejected).toBe(true);
   }, 600_000);
 
-  // Control for the revocation test below. The same hand-rolled prove-then-
-  // submit path has to land a transfer when nothing revokes it: without this,
-  // a proven transfer failing after a removal would be equally consistent with
-  // proveTransfer simply building a broken transaction.
-  it("lands a transfer that is proven and submitted separately", async (ctx) => {
-    if (deployFailure) return ctx.skip();
-    const before = await balanceOf(client, tokenAddress, accountAddress);
-
-    const proven = await proveTransfer(client, tokenAddress, SEED_RECIPIENT, 1000n);
-    expect(await proven.submit()).toBe("success");
-
-    expect(await balanceOf(client, tokenAddress, accountAddress)).toBe(before - 1000n);
-  }, 600_000);
-
   // L2 REVOCATION, the strong half: a removal must reach a transaction that is
   // ALREADY PROVEN. A private proof commits to the allowlist as it stood when
   // the proof was made, so nothing inside it can notice a later removal. Only
@@ -207,7 +193,14 @@ describe("spending limit account (e2e)", () => {
   // claim, and this is the only test that reaches it: every other rejection in
   // this file happens in private, before a proof exists.
   //
-  // Amount is small on purpose. The daily-window test above left the window
+  // Two transfers are proven together, against the same allowlist and the same
+  // anchor state, and submitted either side of the removal. The node reports a
+  // bare "reverted" with no reason, so the reason is established by the pair
+  // rather than by the receipt: identical transactions, identical proving
+  // conditions, and the only difference between the one that lands and the one
+  // that does not is the removal.
+  //
+  // Amounts are small on purpose. The daily-window test above left the window
   // near its cap, and a rejection for volume would prove nothing about
   // revocation.
   //
@@ -215,10 +208,14 @@ describe("spending limit account (e2e)", () => {
   it("invalidates a transfer proven before the recipient was removed", async (ctx) => {
     if (deployFailure) return ctx.skip();
 
-    // Proven while SEED_RECIPIENT is still allowlisted. Proving is what makes
-    // this test meaningful: the private half is now fixed and signed.
-    const proven = await proveTransfer(client, tokenAddress, SEED_RECIPIENT, 1000n);
+    const control = await proveTransfer(client, tokenAddress, SEED_RECIPIENT, 1000n);
+    const revoked = await proveTransfer(client, tokenAddress, SEED_RECIPIENT, 1000n);
+
+    // With nothing revoked, this shape lands. Also rules out the negative
+    // result below being proveTransfer building a broken transaction.
     const before = await balanceOf(client, tokenAddress, accountAddress);
+    expect(await control.submit()).toBe("success");
+    expect(await balanceOf(client, tokenAddress, accountAddress)).toBe(before - 1000n);
 
     await removeRecipient(funderWallet, client, accountAddress, SEED_RECIPIENT, adminAddress);
 
@@ -228,8 +225,9 @@ describe("spending limit account (e2e)", () => {
     // loosened to "not success" so that a check migrating out of
     // check_spending_public -- into private, where it could not see a later
     // removal -- shows up here instead of passing quietly.
-    expect(await proven.submit()).toBe("reverted");
-    expect(await balanceOf(client, tokenAddress, accountAddress)).toBe(before);
+    const afterControl = await balanceOf(client, tokenAddress, accountAddress);
+    expect(await revoked.submit()).toBe("reverted");
+    expect(await balanceOf(client, tokenAddress, accountAddress)).toBe(afterControl);
   }, 600_000);
 
   // L2 REVOCATION, the weak half: once removed, a transfer built from scratch
@@ -271,7 +269,9 @@ interface WalletInternals {
   };
   aztecNode: {
     sendTx: (tx: unknown) => Promise<void>;
-    getTxReceipt: (txHash: unknown) => Promise<{ status: string; executionResult?: string }>;
+    getTxReceipt: (
+      txHash: unknown,
+    ) => Promise<{ status: string; executionResult?: string; error?: string }>;
   };
   completeFeeOptions: (opts: unknown) => Promise<unknown>;
   createTxExecutionRequestFromPayloadAndFee: (
@@ -370,7 +370,9 @@ async function waitForExecution(
   while (Date.now() < deadline) {
     const receipt = await wallet.aztecNode.getTxReceipt(txHash);
     if (receipt.executionResult !== undefined) {
-      return receipt.executionResult;
+      // The reason distinguishes "the guard rejected this" from "it reverted
+      // for some unrelated reason", which is the whole value of the assertion.
+      return receipt.error ? `${receipt.executionResult}: ${receipt.error}` : receipt.executionResult;
     }
     if (receipt.status === "dropped") {
       return "dropped";

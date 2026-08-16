@@ -410,6 +410,10 @@ export class AztecClient implements IAztecClient {
     const detailed = await node.getTxReceipt(rawTxHash as never, { includeTxEffect: true });
     const effect = detailed?.txEffect?.data ?? detailed?.txEffect;
 
+    // NOTE: a transfer_to_private emits 2 note hashes and 3 nullifiers, so
+    // both of these are one pick out of a set, and nullifiers[0] is the
+    // protocol nullifier rather than anything this transfer nullified. Kept as
+    // the pre-existing shape; which values the RPC should return is open.
     const noteCommitment = effect?.noteHashes?.[0]?.toString();
     const nullifierHash = effect?.nullifiers?.[0]?.toString();
 

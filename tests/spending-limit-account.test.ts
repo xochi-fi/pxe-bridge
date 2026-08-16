@@ -4,6 +4,7 @@ import { Fr } from "@aztec/foundation/curves/bn254";
 import { AztecAddress } from "@aztec/aztec.js/addresses";
 import { CompleteAddress } from "@aztec/stdlib/contract";
 import { ExecutionPayload } from "@aztec/stdlib/tx";
+import { GasSettings } from "@aztec/stdlib/gas";
 import {
   SpendingLimitAccountContract,
   ALLOWLIST_SIZE,
@@ -50,17 +51,46 @@ function allowlistHint(): string[] {
   return hint;
 }
 
-async function encodedEntrypointArgs(
+const CHAIN_INFO = { chainId: new Fr(31337), version: new Fr(1) };
+const ENTRYPOINT_OPTIONS = {
+  cancellable: false,
+  txNonce: Fr.ZERO,
+  feePaymentMethodOptions: 0,
+};
+
+/**
+ * The args the entrypoint encodes on the path the bridge actually takes.
+ *
+ * BaseWallet.createTxExecutionRequestFromPayloadAndFee calls
+ * createTxExecutionRequest. wrapExecutionPayload is only reached through
+ * AccountEntrypointMetaPaymentMethod, which this account never uses: it pays
+ * with PREEXISTING_FEE_JUICE, so completeFeeOptions returns no
+ * walletFeePaymentMethod and nothing wraps the payload. Testing only
+ * wrapExecutionPayload would leave the production path uncovered.
+ */
+async function requestArgs(
+  account: import("@aztec/aztec.js/account").Account,
+): Promise<Fr[]> {
+  const request = await account.createTxExecutionRequest(
+    ExecutionPayload.empty(),
+    GasSettings.empty(),
+    CHAIN_INFO,
+    ENTRYPOINT_OPTIONS as Parameters<typeof account.createTxExecutionRequest>[3],
+  );
+  // argsOfCalls is unordered; firstCallArgsHash points at the entrypoint's.
+  const entry = request.argsOfCalls.find((h) => h.hash.equals(request.firstCallArgsHash));
+  expect(entry).toBeDefined();
+  return entry!.values;
+}
+
+/** The same, through the wrapping path, which the class still has to satisfy. */
+async function wrappedArgs(
   account: import("@aztec/aztec.js/account").Account,
 ): Promise<Fr[]> {
   const payload = await account.wrapExecutionPayload(
     ExecutionPayload.empty(),
-    { chainId: new Fr(31337), version: new Fr(1) },
-    {
-      cancellable: false,
-      txNonce: Fr.ZERO,
-      feePaymentMethodOptions: 0,
-    } as Parameters<typeof account.wrapExecutionPayload>[2],
+    CHAIN_INFO,
+    ENTRYPOINT_OPTIONS as Parameters<typeof account.wrapExecutionPayload>[2],
   );
   const call = payload.calls[0];
   expect(call).toBeDefined();
@@ -85,7 +115,7 @@ describe("SpendingLimitAccountContract declaration binding", () => {
     const { contract, address } = await newContract();
     contract.setDeclaredSpending(AMOUNT, RECIPIENT, allowlistHint());
 
-    const args = await encodedEntrypointArgs(contract.getAccount(address));
+    const args = await requestArgs(contract.getAccount(address));
 
     expect(args[DECLARED_AMOUNT_OFFSET]!.toBigInt()).toBe(AMOUNT);
     expect(args[DECLARED_RECIPIENT_OFFSET]!.toString()).toBe(RECIPIENT);
@@ -101,7 +131,7 @@ describe("SpendingLimitAccountContract declaration binding", () => {
 
     contract.setDeclaredSpending(AMOUNT, RECIPIENT, allowlistHint());
 
-    const args = await encodedEntrypointArgs(early);
+    const args = await requestArgs(early);
     expect(args[DECLARED_AMOUNT_OFFSET]!.toBigInt()).toBe(AMOUNT);
     expect(args[DECLARED_RECIPIENT_OFFSET]!.toString()).toBe(RECIPIENT);
   });
@@ -112,8 +142,8 @@ describe("SpendingLimitAccountContract declaration binding", () => {
     contract.setDeclaredSpending(AMOUNT, RECIPIENT, allowlistHint());
     const second = contract.getAccount(address);
 
-    const firstArgs = await encodedEntrypointArgs(first);
-    const secondArgs = await encodedEntrypointArgs(second);
+    const firstArgs = await requestArgs(first);
+    const secondArgs = await requestArgs(second);
 
     expect(firstArgs[DECLARED_AMOUNT_OFFSET]!.toBigInt()).toBe(
       secondArgs[DECLARED_AMOUNT_OFFSET]!.toBigInt(),
@@ -133,10 +163,26 @@ describe("SpendingLimitAccountContract declaration binding", () => {
     hint[1] = other;
     contract.setDeclaredSpending(1n, other, hint);
 
-    const args = await encodedEntrypointArgs(account);
+    const args = await requestArgs(account);
     expect(args[DECLARED_AMOUNT_OFFSET]!.toBigInt()).toBe(1n);
     expect(args[DECLARED_RECIPIENT_OFFSET]!.toString()).toBe(other);
     expect(args[ALLOWLIST_HINT_OFFSET + 1]!.toString()).toBe(other);
+  });
+
+  // Both entrypoint methods encode the declaration independently, so they can
+  // drift. Only createTxExecutionRequest is on the bridge's path today; this
+  // keeps the other honest rather than leaving it silently untested.
+  it("encodes the same declaration on both entrypoint paths", async () => {
+    const { contract, address } = await newContract();
+    contract.setDeclaredSpending(AMOUNT, RECIPIENT, allowlistHint());
+    const account = contract.getAccount(address);
+
+    const viaRequest = await requestArgs(account);
+    const viaWrap = await wrappedArgs(account);
+
+    // Everything from fee_payment_method onward; the AppPayload before it
+    // carries a random tx nonce.
+    expect(viaWrap.slice(31).map(String)).toEqual(viaRequest.slice(31).map(String));
   });
 
   it("rejects an allowlist hint of the wrong length", async () => {
