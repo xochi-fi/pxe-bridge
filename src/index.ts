@@ -155,9 +155,28 @@ if (SPENDING_LIMIT_ADMIN) {
     );
     process.exit(1);
   }
+  // The contract's assert_limits_valid rejects zero in either slot, so
+  // defaulting these to 0n produced a config that could only fail, and it
+  // failed as an in-circuit assert during deployment rather than as a startup
+  // error naming the variable that was missing.
+  if (limitsConfig.maxAmount === undefined || limitsConfig.dailyLimit === undefined) {
+    console.error(
+      "[pxe-bridge] PXE_BRIDGE_MAX_AMOUNT and PXE_BRIDGE_DAILY_LIMIT are both required " +
+        "when the spending limit account is enabled -- the contract rejects a zero limit",
+    );
+    process.exit(1);
+  }
+  // Mirrors the contract's own check, so the mismatch is caught before paying
+  // for a deployment that cannot succeed.
+  if (limitsConfig.dailyLimit < limitsConfig.maxAmount) {
+    console.error(
+      "[pxe-bridge] PXE_BRIDGE_DAILY_LIMIT must be >= PXE_BRIDGE_MAX_AMOUNT",
+    );
+    process.exit(1);
+  }
   spendingLimitConfig = {
-    maxAmountPerTx: limitsConfig.maxAmount ?? 0n,
-    dailyLimit: limitsConfig.dailyLimit ?? 0n,
+    maxAmountPerTx: limitsConfig.maxAmount,
+    dailyLimit: limitsConfig.dailyLimit,
     admin: SPENDING_LIMIT_ADMIN,
     token: SPENDING_LIMIT_TOKEN,
     seedRecipient: SPENDING_LIMIT_SEED,

@@ -50,7 +50,7 @@ The Aztec sandbox requires native x86_64 -- barretenberg's ZK prover crashes und
 | `PXE_BRIDGE_COOLDOWN_THRESHOLD`   | No       | --                      | Amount threshold triggering cooldown delay                                                              |
 | `PXE_BRIDGE_COOLDOWN_DELAY_MS`    | No       | --                      | Delay in ms for amounts >= cooldown threshold                                                           |
 | `PXE_BRIDGE_AUDIT_LOG`            | No       | stdout                  | File path for JSON-lines audit log. Also the durable store for the 24h volume window: set to a path, or the window resets on every restart |
-| `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` | No       | --                      | AztecAddress (32-byte hex) enabling on-chain spending limit account; uses MAX_AMOUNT/DAILY_LIMIT values |
+| `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` | No       | --                      | AztecAddress (32-byte hex) enabling on-chain spending limit account. Requires `PXE_BRIDGE_MAX_AMOUNT` and `PXE_BRIDGE_DAILY_LIMIT`, since the contract rejects a zero limit |
 | `PXE_BRIDGE_SPENDING_LIMIT_TOKEN` | With admin | --                    | AztecAddress (32-byte hex) of the single token the account may move. Fixed at construction, no setter; required when the admin is set |
 | `PXE_BRIDGE_SPENDING_LIMIT_SEED_RECIPIENT` | With admin | --           | AztecAddress (32-byte hex) written to allowlist slot 0 at construction. Without it the allowlist is empty and additions wait out the 24h timelock |
 | `PXE_BRIDGE_SPENDING_LIMIT_MIN_ANONYMITY` | No | `1` | Allowlist slots a transfer must carry, so the recipient is one of at least N. 1 means no floor. Stored on-chain, changed only via the limits timelock; raise it as the allowlist grows |
