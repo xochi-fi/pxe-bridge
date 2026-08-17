@@ -123,6 +123,45 @@ The binding assumes `createNote`'s single-transfer shape. If the bridge later
 issues multi-call payloads, extend the helper to match and sum every
 value-moving call rather than requiring exactly one.
 
+## Fee juice
+
+The spending-limit account's guard also stops it paying its own way. Its
+entrypoint admits exactly one call and requires it to be `transfer_to_private`
+on the pinned token; `FeeJuice.claim` is not that call, and every fee payment
+method the SDK offers contributes a second call which `mergeExecutionPayloads`
+folds into the same `AppPayload` the entrypoint receives. `PREEXISTING_FEE_JUICE`
+is the only branch left, and it is also the only one that calls `end_setup()`,
+which is the phase boundary the limit checks depend on.
+
+Somebody else therefore has to put a balance there. `scripts/top-up-fee-juice.ts`
+bridges from L1 naming the bridge as recipient and then sends
+`FeeJuice.claim(to = bridge, ...)` from a separate payer account, which works
+because `claim` takes its beneficiary as an argument rather than as `msg_sender`.
+
+This introduces an operational key (`FEE_JUICE_PAYER_KEY`) but no new trusted
+party for funds:
+
+- The L1 to L2 message hash commits to the recipient
+  (`get_bridge_gas_msg_hash(owner, amount)`), so the claim can only credit the
+  account it was bridged to. A payer that goes rogue, or a leaked claim secret,
+  can consume the message early but cannot redirect it. The failure mode is
+  liveness, not theft.
+- Fee juice cannot be moved once credited. `FeeJuice` has `claim`,
+  `claim_and_end_setup` and `public_dispatch`, and no transfer or withdrawal.
+  That also means a top-up sent to a mistyped address is lost to everyone, which
+  is why the script validates the address before the L1 write.
+- The payer's own balance pays for the claim transaction, so a compromised payer
+  key spends the payer's fee juice and nothing of the bridge's.
+
+`FEE_JUICE_CLAIM` is refused at startup when `PXE_BRIDGE_SPENDING_LIMIT_ADMIN`
+is set. Attaching a claim to that account names it as fee payer on a deploy sent
+from the separate deployer account, and `BaseWallet.completeFeeOptions` only
+emits `FEE_JUICE_WITH_CLAIM` when the sender is the fee payer; otherwise the
+sender's entrypoint gets `EXTERNAL` and sets no fee payer at all. Since
+`claim_and_end_setup` does not call `set_as_fee_payer` either, the transaction
+would have none. Failing at startup with the reason beats failing during
+deployment with a message about fee payers.
+
 ## What is public
 
 The contract enforces its limits against public state, and a public function's

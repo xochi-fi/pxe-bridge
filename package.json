@@ -33,7 +33,8 @@
     "test:coverage": "vitest run --coverage",
     "test:e2e": "vitest run --config vitest.config.e2e.ts",
     "test:e2e:up": "docker compose up -d --wait anvil aztec-sandbox && npm run test:e2e; ec=$?; docker compose down; exit $ec",
-    "bridge-fee-juice": "tsx scripts/bridge-fee-juice.ts"
+    "bridge-fee-juice": "tsx scripts/bridge-fee-juice.ts",
+    "top-up-fee-juice": "tsx scripts/top-up-fee-juice.ts"
   },
   "dependencies": {
     "@aws-sdk/client-secrets-manager": "^3.1032.0",

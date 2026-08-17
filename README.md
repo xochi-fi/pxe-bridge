@@ -97,6 +97,72 @@ npm run build
 PXE_BRIDGE_SECRET_KEY=0x... PXE_BRIDGE_API_KEY=your-key npm start
 ```
 
+## Fee juice
+
+Every transaction the bridge sends is paid for in fee juice, which is bridged
+in from L1 and cannot be bought, transferred or withdrawn on L2. How the bridge
+gets it depends on which account it runs:
+
+| Account | How it pays | How you fund it |
+| --- | --- | --- |
+| Plain Schnorr (default) | Claims during deployment | `npm run bridge-fee-juice`, then set `FEE_JUICE_CLAIM` |
+| Spending limit (`PXE_BRIDGE_SPENDING_LIMIT_ADMIN`) | Pre-existing balance only | `npm run top-up-fee-juice` |
+
+The spending-limit account cannot claim for itself. Its entrypoint admits
+exactly one call and requires it to be `transfer_to_private` on the pinned
+token, and every way of paying a fee adds a second call to the same payload, so
+each of them is rejected by the account's own guard. Setting `FEE_JUICE_CLAIM`
+alongside `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` is refused at startup rather than
+failing during deployment.
+
+### Topping up the spending-limit account
+
+`FeeJuice.claim` names its beneficiary in an argument rather than taking the
+caller, so a second account can claim on the bridge's behalf. That is what the
+top-up script does: bridge from L1 to the bridge's address, wait for the L1 to
+L2 message, then send the claim from a payer you control.
+
+The bridge logs the address to fund on startup:
+
+```
+[pxe-bridge] Account address: 0x...
+```
+
+The payer must already be deployed and able to pay for one transaction. Running
+the bridge once with the payer's key and **without**
+`PXE_BRIDGE_SPENDING_LIMIT_ADMIN` deploys a plain Schnorr account at the address
+the script derives from that key.
+
+```bash
+FEE_JUICE_RECIPIENT=0x...   \
+FEE_JUICE_PAYER_KEY=0x...   \
+L1_PRIVATE_KEY=0x...        \
+AZTEC_NODE_URL=http://localhost:8080 \
+L1_RPC_URL=https://... L1_CHAIN_ID=1 \
+BRIDGE_AMOUNT=1000000000000000000 \
+npm run top-up-fee-juice
+```
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `FEE_JUICE_RECIPIENT` | Yes | -- | Aztec address to credit |
+| `FEE_JUICE_PAYER_KEY` | Yes | -- | Secret key of the account that sends the claim |
+| `L1_PRIVATE_KEY` | Yes | -- | Ethereum key holding the Fee Juice ERC20 |
+| `AZTEC_NODE_URL` | No | `http://localhost:8080` | Aztec node |
+| `L1_RPC_URL` | No | `http://localhost:8545` | Ethereum RPC |
+| `L1_CHAIN_ID` | No | Anvil's | Required for any L1 other than the sandbox |
+| `BRIDGE_AMOUNT` | No | `1e18` | Fee juice in wei |
+| `FEE_JUICE_PAYER_SPONSORED` | No | -- | `true` pays via SponsoredFPC; sandbox and testnet only |
+
+There is nothing to set on the bridge afterwards. The balance is on chain, and
+the account finds it on its next transaction.
+
+Getting `FEE_JUICE_RECIPIENT` wrong is not recoverable: the L1 to L2 message
+commits to the recipient it was built with, and FeeJuice has no transfer, so
+juice credited to the wrong address stays there. The script checks the address
+shape before it writes to L1, which catches a truncated paste but not a
+well-formed wrong address.
+
 ## API Reference
 
 All methods use JSON-RPC 2.0 over HTTP POST to `/` or `/api/rpc`. Requests require `Content-Type: application/json`. When `PXE_BRIDGE_API_KEY` is set, include `Authorization: Bearer <key>`.

@@ -21,6 +21,34 @@ const TX_TIMEOUT_MS = 120_000; // 2 minutes
 // during a congestion spike.
 const DEPLOY_FEE_HEADROOM = 10n;
 
+/**
+ * Why a fee juice claim and the spending-limit account cannot be combined.
+ *
+ * The claim is bridged to the account it names, so `buildFeePaymentMethod`
+ * hands the deploy a `FeeJuicePaymentMethodWithClaim` naming the limit account
+ * while the deploy is sent from the separate deployer. Three things then go
+ * wrong, any one of which is fatal:
+ *
+ *   1. The payment method's ExecutionPayload carries `feePayer = limit
+ *      account`, and `BaseWallet.completeFeeOptions` gives the sending account
+ *      `FEE_JUICE_WITH_CLAIM` only when `from.equals(feePayer)`. Here it does
+ *      not, so the deployer's entrypoint gets `EXTERNAL`, whose branch in
+ *      `authwit/account.nr` is a no-op.
+ *   2. `FeeJuice.claim_and_end_setup` claims and calls `end_setup()`; it never
+ *      calls `set_as_fee_payer`. With (1) nothing else does either, so the
+ *      transaction has no fee payer at all.
+ *   3. The claim credits the limit account, so even a fee payer that was set
+ *      would be the deployer, paying from a balance the claim did not create.
+ *
+ * `scripts/top-up-fee-juice.ts` is the supported path: it claims on the
+ * account's behalf from a funded payer, leaving a PREEXISTING_FEE_JUICE
+ * balance, which is the only fee branch this account can use.
+ */
+export const FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR =
+  "FEE_JUICE_CLAIM cannot be used with the spending limit account: the claim " +
+  "names the limit account while the deploy is sent from the deployer, so no " +
+  "fee payer is set. Use scripts/top-up-fee-juice.ts instead.";
+
 /** The slice of AztecNode createNote needs to read a tx effect back. */
 interface TxEffectFields {
   noteHashes?: { toString(): string }[];
@@ -35,6 +63,54 @@ interface AztecNodeLike {
 
 /** Distinguishable so createNote can tell a deadline from a rejection. */
 class TimeoutError extends Error {}
+
+/** What the account derivation produces, named so callers cannot swap two Frs. */
+export interface AccountKeys {
+  secret: import("@aztec/aztec.js/fields").Fr;
+  salt: import("@aztec/aztec.js/fields").Fr;
+  signingKey: ReturnType<
+    typeof import("@aztec/stdlib/keys").deriveMasterMessageSigningSecretKey
+  >;
+}
+
+/**
+ * Derives the account material the bridge uses from its secret key.
+ *
+ * Exported because the operator scripts have to reach the same address, and
+ * while they derived it themselves they drifted: `scripts/bridge-fee-juice.ts`
+ * built the salt with `Fr.fromBuffer` and omitted the signing key, so it
+ * produced a claim for the wrong account when it produced one at all.
+ *
+ * The intermediate buffers are zeroed here. The returned `Fr` objects still
+ * hold key material on the JS heap until GC, and the wallet retains the signing
+ * key internally -- SDK-owned memory cannot be zeroed.
+ */
+export async function deriveAccountKeys(secretKey: string): Promise<AccountKeys> {
+  const { Fr } = await import("@aztec/aztec.js/fields");
+  const { deriveMasterMessageSigningSecretKey } = await import("@aztec/stdlib/keys");
+
+  const rawKey = Buffer.from(secretKey.replace(/^0x/, ""), "hex");
+  const keyBytes = Buffer.alloc(32);
+  rawKey.copy(keyBytes, 32 - rawKey.length);
+  rawKey.fill(0); // zero raw key buffer
+
+  const secret = Fr.fromBuffer(keyBytes);
+  const saltBytes = createHash("sha256")
+    .update(Buffer.from("pxe-bridge-account-salt-v1"))
+    .update(keyBytes)
+    .digest();
+  // Reduce, not fromBuffer. A sha256 digest is a uniform 256-bit value and
+  // the BN254 Fr modulus is ~0.189 of 2^256, so ~81% of otherwise valid keys
+  // produced a digest the field could not hold and connect() threw here
+  // before deriving or deploying anything. Reduction is the identity for a
+  // digest already in range, so no account that ever deployed moves.
+  const salt = Fr.fromBufferReduce(saltBytes);
+
+  keyBytes.fill(0);
+  saltBytes.fill(0);
+
+  return { secret, salt, signingKey: deriveMasterMessageSigningSecretKey(secret) };
+}
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
@@ -65,6 +141,13 @@ export class AztecClient implements IAztecClient {
     private readonly feeJuiceClaim?: FeeJuiceClaim,
     private readonly spendingLimitConfig?: SpendingLimitConfig,
   ) {
+    // Refused here rather than in index.ts alone, so a library caller gets the
+    // same answer. Left unchecked the combination fails deep in the SDK during
+    // deployment, with a message about the fee payer that says nothing about
+    // the claim that caused it.
+    if (feeJuiceClaim && spendingLimitConfig) {
+      throw new Error(FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR);
+    }
     this.secretKey = secretKey;
   }
 
@@ -80,45 +163,21 @@ export class AztecClient implements IAztecClient {
     });
     console.log("[pxe-bridge] EmbeddedWallet created");
 
-    const { Fr } = await import("@aztec/aztec.js/fields");
-
-    const rawKey = Buffer.from(this.secretKey.replace(/^0x/, ""), "hex");
+    const secretKey = this.secretKey;
     this.secretKey = null; // clear string reference immediately
+    const { secret, salt, signingKey } = await deriveAccountKeys(secretKey);
 
-    const keyBytes = Buffer.alloc(32);
-    rawKey.copy(keyBytes, 32 - rawKey.length);
-    rawKey.fill(0); // zero raw key buffer
-
-    const secret = Fr.fromBuffer(keyBytes);
-    const saltBytes = createHash("sha256")
-      .update(Buffer.from("pxe-bridge-account-salt-v1"))
-      .update(keyBytes)
-      .digest();
-    // Reduce, not fromBuffer. A sha256 digest is a uniform 256-bit value and
-    // the BN254 Fr modulus is ~0.189 of 2^256, so ~81% of otherwise valid keys
-    // produced a digest the field could not hold and connect() threw here
-    // before deriving or deploying anything. Reduction is the identity for a
-    // digest already in range, so no account that ever deployed moves.
-    const salt = Fr.fromBufferReduce(saltBytes);
-
-    keyBytes.fill(0);
-    saltBytes.fill(0);
-    // Note: Fr objects (secret, salt) hold key material on the JS heap
-    // until GC'd after connect() returns. The wallet also retains the
-    // signing key internally -- we cannot zero SDK-owned memory.
-
-    const { deriveMasterMessageSigningSecretKey } = await import("@aztec/stdlib/keys");
     const accountManager = this.spendingLimitConfig
       ? await this.createSpendingLimitAccount(secret, salt)
-      : await this.wallet.createSchnorrAccount(
-          secret,
-          salt,
-          deriveMasterMessageSigningSecretKey(secret),
-        );
+      : await this.wallet.createSchnorrAccount(secret, salt, signingKey);
 
     const account = await accountManager.getAccount();
     const address = account.getAddress();
     this.solverAddress = address;
+    // Logged because the operator needs it: the spending-limit account cannot
+    // obtain fee juice for itself, and topping it up means naming this address
+    // to scripts/top-up-fee-juice.ts. Public on chain either way.
+    console.log(`[pxe-bridge] Account address: ${address.toString()}`);
 
     // Deploy account contract if not already on-chain.
     // Cannot rely on wallet.getAccounts() since the local WalletDB is

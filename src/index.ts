@@ -1,4 +1,4 @@
-import { AztecClient } from "./aztec-client.js";
+import { AztecClient, FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR } from "./aztec-client.js";
 import { createApp } from "./server.js";
 import { FeeJuiceClaimSchema } from "./types.js";
 import { TransactionLimits, type LimitsConfig } from "./limits.js";
@@ -178,6 +178,13 @@ if (SPENDING_LIMIT_ADMIN) {
     console.error(
       "[pxe-bridge] PXE_BRIDGE_DAILY_LIMIT must be >= PXE_BRIDGE_MAX_AMOUNT",
     );
+    process.exit(1);
+  }
+  // Refused at startup rather than at deployment. The claim would be attached
+  // to an account the deploy is not sent from, which leaves the transaction
+  // with no fee payer at all; see FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR.
+  if (feeJuiceClaim) {
+    console.error(`[pxe-bridge] ${FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR}`);
     process.exit(1);
   }
   spendingLimitConfig = {

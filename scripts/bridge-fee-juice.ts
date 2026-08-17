@@ -2,6 +2,11 @@
  * Bridges Fee Juice from Ethereum L1 to an Aztec L2 account.
  * Outputs the claim JSON needed by PXE_BRIDGE via FEE_JUICE_CLAIM env var.
  *
+ * PLAIN SCHNORR ACCOUNTS ONLY. The sidecar consumes FEE_JUICE_CLAIM through
+ * FeeJuicePaymentMethodWithClaim, which the spending-limit account cannot use;
+ * with PXE_BRIDGE_SPENDING_LIMIT_ADMIN set the bridge refuses the combination
+ * at startup. Use scripts/top-up-fee-juice.ts for that account.
+ *
  * Usage:
  *   npx tsx scripts/bridge-fee-juice.ts
  *
@@ -13,7 +18,7 @@
  *   BRIDGE_AMOUNT          -- Fee Juice amount in wei (default: 1000000000000000000 = 1e18)
  */
 
-import { createHash } from "node:crypto";
+import { deriveAccountKeys } from "../src/aztec-client.js";
 
 async function main() {
   const SECRET_KEY = process.env["PXE_BRIDGE_SECRET_KEY"];
@@ -37,25 +42,16 @@ async function main() {
     process.exit(1);
   }
 
-  // Derive the Aztec account address (same logic as AztecClient.connect)
-  const { Fr } = await import("@aztec/aztec.js/fields");
+  // Shared with AztecClient.connect, not reimplemented. The copy that used to
+  // live here built the salt with Fr.fromBuffer and omitted the signing key, so
+  // it threw for most keys and derived a different address for the rest.
   const { EmbeddedWallet } = await import("@aztec/wallets/embedded");
-
-  const rawKey = Buffer.from(SECRET_KEY.replace(/^0x/, ""), "hex");
-  const keyBytes = Buffer.alloc(32);
-  rawKey.copy(keyBytes, 32 - rawKey.length);
-
-  const secret = Fr.fromBuffer(keyBytes);
-  const saltBytes = createHash("sha256")
-    .update(Buffer.from("pxe-bridge-account-salt-v1"))
-    .update(keyBytes)
-    .digest();
-  const salt = Fr.fromBuffer(saltBytes);
+  const { secret, salt, signingKey } = await deriveAccountKeys(SECRET_KEY);
 
   console.log(`Connecting to Aztec node at ${AZTEC_NODE_URL}...`);
   const wallet = await EmbeddedWallet.create(AZTEC_NODE_URL);
 
-  const accountManager = await wallet.createSchnorrAccount(secret, salt);
+  const accountManager = await wallet.createSchnorrAccount(secret, salt, signingKey);
   const account = await accountManager.getAccount();
   const aztecAddress = account.getAddress();
   console.log(`Aztec account address: ${aztecAddress.toString()}`);
@@ -77,6 +73,12 @@ async function main() {
   const l1Addresses = nodeInfoJson.result.l1ContractAddresses;
   const feeJuicePortalAddress = l1Addresses["feeJuicePortalAddress"];
   const feeJuiceAddress = l1Addresses["feeJuiceAddress"];
+  if (!feeJuicePortalAddress || !feeJuiceAddress) {
+    // EthAddress.fromString takes undefined without complaining and the failure
+    // then surfaces as an L1 call to the zero address.
+    console.error(`Node at ${AZTEC_NODE_URL} did not report the Fee Juice L1 addresses`);
+    process.exit(1);
+  }
 
   console.log(`Fee Juice Portal: ${feeJuicePortalAddress}`);
   console.log(`Fee Juice Token:  ${feeJuiceAddress}`);
