@@ -6,8 +6,8 @@ export async function setup(): Promise<void> {
   if (COMPOSE_MANAGED) {
     console.log("[e2e] Starting Aztec sandbox via docker compose...");
     // Only the chain services. The e2e suite builds the bridge in-process via
-    // createApp(), so the containerised pxe-bridge is not needed and its own
-    // startup failures would otherwise fail the run.
+    // createApp(), so the containerised pxe-bridge is redundant here and
+    // starting it would only add an image build to every run.
     execSync("docker compose up -d --wait anvil aztec-sandbox", { stdio: "inherit" });
     process.env["AZTEC_NODE_URL"] = "http://localhost:8080";
   }

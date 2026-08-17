@@ -63,6 +63,25 @@ docker run -e PXE_BRIDGE_SECRET_KEY=0x... \
            ghcr.io/xochi-fi/pxe-bridge:0.1.0
 ```
 
+`PXE_BRIDGE_HOST=0.0.0.0` is required in a container: the default `127.0.0.1`
+binds inside the container and the published port reaches nothing.
+
+The image sets `NODE_ENV=production`, under which `PXE_BRIDGE_SECRET_KEY` is
+rejected and `PXE_BRIDGE_SECRET_ARN` is required. Pass `NODE_ENV=development`
+to use a raw key, which is what `docker-compose.yml` does.
+
+Building the image locally does not require the compiled Noir artifact. An
+image without it runs the default Schnorr configuration; enabling
+`PXE_BRIDGE_SPENDING_LIMIT_ADMIN` needs the artifact under
+`contracts/spending_limit_account/target/`, built by the CI `contract` job or
+by `aztec compile` on an x86 host.
+
+### Local sandbox
+
+```bash
+docker compose up          # anvil + aztec sandbox + bridge
+```
+
 ### From Source
 
 ```bash

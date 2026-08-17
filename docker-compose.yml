@@ -39,10 +39,18 @@ services:
     ports:
       - "8547:8547"
     environment:
+      # The image sets NODE_ENV=production, under which secrets.ts rejects
+      # PXE_BRIDGE_SECRET_KEY and demands PXE_BRIDGE_SECRET_ARN. That made this
+      # service unstartable: the only key it supplies is the one the image
+      # refuses.
+      NODE_ENV: development
       # Local development only. Must be a BN254 field element: the Anvil
       # secp256k1 test key that used to sit here exceeds the modulus and is
       # rejected by Fr.fromBuffer.
       PXE_BRIDGE_SECRET_KEY: "0x000000000000000000000000000000000000000000000000000000000000beef"
+      # Without this the server binds 127.0.0.1 inside the container and the
+      # published port below reaches nothing.
+      PXE_BRIDGE_HOST: "0.0.0.0"
       AZTEC_NODE_URL: http://aztec-sandbox:8080
     depends_on:
       aztec-sandbox:
