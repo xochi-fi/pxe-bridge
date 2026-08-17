@@ -143,6 +143,10 @@ pub contract SpendingLimitAccount {
         // ---- Admin (immutable after init) ----
         admin: PublicImmutable<AztecAddress, Context>,
 
+        // Emergency stop, checked in check_spending_public so it takes effect
+        // at inclusion time. Defaults false; never written at construction.
+        paused: PublicMutable<bool, Context>,
+
         // ---- Timelock for pending limit changes ----
         // u128 too: as Field, propose_limits could store a value apply_limits
         // then truncates on write.
@@ -385,6 +389,12 @@ pub contract SpendingLimitAccount {
         );
         assert(self.storage.initialized.read(), "Not initialized");
 
+        // Emergency stop. Here rather than in private for the same reason the
+        // allowlist binding is: a check evaluated at inclusion time stops a
+        // transaction however far through proving it already is, which is the
+        // only thing that helps once the signing key is loose.
+        assert(!self.storage.paused.read(), "Account is paused");
+
         // H3: the single asset this account may move. Checked here rather than
         // in private because a public read is of current state and needs no
         // initialization nullifier at the anchor block.
@@ -518,6 +528,59 @@ pub contract SpendingLimitAccount {
         self.storage.pending_change_time.write(0);
     }
 
+    // ================================================================
+    // Emergency stop
+    // ================================================================
+
+    // IMMEDIATE in both directions, and deliberately not timelocked.
+    //
+    // This is the admin's lever against a compromised SIGNING KEY, which under
+    // the threat model at the top of this file is a different party from the
+    // admin. The key holder can sign anything; the only thing that stops them
+    // mid-incident is a check evaluated at inclusion time, and a timelock on
+    // pause would hand them exactly the notice period they need to drain.
+    //
+    // A timelock on unpause is no better: it would freeze the account for a
+    // day after a false alarm. Both directions are already admin-gated, and an
+    // attacker who holds the admin key has propose_limits and does not need
+    // this.
+    //
+    // Removing every allowlist entry is the alternative to this, at one
+    // transaction per recipient, which is what the account had before.
+    #[external("public")]
+    fn pause() {
+        let caller = self.context.maybe_msg_sender().unwrap();
+        assert(caller == self.storage.admin.read(), "Not admin");
+        self.storage.paused.write(true);
+    }
+
+    #[external("public")]
+    fn unpause() {
+        let caller = self.context.maybe_msg_sender().unwrap();
+        assert(caller == self.storage.admin.read(), "Not admin");
+        self.storage.paused.write(false);
+    }
+
+    // Lowering the anonymity floor is IMMEDIATE; raising it keeps the
+    // propose_limits timelock. Same asymmetry as the allowlist, for the same
+    // reason: loosening a restriction is not what an attacker wants, and the
+    // raise is the direction that needs notice.
+    //
+    // This is the way out of a bricked account. assert_hint_masks_live needs
+    // count_nonzero(hint) >= floor, and a hint can carry at most live_count
+    // entries, so a floor above live_count makes every transfer unsatisfiable.
+    // remove_recipient can produce that state immediately and is deliberately
+    // not stopped from doing so -- refusing an emergency revocation is worse
+    // than the outage it would prevent -- so the recovery cannot itself wait
+    // out a 24h timelock.
+    #[external("public")]
+    fn lower_min_anonymity(new_floor: u32) {
+        let caller = self.context.maybe_msg_sender().unwrap();
+        assert(caller == self.storage.admin.read(), "Not admin");
+        assert_anonymity_lowered(new_floor, self.storage.min_anonymity_set.read());
+        self.storage.min_anonymity_set.write(new_floor);
+    }
+
     // There is deliberately no admin reset of the spending counter: an
     // untimelocked write of zero is the counter-reset impact by another route.
 
@@ -593,9 +656,14 @@ pub contract SpendingLimitAccount {
     // delete the wrong recipient.
     //
     // Removing the last entry leaves the allowlist empty and the bridge unable
-    // to transfer until an addition clears its timelock. That is accepted: the
-    // pause is the lever for stopping everything, and this one is for removing
-    // a specific recipient.
+    // to transfer until an addition clears its timelock. That is accepted:
+    // pause() is the lever for stopping everything, and this one is for
+    // removing a specific recipient.
+    //
+    // Nor is this blocked when it would drop live_count below
+    // min_anonymity_set, which also stops every transfer. Refusing an
+    // emergency revocation to protect an availability property is the wrong
+    // trade; lower_min_anonymity is the untimelocked way back.
     #[external("public")]
     fn remove_recipient(recipient: AztecAddress) {
         let caller = self.context.maybe_msg_sender().unwrap();
@@ -873,6 +941,15 @@ pub contract SpendingLimitAccount {
         assert(floor <= ALLOWLIST_SIZE, "Anonymity floor exceeds allowlist size");
     }
 
+    // The untimelocked path may only LOWER the floor. Equality is rejected
+    // too: a no-op write would let the admin present an unpause-shaped
+    // transaction that changes nothing.
+    #[contract_library_method]
+    fn assert_anonymity_lowered(new_floor: u32, current: u32) {
+        assert(new_floor < current, "Anonymity floor must decrease");
+        assert_anonymity_valid(new_floor);
+    }
+
     // Zero is rejected in both slots. It would mean "unlimited", which is a
     // fail-open default for an operator who omits an env var.
     #[contract_library_method]
@@ -1116,15 +1193,62 @@ pub contract SpendingLimitAccount {
         assert_hint_masks_live(hint, after_addition, 4);
     }
 
-    // Below the floor the requirement degrades to live_count: you cannot hide
-    // among more entries than exist.
+    // A floor equal to live_count is the boundary: the hint carries every live
+    // slot and just clears it.
+    //
+    // The previous name for this test claimed the floor "degrades to
+    // live_count". It does not. assert_hint_masks_live uses the stored floor
+    // verbatim -- there is no min() anywhere -- and this test only passed
+    // because it happened to pick floor == live_count. The other side of the
+    // boundary is below.
     #[test]
-    fn floor_degrades_to_live_count() {
+    fn floor_equal_to_live_count_is_satisfiable() {
         let mut live: [Field; ALLOWLIST_SIZE] = [0; ALLOWLIST_SIZE];
         live[0] = A;
         live[1] = B;
         // Floor of 2 is what an operator would set for a 2-entry allowlist.
         assert_hint_masks_live(live, live, 2);
+    }
+
+    // The state lower_min_anonymity exists to undo. A hint carries at most
+    // live_count entries, since every non-zero slot must mask a live one, so a
+    // floor above live_count can never be met and EVERY transfer reverts.
+    //
+    // Reachable two ways with no timelock in between: remove_recipient taking
+    // the list below the floor, or an operator raising the floor ahead of the
+    // allowlist.
+    #[test(should_fail_with = "Hint below minimum anonymity set")]
+    fn floor_above_live_count_is_unsatisfiable() {
+        let mut live: [Field; ALLOWLIST_SIZE] = [0; ALLOWLIST_SIZE];
+        live[0] = A;
+        live[1] = B;
+        // Carrying every live slot is the most a client can do, and it is not
+        // enough.
+        assert_hint_masks_live(live, live, 3);
+    }
+
+    // ---- Anonymity floor: the untimelocked lowering path ----
+
+    #[test]
+    fn floor_may_be_lowered() {
+        assert_anonymity_lowered(2, 4);
+    }
+
+    #[test(should_fail_with = "Anonymity floor must decrease")]
+    fn floor_may_not_be_raised_without_the_timelock() {
+        assert_anonymity_lowered(5, 4);
+    }
+
+    // A no-op write would let the admin present a floor-lowering transaction
+    // that changes nothing.
+    #[test(should_fail_with = "Anonymity floor must decrease")]
+    fn floor_may_not_be_set_to_itself() {
+        assert_anonymity_lowered(4, 4);
+    }
+
+    #[test(should_fail_with = "Anonymity floor must be at least 1")]
+    fn floor_may_not_be_lowered_to_zero() {
+        assert_anonymity_lowered(0, 4);
     }
 
     // REGRESSION. With the floor derived as min(k, live_count), growing the
