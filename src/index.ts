@@ -2,9 +2,12 @@ import { AztecClient } from "./aztec-client.js";
 import { createApp } from "./server.js";
 import { FeeJuiceClaimSchema } from "./types.js";
 import { TransactionLimits, type LimitsConfig } from "./limits.js";
-import { AuditLogger } from "./audit.js";
+import { AuditLogger, readRecentSpends } from "./audit.js";
 import { resolveSecretKey } from "./secrets.js";
 import type { SpendingLimitConfig } from "./spending-limit-account.js";
+
+// Must match WINDOW_MS in limits.ts: it bounds the same rolling window.
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 const PORT = parseInt(process.env["PXE_BRIDGE_PORT"] ?? "8547", 10);
 if (isNaN(PORT) || PORT < 0 || PORT > 65535) {
@@ -94,9 +97,20 @@ const hasLimits =
   limitsConfig.cooldownThreshold !== undefined;
 const limits = hasLimits ? new TransactionLimits(limitsConfig) : undefined;
 
-// Audit log
+// Audit log. Doubles as the rolling window's durable store: main() replays it
+// into `limits` before listening.
 const AUDIT_LOG_PATH = process.env["PXE_BRIDGE_AUDIT_LOG"];
 const audit = new AuditLogger(AUDIT_LOG_PATH);
+
+// Key for POST /admin/resume. Separate from the RPC key on purpose; see
+// ServerOptions.adminKey.
+const ADMIN_KEY = process.env["PXE_BRIDGE_ADMIN_KEY"];
+if (limits && !ADMIN_KEY) {
+  console.warn(
+    "[pxe-bridge] WARNING: PXE_BRIDGE_ADMIN_KEY not set -- a tripped circuit " +
+      "breaker can only be cleared by restarting the process",
+  );
+}
 
 // On-chain spending limit account (Phase 2).
 // When PXE_BRIDGE_SPENDING_LIMIT_ADMIN is set, deploys a custom Noir account
@@ -155,8 +169,23 @@ async function main(): Promise<void> {
   const { key: secretKey, source: keySource } = await resolveSecretKey();
   console.log(`[pxe-bridge] Secret key loaded from ${keySource}`);
 
+  // Rebuild the rolling window before serving. Skipping this gave every
+  // restart a fresh daily budget, and a restart was the documented way to
+  // clear a tripped breaker.
+  if (limits && limitsConfig.dailyLimit !== undefined) {
+    if (AUDIT_LOG_PATH) {
+      const restored = limits.restore(await readRecentSpends(AUDIT_LOG_PATH, Date.now() - DAY_MS));
+      console.log(`[pxe-bridge] Restored ${restored} spend(s) into the 24h window`);
+    } else {
+      console.warn(
+        "[pxe-bridge] WARNING: PXE_BRIDGE_AUDIT_LOG not set -- the 24h volume " +
+          "window is in-memory only and resets on every restart",
+      );
+    }
+  }
+
   const client = new AztecClient(AZTEC_NODE_URL, secretKey, feeJuiceClaim, spendingLimitConfig);
-  const server = createApp(client, { apiKey: API_KEY, limits, audit });
+  const server = createApp(client, { apiKey: API_KEY, adminKey: ADMIN_KEY, limits, audit });
 
   await client.connect();
 
@@ -185,6 +214,9 @@ async function main(): Promise<void> {
     console.log(`  POST /           -- JSON-RPC (aztec_createNote, aztec_getVersion)`);
     console.log(`  POST /api/rpc    -- JSON-RPC (alias)`);
     console.log(`  GET  /status     -- Health check`);
+    console.log(
+      `  POST /admin/resume -- Clear the circuit breaker (${ADMIN_KEY ? "enabled" : "DISABLED"})`,
+    );
   });
 
   function shutdown(): void {

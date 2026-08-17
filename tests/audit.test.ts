@@ -3,7 +3,8 @@ import { readFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
-import { AuditLogger, type AuditEntry } from "../src/audit.js";
+import { writeFile } from "node:fs/promises";
+import { AuditLogger, readRecentSpends, type AuditEntry } from "../src/audit.js";
 
 function tmpPath(): string {
   return join(tmpdir(), `audit-test-${randomBytes(8).toString("hex")}.jsonl`);
@@ -99,5 +100,69 @@ describe("AuditLogger", () => {
     const parsed = JSON.parse(content.trim());
     expect("tradeId" in parsed).toBe(false);
     expect("error" in parsed).toBe(false);
+  });
+});
+
+describe("readRecentSpends", () => {
+  const files: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(files.splice(0).map((f) => unlink(f).catch(() => undefined)));
+  });
+
+  /** Writes JSON lines and registers the file for cleanup. */
+  async function writeLog(entries: Partial<AuditEntry>[]): Promise<string> {
+    const path = tmpPath();
+    files.push(path);
+    await writeFile(path, entries.map((e) => JSON.stringify(entry(e))).join("\n") + "\n");
+    return path;
+  }
+
+  const iso = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
+
+  it("round-trips what AuditLogger wrote", async () => {
+    const path = tmpPath();
+    files.push(path);
+    const logger = new AuditLogger(path);
+    await logger.log(entry({ timestamp: iso(0), amount: "1500" }));
+
+    const spends = await readRecentSpends(path, 0);
+    expect(spends).toHaveLength(1);
+    expect(spends[0]!.amount).toBe(1500n);
+  });
+
+  it("returns only successful spends", async () => {
+    const path = await writeLog([
+      { timestamp: iso(0), amount: "100", status: "success" },
+      { timestamp: iso(0), amount: "200", status: "rejected" },
+      { timestamp: iso(0), amount: "400", status: "error" },
+    ]);
+
+    const spends = await readRecentSpends(path, 0);
+    expect(spends.map((s) => s.amount)).toEqual([100n]);
+  });
+
+  it("drops entries older than the cutoff", async () => {
+    const path = await writeLog([
+      { timestamp: iso(25 * 60 * 60 * 1000), amount: "100" },
+      { timestamp: iso(60_000), amount: "200" },
+    ]);
+
+    const spends = await readRecentSpends(path, Date.now() - 24 * 60 * 60 * 1000);
+    expect(spends.map((s) => s.amount)).toEqual([200n]);
+  });
+
+  // A log killed mid-append leaves a partial final line. Refusing to boot over
+  // that would turn an observability problem into an outage.
+  it("skips a truncated final line and keeps the rest", async () => {
+    const path = await writeLog([{ timestamp: iso(0), amount: "100" }]);
+    await writeFile(path, (await readFile(path, "utf8")) + '{"status":"success","amo');
+
+    const spends = await readRecentSpends(path, 0);
+    expect(spends.map((s) => s.amount)).toEqual([100n]);
+  });
+
+  it("treats a missing log as a first boot", async () => {
+    expect(await readRecentSpends(tmpPath(), 0)).toEqual([]);
   });
 });

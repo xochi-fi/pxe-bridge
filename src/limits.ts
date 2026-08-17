@@ -90,16 +90,32 @@ export class TransactionLimits {
 
     if (this.config.dailyLimit !== undefined) {
       const windowTotal = this.rollingTotal();
-      if (windowTotal + amount > this.config.dailyLimit) {
+
+      // Volume actually consumed the window. This is the drain signal the
+      // breaker exists for, so it stops everything until an operator resumes.
+      if (windowTotal >= this.config.dailyLimit) {
         this.paused = true;
         this.pausedAt = Date.now();
         console.error(
-          `[pxe-bridge] CIRCUIT BREAKER: daily limit ${this.config.dailyLimit} would be exceeded ` +
-            `(current: ${windowTotal}, requested: ${amount}). Bridge paused.`,
+          `[pxe-bridge] CIRCUIT BREAKER: 24h volume ${windowTotal} reached the daily limit ` +
+            `${this.config.dailyLimit}. Bridge paused.`,
         );
         return {
           allowed: false,
           reason: "Bridge paused: daily volume limit exceeded",
+        };
+      }
+
+      // One request larger than what is left. Reject it alone and keep
+      // serving: tripping the breaker here let a single oversized request --
+      // which needs no prior volume at all when maxAmount is unset -- stop the
+      // bridge for the full window.
+      if (windowTotal + amount > this.config.dailyLimit) {
+        return {
+          allowed: false,
+          reason:
+            `Amount ${amount} exceeds the remaining daily budget ` +
+            `${this.config.dailyLimit - windowTotal}`,
         };
       }
     }
@@ -115,10 +131,31 @@ export class TransactionLimits {
     this.spendLog.push({ amount, timestamp: Date.now() });
   }
 
-  /** Manual re-enable after circuit breaker trips. */
+  /**
+   * Manual re-enable after the circuit breaker trips.
+   *
+   * Clears `pausedAt` too. Leaving it set meant a later pause inherited the
+   * first one's timestamp and could auto-resume immediately.
+   */
   resume(): void {
     this.paused = false;
+    this.pausedAt = 0;
     console.log("[pxe-bridge] Bridge resumed by operator");
+  }
+
+  /**
+   * Seed the rolling window with spends recorded before this process started.
+   *
+   * The window is in-memory, so without this a restart -- including the
+   * restart that used to be the only way to clear a tripped breaker -- reset
+   * the 24h total to zero and handed back the full daily budget. Entries
+   * outside the window are dropped rather than trusted.
+   */
+  restore(entries: { amount: bigint; timestamp: number }[]): number {
+    const cutoff = Date.now() - WINDOW_MS;
+    const live = entries.filter((e) => e.timestamp >= cutoff);
+    this.spendLog.push(...live);
+    return live.length;
   }
 
   isPaused(): boolean {

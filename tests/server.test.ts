@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import type { Server } from "node:http";
 import { createApp, type ServerOptions } from "../src/server.js";
+import { TransactionLimits } from "../src/limits.js";
 import type { CreateNoteParams, CreateNoteResult, IAztecClient } from "../src/types.js";
 import { rpcJson } from "./helpers.js";
 
@@ -308,5 +309,94 @@ describe("HTTP server with auth", () => {
   it("allows /status without auth", async () => {
     const res = await fetch(`${authBaseUrl}/status`);
     expect(res.status).toBe(200);
+  });
+});
+
+describe("POST /admin/resume", () => {
+  const ADMIN_KEY = "admin-secret-key-67890";
+  const RPC_KEY = "rpc-secret-key-12345";
+
+  /** Boots a server on an ephemeral port and returns its URL plus a closer. */
+  async function boot(opts: ServerOptions): Promise<{ url: string; close: () => Promise<void> }> {
+    const srv = createApp(new FakeAztecClient(), opts);
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const port = addr && typeof addr === "object" ? addr.port : 0;
+    return {
+      url: `http://127.0.0.1:${port}`,
+      close: () => new Promise<void>((resolve) => srv.close(() => resolve())),
+    };
+  }
+
+  function resume(url: string, key?: string) {
+    return fetch(`${url}/admin/resume`, {
+      method: "POST",
+      headers: key ? { Authorization: `Bearer ${key}` } : {},
+    });
+  }
+
+  it("clears a tripped breaker and reports the new state", async () => {
+    const limits = new TransactionLimits({ dailyLimit: 5000n });
+    limits.recordSpend(5000n);
+    limits.check(1n);
+    expect(limits.isPaused()).toBe(true);
+
+    const { url, close } = await boot({ adminKey: ADMIN_KEY, limits });
+    try {
+      const res = await resume(url, ADMIN_KEY);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ status: "resumed", paused: false });
+      expect(limits.isPaused()).toBe(false);
+    } finally {
+      await close();
+    }
+  });
+
+  it("rejects a missing or wrong admin key", async () => {
+    const { url, close } = await boot({
+      adminKey: ADMIN_KEY,
+      limits: new TransactionLimits({ dailyLimit: 5000n }),
+    });
+    try {
+      expect((await resume(url)).status).toBe(401);
+      expect((await resume(url, "wrong-key")).status).toBe(401);
+    } finally {
+      await close();
+    }
+  });
+
+  // The whole reason the key is separate: a caller who can move funds must not
+  // be able to clear the breaker that stopped them.
+  it("does not accept the RPC key", async () => {
+    const { url, close } = await boot({
+      apiKey: RPC_KEY,
+      adminKey: ADMIN_KEY,
+      limits: new TransactionLimits({ dailyLimit: 5000n }),
+    });
+    try {
+      expect((await resume(url, RPC_KEY)).status).toBe(401);
+    } finally {
+      await close();
+    }
+  });
+
+  // 404 rather than 403: an endpoint that cannot be used should not confirm
+  // that it exists.
+  it("is invisible when no admin key is configured", async () => {
+    const { url, close } = await boot({ limits: new TransactionLimits({ dailyLimit: 5000n }) });
+    try {
+      expect((await resume(url, ADMIN_KEY)).status).toBe(404);
+    } finally {
+      await close();
+    }
+  });
+
+  it("reports 409 when no limits are configured", async () => {
+    const { url, close } = await boot({ adminKey: ADMIN_KEY });
+    try {
+      expect((await resume(url, ADMIN_KEY)).status).toBe(409);
+    } finally {
+      await close();
+    }
   });
 });

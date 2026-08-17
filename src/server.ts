@@ -12,6 +12,12 @@ const REQUEST_TIMEOUT_MS = 30_000;
 
 export interface ServerOptions {
   apiKey?: string | undefined;
+  /**
+   * Separate key for `POST /admin/resume`. Deliberately not `apiKey`: whoever
+   * can move funds should not also be able to clear the circuit breaker that
+   * stopped them. Unset disables the endpoint entirely.
+   */
+  adminKey?: string | undefined;
   limits?: TransactionLimits | undefined;
   audit?: AuditLogger | undefined;
 }
@@ -139,6 +145,34 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           console.error("[pxe-bridge] Health check failed:", err);
           sendJson(res, 503, { status: "starting" });
         }
+        return;
+      }
+
+      // Operator recovery after the circuit breaker trips. Without it the only
+      // way back was a process restart, which also wiped the rolling window
+      // and handed back the full daily budget.
+      if (req.method === "POST" && pathname === "/admin/resume") {
+        const adminIp = req.socket.remoteAddress ?? "unknown";
+        if (!rateLimiter.allow(adminIp)) {
+          sendJson(res, 429, { error: "Too many requests" });
+          return;
+        }
+        // 404 rather than 403 when no admin key is configured: an endpoint
+        // that cannot be used should not confirm that it exists.
+        if (!opts.adminKey) {
+          sendJson(res, 404, { error: "Not found" });
+          return;
+        }
+        if (!checkAuth(req, opts.adminKey)) {
+          sendJson(res, 401, { error: "Unauthorized" });
+          return;
+        }
+        if (!opts.limits) {
+          sendJson(res, 409, { error: "No transaction limits configured" });
+          return;
+        }
+        opts.limits.resume();
+        sendJson(res, 200, { status: "resumed", paused: opts.limits.isPaused() });
         return;
       }
 

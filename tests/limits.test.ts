@@ -45,12 +45,11 @@ describe("TransactionLimits", () => {
       expect(result.allowed).toBe(false);
     });
 
-    it("trips circuit breaker and stays paused", () => {
+    it("trips circuit breaker once volume consumes the window", () => {
       const limits = new TransactionLimits({ dailyLimit: 5000n });
-      limits.recordSpend(4000n);
+      limits.recordSpend(5000n);
 
-      // This check trips the breaker
-      const result1 = limits.check(2000n);
+      const result1 = limits.check(1n);
       expect(result1.allowed).toBe(false);
       expect(limits.isPaused()).toBe(true);
 
@@ -59,18 +58,77 @@ describe("TransactionLimits", () => {
       expect(result2.allowed).toBe(false);
     });
 
-    it("resumes after manual resume", () => {
+    // A single request larger than the remaining budget used to pause the
+    // bridge for 24h. With no maxAmount configured that needed no prior volume
+    // at all, so one request was a full-day denial of service.
+    it("rejects an oversized request without pausing", () => {
+      const limits = new TransactionLimits({ dailyLimit: 5000n });
+
+      const result = limits.check(999_999n);
+      expect(result.allowed).toBe(false);
+      if (!result.allowed) {
+        expect(result.reason).toContain("remaining daily budget");
+      }
+      expect(limits.isPaused()).toBe(false);
+
+      // Still serving.
+      expect(limits.check(100n).allowed).toBe(true);
+    });
+
+    it("keeps serving after a partial-window rejection", () => {
       const limits = new TransactionLimits({ dailyLimit: 5000n });
       limits.recordSpend(4000n);
-      limits.check(2000n); // trips breaker
+
+      expect(limits.check(2000n).allowed).toBe(false);
+      expect(limits.isPaused()).toBe(false);
+      expect(limits.check(1000n).allowed).toBe(true);
+    });
+
+    it("resumes after manual resume", () => {
+      const limits = new TransactionLimits({ dailyLimit: 5000n });
+      limits.recordSpend(5000n);
+      limits.check(1n); // trips breaker
       expect(limits.isPaused()).toBe(true);
 
       limits.resume();
       expect(limits.isPaused()).toBe(false);
+    });
 
-      // Allows if under limit after resume
-      const result = limits.check(500n);
-      expect(result.allowed).toBe(true);
+    // Deliberate: resuming clears the latch, it does not hand back budget. The
+    // window is still full, so the next check re-trips. Making resume() grant
+    // spend would be the restart-resets-the-cap bug by another route.
+    it("does not grant budget when the window is still full", () => {
+      const limits = new TransactionLimits({ dailyLimit: 5000n });
+      limits.recordSpend(5000n);
+      limits.check(1n);
+      limits.resume();
+
+      expect(limits.check(1n).allowed).toBe(false);
+      expect(limits.isPaused()).toBe(true);
+    });
+
+    // The pause holds for as long as the volume that caused it is in the
+    // window, then lifts on its own. An operator who wants service back before
+    // that has POST /admin/resume; there is no way to get it back sooner by
+    // waiting.
+    it("holds the pause through the window and auto-resumes after it", () => {
+      const limits = new TransactionLimits({ dailyLimit: 5000n });
+      const now = Date.now();
+
+      vi.spyOn(Date, "now").mockReturnValue(now);
+      limits.recordSpend(5000n);
+      limits.check(1n);
+      expect(limits.isPaused()).toBe(true);
+
+      // 12h in, the spend is still counted and the pause still holds.
+      vi.spyOn(Date, "now").mockReturnValue(now + 12 * 60 * 60 * 1000);
+      expect(limits.check(1n).allowed).toBe(false);
+      expect(limits.isPaused()).toBe(true);
+
+      // 25h in, the spend has left the window and so has the pause.
+      vi.spyOn(Date, "now").mockReturnValue(now + 25 * 60 * 60 * 1000);
+      expect(limits.check(1n).allowed).toBe(true);
+      expect(limits.isPaused()).toBe(false);
     });
 
     it("expires old spend entries after 24h", () => {
@@ -134,6 +192,40 @@ describe("TransactionLimits", () => {
       if (!result.allowed) {
         expect(result.reason).toContain("per-transaction maximum");
       }
+    });
+  });
+
+  describe("restore", () => {
+    it("counts restored spends toward the window", () => {
+      const limits = new TransactionLimits({ dailyLimit: 5000n });
+      const restored = limits.restore([{ amount: 4000n, timestamp: Date.now() }]);
+
+      expect(restored).toBe(1);
+      expect(limits.check(2000n).allowed).toBe(false);
+      expect(limits.check(1000n).allowed).toBe(true);
+    });
+
+    it("drops entries older than the window", () => {
+      const limits = new TransactionLimits({ dailyLimit: 5000n });
+      const restored = limits.restore([
+        { amount: 4000n, timestamp: Date.now() - 25 * 60 * 60 * 1000 },
+      ]);
+
+      expect(restored).toBe(0);
+      expect(limits.check(5000n).allowed).toBe(true);
+    });
+
+    // The whole point: a restart used to hand back the full daily budget, and
+    // a restart was the only way to clear a tripped breaker.
+    it("carries an exhausted window across a restart", () => {
+      const before = new TransactionLimits({ dailyLimit: 5000n });
+      before.recordSpend(5000n);
+
+      const after = new TransactionLimits({ dailyLimit: 5000n });
+      after.restore([{ amount: 5000n, timestamp: Date.now() }]);
+
+      expect(after.check(1n).allowed).toBe(false);
+      expect(after.isPaused()).toBe(true);
     });
   });
 
