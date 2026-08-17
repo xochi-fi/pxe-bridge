@@ -21,29 +21,6 @@ const TX_TIMEOUT_MS = 120_000; // 2 minutes
 // during a congestion spike.
 const DEPLOY_FEE_HEADROOM = 10n;
 
-/**
- * Builds a function that runs its callbacks one at a time, in call order.
- *
- * The declared-spending binding is state on the shared contract object, not an
- * argument to the send. Two overlapping `createNote` calls each set it, and
- * whichever builds its payload second signs the other's declaration, so the
- * first transfer reverts on `assert_single_call_matches`. Fail-closed and no
- * funds move, but it is a spurious failure under concurrent load.
- */
-export function createSerializer(): <T>(fn: () => Promise<T>) => Promise<T> {
-  let tail: Promise<unknown> = Promise.resolve();
-  return <T>(fn: () => Promise<T>): Promise<T> => {
-    // Queued on both settlement paths: one caller's rejection must not wedge
-    // every later call behind it.
-    const run = tail.then(fn, fn);
-    tail = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
-  };
-}
-
 /** The slice of AztecNode createNote needs to read a tx effect back. */
 interface TxEffectFields {
   noteHashes?: { toString(): string }[];
@@ -81,7 +58,6 @@ export class AztecClient implements IAztecClient {
   private tokenCache = new Map<string, TokenContract>();
   private secretKey: string | null;
   private spendingLimitContract: SpendingLimitAccountContract | null = null;
-  private readonly serialize = createSerializer();
 
   constructor(
     private readonly nodeUrl: string,
@@ -414,18 +390,18 @@ export class AztecClient implements IAztecClient {
     }
 
     const submit = async () => {
-      // Bind declared spending to the next tx for on-chain enforcement. The
-      // entrypoint signs over (payloadHash, amount, recipient) so these values
-      // cannot be forged. Must be set before send(), and must still be this
-      // call's values when send() builds the payload -- hence the serializer.
       if (this.spendingLimitContract) {
         // The hint must mask live storage POSITIONALLY, so it has to be read
         // fresh: check_spending_public re-derives the allowlist at inclusion
         // time and rejects a hint built against a superseded list. Carrying
         // every live slot maximises the set the recipient hides in; the
         // contract only enforces a floor.
-        const allowlistHint = await this.readAllowlist();
-        this.spendingLimitContract.setDeclaredSpending(amount, params.recipient, allowlistHint);
+        //
+        // The declared amount and recipient are NOT set here. The entrypoint
+        // reads them off the payload it is signing, so there is no per-call
+        // state for a concurrent send to overwrite and nothing to serialize
+        // around.
+        this.spendingLimitContract.setAllowlistHint(await this.readAllowlist());
       }
 
       return withTimeout(
@@ -434,12 +410,9 @@ export class AztecClient implements IAztecClient {
       );
     };
 
-    // Only the spending-limit path shares mutable per-tx state. A plain Schnorr
-    // account carries everything in the payload, so serializing it would cost
-    // throughput and buy nothing.
     let result: unknown;
     try {
-      result = this.spendingLimitContract ? await this.serialize(submit) : await submit();
+      result = await submit();
     } catch (err) {
       // A deadline is the one ambiguous case: send() may already have
       // broadcast. Everything else here failed while building, proving or

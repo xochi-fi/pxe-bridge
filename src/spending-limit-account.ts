@@ -43,6 +43,14 @@ export const DOM_SEP_SPENDING_LIMIT = 10042;
 // mismatch changes the selector and the account address.
 export const ALLOWLIST_SIZE = 8;
 
+// The only call this account may make. The entrypoint reads the declared
+// amount and recipient out of this call's args, and main.nr pins the same
+// selector as a comptime constant.
+export const TRANSFER_TO_PRIVATE_SIGNATURE = "transfer_to_private((Field),u128)";
+// Pinned so a signature typo shows up as a failing unit test rather than as an
+// account that silently declares nothing. Mirrors transfer_to_private_selector_pin.
+export const TRANSFER_TO_PRIVATE_SELECTOR = "0x89758b40";
+
 // Built by `aztec compile`; gitignored, produced by CI.
 const ARTIFACT_PATH =
   "../contracts/spending_limit_account/target/spending_limit_account_contract-SpendingLimitAccount.json";
@@ -71,32 +79,28 @@ export interface SpendingLimitConfig {
 
 const ZERO_ADDRESS = "0x" + "0".repeat(64);
 
-/**
- * Declared spending for the next transaction.
- *
- * Held by the contract and handed to every entrypoint BY REFERENCE. The SDK
- * calls AccountContract.getAccount() afresh on each resolution and does not
- * memoize, so an entrypoint owning its own copy of the declaration is reliably
- * not the one that ends up building the request: the values are written to an
- * orphan and the payload carries (0, zero address), which the on-chain guard
- * rejects with "Transfer does not match declared spending".
- */
-interface DeclaredSpending {
-  amount: bigint;
-  recipient: string;
-  allowlistHint: string[];
-}
-
 // ============================================================
 // Account contract
 // ============================================================
 
 export class SpendingLimitAccountContract implements AccountContract {
-  private declared: DeclaredSpending = {
-    amount: 0n,
-    recipient: ZERO_ADDRESS,
-    allowlistHint: new Array(ALLOWLIST_SIZE).fill(ZERO_ADDRESS),
-  };
+  /**
+   * Live allowlist snapshot for the next transaction.
+   *
+   * Shared with every entrypoint BY REFERENCE and mutated in place. The SDK
+   * calls AccountContract.getAccount() afresh on each resolution and does not
+   * memoize, so an entrypoint owning its own copy is reliably not the one that
+   * ends up building the request: the value would be written to an orphan and
+   * the payload would carry zeros.
+   *
+   * Sharing this across concurrent sends is safe in a way that sharing the
+   * declared amount and recipient was not. Every caller wants the same live
+   * list, the hint is not signed, and the contract validates it positionally
+   * against storage at inclusion time. Whichever snapshot a payload ends up
+   * carrying is a valid one; carrying a slightly newer one is if anything
+   * better, since a revocation in it is a revocation that should apply.
+   */
+  private allowlistHint: string[] = new Array(ALLOWLIST_SIZE).fill(ZERO_ADDRESS);
 
   constructor(
     private signingPrivateKey: GrumpkinScalarType,
@@ -104,19 +108,22 @@ export class SpendingLimitAccountContract implements AccountContract {
   ) {}
 
   /**
-   * Set declared spending for the next transaction.
-   * Must be called before each createNote to bind amount/recipient
-   * into the signed hash so the on-chain contract can verify them.
+   * Publish the live allowlist for subsequent sends.
+   *
+   * Unlike the amount and recipient, this cannot be derived from the payload:
+   * it is a snapshot of on-chain state that only the caller can read.
    */
-  setDeclaredSpending(amount: bigint, recipient: string, allowlistHint: string[]): void {
+  setAllowlistHint(allowlistHint: string[]): void {
     if (allowlistHint.length !== ALLOWLIST_SIZE) {
-      throw new Error(`allowlistHint must have ${ALLOWLIST_SIZE} entries, got ${allowlistHint.length}`);
+      throw new Error(
+        `allowlistHint must have ${ALLOWLIST_SIZE} entries, got ${allowlistHint.length}`,
+      );
     }
-    // Mutate in place. Replacing the object would strand the entrypoints
-    // already holding the old one, which is the bug this shape exists to stop.
-    this.declared.amount = amount;
-    this.declared.recipient = recipient;
-    this.declared.allowlistHint = allowlistHint;
+    // Copy into the existing array rather than replacing it: entrypoints
+    // already handed out hold a reference to this one.
+    for (let i = 0; i < ALLOWLIST_SIZE; i++) {
+      this.allowlistHint[i] = allowlistHint[i]!;
+    }
   }
 
   // v5 AccountContract interface member. Address derivation includes an
@@ -180,7 +187,7 @@ export class SpendingLimitAccountContract implements AccountContract {
     const entrypoint = new SpendingLimitEntrypoint(
       completeAddress.address,
       authProvider,
-      this.declared,
+      this.allowlistHint,
     );
     return new BaseAccount(entrypoint, authProvider, completeAddress);
   }
@@ -226,8 +233,128 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
     private address: import("@aztec/stdlib/aztec-address").AztecAddress,
     private auth: AuthWitnessProvider,
     /** Shared with the contract and every sibling entrypoint. Never reassign. */
-    private declared: DeclaredSpending,
+    private allowlistHint: string[],
   ) {}
+
+  /**
+   * Reads the declared amount and recipient out of the payload being signed.
+   *
+   * They used to be pushed in beforehand, as mutable state on the contract
+   * object. That made the declaration a second source of truth for something
+   * the payload already said, and the two could disagree: two overlapping
+   * sends each set it, and whichever built its payload second signed the
+   * other's declaration, so the first reverted on assert_single_call_matches.
+   * The bridge serialized every send to stop that happening, at one
+   * transaction at a time.
+   *
+   * Deriving from `exec.calls` -- the same array that gets encoded into the
+   * payload the circuit inspects -- makes declared == actual true by
+   * construction here, and leaves the circuit to prove it rather than to
+   * catch us out.
+   */
+  private async deriveDeclaration(
+    calls: readonly import("@aztec/stdlib/abi").FunctionCall[],
+  ): Promise<{ amount: bigint; recipient: import("@aztec/stdlib/aztec-address").AztecAddress }> {
+    const { FunctionSelector } = await import("@aztec/stdlib/abi");
+    const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+
+    const transferSelector = await FunctionSelector.fromSignature(TRANSFER_TO_PRIVATE_SIGNATURE);
+    const transfers = calls.filter((c) => c.selector.equals(transferSelector));
+
+    // Exactly one is what the circuit's assert_single_call_matches requires
+    // anyway. Failing here costs nothing; failing there costs a fee, since
+    // set_as_fee_payer runs in the non-revertible setup phase.
+    //
+    // The total call count is deliberately not policed: a fee payment method
+    // merges its own call into this payload, and where that merge happens
+    // relative to this code is the SDK's business. The circuit is the
+    // authority on the payload's shape.
+    if (transfers.length !== 1) {
+      throw new Error(
+        `Spending limit account requires exactly one ${TRANSFER_TO_PRIVATE_SIGNATURE} call, ` +
+          `found ${transfers.length}`,
+      );
+    }
+
+    // transfer_to_private(to: AztecAddress, amount: u128) encodes as two
+    // fields, a u128 packing into one. Same layout main.nr reconstructs in
+    // assert_declared_matches_transfer.
+    const args = transfers[0]!.args;
+    if (args.length !== 2) {
+      throw new Error(`Expected 2 args on transfer_to_private, found ${args.length}`);
+    }
+
+    // Unsafe as in "not range-checked as a valid address". It came out of a
+    // call the SDK already encoded, and the circuit re-derives the args hash
+    // from it either way.
+    return {
+      recipient: AztecAddress.fromFieldUnsafe(args[0]!),
+      amount: args[1]!.toBigInt(),
+    };
+  }
+
+  /**
+   * Everything both entrypoint paths need: encoded args, selector, signature.
+   *
+   * Extracted because the two used to build it independently, line for line,
+   * and a drift between them would have signed one declaration while sending
+   * another.
+   */
+  private async buildEntrypointArgs(
+    exec: import("@aztec/stdlib/tx").ExecutionPayload,
+    chainInfo: ChainInfo,
+    options: DefaultAccountEntrypointOptions,
+  ): Promise<{
+    encodedCalls: import("@aztec/entrypoints/encoding").EncodedAppEntrypointCalls;
+    encodedArgs: FrType[];
+    functionSelector: import("@aztec/stdlib/abi").FunctionSelector;
+    abi: FunctionAbi;
+    authWitness: import("@aztec/stdlib/auth-witness").AuthWitness;
+  }> {
+    const { Fr } = await import("@aztec/foundation/curves/bn254");
+    const { FunctionSelector, encodeArguments } = await import("@aztec/stdlib/abi");
+    const { computeOuterAuthWitHash } = await import("@aztec/stdlib/auth-witness");
+    const { EncodedAppEntrypointCalls } = await import("@aztec/entrypoints/encoding");
+    const { poseidon2HashWithSeparator } = await import("@aztec/foundation/crypto/poseidon");
+
+    const { cancellable, txNonce, feePaymentMethodOptions } = options;
+
+    const encodedCalls = await EncodedAppEntrypointCalls.create(exec.calls, txNonce);
+    const { amount, recipient } = await this.deriveDeclaration(exec.calls);
+
+    const abi = this.getEntrypointAbi();
+    const encodedArgs = encodeArguments(abi, [
+      encodedCalls,
+      feePaymentMethodOptions,
+      !!cancellable,
+      // Raw bigint: the ABI parameter is a u128 integer, not a field.
+      amount,
+      recipient,
+      this.allowlistHint.map((h) => Fr.fromString(h)),
+    ]);
+    const functionSelector = await FunctionSelector.fromNameAndParameters(abi.name, abi.parameters);
+
+    // Sign over payload + declared spending, not the payload alone, so the
+    // declaration cannot be swapped under a valid signature.
+    const combinedHash = await poseidon2HashWithSeparator(
+      [await encodedCalls.hash(), new Fr(amount), recipient.toField()],
+      DOM_SEP_SPENDING_LIMIT,
+    );
+    const messageHash = await computeOuterAuthWitHash(
+      this.address,
+      chainInfo.chainId,
+      chainInfo.version,
+      combinedHash,
+    );
+
+    return {
+      encodedCalls,
+      encodedArgs,
+      functionSelector,
+      abi,
+      authWitness: await this.auth.createAuthWit(messageHash),
+    };
+  }
 
   async createTxExecutionRequest(
     exec: import("@aztec/stdlib/tx").ExecutionPayload,
@@ -236,52 +363,11 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
     options: DefaultAccountEntrypointOptions,
   ): Promise<import("@aztec/stdlib/tx").TxExecutionRequest> {
     const { Fr } = await import("@aztec/foundation/curves/bn254");
-    const { FunctionSelector, encodeArguments } = await import("@aztec/stdlib/abi");
-    const { computeOuterAuthWitHash } = await import("@aztec/stdlib/auth-witness");
     const { HashedValues, TxContext, TxExecutionRequest } = await import("@aztec/stdlib/tx");
-    const { EncodedAppEntrypointCalls } = await import("@aztec/entrypoints/encoding");
-    const { AztecAddress } = await import("@aztec/aztec.js/addresses");
-    const { poseidon2HashWithSeparator } = await import("@aztec/foundation/crypto/poseidon");
 
     const { authWitnesses, capsules, extraHashedArgs } = exec;
-    const { cancellable, txNonce, feePaymentMethodOptions } = options;
-
-    // Encode function calls (same as DefaultAccountEntrypoint)
-    const encodedCalls = await EncodedAppEntrypointCalls.create(exec.calls, txNonce);
-
-    // Build extended args: standard + declared_amount + declared_recipient
-    const declaredAmountFr = new Fr(this.declared.amount);
-    const declaredRecipientAddr = AztecAddress.fromStringUnsafe(this.declared.recipient);
-
-    const abi = this.getEntrypointAbi();
-    const args = [
-      encodedCalls,
-      feePaymentMethodOptions,
-      !!cancellable,
-      // Raw bigint: the ABI parameter is a u128 integer, not a field.
-      this.declared.amount,
-      declaredRecipientAddr,
-      this.declared.allowlistHint.map((h) => Fr.fromString(h)),
-    ];
-    const encodedArgs = encodeArguments(abi, args);
-
-    const functionSelector = await FunctionSelector.fromNameAndParameters(abi.name, abi.parameters);
-
-    // Combined hash: payload + spending info
-    const payloadHash = await encodedCalls.hash();
-    const combinedHash = await poseidon2HashWithSeparator(
-      [payloadHash, declaredAmountFr, declaredRecipientAddr.toField()],
-      DOM_SEP_SPENDING_LIMIT,
-    );
-
-    // Sign over the combined hash (not just payload hash)
-    const messageHash = await computeOuterAuthWitHash(
-      this.address,
-      chainInfo.chainId,
-      chainInfo.version,
-      combinedHash,
-    );
-    const payloadAuthWitness = await this.auth.createAuthWit(messageHash);
+    const { encodedCalls, encodedArgs, functionSelector, authWitness } =
+      await this.buildEntrypointArgs(exec, chainInfo, options);
 
     const entrypointHashedArgs = await HashedValues.fromArgs(encodedArgs);
     return TxExecutionRequest.from({
@@ -294,7 +380,7 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
         gasSettings,
       ),
       argsOfCalls: [...encodedCalls.hashedArguments, entrypointHashedArgs, ...extraHashedArgs],
-      authWitnesses: [...authWitnesses, payloadAuthWitness],
+      authWitnesses: [...authWitnesses, authWitness],
       capsules,
       salt: Fr.random(),
     });
@@ -305,51 +391,12 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
     chainInfo: ChainInfo,
     options: DefaultAccountEntrypointOptions,
   ): Promise<import("@aztec/stdlib/tx").ExecutionPayload> {
-    const { Fr } = await import("@aztec/foundation/curves/bn254");
-    const {
-      FunctionCall: FunctionCallCls,
-      FunctionSelector,
-      encodeArguments,
-    } = await import("@aztec/stdlib/abi");
-    const { computeOuterAuthWitHash } = await import("@aztec/stdlib/auth-witness");
+    const { FunctionCall: FunctionCallCls } = await import("@aztec/stdlib/abi");
     const { ExecutionPayload } = await import("@aztec/stdlib/tx");
-    const { EncodedAppEntrypointCalls } = await import("@aztec/entrypoints/encoding");
-    const { AztecAddress } = await import("@aztec/aztec.js/addresses");
-    const { poseidon2HashWithSeparator } = await import("@aztec/foundation/crypto/poseidon");
 
     const { authWitnesses, capsules, extraHashedArgs, feePayer } = exec;
-    const { cancellable, txNonce, feePaymentMethodOptions } = options;
-
-    const encodedCalls = await EncodedAppEntrypointCalls.create(exec.calls, txNonce);
-
-    const declaredAmountFr = new Fr(this.declared.amount);
-    const declaredRecipientAddr = AztecAddress.fromStringUnsafe(this.declared.recipient);
-
-    const abi = this.getEntrypointAbi();
-    const args = [
-      encodedCalls,
-      feePaymentMethodOptions,
-      !!cancellable,
-      // Raw bigint: the ABI parameter is a u128 integer, not a field.
-      this.declared.amount,
-      declaredRecipientAddr,
-      this.declared.allowlistHint.map((h) => Fr.fromString(h)),
-    ];
-    const encodedArgs = encodeArguments(abi, args);
-    const functionSelector = await FunctionSelector.fromNameAndParameters(abi.name, abi.parameters);
-
-    const payloadHash = await encodedCalls.hash();
-    const combinedHash = await poseidon2HashWithSeparator(
-      [payloadHash, declaredAmountFr, declaredRecipientAddr.toField()],
-      DOM_SEP_SPENDING_LIMIT,
-    );
-    const messageHash = await computeOuterAuthWitHash(
-      this.address,
-      chainInfo.chainId,
-      chainInfo.version,
-      combinedHash,
-    );
-    const payloadAuthWitness = await this.auth.createAuthWit(messageHash);
+    const { encodedCalls, encodedArgs, functionSelector, abi, authWitness } =
+      await this.buildEntrypointArgs(exec, chainInfo, options);
 
     const entrypointCall = FunctionCallCls.from({
       name: abi.name,
@@ -364,7 +411,7 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
 
     return new ExecutionPayload(
       [entrypointCall],
-      [payloadAuthWitness, ...authWitnesses],
+      [authWitness, ...authWitnesses],
       capsules,
       [...encodedCalls.hashedArguments, ...extraHashedArgs],
       feePayer ?? this.address,
@@ -372,8 +419,13 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
   }
 
   /**
-   * ABI for the extended entrypoint signature. Matches the Noir contract's
-   * entrypoint function: (AppPayload, u8, bool, Field, AztecAddress).
+   * ABI for the extended entrypoint signature. Hand-maintained against the
+   * Noir contract's entrypoint:
+   *
+   *   entrypoint(AppPayload, u8, bool, u128, AztecAddress, [Field; ALLOWLIST_SIZE])
+   *
+   * Drift is not a type error anywhere. It changes the selector, which changes
+   * the contract class, which changes the account address.
    */
   private getEntrypointAbi(): FunctionAbi {
     return {
