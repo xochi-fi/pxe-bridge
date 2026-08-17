@@ -76,19 +76,31 @@ jobs:
       - name: Compile and transpile contract
         working-directory: contracts/spending_limit_account
         run: aztec compile
-      # The artifact is gitignored and rebuilt here every run, from a toolchain
-      # fetched by piping a remote installer into bash. The class ID derives
-      # from that bytecode and feeds address derivation, so drift silently moves
-      # the account address: the bridge finds no contract there, deploys a fresh
-      # empty account, logs "Ready", and strands the balance at the old address.
-      - name: Assert artifact is loadable and the class ID has not drifted
-        run: node scripts/contract-class-id.js --check contracts/spending_limit_account/CLASS_ID
+      # Uploaded BEFORE the class ID check, deliberately. `aztec compile` has
+      # been observed to produce a different class ID from identical sources
+      # (see below), and with the check first the drifted artifact was
+      # discarded, leaving nothing to diff against a good one. Preserving it is
+      # the only way that gets diagnosed.
       - name: Upload contract artifact
         uses: actions/upload-artifact@v4
         with:
           name: contract-artifact
           path: contracts/spending_limit_account/target/*.json
           if-no-files-found: error
+      # The artifact is gitignored and rebuilt here every run, from a toolchain
+      # fetched by piping a remote installer into bash. The class ID derives
+      # from that bytecode and feeds address derivation, so drift silently moves
+      # the account address: the bridge finds no contract there, deploys a fresh
+      # empty account, logs "Ready", and strands the balance at the old address.
+      #
+      # KNOWN FLAKE: one of four observed runs on this branch produced
+      # 0x2ff3ed37... where the other three produced 0x0df61951..., from the
+      # same commit and the same reported toolchain versions. Re-running the
+      # job passed. So `aztec compile` is not reproducible, and a red here may
+      # be that rather than a real change. Compare the uploaded artifact
+      # against a known-good one before assuming either.
+      - name: Assert artifact is loadable and the class ID has not drifted
+        run: node scripts/contract-class-id.js --check contracts/spending_limit_account/CLASS_ID
 
   e2e:
     needs: [check, contract]

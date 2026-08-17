@@ -159,6 +159,27 @@ The artifact it produces is not committed, so the mitigation is downstream:
 compromised or merely updated toolchain changes that ID, and the account address
 derives from it.
 
+### `aztec compile` is not reproducible
+
+Introducing that check immediately found the following. Across four CI runs of
+identical sources, with identical reported toolchain versions (aztec 5.1.0, noir
+`1.0.0-beta.22+c57152f9`), three produced class ID `0x0df61951...` and one
+produced `0x2ff3ed37...`. Re-running the odd job passed.
+
+The consequences are worth stating plainly:
+
+- **The account address is not reproducible from source.** Rebuilding the
+  artifact can yield a different contract class and therefore a different
+  address, holding no funds.
+- **The artifact that a deployment was made against must be archived**, not
+  regenerated. The CI job uploads it on every run, before the class ID check, so
+  a drifted build is preserved for comparison rather than discarded.
+- **A red class ID check may be this flake rather than a real change.** Diff the
+  uploaded artifact against a known-good one before concluding either way.
+
+Root cause is not established. Nothing here depends on the ID being stable
+except deployment itself, which is exactly the thing that cannot tolerate it.
+
 ## Application-level limits
 
 `src/limits.ts` provides defense-in-depth independent of the contract. Limit
