@@ -539,20 +539,18 @@ async function proveTransfer(
   const inner = client as unknown as {
     wallet: WalletInternals;
     solverAddress: unknown;
-    spendingLimitContract: {
-      setDeclaredSpending: (amount: bigint, recipient: string, hint: string[]) => void;
-    };
+    spendingLimitContract: { setAllowlistHint: (hint: string[]) => void };
     readAllowlist: () => Promise<string[]>;
   };
   const wallet = inner.wallet;
   const from = inner.solverAddress;
 
-  // The binding createNote performs before it sends. The entrypoint signs the
-  // declaration, so it has to be set before the payload is built, and the hint
-  // is read against the allowlist as it stands now -- which is the state this
-  // test is about to invalidate.
-  const hint = await inner.readAllowlist.call(client);
-  inner.spendingLimitContract.setDeclaredSpending(amount, recipient, hint);
+  // The one thing createNote sets before it sends. The declared amount and
+  // recipient are not pushed in any more -- the entrypoint reads them off the
+  // payload -- but the hint is a snapshot of on-chain state the payload cannot
+  // supply, and it is read against the allowlist as it stands now, which is the
+  // state this test is about to invalidate.
+  inner.spendingLimitContract.setAllowlistHint(await inner.readAllowlist.call(client));
 
   const contract = await (
     TokenContract as unknown as {

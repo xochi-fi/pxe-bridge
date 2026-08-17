@@ -261,19 +261,34 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
     const transferSelector = await FunctionSelector.fromSignature(TRANSFER_TO_PRIVATE_SIGNATURE);
     const transfers = calls.filter((c) => c.selector.equals(transferSelector));
 
-    // Exactly one is what the circuit's assert_single_call_matches requires
-    // anyway. Failing here costs nothing; failing there costs a fee, since
+    // Two or more is unresolvable here: there is one declaration and no basis
+    // for picking which transfer it describes. The circuit rejects this too,
+    // but failing here costs nothing while failing there costs a fee, since
     // set_as_fee_payer runs in the non-revertible setup phase.
     //
     // The total call count is deliberately not policed: a fee payment method
     // merges its own call into this payload, and where that merge happens
     // relative to this code is the SDK's business. The circuit is the
     // authority on the payload's shape.
-    if (transfers.length !== 1) {
+    if (transfers.length > 1) {
       throw new Error(
-        `Spending limit account requires exactly one ${TRANSFER_TO_PRIVATE_SIGNATURE} call, ` +
+        `Spending limit account requires at most one ${TRANSFER_TO_PRIVATE_SIGNATURE} call, ` +
           `found ${transfers.length}`,
       );
+    }
+
+    // No transfer is NOT an error. Every call the SDK routes through this
+    // entrypoint arrives here, including simulating a private view such as
+    // verify_private_authwit, and refusing those broke reads that have nothing
+    // to do with spending. A zero declaration is what the old code produced by
+    // default in exactly these cases.
+    //
+    // Fail-closed for anything that actually moves value: the circuit asserts
+    // !declared_recipient.is_zero() in private, and assert_single_call_matches
+    // rejects the payload before that, so a real send built from a zero
+    // declaration cannot land.
+    if (transfers.length === 0) {
+      return { recipient: AztecAddress.ZERO, amount: 0n };
     }
 
     // transfer_to_private(to: AztecAddress, amount: u128) encodes as two

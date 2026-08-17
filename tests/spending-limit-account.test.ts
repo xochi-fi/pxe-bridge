@@ -225,15 +225,27 @@ describe("SpendingLimitAccountContract declaration binding", () => {
 
   // Failing here costs nothing. Failing in the circuit costs a fee, because
   // set_as_fee_payer runs in the non-revertible setup phase.
-  it("refuses a payload with no transfer to declare", async () => {
+  // Every call the SDK routes through this entrypoint reaches the derivation,
+  // including simulating a private view such as verify_private_authwit.
+  // Refusing those broke reads that have nothing to do with spending, which is
+  // how the e2e authwit test caught it.
+  //
+  // Fail-closed is the circuit's job here: assert_single_call_matches rejects
+  // an empty payload, and the entrypoint asserts !declared_recipient.is_zero(),
+  // so a zero declaration cannot move value.
+  it("declares zero for a payload with no transfer", async () => {
     const { contract, address } = await newContract();
     contract.setAllowlistHint(allowlistHint());
 
-    await expect(
-      requestArgs(contract.getAccount(address), ExecutionPayload.empty()),
-    ).rejects.toThrow("requires exactly one");
+    const args = await requestArgs(contract.getAccount(address), ExecutionPayload.empty());
+
+    expect(args[DECLARED_AMOUNT_OFFSET]!.toBigInt()).toBe(0n);
+    expect(args[DECLARED_RECIPIENT_OFFSET]!.toBigInt()).toBe(0n);
   });
 
+  // Two is unresolvable: one declaration and no basis for picking which
+  // transfer it describes. Failing here costs nothing; failing in the circuit
+  // costs a fee, since set_as_fee_payer runs in the non-revertible setup phase.
   it("refuses a payload with two transfers", async () => {
     const { contract, address } = await newContract();
     contract.setAllowlistHint(allowlistHint());
@@ -245,7 +257,7 @@ describe("SpendingLimitAccountContract declaration binding", () => {
     );
 
     await expect(requestArgs(contract.getAccount(address), exec)).rejects.toThrow(
-      "requires exactly one",
+      "at most one",
     );
   });
 
