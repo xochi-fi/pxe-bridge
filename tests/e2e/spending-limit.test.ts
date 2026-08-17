@@ -224,15 +224,29 @@ describe("spending limit account (e2e)", () => {
   // false is what stops an off-chain caller being told to submit a transaction
   // that is guaranteed to revert. The stock implementation gets the second one
   // wrong.
+  //
+  // Simulated from the FUNDER, not from the limit account. A private view is
+  // reached through the caller's own entrypoint, and this account's entrypoint
+  // runs assert_declared_matches_transfer on everything, so asking it to make
+  // any non-transfer call reverts on "Transfer does not match declared
+  // spending". That is the single-call guard working, but it means the account
+  // cannot be used to read its own views. It also matches how the function is
+  // reached in production: a consumer contract calls it, never this account.
   it("refuses every third-party authwit", async (ctx) => {
     if (deployFailure) return ctx.skip();
 
     const innerHash = "0x" + "07".repeat(32);
 
-    const validity = await simulateAccount(client, "verify_private_authwit", [innerHash]);
+    const validity = await simulateAccount(
+      client,
+      funderWallet,
+      adminAddress,
+      "verify_private_authwit",
+      [innerHash],
+    );
     expect(BigInt(String(validity))).toBe(0n);
 
-    const lookup = await simulateAccount(client, "lookup_validity", [
+    const lookup = await simulateAccount(client, funderWallet, adminAddress, "lookup_validity", [
       UNLISTED_RECIPIENT,
       innerHash,
     ]);
@@ -397,16 +411,16 @@ describe("spending limit account (e2e)", () => {
  */
 async function simulateAccount(
   client: AztecClient,
+  wallet: unknown,
+  caller: string,
   method: string,
   args: unknown[],
 ): Promise<unknown> {
   const { Contract } = await import("@aztec/aztec.js/contracts");
   const { AztecAddress } = await import("@aztec/aztec.js/addresses");
-  const wallet = (client as unknown as { wallet: unknown }).wallet;
   const slc = (client as unknown as {
     spendingLimitContract: { getContractArtifact: () => Promise<unknown> };
   }).spendingLimitContract;
-  const account = client.getAddress()!;
 
   const c = await (
     Contract as unknown as {
@@ -418,13 +432,13 @@ async function simulateAccount(
       }>;
     }
   ).at(
-    AztecAddress.fromStringUnsafe(account),
+    AztecAddress.fromStringUnsafe(client.getAddress()!),
     await slc.getContractArtifact(),
     wallet,
   );
 
   const out = await c.methods[method]!(...args).simulate({
-    from: AztecAddress.fromStringUnsafe(account),
+    from: AztecAddress.fromStringUnsafe(caller),
   });
   return (out as { result?: unknown })?.result ?? out;
 }
