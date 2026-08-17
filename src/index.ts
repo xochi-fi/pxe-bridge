@@ -2,7 +2,8 @@ import { AztecClient } from "./aztec-client.js";
 import { createApp } from "./server.js";
 import { FeeJuiceClaimSchema } from "./types.js";
 import { TransactionLimits, type LimitsConfig } from "./limits.js";
-import { AuditLogger, readRecentSpends } from "./audit.js";
+import { AuditLogger, replayAuditLog } from "./audit.js";
+import { IdempotencyStore } from "./idempotency.js";
 import { resolveSecretKey } from "./secrets.js";
 import type { SpendingLimitConfig } from "./spending-limit-account.js";
 
@@ -102,6 +103,11 @@ const limits = hasLimits ? new TransactionLimits(limitsConfig) : undefined;
 const AUDIT_LOG_PATH = process.env["PXE_BRIDGE_AUDIT_LOG"];
 const audit = new AuditLogger(AUDIT_LOG_PATH);
 
+// Replay store for the Idempotency-Key header. Always on: it only does
+// anything for callers that send the header, and the alternative is a knob
+// whose "off" position silently reintroduces double transfers.
+const idempotency = new IdempotencyStore();
+
 // Key for POST /admin/resume. Separate from the RPC key on purpose; see
 // ServerOptions.adminKey.
 const ADMIN_KEY = process.env["PXE_BRIDGE_ADMIN_KEY"];
@@ -188,23 +194,30 @@ async function main(): Promise<void> {
   const { key: secretKey, source: keySource } = await resolveSecretKey();
   console.log(`[pxe-bridge] Secret key loaded from ${keySource}`);
 
-  // Rebuild the rolling window before serving. Skipping this gave every
-  // restart a fresh daily budget, and a restart was the documented way to
-  // clear a tripped breaker.
-  if (limits && limitsConfig.dailyLimit !== undefined) {
-    if (AUDIT_LOG_PATH) {
-      const restored = limits.restore(await readRecentSpends(AUDIT_LOG_PATH, Date.now() - DAY_MS));
-      console.log(`[pxe-bridge] Restored ${restored} spend(s) into the 24h window`);
-    } else {
-      console.warn(
-        "[pxe-bridge] WARNING: PXE_BRIDGE_AUDIT_LOG not set -- the 24h volume " +
-          "window is in-memory only and resets on every restart",
-      );
+  // Rebuild both pieces of durable state before serving. Skipping this gave
+  // every restart a fresh daily budget and forgot every idempotency key, so a
+  // retry that straddled a restart transferred a second time.
+  if (AUDIT_LOG_PATH) {
+    const { spends, keys } = await replayAuditLog(AUDIT_LOG_PATH, Date.now() - DAY_MS);
+    if (limits) {
+      console.log(`[pxe-bridge] Restored ${limits.restore(spends)} spend(s) into the 24h window`);
     }
+    console.log(`[pxe-bridge] Restored ${idempotency.restore(keys)} idempotency key(s)`);
+  } else {
+    console.warn(
+      "[pxe-bridge] WARNING: PXE_BRIDGE_AUDIT_LOG not set -- the 24h volume window " +
+        "and idempotency keys are in-memory only and reset on every restart",
+    );
   }
 
   const client = new AztecClient(AZTEC_NODE_URL, secretKey, feeJuiceClaim, spendingLimitConfig);
-  const server = createApp(client, { apiKey: API_KEY, adminKey: ADMIN_KEY, limits, audit });
+  const server = createApp(client, {
+    apiKey: API_KEY,
+    adminKey: ADMIN_KEY,
+    limits,
+    audit,
+    idempotency,
+  });
 
   await client.connect();
 

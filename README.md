@@ -151,6 +151,36 @@ sends a second transfer. The bridge counts the amount against its daily window
 in this case, on the assumption that it landed. `data` is absent when no hash
 was obtained, which is the deadline case.
 
+### Idempotency
+
+Send an `Idempotency-Key` header to make retries safe:
+
+```
+Idempotency-Key: 0x9f2c..-0
+```
+
+Any later request with the same key replays the first one's response instead of
+transferring again, including the "submitted, result unknown" case above. That
+is the point: the ambiguous error stays ambiguous rather than being resolved by
+sending a second transfer.
+
+- Use one key per settlement. `(tradeId, subTradeIndex)` is a natural choice,
+  but the bridge does not require trade context and does not inspect the key.
+- 1 to 128 printable ASCII characters. A malformed key is a `400`, never
+  cleaned up: a key silently altered would stop matching the one you retry
+  with.
+- A duplicate arriving while the first is still running gets an error saying
+  so, not a second transfer.
+- Keys are remembered for 24 hours and survive a restart when
+  `PXE_BRIDGE_AUDIT_LOG` is a file path. Without it they are in-memory only.
+- A request that definitively moved nothing -- rejected by the limits, or
+  failed before submission -- **frees** its key, so retrying with it is
+  allowed. This differs from Stripe, where a recorded error replays forever.
+  The key guards against repeating a transfer, and there is no transfer to
+  repeat.
+
+Requests without the header behave exactly as before: every one executes.
+
 ### `aztec_getVersion`
 
 Returns the connected Aztec node version string.

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import type { Server } from "node:http";
 import { createApp, type ServerOptions } from "../src/server.js";
 import { TransactionLimits } from "../src/limits.js";
+import { IdempotencyStore } from "../src/idempotency.js";
 import type { CreateNoteParams, CreateNoteResult, IAztecClient } from "../src/types.js";
 import { rpcJson } from "./helpers.js";
 
@@ -21,10 +22,13 @@ class FakeAztecClient implements IAztecClient {
   };
   versionResult = "4.1.3";
   versionError: Error | null = null;
+  /** Counts real executions, so a replay is distinguishable from a re-run. */
+  createNoteCalls = 0;
 
   async connect(): Promise<void> {}
 
   async createNote(_params: CreateNoteParams): Promise<CreateNoteResult> {
+    this.createNoteCalls++;
     return this.createNoteResult;
   }
 
@@ -309,6 +313,95 @@ describe("HTTP server with auth", () => {
   it("allows /status without auth", async () => {
     const res = await fetch(`${authBaseUrl}/status`);
     expect(res.status).toBe(200);
+  });
+});
+
+describe("Idempotency-Key header", () => {
+  async function boot(): Promise<{
+    url: string;
+    client: FakeAztecClient;
+    close: () => Promise<void>;
+  }> {
+    const c = new FakeAztecClient();
+    const srv = createApp(c, { idempotency: new IdempotencyStore() });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const port = addr && typeof addr === "object" ? addr.port : 0;
+    return {
+      url: `http://127.0.0.1:${port}`,
+      client: c,
+      close: () => new Promise<void>((resolve) => srv.close(() => resolve())),
+    };
+  }
+
+  const noteBody = () =>
+    rpcBody("aztec_createNote", [
+      { recipient: VALID_ADDR, token: VALID_ADDR, amount: "1000", chainId: 1 },
+    ]);
+
+  it("carries the header through to replay a duplicate", async () => {
+    const { url, close } = await boot();
+    try {
+      const first = await jsonPost(url, noteBody(), { "Idempotency-Key": "trade-1" });
+      const second = await jsonPost(url, noteBody(), { "Idempotency-Key": "trade-1" });
+
+      expect(await rpcJson(first)).toEqual(await rpcJson(second));
+    } finally {
+      await close();
+    }
+  });
+
+  it("treats different keys as different requests", async () => {
+    const { url, close } = await boot();
+    try {
+      await jsonPost(url, noteBody(), { "Idempotency-Key": "trade-1" });
+      const other = await jsonPost(url, noteBody(), { "Idempotency-Key": "trade-2" });
+
+      expect(other.status).toBe(200);
+      expect("result" in (await rpcJson(other))).toBe(true);
+    } finally {
+      await close();
+    }
+  });
+
+  // Rejected, not sanitised. A key that is silently altered stops matching the
+  // one the caller retries with, which turns the protection off precisely when
+  // it is needed.
+  //
+  // A newline is absent from this list because fetch refuses to send one, so
+  // no conforming client can produce it; the validator still rejects control
+  // characters for anything that reaches the socket by other means.
+  it("rejects a malformed key rather than cleaning it up", async () => {
+    const { url, close } = await boot();
+    try {
+      for (const bad of ["", "   ", "x".repeat(129), "tab\there"]) {
+        const res = await jsonPost(url, noteBody(), { "Idempotency-Key": bad });
+        expect(res.status, `should reject ${JSON.stringify(bad)}`).toBe(400);
+      }
+    } finally {
+      await close();
+    }
+  });
+
+  it("accepts a key at the length limit", async () => {
+    const { url, close } = await boot();
+    try {
+      const res = await jsonPost(url, noteBody(), { "Idempotency-Key": "x".repeat(128) });
+      expect(res.status).toBe(200);
+    } finally {
+      await close();
+    }
+  });
+
+  it("runs normally when no key is sent", async () => {
+    const { url, client, close } = await boot();
+    try {
+      await jsonPost(url, noteBody());
+      await jsonPost(url, noteBody());
+      expect(client.createNoteCalls).toBe(2);
+    } finally {
+      await close();
+    }
   });
 });
 

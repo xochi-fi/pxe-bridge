@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { handleRpcRequest } from "../src/rpc.js";
+import { handleRpcRequest, type RpcContext } from "../src/rpc.js";
 import { TransactionLimits } from "../src/limits.js";
+import { IdempotencyStore } from "../src/idempotency.js";
 import { PostSubmissionError } from "../src/types.js";
 import type { AuditEntry, AuditLogger } from "../src/audit.js";
 import type { CreateNoteParams, CreateNoteResult, IAztecClient } from "../src/types.js";
@@ -22,11 +23,19 @@ class FakeAztecClient implements IAztecClient {
   versionResult = "4.1.3";
   versionError: Error | null = null;
   lastCreateNoteParams: CreateNoteParams | null = null;
+  /** Counts real executions, so a replay is distinguishable from a re-run. */
+  createNoteCalls = 0;
+  /** Holds the call open long enough for a concurrent duplicate to arrive. */
+  createNoteDelayMs = 0;
 
   async connect(): Promise<void> {}
 
   async createNote(params: CreateNoteParams): Promise<CreateNoteResult> {
     this.lastCreateNoteParams = params;
+    this.createNoteCalls++;
+    if (this.createNoteDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, this.createNoteDelayMs));
+    }
     if (this.createNoteError) throw this.createNoteError;
     return this.createNoteResult;
   }
@@ -314,6 +323,18 @@ describe("handleRpcRequest", () => {
       expect("error" in res && "data" in res.error).toBe(false);
     });
 
+    it("records the failure as unknown, not error", async () => {
+      const logged: AuditEntry[] = [];
+      const audit = { log: async (e: AuditEntry) => void logged.push(e) } as AuditLogger;
+      client.createNoteError = new PostSubmissionError("Incomplete receipt", "0xabc");
+
+      await handleRpcRequest(rpcRequest("aztec_createNote", [noteParams]), client, { audit });
+
+      // "this moved nothing" and "we do not know whether this moved funds"
+      // call for opposite responses on replay.
+      expect(logged.at(-1)?.status).toBe("unknown");
+    });
+
     it("records the txHash on the audit entry", async () => {
       const logged: AuditEntry[] = [];
       const audit = { log: async (e: AuditEntry) => void logged.push(e) } as AuditLogger;
@@ -321,8 +342,152 @@ describe("handleRpcRequest", () => {
 
       await handleRpcRequest(rpcRequest("aztec_createNote", [noteParams]), client, { audit });
 
-      expect(logged[0]?.status).toBe("error");
-      expect(logged[0]?.txHash).toBe("0xabc");
+      expect(logged.at(-1)?.status).toBe("unknown");
+      expect(logged.at(-1)?.txHash).toBe("0xabc");
+    });
+  });
+
+  describe("idempotency", () => {
+    const noteParams = {
+      recipient: VALID_ADDR,
+      token: VALID_ADDR,
+      amount: "3000",
+      chainId: 1,
+    };
+    const send = (ctx: RpcContext) =>
+      handleRpcRequest(rpcRequest("aztec_createNote", [noteParams]), client, ctx);
+
+    let idempotency: IdempotencyStore;
+    beforeEach(() => {
+      idempotency = new IdempotencyStore();
+    });
+
+    // The failure this whole mechanism exists for: a transfer that may be on
+    // chain, an error the caller cannot distinguish from a clean rejection,
+    // and a retry that moves funds a second time.
+    it("does not re-transfer when a retry replays a landed failure", async () => {
+      client.createNoteError = new PostSubmissionError("Incomplete receipt", "0xabc");
+      const ctx: RpcContext = { idempotency, idempotencyKey: "k1" };
+
+      const first = await send(ctx);
+      const callsAfterFirst = client.createNoteCalls;
+      const second = await send(ctx);
+
+      expect(client.createNoteCalls).toBe(callsAfterFirst);
+      expect(second).toEqual(first);
+    });
+
+    it("replays a success without calling the client again", async () => {
+      const ctx: RpcContext = { idempotency, idempotencyKey: "k1" };
+
+      const first = await send(ctx);
+      const second = await send(ctx);
+
+      expect(client.createNoteCalls).toBe(1);
+      expect(second).toEqual(first);
+    });
+
+    // The replay has to answer the request in front of it. Storing the whole
+    // original response would have handed the first caller's id to the second.
+    it("replays under the retrying request's own id", async () => {
+      const ctx: RpcContext = { idempotency, idempotencyKey: "k1" };
+      await send(ctx);
+
+      const replayed = await handleRpcRequest(
+        { jsonrpc: "2.0", id: "second-request", method: "aztec_createNote", params: [noteParams] },
+        client,
+        ctx,
+      );
+
+      expect(replayed.id).toBe("second-request");
+      expect("result" in replayed && replayed.result).toEqual(client.createNoteResult);
+    });
+
+    // A retry after a definitive failure is legitimate: nothing moved, so the
+    // key is free and the trade can still settle. Recording the error would
+    // strand the caller with no way forward.
+    it("lets a retry through after a clean failure", async () => {
+      const ctx: RpcContext = { idempotency, idempotencyKey: "k1" };
+      client.createNoteError = new Error("simulation reverted");
+      await send(ctx);
+
+      client.createNoteError = null;
+      const retry = await send(ctx);
+
+      expect(client.createNoteCalls).toBe(2);
+      expect("result" in retry).toBe(true);
+    });
+
+    it("lets a retry through after the limits rejected it", async () => {
+      const limits = new TransactionLimits({ maxAmount: 100n });
+      const ctx: RpcContext = { idempotency, idempotencyKey: "k1", limits };
+
+      expect("error" in (await send(ctx))).toBe(true);
+      expect(client.createNoteCalls).toBe(0);
+
+      // Same key, now under a limit that admits it.
+      const allowed = await send({ idempotency, idempotencyKey: "k1" });
+      expect("result" in allowed).toBe(true);
+    });
+
+    it("refuses a concurrent duplicate rather than running it twice", async () => {
+      const ctx: RpcContext = { idempotency, idempotencyKey: "k1" };
+      client.createNoteDelayMs = 20;
+
+      const [a, b] = await Promise.all([send(ctx), send(ctx)]);
+
+      expect(client.createNoteCalls).toBe(1);
+      const messages = [a, b].map((r) => ("error" in r ? r.error.message : "ok"));
+      expect(messages).toContain("ok");
+      expect(messages.join(" ")).toContain("still in flight");
+    });
+
+    it("keeps distinct keys independent", async () => {
+      await send({ idempotency, idempotencyKey: "k1" });
+      await send({ idempotency, idempotencyKey: "k2" });
+
+      expect(client.createNoteCalls).toBe(2);
+    });
+
+    // Unchanged behaviour for callers that send no header: every request runs.
+    it("does not dedupe when no key is supplied", async () => {
+      await send({ idempotency });
+      await send({ idempotency });
+
+      expect(client.createNoteCalls).toBe(2);
+    });
+
+    it("writes the intent record before the send", async () => {
+      const logged: AuditEntry[] = [];
+      const audit = { log: async (e: AuditEntry) => void logged.push(e) } as AuditLogger;
+
+      await send({ idempotency, idempotencyKey: "k1", audit });
+
+      // Ordering is the whole point: a crash between the two is recoverable
+      // only because the first one is already on disk.
+      expect(logged.map((e) => e.status)).toEqual(["submitting", "success"]);
+      expect(logged.every((e) => e.idempotencyKey === "k1")).toBe(true);
+    });
+
+    // No key means no crash-window to protect, and the intent record only
+    // exists to close that window.
+    it("writes no intent record without a key", async () => {
+      const logged: AuditEntry[] = [];
+      const audit = { log: async (e: AuditEntry) => void logged.push(e) } as AuditLogger;
+
+      await send({ idempotency, audit });
+
+      expect(logged.map((e) => e.status)).toEqual(["success"]);
+    });
+
+    it("records the note effects so a replay after restart is faithful", async () => {
+      const logged: AuditEntry[] = [];
+      const audit = { log: async (e: AuditEntry) => void logged.push(e) } as AuditLogger;
+
+      await send({ idempotency, idempotencyKey: "k1", audit });
+
+      expect(logged.at(-1)?.noteHashes).toEqual(client.createNoteResult.noteHashes);
+      expect(logged.at(-1)?.nullifiers).toEqual(client.createNoteResult.nullifiers);
     });
   });
 });

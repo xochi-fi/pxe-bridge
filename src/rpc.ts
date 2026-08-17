@@ -3,15 +3,20 @@ import {
   CreateNoteParamsSchema,
   PostSubmissionError,
   RPC_ERRORS,
+  SUBMITTED_UNKNOWN_MESSAGE,
   type IAztecClient,
   type JsonRpcResponse,
 } from "./types.js";
 import type { TransactionLimits } from "./limits.js";
+import type { IdempotencyStore, IdempotentOutcome } from "./idempotency.js";
 import type { AuditLogger, AuditEntry } from "./audit.js";
 
 export interface RpcContext {
   limits?: TransactionLimits | undefined;
   audit?: AuditLogger | undefined;
+  idempotency?: IdempotencyStore | undefined;
+  /** From the `Idempotency-Key` request header, when the caller sent one. */
+  idempotencyKey?: string | undefined;
   clientIp?: string | undefined;
 }
 
@@ -22,6 +27,7 @@ function auditBase(
     amount: string;
     chainId: number;
     tradeId?: string | undefined;
+    subTradeIndex?: number | undefined;
   },
   ctx: RpcContext,
 ): Omit<AuditEntry, "status" | "txHash" | "error"> {
@@ -33,8 +39,17 @@ function auditBase(
     amount: params.amount,
     chainId: params.chainId,
     tradeId: params.tradeId,
+    subTradeIndex: params.subTradeIndex,
+    idempotencyKey: ctx.idempotencyKey,
     clientIp: ctx.clientIp ?? "unknown",
   };
+}
+
+/** Applies a recorded outcome to the id of the request replaying it. */
+function replay(id: number | string, outcome: IdempotentOutcome): JsonRpcResponse {
+  return outcome.kind === "result"
+    ? success(id, outcome.result)
+    : rpcError(id, outcome.code, outcome.message, outcome.data);
 }
 
 function success(id: number | string | null, result: unknown): JsonRpcResponse {
@@ -96,6 +111,35 @@ async function handleCreateNote(
   const noteParams = parsed.data;
   const amount = BigInt(noteParams.amount);
 
+  // Claimed before the limits are touched, so a duplicate neither transfers
+  // nor consumes budget. Claiming is synchronous, so two concurrent requests
+  // carrying the same key cannot both proceed.
+  const key = ctx.idempotency && ctx.idempotencyKey ? ctx.idempotencyKey : undefined;
+  if (ctx.idempotency && key !== undefined) {
+    const lookup = ctx.idempotency.begin(key);
+    if (lookup.state === "settled") {
+      console.log(`[rpc] Replaying idempotency key ${key}`);
+      return replay(id, lookup.outcome);
+    }
+    if (lookup.state === "in-flight") {
+      console.warn(`[rpc] Idempotency key ${key} is already in flight`);
+      return rpcError(
+        id,
+        RPC_ERRORS.INTERNAL_ERROR,
+        "A request with this Idempotency-Key is still in flight",
+      );
+    }
+  }
+
+  /** Frees the key: nothing moved, so a retry is legitimate. */
+  const abandon = (): void => {
+    if (ctx.idempotency && key !== undefined) ctx.idempotency.abandon(key);
+  };
+  /** Holds the key: a duplicate must replay this rather than transfer again. */
+  const settle = (outcome: IdempotentOutcome): void => {
+    if (ctx.idempotency && key !== undefined) ctx.idempotency.settle(key, outcome);
+  };
+
   // Enforce transaction limits (ceiling, daily volume, circuit breaker).
   // reserve() counts the amount against the rolling window immediately, so
   // concurrent in-flight requests cannot each pass on a stale total and
@@ -106,6 +150,7 @@ async function handleCreateNote(
     const reservation = ctx.limits.reserve(amount);
     if (!reservation.allowed) {
       console.error("[rpc] Limit rejected:", reservation.reason);
+      abandon();
       if (ctx.audit) {
         await ctx.audit.log({
           ...auditBase(noteParams, ctx),
@@ -126,6 +171,15 @@ async function handleCreateNote(
     }
   }
 
+  // Intent, written and flushed BEFORE the send. A crash between submitting
+  // and recording the outcome would otherwise leave the log silent about a
+  // transfer that may have landed, and a restart would hand the key back as
+  // fresh. Replaying a `submitting` entry with no successor as "unknown" is
+  // what closes that window, and only this write makes it visible.
+  if (ctx.audit && key !== undefined) {
+    await ctx.audit.log({ ...auditBase(noteParams, ctx), status: "submitting" });
+  }
+
   try {
     const result = await client.createNote(noteParams);
 
@@ -134,11 +188,15 @@ async function handleCreateNote(
       ctx.limits.commit(reservationId);
     }
 
+    settle({ kind: "result", result });
+
     if (ctx.audit) {
       await ctx.audit.log({
         ...auditBase(noteParams, ctx),
         status: "success",
         txHash: result.l2TxHash,
+        noteHashes: result.noteHashes,
+        nullifiers: result.nullifiers,
       });
     }
 
@@ -159,27 +217,36 @@ async function handleCreateNote(
       }
     }
 
+    // Distinct from a clean rejection: the caller has to reconcile rather than
+    // assume nothing happened. Retrying this blindly sends a second transfer,
+    // which is why the key holds it rather than freeing it.
+    const outcome: IdempotentOutcome = landed
+      ? {
+          kind: "error",
+          code: RPC_ERRORS.INTERNAL_ERROR,
+          message: SUBMITTED_UNKNOWN_MESSAGE,
+          ...(cause.txHash !== undefined ? { data: { txHash: cause.txHash } } : {}),
+        }
+      : { kind: "error", code: RPC_ERRORS.INTERNAL_ERROR, message: "Internal error" };
+
+    if (landed) {
+      settle(outcome);
+    } else {
+      abandon();
+    }
+
     if (ctx.audit) {
       await ctx.audit.log({
         ...auditBase(noteParams, ctx),
-        status: "error",
+        // "unknown" rather than "error": whether this moved funds is exactly
+        // what is not known, and the replay reader has to tell the two apart.
+        status: landed ? "unknown" : "error",
         ...(landed && cause.txHash ? { txHash: cause.txHash } : {}),
         error: cause instanceof Error ? cause.message : "Unknown error",
       });
     }
 
-    // Distinct from a clean rejection: the caller has to reconcile rather than
-    // assume nothing happened. Retrying this blindly sends a second transfer.
-    if (landed) {
-      return rpcError(
-        id,
-        RPC_ERRORS.INTERNAL_ERROR,
-        "Transaction submitted, result unknown -- do not retry without reconciling",
-        cause.txHash !== undefined ? { txHash: cause.txHash } : undefined,
-      );
-    }
-
-    return rpcError(id, RPC_ERRORS.INTERNAL_ERROR, "Internal error");
+    return replay(id, outcome);
   }
 }
 

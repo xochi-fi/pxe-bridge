@@ -130,6 +130,15 @@ export interface IAztecClient {
   getVersion(): Promise<string>;
 }
 
+/**
+ * Answer for a transfer that may be on chain but whose result could not be
+ * read back. Shared, because `rpc.ts` produces it live and `audit.ts`
+ * reconstructs it when replaying a key after a restart, and a caller matching
+ * on the string must see the same one either way.
+ */
+export const SUBMITTED_UNKNOWN_MESSAGE =
+  "Transaction submitted, result unknown -- do not retry without reconciling";
+
 // JSON-RPC error codes
 export const RPC_ERRORS = {
   PARSE_ERROR: -32700,

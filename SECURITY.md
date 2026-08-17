@@ -194,6 +194,34 @@ with a distinct RPC message carrying the txHash. Releasing those let a caller
 repeat whatever caused the failure and move past the cap without the window
 seeing it.
 
+## Idempotency
+
+That distinct message tells a caller not to retry blindly, but nothing enforced
+it. The `Idempotency-Key` request header does: a duplicate replays the first
+attempt's response rather than transferring again, so the ambiguous case stays
+ambiguous instead of being resolved by moving funds a second time.
+
+Three properties carry the weight:
+
+- **The claim is synchronous.** `begin()` marks the key before any await, so two
+  concurrent requests with one key cannot both proceed. The duplicate this
+  exists to stop is exactly the one that would otherwise race past the check.
+- **Intent is recorded before the send.** A `submitting` entry is flushed to the
+  audit log first, so a crash between submitting and recording the outcome is
+  recoverable: on restart, a key left at `submitting` replays as `unknown`.
+  Without it, the crash-mid-send window -- the one that most needs covering --
+  would hand the key back as fresh.
+- **Only transfers are protected.** A request stopped by validation or by the
+  limits frees its key, because there is no transfer to repeat and recording the
+  failure would leave the caller unable to settle the trade at all. This departs
+  from Stripe's replay-errors-forever semantics deliberately.
+
+The residual window is a crash before the `submitting` record reaches disk. At
+that point the send has not been made, so a retry is correct.
+
+Keys are held 24h, and durability depends on `PXE_BRIDGE_AUDIT_LOG` being a file
+path. Without it the store is in-memory and a restart forgets every key.
+
 The circuit breaker trips when committed volume reaches the daily cap, not when
 a single request would overshoot it. A request larger than the remaining budget
 is rejected on its own; tripping there meant one oversized request, needing no

@@ -3,6 +3,7 @@ import { timingSafeEqual } from "node:crypto";
 import { handleRpcRequest, type RpcContext } from "./rpc.js";
 import { RPC_ERRORS, type IAztecClient } from "./types.js";
 import type { TransactionLimits } from "./limits.js";
+import type { IdempotencyStore } from "./idempotency.js";
 import type { AuditLogger } from "./audit.js";
 
 const MAX_BODY_BYTES = 64 * 1024; // 64 KB
@@ -28,6 +29,8 @@ export interface ServerOptions {
   adminKey?: string | undefined;
   limits?: TransactionLimits | undefined;
   audit?: AuditLogger | undefined;
+  /** Absent disables replay: every request executes, as before. */
+  idempotency?: IdempotencyStore | undefined;
 }
 
 const RATE_LIMIT_CLEANUP_INTERVAL_MS = 300_000; // 5 min
@@ -113,6 +116,33 @@ function sendJson(res: ServerResponse, status: number, data: unknown): void {
     "Content-Length": String(Buffer.byteLength(body)),
   });
   res.end(body);
+}
+
+// Long enough for a UUID or a "0x<32 bytes>-<index>" trade identifier, short
+// enough that keys cannot be used to grow the store or the audit log.
+const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
+/** Distinct from undefined, which means the caller simply sent no key. */
+const INVALID_KEY = Symbol("invalid-idempotency-key");
+
+/**
+ * Validates the `Idempotency-Key` header.
+ *
+ * Rejected rather than sanitised. A key that is silently altered stops
+ * matching the one the caller will retry with, which turns the protection off
+ * exactly when it is needed. Printable ASCII only, since the value is written
+ * to the audit log and read back by a parser.
+ */
+function readIdempotencyKey(
+  header: string | string[] | undefined,
+): string | undefined | typeof INVALID_KEY {
+  if (header === undefined) return undefined;
+  // Duplicate headers are ambiguous about which key the caller meant.
+  if (Array.isArray(header)) return INVALID_KEY;
+
+  const key = header.trim();
+  if (key.length === 0 || key.length > MAX_IDEMPOTENCY_KEY_LENGTH) return INVALID_KEY;
+  if (!/^[\x20-\x7e]+$/.test(key)) return INVALID_KEY;
+  return key;
 }
 
 function checkAuth(req: IncomingMessage, apiKey: string): boolean {
@@ -243,9 +273,22 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           return;
         }
 
+        // A header rather than an RPC param: it is a property of the delivery
+        // attempt, not of the note being created, and it has to work for
+        // callers that send no XIP-1 trade context.
+        const idempotencyKey = readIdempotencyKey(req.headers["idempotency-key"]);
+        if (idempotencyKey === INVALID_KEY) {
+          sendJson(res, 400, {
+            error: `Idempotency-Key must be 1-${MAX_IDEMPOTENCY_KEY_LENGTH} printable ASCII characters`,
+          });
+          return;
+        }
+
         const rpcCtx: RpcContext = {
           limits: opts.limits,
           audit: opts.audit,
+          idempotency: opts.idempotency,
+          idempotencyKey,
           clientIp: clientIp,
         };
         const result = await handleRpcRequest(parsed, client, rpcCtx);
