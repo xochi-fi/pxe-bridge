@@ -178,6 +178,67 @@ describe("spending limit account (e2e)", () => {
     ).rejects.toThrow();
   });
 
+  // TOKEN PIN. check_spending_public asserts the matched call's target equals
+  // permitted_token, which is fixed at construction with no setter. Nothing
+  // covered that assert: the Noir test only checks the private guard REPORTS a
+  // target, and the comparison itself is a public read that no Noir test can
+  // reach.
+  //
+  // The second token is minted to the account first, and deliberately so. An
+  // unfunded token would fail inside transfer_to_private on the balance, in
+  // private, and would have proven nothing about the pin. With a balance, the
+  // private half has no reason to object and the only thing left to stop it is
+  // the public comparison.
+  //
+  // Placed before the daily-window and revocation tests: after them the
+  // allowlist is empty and the window near its cap, either of which would
+  // reject this for the wrong reason.
+  it("rejects a transfer of a token that is not the pinned one", async (ctx) => {
+    if (deployFailure) return ctx.skip();
+
+    const otherToken = await deployTestToken(funderWallet, adminAddress);
+    await mintTo(funderWallet, otherToken, accountAddress, MINT_AMOUNT, adminAddress);
+    expect(await balanceOf(client, otherToken, accountAddress)).toBe(MINT_AMOUNT);
+
+    await expect(
+      client.createNote({
+        chainId: 1,
+        token: otherToken,
+        recipient: SEED_RECIPIENT,
+        amount: "1000",
+      }),
+    ).rejects.toThrow();
+
+    // Funded, allowlisted recipient, amount well under both limits, and still
+    // nothing moved. The pin is the only remaining explanation.
+    expect(await balanceOf(client, otherToken, accountAddress)).toBe(MINT_AMOUNT);
+  }, 600_000);
+
+  // AUTHWIT KILL-SWITCH. A valid third-party authwit would let a token contract
+  // move funds without routing through entrypoint, so check_spending_public --
+  // per-tx cap, daily window, allowlist, token pin -- would never run. The
+  // account answers every authwit request as invalid.
+  //
+  // Both halves matter. verify_private_authwit returning 0 instead of the
+  // IS_VALID magic value is what actually rejects; lookup_validity returning
+  // false is what stops an off-chain caller being told to submit a transaction
+  // that is guaranteed to revert. The stock implementation gets the second one
+  // wrong.
+  it("refuses every third-party authwit", async (ctx) => {
+    if (deployFailure) return ctx.skip();
+
+    const innerHash = "0x" + "07".repeat(32);
+
+    const validity = await simulateAccount(client, "verify_private_authwit", [innerHash]);
+    expect(BigInt(String(validity))).toBe(0n);
+
+    const lookup = await simulateAccount(client, "lookup_validity", [
+      UNLISTED_RECIPIENT,
+      innerHash,
+    ]);
+    expect(lookup).toBe(false);
+  }, 600_000);
+
   it("rejects a transfer that would exceed the daily window", async (ctx) => {
     if (deployFailure) return ctx.skip();
     // The window is 25 hourly buckets summed, so repeated max-size transfers
@@ -325,6 +386,48 @@ describe("spending limit account (e2e)", () => {
     ).toBe("success");
   }, 600_000);
 });
+
+/**
+ * Simulates a view or utility function on the spending-limit account.
+ *
+ * `from` scopes the execution. Without it PXE throws, and its own error
+ * formatter then crashes on undefined args, masking the cause. simulate()
+ * resolves to { result, offchainEffects, offchainMessages }, so the return
+ * value is under `result`.
+ */
+async function simulateAccount(
+  client: AztecClient,
+  method: string,
+  args: unknown[],
+): Promise<unknown> {
+  const { Contract } = await import("@aztec/aztec.js/contracts");
+  const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+  const wallet = (client as unknown as { wallet: unknown }).wallet;
+  const slc = (client as unknown as {
+    spendingLimitContract: { getContractArtifact: () => Promise<unknown> };
+  }).spendingLimitContract;
+  const account = client.getAddress()!;
+
+  const c = await (
+    Contract as unknown as {
+      at: (a: unknown, art: unknown, w: unknown) => Promise<{
+        methods: Record<
+          string,
+          (...a: unknown[]) => { simulate: (o: { from: unknown }) => Promise<unknown> }
+        >;
+      }>;
+    }
+  ).at(
+    AztecAddress.fromStringUnsafe(account),
+    await slc.getContractArtifact(),
+    wallet,
+  );
+
+  const out = await c.methods[method]!(...args).simulate({
+    from: AztecAddress.fromStringUnsafe(account),
+  });
+  return (out as { result?: unknown })?.result ?? out;
+}
 
 /**
  * Calls `method` on the spending-limit account as `caller` and reports how the
