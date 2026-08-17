@@ -20,6 +20,13 @@ EVM intent solvers speak JSON-RPC and have no concept of private execution, PXEs
 
 pxe-bridge embeds a PXE wallet and wraps it in a JSON-RPC interface that solvers already understand. When a solver says "create a shielded note for this token," the bridge handles private execution, proof generation, and note encryption transparently. The solver gets back a transaction hash.
 
+> **What "shielded" covers.** The note and its recipient are private. With the
+> on-chain spending-limit account enabled, the transfer **amount is public**, and
+> the recipient is published as one of up to 8 allowlisted addresses. Enforcing
+> caps against public contract state requires putting the amount in a public
+> call's arguments. See [SECURITY.md](SECURITY.md#what-is-public). A plain
+> Schnorr account, the default, publishes neither.
+
 ```
 EVM Solver --JSON-RPC--> pxe-bridge --Aztec SDK--> Aztec L2 Node
                          (this repo)

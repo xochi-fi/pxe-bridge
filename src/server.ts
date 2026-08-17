@@ -1,14 +1,22 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { handleRpcRequest, type RpcContext } from "./rpc.js";
-import type { IAztecClient } from "./types.js";
+import { RPC_ERRORS, type IAztecClient } from "./types.js";
 import type { TransactionLimits } from "./limits.js";
 import type { AuditLogger } from "./audit.js";
 
 const MAX_BODY_BYTES = 64 * 1024; // 64 KB
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = 60;
+// Bounds RECEIVING the request. Node's server.requestTimeout covers headers
+// plus body, not the response, which is why it was never the protection the
+// docs claimed it was.
 const REQUEST_TIMEOUT_MS = 30_000;
+
+// Bounds PRODUCING the response. Above aztec-client's 120s TX_TIMEOUT_MS, so a
+// legitimate transfer is never cut off by it; a socket that outlives even that
+// is not waiting on anything the bridge is going to deliver.
+const RESPONSE_TIMEOUT_MS = 150_000;
 
 export interface ServerOptions {
   apiKey?: string | undefined;
@@ -128,6 +136,21 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
   const rateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
 
   const server = createServer(async (req, res) => {
+    // Nothing otherwise bounded how long a connection could stay open waiting
+    // for a reply, so a stalled node held sockets indefinitely.
+    res.setTimeout(RESPONSE_TIMEOUT_MS, () => {
+      console.error("[pxe-bridge] Response deadline exceeded, closing connection");
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      sendJson(res, 504, {
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: RPC_ERRORS.INTERNAL_ERROR, message: "Gateway timeout" },
+      });
+    });
+
     try {
       const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
 

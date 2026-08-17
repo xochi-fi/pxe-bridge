@@ -12,6 +12,32 @@ compromised and aims to limit the damage via per-transaction amount caps, a
 fixed at construction, all enforced on-chain and independent of the
 application-level limits in `src/limits.ts`.
 
+The admin is a separate party from the signing key holder, and every admin
+lever follows one asymmetry: **tightening waits out the 24h timelock,
+loosening and stopping are immediate.**
+
+| Lever | Direction | Timing |
+| --- | --- | --- |
+| `pause` / `unpause` | Stop everything | Immediate |
+| `remove_recipient` | Revoke a payee | Immediate |
+| `lower_min_anonymity` | Loosen the hint floor | Immediate |
+| `propose_recipient` + `apply_recipient` | Add a payee | 24h |
+| `propose_limits` + `apply_limits` | Change caps or raise the floor | 24h |
+
+`pause` is the response to a compromised signing key: it is checked in
+`check_spending_public`, so it stops a transaction however far through proving
+it already is. A timelock on it would hand an attacker exactly the notice
+period they need.
+
+`remove_recipient` is deliberately not blocked when it would leave fewer live
+entries than `min_anonymity_set`, which makes every hint unsatisfiable and
+stops all transfers. Refusing an emergency revocation to protect an
+availability property is the wrong trade; `lower_min_anonymity` is the
+untimelocked way back.
+
+An attacker holding the **admin** key is outside this model. They have
+`propose_limits`, and a 24h public notice is the whole defence.
+
 ## Declared-vs-actual amount binding
 
 `contracts/spending_limit_account/src/main.nr` enforces spending limits against
@@ -73,11 +99,21 @@ Aztec v5.1.0. It is validated three ways:
   payload; `stale_hint_is_rejected` and `minimal_hint_is_rejected` cover the
   allowlist binding and the anonymity floor. The `contract` CI job runs these
   and `aztec compile`.
-- e2e tests in `tests/e2e/spending-limit.test.ts` run the same guard as
-  transpiled AVM bytecode against a real sandbox, which `aztec-nargo test`
-  cannot: it runs in Brillig and says nothing about what actually executes.
+- e2e tests in `tests/e2e/spending-limit.test.ts` reach what `aztec-nargo test`
+  cannot. The guard itself is private, so it runs in ACIR either way; what only
+  the sandbox exercises is `check_spending_public` as transpiled AVM bytecode,
+  plus everything that depends on `msg_sender` or a public read: the token pin,
+  admin authorization, phase ordering, and revocation of an already-proven
+  transfer.
 - The check is fail-closed: any mismatch reverts the transaction, so an error
   surfaces as a failing tx, never a silent bypass.
+
+On the TypeScript side, the entrypoint no longer accepts a declaration at all.
+It reads `declared_amount` and `declared_recipient` out of the
+`transfer_to_private` call in the payload it is signing, so declared == actual
+holds by construction there and the circuit re-proves it rather than catching
+the client out. A payload without exactly one such call is refused before it
+costs a fee.
 
 Barretenberg SIGILLs on Apple Silicon (ARM), so the sandbox e2e runs only on
 x86 CI. `aztec compile` does not finish there either, since it generates
@@ -87,6 +123,42 @@ The binding assumes `createNote`'s single-transfer shape. If the bridge later
 issues multi-call payloads, extend the helper to match and sum every
 value-moving call rather than requiring exactly one.
 
+## What is public
+
+The contract enforces its limits against public state, and a public function's
+arguments are part of the transaction. Every transfer therefore publishes:
+
+- **The amount.** `declared_amount` is an argument to `check_spending_public`.
+- **A candidate recipient set.** `allowlist_hint` is an argument to the same
+  call. It names between `min_anonymity_set` and `ALLOWLIST_SIZE` (8) addresses,
+  one of which is the recipient. Which one is not published.
+- **The token.** Pinned at construction and visible as the call target.
+
+The allowlist is public regardless, because `propose_recipient` and
+`remove_recipient` take the address as an ordinary public argument, so the
+admin's own transactions publish every entry. The hint therefore leaks nothing
+the chain does not already show; what it does is narrow each transfer's
+recipient to a member of a small, published set.
+
+This is inherent to checking a value against public storage and is not
+remediated. Enforcing the same limits privately would mean nullifier-based
+counters and a different contract. The recipient's identity and the note
+contents remain private; the amount does not. Callers who need the amount
+private cannot use the spending-limit account.
+
+## Build supply chain
+
+The `contract` CI job installs the Aztec toolchain by piping
+`https://install.aztec.network` into bash. There is no published checksum to pin
+against, so the build trusts that endpoint. `aztec-up install 5.1.0` pins the
+toolchain version but not the installer that fetches it.
+
+The artifact it produces is not committed, so the mitigation is downstream:
+`scripts/contract-class-id.js` compares the resulting contract class ID against
+`contracts/spending_limit_account/CLASS_ID` and fails the job on drift. A
+compromised or merely updated toolchain changes that ID, and the account address
+derives from it.
+
 ## Application-level limits
 
 `src/limits.ts` provides defense-in-depth independent of the contract. Limit
@@ -94,3 +166,32 @@ checks reserve the amount against the rolling window at admission time
 (`reserve()`), commit on success, and release on failure, so concurrent
 in-flight requests cannot each pass on a stale total and collectively exceed the
 daily cap.
+
+A failure that may have left the transfer on chain -- the send deadline, or a
+receipt that could not be read back -- commits rather than releases, and answers
+with a distinct RPC message carrying the txHash. Releasing those let a caller
+repeat whatever caused the failure and move past the cap without the window
+seeing it.
+
+The circuit breaker trips when committed volume reaches the daily cap, not when
+a single request would overshoot it. A request larger than the remaining budget
+is rejected on its own; tripping there meant one oversized request, needing no
+prior volume when `PXE_BRIDGE_MAX_AMOUNT` was unset, stopped the bridge for a
+full window.
+
+The rolling window is rebuilt from `PXE_BRIDGE_AUDIT_LOG` at startup. Without
+that path set it is in-memory only and a restart hands back the full daily
+budget, which matters because a restart used to be the only way to clear a
+tripped breaker. `POST /admin/resume` is now that way, gated on
+`PXE_BRIDGE_ADMIN_KEY` -- separate from the RPC key, so a caller who can move
+funds cannot clear the breaker that stopped them.
+
+## Transport
+
+- 30s deadline on receiving a request (`server.requestTimeout`) and 150s on
+  producing a response (`res.setTimeout`), the latter above the client's 120s
+  transaction timeout. These are separate limits: `requestTimeout` alone, which
+  is all this had, bounds nothing about how long a reply may take, so a stalled
+  node held sockets open indefinitely.
+- 64KB body limit, 60 requests/min per IP, `Content-Type: application/json`
+  required on POST.
