@@ -4,6 +4,7 @@ import { TokenContract } from "@aztec/noir-contracts.js/Token";
 import { SponsoredFPCContract } from "@aztec/noir-contracts.js/SponsoredFPC";
 import type { AztecAddress } from "@aztec/aztec.js/addresses";
 import type { GasFees } from "@aztec/stdlib/gas";
+import { PostSubmissionError } from "./types.js";
 import type { CreateNoteParams, CreateNoteResult, FeeJuiceClaim, IAztecClient } from "./types.js";
 import {
   ALLOWLIST_SIZE,
@@ -55,10 +56,13 @@ interface AztecNodeLike {
   ): Promise<{ txEffect?: (TxEffectFields & { data?: TxEffectFields }) | undefined } | undefined>;
 }
 
+/** Distinguishable so createNote can tell a deadline from a rejection. */
+class TimeoutError extends Error {}
+
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error("Operation timed out")), ms);
+    timer = setTimeout(() => reject(new TimeoutError("Operation timed out")), ms);
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
@@ -433,8 +437,37 @@ export class AztecClient implements IAztecClient {
     // Only the spending-limit path shares mutable per-tx state. A plain Schnorr
     // account carries everything in the payload, so serializing it would cost
     // throughput and buy nothing.
-    const result = this.spendingLimitContract ? await this.serialize(submit) : await submit();
+    let result: unknown;
+    try {
+      result = this.spendingLimitContract ? await this.serialize(submit) : await submit();
+    } catch (err) {
+      // A deadline is the one ambiguous case: send() may already have
+      // broadcast. Everything else here failed while building, proving or
+      // simulating, before the network saw anything, or landed as a revert
+      // that moved no funds.
+      if (err instanceof TimeoutError) {
+        throw new PostSubmissionError(
+          `Transaction did not confirm within ${TX_TIMEOUT_MS}ms and may still be included`,
+          undefined,
+          { cause: err },
+        );
+      }
+      throw err;
+    }
 
+    // Past this point the transfer is on chain. Everything below reads the
+    // result back, so a failure here is a reporting failure over a transfer
+    // that already happened, and must not be reported as a clean rejection.
+    return await this.readNoteResult(result);
+  }
+
+  /**
+   * Turns a settled send into a CreateNoteResult.
+   *
+   * Split out so every throw on this path is a PostSubmissionError: the
+   * transfer has landed by the time any of it runs.
+   */
+  private async readNoteResult(result: unknown): Promise<CreateNoteResult> {
     const raw = result as unknown as Record<string, unknown>;
     const receiptInner =
       typeof raw["receipt"] === "object" && raw["receipt"] !== null
@@ -443,7 +476,7 @@ export class AztecClient implements IAztecClient {
 
     const rawTxHash = receiptInner["txHash"] ?? raw["txHash"];
     if (rawTxHash === undefined || rawTxHash === null) {
-      throw new Error("Missing txHash in transaction receipt");
+      throw new PostSubmissionError("Missing txHash in transaction receipt");
     }
     const txHash = String(rawTxHash);
 
@@ -453,7 +486,16 @@ export class AztecClient implements IAztecClient {
     // undefined and every successful transfer reported "Incomplete transaction
     // receipt".
     const node = (this.wallet as unknown as { aztecNode: AztecNodeLike }).aztecNode;
-    const detailed = await node.getTxReceipt(rawTxHash as never, { includeTxEffect: true });
+    let detailed;
+    try {
+      detailed = await node.getTxReceipt(rawTxHash as never, { includeTxEffect: true });
+    } catch (err) {
+      throw new PostSubmissionError(
+        "Transfer landed but its effects could not be read back",
+        txHash,
+        { cause: err },
+      );
+    }
     const effect = detailed?.txEffect?.data ?? detailed?.txEffect;
 
     // A transfer_to_private emits 2 note hashes and 3 nullifiers, so no single
@@ -465,7 +507,9 @@ export class AztecClient implements IAztecClient {
     const noteCommitment = noteHashes[0];
     const nullifierHash = nullifiers[0];
     if (!noteCommitment || !nullifierHash) {
-      throw new Error("Incomplete transaction receipt");
+      // The node has the transaction but not yet its effects. The transfer
+      // happened; only this read is early.
+      throw new PostSubmissionError("Incomplete transaction receipt", txHash);
     }
 
     console.log("[pxe-bridge] Note created, txHash:", txHash);

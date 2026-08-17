@@ -15,7 +15,10 @@ export type JsonRpcResponse =
   | {
       jsonrpc: "2.0";
       id: number | string | null;
-      error: { code: number; message: string };
+      // `data` carries the txHash when a transfer may have landed but its
+      // result could not be read back, so the caller can reconcile instead of
+      // retrying into a second transfer.
+      error: { code: number; message: string; data?: unknown };
     };
 
 // aztec_createNote params
@@ -95,6 +98,30 @@ export const FeeJuiceClaimSchema = z.object({
 });
 
 export type FeeJuiceClaim = z.infer<typeof FeeJuiceClaimSchema>;
+
+/**
+ * Raised when createNote fails at a point where the transfer may already be on
+ * chain: the send deadline expired, or the transfer succeeded and only reading
+ * the result back failed.
+ *
+ * The caller must not treat this as "nothing happened". `rpc.ts` counts it
+ * against the daily window instead of releasing the reservation, because
+ * releasing a transfer that landed lets the same failure be repeated past the
+ * cap.
+ *
+ * Lives here rather than in `aztec-client.ts` so `rpc.ts` can narrow on it
+ * without importing the Aztec SDK.
+ */
+export class PostSubmissionError extends Error {
+  constructor(
+    message: string,
+    readonly txHash?: string,
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
+    this.name = "PostSubmissionError";
+  }
+}
 
 // Abstraction over AztecClient for testability
 export interface IAztecClient {

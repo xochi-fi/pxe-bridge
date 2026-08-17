@@ -1,6 +1,7 @@
 import {
   JsonRpcRequestSchema,
   CreateNoteParamsSchema,
+  PostSubmissionError,
   RPC_ERRORS,
   type IAztecClient,
   type JsonRpcResponse,
@@ -40,8 +41,17 @@ function success(id: number | string | null, result: unknown): JsonRpcResponse {
   return { jsonrpc: "2.0", id, result };
 }
 
-function rpcError(id: number | string | null, code: number, message: string): JsonRpcResponse {
-  return { jsonrpc: "2.0", id, error: { code, message } };
+function rpcError(
+  id: number | string | null,
+  code: number,
+  message: string,
+  data?: unknown,
+): JsonRpcResponse {
+  return {
+    jsonrpc: "2.0",
+    id,
+    error: { code, message, ...(data !== undefined ? { data } : {}) },
+  };
 }
 
 export async function handleRpcRequest(
@@ -136,17 +146,37 @@ async function handleCreateNote(
   } catch (cause) {
     console.error("[rpc] aztec_createNote failed:", cause);
 
-    // Free the reservation so a failed tx does not count against the cap
+    // A PostSubmissionError means the transfer may already be on chain, so the
+    // amount has to stay counted. Releasing it let a caller repeat whatever
+    // caused the failure -- a slow node, most obviously -- and move funds past
+    // the daily cap without the window ever seeing them.
+    const landed = cause instanceof PostSubmissionError;
     if (ctx.limits && reservationId !== undefined) {
-      ctx.limits.release(reservationId);
+      if (landed) {
+        ctx.limits.commit(reservationId);
+      } else {
+        ctx.limits.release(reservationId);
+      }
     }
 
     if (ctx.audit) {
       await ctx.audit.log({
         ...auditBase(noteParams, ctx),
         status: "error",
+        ...(landed && cause.txHash ? { txHash: cause.txHash } : {}),
         error: cause instanceof Error ? cause.message : "Unknown error",
       });
+    }
+
+    // Distinct from a clean rejection: the caller has to reconcile rather than
+    // assume nothing happened. Retrying this blindly sends a second transfer.
+    if (landed) {
+      return rpcError(
+        id,
+        RPC_ERRORS.INTERNAL_ERROR,
+        "Transaction submitted, result unknown -- do not retry without reconciling",
+        cause.txHash !== undefined ? { txHash: cause.txHash } : undefined,
+      );
     }
 
     return rpcError(id, RPC_ERRORS.INTERNAL_ERROR, "Internal error");

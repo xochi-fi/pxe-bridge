@@ -110,6 +110,21 @@ and nullifies no note. The two scalar fields are the historical shape and are
 retained so existing callers keep parsing; read the arrays and pick
 deliberately.
 
+**Errors:** most failures mean nothing happened and are safe to retry. One is
+not. When the send deadline expires, or the transfer succeeds and only reading
+its effects back fails, the response is:
+
+```json
+{ "code": -32603,
+  "message": "Transaction submitted, result unknown -- do not retry without reconciling",
+  "data": { "txHash": "0x..." } }
+```
+
+The transfer may be on L2. Look up `data.txHash` before deciding; a blind retry
+sends a second transfer. The bridge counts the amount against its daily window
+in this case, on the assumption that it landed. `data` is absent when no hash
+was obtained, which is the deadline case.
+
 ### `aztec_getVersion`
 
 Returns the connected Aztec node version string.

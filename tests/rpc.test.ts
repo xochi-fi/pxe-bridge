@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { handleRpcRequest } from "../src/rpc.js";
+import { TransactionLimits } from "../src/limits.js";
+import { PostSubmissionError } from "../src/types.js";
+import type { AuditEntry, AuditLogger } from "../src/audit.js";
 import type { CreateNoteParams, CreateNoteResult, IAztecClient } from "../src/types.js";
 
 const VALID_ADDR = "0x" + "a".repeat(64);
@@ -257,6 +260,69 @@ describe("handleRpcRequest", () => {
         client,
       );
       expect(res.id).toBe("req-123");
+    });
+  });
+
+  // A transfer that may already be on chain must not be accounted as if
+  // nothing happened. Releasing the reservation let a caller repeat whatever
+  // caused the failure -- a slow node, most obviously -- and move funds past
+  // the daily cap without the window ever seeing them.
+  describe("post-submission failures", () => {
+    const noteParams = {
+      recipient: VALID_ADDR,
+      token: VALID_ADDR,
+      amount: "3000",
+      chainId: 1,
+    };
+
+    it("counts the amount against the window instead of releasing it", async () => {
+      const limits = new TransactionLimits({ dailyLimit: 5000n });
+      client.createNoteError = new PostSubmissionError("Incomplete receipt", "0xabc");
+
+      await handleRpcRequest(rpcRequest("aztec_createNote", [noteParams]), client, { limits });
+
+      // 3000 stayed counted, so a second 3000 no longer fits under 5000.
+      expect(limits.check(3000n).allowed).toBe(false);
+    });
+
+    it("still releases when the failure was before submission", async () => {
+      const limits = new TransactionLimits({ dailyLimit: 5000n });
+      client.createNoteError = new Error("simulation reverted");
+
+      await handleRpcRequest(rpcRequest("aztec_createNote", [noteParams]), client, { limits });
+
+      expect(limits.check(5000n).allowed).toBe(true);
+    });
+
+    it("returns a distinct message and the txHash to reconcile against", async () => {
+      client.createNoteError = new PostSubmissionError("Incomplete receipt", "0xabc");
+
+      const res = await handleRpcRequest(rpcRequest("aztec_createNote", [noteParams]), client);
+
+      expect("error" in res && res.error.message).toContain("do not retry");
+      expect("error" in res && res.error.data).toEqual({ txHash: "0xabc" });
+    });
+
+    // Without a hash there is nothing to reconcile against, so the message has
+    // to carry the warning on its own.
+    it("omits data when no txHash is known", async () => {
+      client.createNoteError = new PostSubmissionError("Timed out");
+
+      const res = await handleRpcRequest(rpcRequest("aztec_createNote", [noteParams]), client);
+
+      expect("error" in res && res.error.message).toContain("result unknown");
+      expect("error" in res && "data" in res.error).toBe(false);
+    });
+
+    it("records the txHash on the audit entry", async () => {
+      const logged: AuditEntry[] = [];
+      const audit = { log: async (e: AuditEntry) => void logged.push(e) } as AuditLogger;
+      client.createNoteError = new PostSubmissionError("Incomplete receipt", "0xabc");
+
+      await handleRpcRequest(rpcRequest("aztec_createNote", [noteParams]), client, { audit });
+
+      expect(logged[0]?.status).toBe("error");
+      expect(logged[0]?.txHash).toBe("0xabc");
     });
   });
 });
