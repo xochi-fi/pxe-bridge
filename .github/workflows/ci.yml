@@ -40,6 +40,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Needed by the class ID check below, which loads the artifact through
+      # @aztec/stdlib rather than reading JSON fields.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
       - name: Install Aztec toolchain
         run: |
           curl -fsSL https://install.aztec.network | bash
@@ -69,16 +76,13 @@ jobs:
       - name: Compile and transpile contract
         working-directory: contracts/spending_limit_account
         run: aztec compile
-      - name: Assert artifact is loadable
-        run: |
-          node -e "
-            const { readFileSync } = require('fs');
-            const p = 'contracts/spending_limit_account/target/spending_limit_account_contract-SpendingLimitAccount.json';
-            const a = JSON.parse(readFileSync(p, 'utf8'));
-            if (!a.transpiled) { console.error('artifact not transpiled'); process.exit(1); }
-            if (!a.aztec_version) { console.error('artifact has no aztec_version'); process.exit(1); }
-            console.log('artifact ok: aztec', a.aztec_version, '/ noir', a.noir_version);
-          "
+      # The artifact is gitignored and rebuilt here every run, from a toolchain
+      # fetched by piping a remote installer into bash. The class ID derives
+      # from that bytecode and feeds address derivation, so drift silently moves
+      # the account address: the bridge finds no contract there, deploys a fresh
+      # empty account, logs "Ready", and strands the balance at the old address.
+      - name: Assert artifact is loadable and the class ID has not drifted
+        run: node scripts/contract-class-id.js --check contracts/spending_limit_account/CLASS_ID
       - name: Upload contract artifact
         uses: actions/upload-artifact@v4
         with:
