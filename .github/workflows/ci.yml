@@ -10,9 +10,12 @@ on:
     # retargets to main, which is exactly when review is least useful.
     branches: [main, "fix/**"]
 
+# Read-only by default. `packages: write` is granted to the `docker` job alone:
+# at workflow scope it also applied to `check`, `contract` and `e2e`, so every
+# pull_request build ran with a token that could push to the registry --
+# including the `contract` job, which pipes a remote installer into bash.
 permissions:
   contents: read
-  packages: write
 
 jobs:
   check:
@@ -107,6 +110,9 @@ jobs:
     needs: [check, contract]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
       # The image COPYs this in; it is no longer committed to git.
