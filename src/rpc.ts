@@ -28,6 +28,7 @@ function auditBase(
     chainId: number;
     tradeId?: string | undefined;
     subTradeIndex?: number | undefined;
+    totalSubTrades?: number | undefined;
   },
   ctx: RpcContext,
 ): Omit<AuditEntry, "status" | "txHash" | "error"> {
@@ -40,6 +41,7 @@ function auditBase(
     chainId: params.chainId,
     tradeId: params.tradeId,
     subTradeIndex: params.subTradeIndex,
+    totalSubTrades: params.totalSubTrades,
     idempotencyKey: ctx.idempotencyKey,
     clientIp: ctx.clientIp ?? "unknown",
   };
