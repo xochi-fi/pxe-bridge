@@ -471,9 +471,23 @@ describe("POST /admin/resume", () => {
   function resume(url: string, key?: string) {
     return fetch(`${url}/admin/resume`, {
       method: "POST",
-      headers: key ? { Authorization: `Bearer ${key}` } : {},
+      headers: key ? { ...JSON_HEADERS, Authorization: `Bearer ${key}` } : { ...JSON_HEADERS },
     });
   }
+
+  it("rejects a resume without the JSON content type", async () => {
+    const limits = new TransactionLimits({ dailyLimit: 5000n });
+    const { url, close } = await boot({ adminKey: ADMIN_KEY, limits });
+    try {
+      const res = await fetch(`${url}/admin/resume`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${ADMIN_KEY}` },
+      });
+      expect(res.status).toBe(415);
+    } finally {
+      await close();
+    }
+  });
 
   it("clears a tripped breaker and reports the new state", async () => {
     const limits = new TransactionLimits({ dailyLimit: 5000n });
