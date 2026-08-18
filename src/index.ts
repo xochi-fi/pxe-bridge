@@ -246,6 +246,20 @@ async function main(): Promise<void> {
       console.log(`[pxe-bridge] Restored ${limits.restore(spends)} spend(s) into the 24h window`);
     }
     console.log(`[pxe-bridge] Restored ${idempotency.restore(keys)} idempotency key(s)`);
+  } else if (process.env["NODE_ENV"] === "production") {
+    // Refused rather than warned, for the same reason production refuses an
+    // env-var secret key and a missing API key. Without a durable log the
+    // idempotency store is memory only, so a restart forgets every key and a
+    // caller's retry transfers a second time. Callers are told the header
+    // makes retries safe -- the Riddler client enables retries because of it --
+    // and that promise is only true when this is set.
+    console.error(
+      "[pxe-bridge] PXE_BRIDGE_AUDIT_LOG is required when NODE_ENV=production. " +
+        "Without it the 24h volume window and the idempotency keys are in-memory " +
+        "only, so a restart hands back the daily budget and a retried transfer " +
+        "is sent twice.",
+    );
+    process.exit(1);
   } else {
     console.warn(
       "[pxe-bridge] WARNING: PXE_BRIDGE_AUDIT_LOG not set -- the 24h volume window " +
