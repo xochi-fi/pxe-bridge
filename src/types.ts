@@ -146,4 +146,13 @@ export const RPC_ERRORS = {
   METHOD_NOT_FOUND: -32601,
   INVALID_PARAMS: -32602,
   INTERNAL_ERROR: -32603,
+
+  // JSON-RPC reserves -32000..-32099 for application errors. Both of these
+  // used to be INTERNAL_ERROR, which put five distinct conditions behind one
+  // code and left the two that matter indistinguishable: a caller reading the
+  // code alone could not tell "nothing happened yet, wait" from "this may
+  // have moved funds, reconcile". Only string-matching the message separated
+  // them, which is not an interface.
+  REQUEST_IN_FLIGHT: -32001,
+  SUBMITTED_UNKNOWN: -32002,
 } as const;

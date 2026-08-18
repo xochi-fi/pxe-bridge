@@ -125,7 +125,7 @@ async function handleCreateNote(
       console.warn(`[rpc] Idempotency key ${key} is already in flight`);
       return rpcError(
         id,
-        RPC_ERRORS.INTERNAL_ERROR,
+        RPC_ERRORS.REQUEST_IN_FLIGHT,
         "A request with this Idempotency-Key is still in flight",
       );
     }
@@ -261,7 +261,7 @@ async function handleCreateNote(
     const outcome: IdempotentOutcome = landed
       ? {
           kind: "error",
-          code: RPC_ERRORS.INTERNAL_ERROR,
+          code: RPC_ERRORS.SUBMITTED_UNKNOWN,
           message: SUBMITTED_UNKNOWN_MESSAGE,
           ...(cause.txHash !== undefined ? { data: { txHash: cause.txHash } } : {}),
         }

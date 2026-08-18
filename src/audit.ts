@@ -177,7 +177,7 @@ function outcomeFor(entry: Partial<AuditEntry>): IdempotentOutcome | null {
 function unknownOutcome(txHash?: string): IdempotentOutcome {
   return {
     kind: "error",
-    code: RPC_ERRORS.INTERNAL_ERROR,
+    code: RPC_ERRORS.SUBMITTED_UNKNOWN,
     message: SUBMITTED_UNKNOWN_MESSAGE,
     ...(txHash !== undefined ? { data: { txHash } } : {}),
   };
