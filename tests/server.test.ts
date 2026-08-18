@@ -316,6 +316,53 @@ describe("HTTP server with auth", () => {
   });
 });
 
+// The rate limit used to run AFTER auth, so a 401 returned before `allow()`
+// was ever called. That left API key guessing unthrottled: the documented
+// "60 requests/min" bounded only callers who already had the key. Its own
+// server so the limiter starts fresh and no other suite shares the budget.
+describe("rate limiting applies to failed auth", () => {
+  let rlServer: Server;
+  let rlBaseUrl: string;
+  const RL_API_KEY = "rate-limit-suite-key";
+  const RATE_LIMIT_MAX = 60;
+
+  beforeAll(async () => {
+    rlServer = createApp(new FakeAztecClient(), { apiKey: RL_API_KEY });
+    await new Promise<void>((resolve) => {
+      rlServer.listen(0, () => {
+        const addr = rlServer.address();
+        if (addr && typeof addr === "object") {
+          rlBaseUrl = `http://127.0.0.1:${addr.port}`;
+        }
+        resolve();
+      });
+    });
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => rlServer.close(() => resolve()));
+  });
+
+  it("spends the budget on wrong keys, so a correct key is throttled too", async () => {
+    const statuses: number[] = [];
+    for (let i = 0; i < RATE_LIMIT_MAX; i++) {
+      const res = await jsonPost(rlBaseUrl, rpcBody("aztec_getVersion"), {
+        Authorization: "Bearer wrong-key",
+      });
+      statuses.push(res.status);
+    }
+    // Every guess is refused on its merits, not yet on volume.
+    expect(new Set(statuses)).toEqual(new Set([401]));
+
+    // The budget is now spent. A caller holding the real key is refused for
+    // volume, which is the proof the failed attempts were counted at all.
+    const throttled = await jsonPost(rlBaseUrl, rpcBody("aztec_getVersion"), {
+      Authorization: `Bearer ${RL_API_KEY}`,
+    });
+    expect(throttled.status).toBe(429);
+  });
+});
+
 describe("Idempotency-Key header", () => {
   async function boot(): Promise<{
     url: string;

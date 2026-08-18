@@ -231,6 +231,18 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
 
       // JSON-RPC endpoint
       if (req.method === "POST" && (pathname === "/" || pathname === "/api/rpc")) {
+        // Rate limit (per-IP) FIRST, as /admin/resume already does. Auth used
+        // to run ahead of it, so a rejected request returned before
+        // `allow()` was ever called and key guessing was unthrottled: the
+        // limit applied only to callers who already held the key. That also
+        // left the constant-time compare below guarding against a timing
+        // side channel while unlimited online guessing ran past it.
+        const clientIp = req.socket.remoteAddress ?? "unknown";
+        if (!rateLimiter.allow(clientIp)) {
+          sendJson(res, 429, { error: "Too many requests" });
+          return;
+        }
+
         // Auth check
         if (opts.apiKey && !checkAuth(req, opts.apiKey)) {
           sendJson(res, 401, { error: "Unauthorized" });
@@ -243,13 +255,6 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           sendJson(res, 415, {
             error: "Content-Type must be application/json",
           });
-          return;
-        }
-
-        // Rate limit (per-IP)
-        const clientIp = req.socket.remoteAddress ?? "unknown";
-        if (!rateLimiter.allow(clientIp)) {
-          sendJson(res, 429, { error: "Too many requests" });
           return;
         }
 
