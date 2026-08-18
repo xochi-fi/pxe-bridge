@@ -123,7 +123,11 @@ jobs:
       - run: npm run test:e2e:up
 
   docker:
-    needs: [check, contract]
+    # e2e too, not just [check, contract]. With the same dependencies as the
+    # e2e job the two ran in parallel, so a v* tag published to ghcr regardless
+    # of whether the on-chain behaviour passed. Contract class ID drift was
+    # gated and nothing the e2e job proves was.
+    needs: [check, contract, e2e]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
