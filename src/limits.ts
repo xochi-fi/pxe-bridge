@@ -92,7 +92,10 @@ export class TransactionLimits {
       const windowTotal = this.rollingTotal();
 
       // Volume actually consumed the window. This is the drain signal the
-      // breaker exists for, so it stops everything until an operator resumes.
+      // breaker exists for, so it stops everything until an operator resumes
+      // or the window elapses. There are three ways out, not one: the operator
+      // endpoint, the auto-resume above, and a restart, and none of them hands
+      // budget back -- the window is rebuilt from the audit log either way.
       if (windowTotal >= this.config.dailyLimit) {
         this.paused = true;
         this.pausedAt = Date.now();
@@ -141,6 +144,28 @@ export class TransactionLimits {
     this.paused = false;
     this.pausedAt = 0;
     console.log("[pxe-bridge] Bridge resumed by operator");
+  }
+
+  /**
+   * What the breaker will see on the next check.
+   *
+   * `resume()` clears the latch and not the window, which is the correct
+   * semantics: volume genuinely consumed the budget, and resuming must not
+   * hand it back. The consequence is that a resume issued while the window is
+   * still full is undone by the very next request. The endpoint used to answer
+   * `paused: false` and stop there, which reads as "service restored" during
+   * exactly the incident where it is not, so an operator could believe they
+   * had recovered the bridge and walk away. The deciding number is reported
+   * now instead of being left for them to infer.
+   */
+  windowStatus(): { total: bigint; dailyLimit: bigint | undefined; willTripAgain: boolean } {
+    const total = this.rollingTotal();
+    const dailyLimit = this.config.dailyLimit;
+    return {
+      total,
+      dailyLimit,
+      willTripAgain: dailyLimit !== undefined && total >= dailyLimit,
+    };
   }
 
   /**

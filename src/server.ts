@@ -234,7 +234,21 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           return;
         }
         opts.limits.resume();
-        sendJson(res, 200, { status: "resumed", paused: opts.limits.isPaused() });
+        // `paused: false` on its own was a true statement that read as a false
+        // one. Clearing the latch does not clear the window, so a resume
+        // issued while volume still fills the budget is undone by the next
+        // request, and the operator who just got a 200 has no way to know that
+        // from the response. The number that decides it goes back with it.
+        const window = opts.limits.windowStatus();
+        sendJson(res, 200, {
+          status: "resumed",
+          paused: opts.limits.isPaused(),
+          windowTotal: window.total.toString(),
+          ...(window.dailyLimit !== undefined
+            ? { dailyLimit: window.dailyLimit.toString() }
+            : {}),
+          willTripAgain: window.willTripAgain,
+        });
         return;
       }
 

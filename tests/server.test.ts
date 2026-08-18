@@ -475,6 +475,26 @@ describe("POST /admin/resume", () => {
     });
   }
 
+  // The case where a resume actually restores service: the volume that tripped
+  // the breaker has aged out, so nothing re-trips it.
+  it("reports a drained window as recovered", async () => {
+    const limits = new TransactionLimits({ dailyLimit: 5000n });
+    const { url, close } = await boot({ adminKey: ADMIN_KEY, limits });
+    try {
+      const res = await resume(url, ADMIN_KEY);
+      expect(await res.json()).toEqual({
+        status: "resumed",
+        paused: false,
+        windowTotal: "0",
+        dailyLimit: "5000",
+        willTripAgain: false,
+      });
+      expect(limits.check(1n).allowed).toBe(true);
+    } finally {
+      await close();
+    }
+  });
+
   it("rejects a resume without the JSON content type", async () => {
     const limits = new TransactionLimits({ dailyLimit: 5000n });
     const { url, close } = await boot({ adminKey: ADMIN_KEY, limits });
@@ -499,8 +519,22 @@ describe("POST /admin/resume", () => {
     try {
       const res = await resume(url, ADMIN_KEY);
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ status: "resumed", paused: false });
+      // The latch is cleared and the window is not, so the response says both.
+      // `paused: false` alone was true and read as "service restored", which
+      // is the one thing it does not mean while the budget is still spent.
+      expect(await res.json()).toEqual({
+        status: "resumed",
+        paused: false,
+        windowTotal: "5000",
+        dailyLimit: "5000",
+        willTripAgain: true,
+      });
       expect(limits.isPaused()).toBe(false);
+
+      // What willTripAgain is warning about. Nothing tested this before, so
+      // the gap between the 200 and the recovery was never visible.
+      expect(limits.check(1n).allowed).toBe(false);
+      expect(limits.isPaused()).toBe(true);
     } finally {
       await close();
     }
