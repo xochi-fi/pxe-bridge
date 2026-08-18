@@ -341,6 +341,32 @@ pub contract SpendingLimitAccount {
             .enqueue(self.context);
 
         // --- Cancellation nullifier ---
+        // NOT SUPPORTED, and deliberately left as-is. NM-1019 [Low] observes
+        // that this account emits a cancellation nullifier while offering no
+        // way to cancel: the only path here is a real transfer, so replacing a
+        // pending tx costs an allowlisted recipient, an unspent per-tx cap and
+        // room in the daily window, and there are reachable states with none of
+        // those. The observation is correct.
+        //
+        // Not fixed this pass because the branch is unreachable. `cancellable`
+        // comes from `BaseWallet.cancellableTransactions`, which is `protected`,
+        // initialised `false`, and has no setter anywhere in the SDK; the bridge
+        // does not subclass the wallet. Every transaction it sends passes
+        // `false`, so no nullifier is ever pushed and no cancellation is ever
+        // advertised.
+        //
+        // Two ways out when it is worth spending a class ID change on. Delete
+        // the branch, which keeps the entrypoint single-shape and fails safe if
+        // a future SDK flips that default (no cancellation offered, rather than
+        // one offered and not deliverable). Or take NM-1019's recommendation and
+        // branch on zero non-empty calls, which means skipping
+        // assert_declared_matches_transfer, the zero-recipient assert, the
+        // allowlist assert and the check_spending_public enqueue together. That
+        // path can move no value, but it is a second shape through the
+        // entrypoint and the fee branch still runs on it, so a compromised key
+        // could burn fee juice on empty cancellations.
+        //
+        // The ABI parameter stays either way: the SDK encodes it positionally.
         if cancellable {
             let tx_nullifier = poseidon2_hash_with_separator(
                 [app_payload.tx_nonce],

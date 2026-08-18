@@ -185,6 +185,31 @@ counters and a different contract. The recipient's identity and the note
 contents remain private; the amount does not. Callers who need the amount
 private cannot use the spending-limit account.
 
+## Transaction cancellation is not supported
+
+The entrypoint takes a `cancellable` flag and, when set, pushes a nullifier
+derived from the payload's `tx_nonce`, which is the mechanism a wallet would use
+to replace a pending transaction. This account offers no way to use it, and
+NM-1019 [Low] records that: the only path through the entrypoint is a real
+transfer, so cancelling means sending another one, which costs an allowlisted
+recipient, unspent per-tx cap and room in the daily window. There are reachable
+states with none of those, and they are exactly the states where cancelling
+matters.
+
+Accepted rather than fixed, because the branch cannot be entered. `cancellable`
+arrives from `BaseWallet.cancellableTransactions`, which is `protected`,
+initialised `false`, and has no setter anywhere in the SDK. The bridge does not
+subclass the wallet, so every transaction it sends passes `false` and no
+cancellation nullifier is ever emitted. Operationally the bridge does not want
+the feature either: it submits and reconciles through the idempotency store
+rather than leaving a transaction pending for someone to withdraw.
+
+What this costs: if a later SDK makes cancellation the default, the account would
+begin advertising a cancellation it cannot honour. That is the finding as
+written, and it is the trigger for revisiting this. Both fixes move the contract
+class ID and therefore the account address, so either lands before a deployment
+is fixed, not after.
+
 ## Build supply chain
 
 The `contract` CI job installs the Aztec toolchain by piping
