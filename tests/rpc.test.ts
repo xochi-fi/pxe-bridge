@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { handleRpcRequest, type RpcContext } from "../src/rpc.js";
 import { TransactionLimits } from "../src/limits.js";
 import { IdempotencyStore } from "../src/idempotency.js";
-import { PostSubmissionError } from "../src/types.js";
+import { PostSubmissionError, SUBMITTED_UNKNOWN_MESSAGE } from "../src/types.js";
 import type { AuditEntry, AuditLogger } from "../src/audit.js";
 import type { CreateNoteParams, CreateNoteResult, IAztecClient } from "../src/types.js";
 
@@ -488,6 +488,97 @@ describe("handleRpcRequest", () => {
 
       expect(logged.at(-1)?.noteHashes).toEqual(client.createNoteResult.noteHashes);
       expect(logged.at(-1)?.nullifiers).toEqual(client.createNoteResult.nullifiers);
+    });
+
+    // Every audit double above resolves, which is why none of the following
+    // was ever exercised. A real logger writes to a disk that fills.
+    describe("when the audit log cannot be written", () => {
+      /** Rejects on the Nth call, 1-indexed. 0 never rejects. */
+      const failingAudit = (failOn: number, logged: AuditEntry[]) => {
+        let calls = 0;
+        return {
+          log: async (e: AuditEntry) => {
+            calls += 1;
+            if (calls === failOn) throw new Error("ENOSPC: no space left on device");
+            logged.push(e);
+          },
+        } as AuditLogger;
+      };
+
+      // Fail-closed. The intent record is what makes a crash mid-send
+      // recoverable, so without it the send must not happen at all.
+      it("refuses to send when the intent record cannot be written", async () => {
+        const logged: AuditEntry[] = [];
+        const audit = failingAudit(1, logged);
+        const limits = new TransactionLimits({ dailyLimit: 5000n });
+
+        const res = await send({ idempotency, idempotencyKey: "k1", audit, limits });
+
+        expect(client.createNoteCalls).toBe(0);
+        expect("error" in res && res.error.message).toBe("Internal error");
+        expect(logged).toEqual([]);
+      });
+
+      // The reservation and the key are both claimed before the intent write.
+      // Leaving either behind punishes a caller whose transfer never happened:
+      // the amount would hold budget for 24h and the key would report itself
+      // still in flight forever.
+      it("releases the reservation and frees the key when the intent write fails", async () => {
+        // 5000 admits one 3000 transfer and not two, so a leaked reservation
+        // surfaces as the retry being refused for budget rather than running.
+        const limits = new TransactionLimits({ dailyLimit: 5000n });
+        const logged: AuditEntry[] = [];
+
+        await send({ idempotency, idempotencyKey: "k1", audit: failingAudit(1, logged), limits });
+
+        // Same key, working logger. Both claims had to be released for this to
+        // reach the client: the key, or it reports itself in flight; the
+        // reservation, or the limits refuse it.
+        const retry = await send({
+          idempotency,
+          idempotencyKey: "k1",
+          audit: failingAudit(0, logged),
+          limits,
+        });
+
+        expect("result" in retry).toBe(true);
+        expect(client.createNoteCalls).toBe(1);
+      });
+
+      // The damaging one. The write used to sit inside the same try as the
+      // send, so failing it looked identical to the transfer failing: the key
+      // was abandoned and the next retry sent a second transfer.
+      it("still reports success when the outcome write fails after a landed transfer", async () => {
+        const logged: AuditEntry[] = [];
+        const audit = failingAudit(2, logged);
+
+        const res = await send({ idempotency, idempotencyKey: "k1", audit });
+
+        expect("result" in res).toBe(true);
+        expect(logged.map((e) => e.status)).toEqual(["submitting"]);
+      });
+
+      it("does not re-transfer when a retry follows a failed outcome write", async () => {
+        const logged: AuditEntry[] = [];
+
+        await send({ idempotency, idempotencyKey: "k1", audit: failingAudit(2, logged) });
+        const retry = await send({ idempotency, idempotencyKey: "k1", audit: failingAudit(0, logged) });
+
+        expect(client.createNoteCalls).toBe(1);
+        expect("result" in retry).toBe(true);
+      });
+
+      // A failed write on the error path must not cost the caller the one
+      // response that tells them to reconcile rather than retry.
+      it("still reports the reconcile message when the outcome write fails", async () => {
+        client.createNoteError = new PostSubmissionError("Incomplete receipt", "0xabc");
+        const logged: AuditEntry[] = [];
+
+        const res = await send({ idempotency, idempotencyKey: "k1", audit: failingAudit(2, logged) });
+
+        expect("error" in res && res.error.message).toBe(SUBMITTED_UNKNOWN_MESSAGE);
+        expect("error" in res && res.error.data).toEqual({ txHash: "0xabc" });
+      });
     });
   });
 });

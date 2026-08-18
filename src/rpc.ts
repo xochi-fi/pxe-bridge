@@ -140,6 +140,33 @@ async function handleCreateNote(
     if (ctx.idempotency && key !== undefined) ctx.idempotency.settle(key, outcome);
   };
 
+  /**
+   * Records an outcome without letting the write decide the outcome.
+   *
+   * Every call below happens AFTER the decision it describes: the reservation
+   * is committed or released, the key is settled or abandoned, the response is
+   * chosen. A rejected write (ENOSPC, EACCES, EMFILE) used to unwind those
+   * decisions instead of reporting beside them. The damaging case was the
+   * success path: the write sat inside the same `try` as the send, so a failed
+   * write landed in the catch with `landed` false, `abandon()` freed the key of
+   * a transfer that had moved funds, and the caller got "Internal error" with
+   * no txHash. The next retry sent a second transfer.
+   *
+   * Losing the line is survivable in a way that losing the decision is not.
+   * The `submitting` intent is already on disk, so a reader that finds no
+   * successor replays it as `unknown` -- "may have moved funds", which is the
+   * safe direction. Logged loudly rather than swallowed: this is the durable
+   * record failing, and an operator has to know the log is now incomplete.
+   */
+  const logOutcome = async (entry: AuditEntry): Promise<void> => {
+    if (!ctx.audit) return;
+    try {
+      await ctx.audit.log(entry);
+    } catch (cause) {
+      console.error("[rpc] AUDIT WRITE FAILED -- outcome not recorded:", cause);
+    }
+  };
+
   // Enforce transaction limits (ceiling, daily volume, circuit breaker).
   // reserve() counts the amount against the rolling window immediately, so
   // concurrent in-flight requests cannot each pass on a stale total and
@@ -151,13 +178,11 @@ async function handleCreateNote(
     if (!reservation.allowed) {
       console.error("[rpc] Limit rejected:", reservation.reason);
       abandon();
-      if (ctx.audit) {
-        await ctx.audit.log({
-          ...auditBase(noteParams, ctx),
-          status: "rejected",
-          error: reservation.reason,
-        });
-      }
+      await logOutcome({
+        ...auditBase(noteParams, ctx),
+        status: "rejected",
+        error: reservation.reason,
+      });
       return rpcError(id, RPC_ERRORS.INVALID_PARAMS, reservation.reason);
     }
 
@@ -176,8 +201,23 @@ async function handleCreateNote(
   // transfer that may have landed, and a restart would hand the key back as
   // fresh. Replaying a `submitting` entry with no successor as "unknown" is
   // what closes that window, and only this write makes it visible.
+  //
+  // Fail-closed, and the only audit write that still decides control flow. If
+  // the intent cannot be recorded, sending anyway reopens exactly the window
+  // this write exists to close, so we do not send. Unwinding has to undo BOTH
+  // claims: the write used to sit outside the try below, so a throw escaped
+  // the function with the reservation neither committed nor released -- it
+  // counted against the window for 24h -- and with the key held, so every
+  // retry was told a transfer that never happened was still in flight.
   if (ctx.audit && key !== undefined) {
-    await ctx.audit.log({ ...auditBase(noteParams, ctx), status: "submitting" });
+    try {
+      await ctx.audit.log({ ...auditBase(noteParams, ctx), status: "submitting" });
+    } catch (cause) {
+      console.error("[rpc] Intent write failed -- refusing to send:", cause);
+      if (ctx.limits && reservationId !== undefined) ctx.limits.release(reservationId);
+      abandon();
+      return rpcError(id, RPC_ERRORS.INTERNAL_ERROR, "Internal error");
+    }
   }
 
   try {
@@ -190,15 +230,13 @@ async function handleCreateNote(
 
     settle({ kind: "result", result });
 
-    if (ctx.audit) {
-      await ctx.audit.log({
-        ...auditBase(noteParams, ctx),
-        status: "success",
-        txHash: result.l2TxHash,
-        noteHashes: result.noteHashes,
-        nullifiers: result.nullifiers,
-      });
-    }
+    await logOutcome({
+      ...auditBase(noteParams, ctx),
+      status: "success",
+      txHash: result.l2TxHash,
+      noteHashes: result.noteHashes,
+      nullifiers: result.nullifiers,
+    });
 
     return success(id, result);
   } catch (cause) {
@@ -235,16 +273,14 @@ async function handleCreateNote(
       abandon();
     }
 
-    if (ctx.audit) {
-      await ctx.audit.log({
-        ...auditBase(noteParams, ctx),
-        // "unknown" rather than "error": whether this moved funds is exactly
-        // what is not known, and the replay reader has to tell the two apart.
-        status: landed ? "unknown" : "error",
-        ...(landed && cause.txHash ? { txHash: cause.txHash } : {}),
-        error: cause instanceof Error ? cause.message : "Unknown error",
-      });
-    }
+    await logOutcome({
+      ...auditBase(noteParams, ctx),
+      // "unknown" rather than "error": whether this moved funds is exactly
+      // what is not known, and the replay reader has to tell the two apart.
+      status: landed ? "unknown" : "error",
+      ...(landed && cause.txHash ? { txHash: cause.txHash } : {}),
+      error: cause instanceof Error ? cause.message : "Unknown error",
+    });
 
     return replay(id, outcome);
   }
