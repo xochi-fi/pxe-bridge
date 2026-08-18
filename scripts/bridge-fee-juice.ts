@@ -14,7 +14,8 @@
  *   PXE_BRIDGE_SECRET_KEY  -- same key the sidecar uses (derives the Aztec account address)
  *   L1_PRIVATE_KEY         -- Ethereum private key with Fee Juice ERC20 balance
  *   AZTEC_NODE_URL         -- Aztec node (default: http://localhost:8080)
- *   L1_RPC_URL             -- Ethereum RPC (default: https://eth.llamarpc.com)
+ *   L1_RPC_URL             -- Ethereum RPC (default: http://localhost:8545)
+ *   L1_CHAIN_ID            -- L1 chain id (default: Anvil's, per the SDK)
  *   BRIDGE_AMOUNT          -- Fee Juice amount in wei (default: 1000000000000000000 = 1e18)
  */
 
@@ -28,7 +29,16 @@ async function main() {
   delete process.env["L1_PRIVATE_KEY"];
   const AZTEC_NODE_URL =
     process.env["AZTEC_NODE_URL"] ?? "http://localhost:8080";
-  const L1_RPC_URL = process.env["L1_RPC_URL"] ?? "https://eth.llamarpc.com";
+  // Localhost, matching AZTEC_NODE_URL above and top-up-fee-juice.ts. This
+  // used to default to a public mainnet RPC while the Aztec node defaulted to
+  // a sandbox, so running the script with no L1 settings signed against
+  // chainId 1 with a key meant for Anvil.
+  const L1_RPC_URL = process.env["L1_RPC_URL"] ?? "http://localhost:8545";
+  const L1_CHAIN_ID = process.env["L1_CHAIN_ID"];
+  if (L1_CHAIN_ID !== undefined && !/^\d+$/.test(L1_CHAIN_ID)) {
+    console.error("L1_CHAIN_ID must be a decimal integer");
+    process.exit(1);
+  }
   const BRIDGE_AMOUNT = BigInt(
     process.env["BRIDGE_AMOUNT"] ?? "1000000000000000000",
   );
@@ -85,12 +95,21 @@ async function main() {
 
   // Create L1 client
   const { createExtendedL1Client } = await import("@aztec/ethereum/client");
-  const { mainnet } = await import("viem/chains");
+  const { createEthereumChain } = await import("@aztec/ethereum/chain");
+
+  // Same resolution as src/fee-juice.ts. viem's `mainnet` was hardcoded here,
+  // so the chain was mainnet whatever L1_RPC_URL pointed at. Undefined falls
+  // through to the SDK's Anvil default, so the sandbox needs no chain id and a
+  // real L1 cannot be reached without naming one.
+  const chain =
+    L1_CHAIN_ID === undefined
+      ? undefined
+      : createEthereumChain([L1_RPC_URL], Number(L1_CHAIN_ID)).chainInfo;
 
   const l1Client = createExtendedL1Client(
     [L1_RPC_URL],
     L1_PRIVATE_KEY as `0x${string}`,
-    mainnet,
+    chain,
   );
   console.log(`L1 wallet: ${l1Client.account.address}`);
 
