@@ -15,11 +15,55 @@ import {
 const MAX_TOKEN_CACHE_SIZE = 100;
 export const TX_TIMEOUT_MS = 120_000; // 2 minutes
 
-// Multiplier applied to the worst predicted base fee when deploying the
-// account. Deployment happens once at startup and the max is a ceiling rather
-// than a charge, so this trades an unused allowance for not failing to boot
-// during a congestion spike.
-const DEPLOY_FEE_HEADROOM = 10n;
+// Multiplier applied to the worst predicted base fee. Named for the deploy
+// because that is where it was first needed, but it is not deploy-specific:
+// the max is a ceiling rather than a charge, so this trades an unused
+// allowance for not failing during a congestion spike, and that trade is the
+// same for any send.
+const FEE_HEADROOM = 10n;
+
+/**
+ * `maxFeesPerGas` with headroom over the worst fee predicted for the inclusion
+ * window.
+ *
+ * The SDK's own estimate is a point prediction and goes stale. A single
+ * unrelated account deployment landing between the estimate and validation was
+ * enough to fail with "maxFeesPerGas.feePerL2Gas must be greater than or equal
+ * to gasFees.feePerL2Gas" at 9748636365 against a base fee of 95484800000,
+ * roughly 10x.
+ *
+ * `getPredictedMinFees` returns the current slot's fees followed by one entry
+ * per predicted slot, so taking the maximum covers the whole window rather than
+ * the instant of the estimate. The multiplier is on top of that.
+ *
+ * Overshooting is close to free: the max is a ceiling, and what is charged is
+ * the base fee at inclusion. Undershooting fails the send, so the asymmetry
+ * justifies a wide margin.
+ *
+ * Exported because the e2e suite needs the same treatment and had none. Its
+ * sends took the SDK default and flaked on exactly the failure above, right
+ * after a test deployed an account of its own. One implementation rather than
+ * two that drift, the same reason fee-juice.ts was promoted out of the helpers.
+ */
+export async function headroomGasSettings(nodeUrl: string): Promise<{ maxFeesPerGas: GasFees }> {
+  const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
+  const { GasFees, ManaUsageEstimate } = await import("@aztec/stdlib/gas");
+
+  const node = createAztecNodeClient(nodeUrl);
+  const predicted = await node.getPredictedMinFees(ManaUsageEstimate.Limit);
+
+  const worst = predicted.reduce(
+    (acc, fees) => ({
+      da: fees.feePerDaGas > acc.da ? fees.feePerDaGas : acc.da,
+      l2: fees.feePerL2Gas > acc.l2 ? fees.feePerL2Gas : acc.l2,
+    }),
+    { da: 0n, l2: 0n },
+  );
+
+  return {
+    maxFeesPerGas: new GasFees(worst.da * FEE_HEADROOM, worst.l2 * FEE_HEADROOM),
+  };
+}
 
 /**
  * Why a fee juice claim and the spending-limit account cannot be combined.
@@ -628,45 +672,8 @@ export class AztecClient implements IAztecClient {
     // nullifier is the signal that survives either way.
   }
 
-  /**
-   * `maxFeesPerGas` for the account deployment, with headroom over the worst
-   * fee predicted for the inclusion window.
-   *
-   * The SDK's own estimate is a point prediction and goes stale. A single
-   * unrelated account deployment landing between the estimate and validation
-   * was enough to fail this with "maxFeesPerGas.feePerL2Gas must be greater
-   * than or equal to gasFees.feePerL2Gas" at 9748636365 against a base fee of
-   * 95484800000, roughly 10x.
-   *
-   * `getPredictedMinFees` returns the current slot's fees followed by one entry
-   * per predicted slot, so taking the maximum covers the whole window rather
-   * than the instant of the estimate. The multiplier is on top of that.
-   *
-   * Overshooting is close to free: the max is a ceiling, and what is actually
-   * charged is the base fee at inclusion. Undershooting fails startup, so the
-   * asymmetry justifies a wide margin.
-   */
   private async deployGasSettings(): Promise<{ maxFeesPerGas: GasFees }> {
-    const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
-    const { GasFees, ManaUsageEstimate } = await import("@aztec/stdlib/gas");
-
-    const node = createAztecNodeClient(this.nodeUrl);
-    const predicted = await node.getPredictedMinFees(ManaUsageEstimate.Limit);
-
-    const worst = predicted.reduce(
-      (acc, fees) => ({
-        da: fees.feePerDaGas > acc.da ? fees.feePerDaGas : acc.da,
-        l2: fees.feePerL2Gas > acc.l2 ? fees.feePerL2Gas : acc.l2,
-      }),
-      { da: 0n, l2: 0n },
-    );
-
-    return {
-      maxFeesPerGas: new GasFees(
-        worst.da * DEPLOY_FEE_HEADROOM,
-        worst.l2 * DEPLOY_FEE_HEADROOM,
-      ),
-    };
+    return headroomGasSettings(this.nodeUrl);
   }
 
   private async buildFeePaymentMethod(

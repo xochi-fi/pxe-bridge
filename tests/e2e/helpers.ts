@@ -1,6 +1,7 @@
 import type { FeeJuiceClaim } from "../../src/types.js";
 import { FeeJuiceClaimSchema } from "../../src/types.js";
 import { topUpFeeJuice, type ClaimingWallet } from "../../src/fee-juice.js";
+import { headroomGasSettings } from "../../src/aztec-client.js";
 
 export interface E2EConfig {
   nodeUrl: string;
@@ -12,6 +13,11 @@ export interface E2EConfig {
 // Test-only key well under BN254 Fr modulus -- never use with real funds
 const DEFAULT_SECRET_KEY = "0x000000000000000000000000000000000000000000000000000000000000beef";
 
+/** One resolution for the node URL, shared by getTestConfig and the fee helper. */
+export function resolveNodeUrl(): string {
+  return process.env["AZTEC_NODE_URL"] ?? "http://localhost:8080";
+}
+
 export function getTestConfig(): E2EConfig {
   let feeJuiceClaim: FeeJuiceClaim | undefined;
   const raw = process.env["FEE_JUICE_CLAIM"];
@@ -21,7 +27,7 @@ export function getTestConfig(): E2EConfig {
   }
 
   return {
-    nodeUrl: process.env["AZTEC_NODE_URL"] ?? "http://localhost:8080",
+    nodeUrl: resolveNodeUrl(),
     secretKey: process.env["PXE_BRIDGE_SECRET_KEY"] ?? DEFAULT_SECRET_KEY,
     bridgePort: 0, // let OS pick
     // Spread rather than assign: exactOptionalPropertyTypes distinguishes an
@@ -45,6 +51,27 @@ export async function waitForNode(url: string, timeoutMs = 120_000): Promise<voi
   }
 
   throw new Error(`Aztec node at ${url} did not become ready within ${timeoutMs}ms`);
+}
+
+/**
+ * The `fee` option every e2e send should use: sponsored payment plus the same
+ * predicted-fee headroom the deploy path applies.
+ *
+ * Sends here took the SDK's default gas settings, which are a point prediction.
+ * `rejects apply_limits from a non-admin` deploys an account of its own and
+ * then sends against an estimate made before that deployment moved the base
+ * fee, so it failed validation with "maxFeesPerGas.feePerL2Gas must be greater
+ * than or equal to gasFees.feePerL2Gas". Intermittent, and the last open flake
+ * on the branch. The deploy path already solved this; the sends never got it.
+ */
+export async function feeWithHeadroom(wallet: unknown): Promise<{
+  paymentMethod: import("@aztec/aztec.js/fee").FeePaymentMethod;
+  gasSettings: Awaited<ReturnType<typeof headroomGasSettings>>;
+}> {
+  return {
+    paymentMethod: await sponsoredFee(wallet),
+    gasSettings: await headroomGasSettings(resolveNodeUrl()),
+  };
 }
 
 /**
@@ -138,7 +165,7 @@ export async function mintOne(
 
   await contract.methods["mint_to_public"]!(minterAddress, 1n).send({
     from: minterAddress,
-    fee: { paymentMethod: await sponsoredFee(wallet) },
+    fee: await feeWithHeadroom(wallet),
   });
 }
 
@@ -171,7 +198,7 @@ export async function deployTestToken(wallet: unknown, admin: string): Promise<s
     }
   )
     .deploy(wallet, adminAddress, "TestToken", "TST", 18)
-    .send({ from: adminAddress, fee: { paymentMethod: await sponsoredFee(wallet) } });
+    .send({ from: adminAddress, fee: await feeWithHeadroom(wallet) });
 
   return contract.address.toString();
 }

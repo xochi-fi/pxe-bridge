@@ -4,7 +4,7 @@ import type { SpendingLimitConfig } from "../../src/spending-limit-account.js";
 import {
   getTestConfig,
   deployTestToken,
-  sponsoredFee,
+  feeWithHeadroom,
   fundFeeJuice,
   mintOne,
 } from "./helpers.js";
@@ -486,7 +486,7 @@ async function callAccount(
   try {
     const { receipt } = await c.methods[method]!(...args).send({
       from: AztecAddress.fromStringUnsafe(caller),
-      fee: { paymentMethod: await sponsoredFee(wallet) },
+      fee: await feeWithHeadroom(wallet),
       // Without this a revert throws, which would discard the reason that
       // distinguishes the caller check from the timelock.
       wait: { dontThrowOnRevert: true, timeout: 180 },
@@ -656,7 +656,7 @@ async function removeRecipient(
   ).at(AztecAddress.fromStringUnsafe(account), artifact, wallet);
   await c.methods["remove_recipient"]!(AztecAddress.fromStringUnsafe(recipient)).send({
     from: AztecAddress.fromStringUnsafe(admin),
-    fee: { paymentMethod: await sponsoredFee(wallet) },
+    fee: await feeWithHeadroom(wallet),
   });
 }
 
@@ -688,7 +688,7 @@ async function mintTo(
     amount,
   ).send({
     from: AztecAddress.fromStringUnsafe(minter),
-    fee: { paymentMethod: await sponsoredFee(wallet) },
+    fee: await feeWithHeadroom(wallet),
   });
 }
 
