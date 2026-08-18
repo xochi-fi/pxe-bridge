@@ -19,7 +19,22 @@ const HOST = process.env["PXE_BRIDGE_HOST"] ?? "127.0.0.1";
 const AZTEC_NODE_URL = process.env["AZTEC_NODE_URL"] ?? "http://localhost:8080";
 const API_KEY = process.env["PXE_BRIDGE_API_KEY"];
 
+// Production refuses to boot unauthenticated, the same way secrets.ts refuses
+// the env-var secret key. The asymmetry it replaces was hard to defend: one
+// NODE_ENV gate protected the key material and nothing protected the auth that
+// guards spending it, while the image sets NODE_ENV=production, so the shipped
+// default was a money-moving endpoint whose only protection was an operator
+// reading a warning. The 127.0.0.1 default is not that protection either --
+// anything serving traffic sets PXE_BRIDGE_HOST, and inside a container the
+// default is not reachable at all.
 if (!API_KEY) {
+  if (process.env["NODE_ENV"] === "production") {
+    console.error(
+      "[pxe-bridge] PXE_BRIDGE_API_KEY is required when NODE_ENV=production. " +
+        "Refusing to start an unauthenticated RPC endpoint.",
+    );
+    process.exit(1);
+  }
   console.warn(
     "[pxe-bridge] WARNING: PXE_BRIDGE_API_KEY not set -- RPC endpoint is unauthenticated",
   );
