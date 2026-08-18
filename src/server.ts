@@ -33,6 +33,18 @@ export interface ServerOptions {
   idempotency?: IdempotencyStore | undefined;
 }
 
+// Failed auth gets its own, much smaller budget, separate from the one real
+// traffic spends. One shared bucket forces a choice between two bad outcomes:
+// authenticate first and key guessing is unthrottled, or rate limit first and
+// an unauthenticated caller starves every legitimate one.
+//
+// The second is worse than it looks. Nothing here reads X-Forwarded-For, so
+// behind the reverse proxy this is documented to run behind, `remoteAddress`
+// is the PROXY for every request and all callers share a single bucket. One
+// attacker sending 60 unauthenticated requests a minute would stop the bridge
+// for everybody.
+const AUTH_FAILURE_MAX = 10;
+
 const RATE_LIMIT_CLEANUP_INTERVAL_MS = 300_000; // 5 min
 
 export class RateLimiter {
@@ -164,6 +176,29 @@ function checkAuth(req: IncomingMessage, apiKey: string): boolean {
 
 export function createApp(client: IAztecClient, opts: ServerOptions = {}): Server {
   const rateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+  const authFailureLimiter = new RateLimiter(AUTH_FAILURE_MAX, RATE_LIMIT_WINDOW_MS);
+
+  /**
+   * Rejects an unauthenticated caller, charging the attempt to its own bucket.
+   *
+   * Returns true when the request was rejected and a response already sent.
+   * A caller that never proves who it is cannot spend the budget that real
+   * traffic depends on, and cannot guess keys without limit either.
+   */
+  const rejectedUnauthenticated = (
+    req: IncomingMessage,
+    res: ServerResponse,
+    key: string | undefined,
+    ip: string,
+  ): boolean => {
+    if (!key || checkAuth(req, key)) return false;
+    if (!authFailureLimiter.allow(ip)) {
+      sendJson(res, 429, { error: "Too many requests" });
+      return true;
+    }
+    sendJson(res, 401, { error: "Unauthorized" });
+    return true;
+  };
 
   const server = createServer(async (req, res) => {
     // Nothing otherwise bounded how long a connection could stay open waiting
@@ -206,18 +241,19 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
       // and handed back the full daily budget.
       if (req.method === "POST" && pathname === "/admin/resume") {
         const adminIp = req.socket.remoteAddress ?? "unknown";
-        if (!rateLimiter.allow(adminIp)) {
-          sendJson(res, 429, { error: "Too many requests" });
-          return;
-        }
         // 404 rather than 403 when no admin key is configured: an endpoint
         // that cannot be used should not confirm that it exists.
         if (!opts.adminKey) {
           sendJson(res, 404, { error: "Not found" });
           return;
         }
-        if (!checkAuth(req, opts.adminKey)) {
-          sendJson(res, 401, { error: "Unauthorized" });
+        // Charged to the auth-failure bucket for the same reason as the RPC
+        // branch, and it matters more here: this endpoint shares one limiter
+        // with the RPC path, so hammering it used to spend the budget every
+        // transfer depends on.
+        if (rejectedUnauthenticated(req, res, opts.adminKey, adminIp)) return;
+        if (!rateLimiter.allow(adminIp)) {
+          sendJson(res, 429, { error: "Too many requests" });
           return;
         }
         // Same Content-Type requirement as the RPC branch. The docs state it
@@ -254,23 +290,13 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
 
       // JSON-RPC endpoint
       if (req.method === "POST" && (pathname === "/" || pathname === "/api/rpc")) {
-        // Rate limit (per-IP) FIRST, as /admin/resume already does. Auth used
-        // to run ahead of it, so a rejected request returned before
-        // `allow()` was ever called and key guessing was unthrottled: the
-        // limit applied only to callers who already held the key. That also
-        // left the constant-time compare below guarding against a timing
-        // side channel while unlimited online guessing ran past it.
         const clientIp = req.socket.remoteAddress ?? "unknown";
-        if (!rateLimiter.allow(clientIp)) {
-          sendJson(res, 429, { error: "Too many requests" });
-          return;
-        }
 
-        // Auth check
-        if (opts.apiKey && !checkAuth(req, opts.apiKey)) {
-          sendJson(res, 401, { error: "Unauthorized" });
-          return;
-        }
+        // A failed key is charged to the auth-failure bucket, so guessing is
+        // throttled without letting an unauthenticated caller spend the budget
+        // real traffic needs. Auth used to run with no limiter at all, which
+        // left unlimited online guessing running past a constant-time compare.
+        if (rejectedUnauthenticated(req, res, opts.apiKey, clientIp)) return;
 
         // Content-Type check (CSRF defense: forces browser preflight which fails without CORS)
         const contentType = req.headers["content-type"];
@@ -278,6 +304,13 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           sendJson(res, 415, {
             error: "Content-Type must be application/json",
           });
+          return;
+        }
+
+        // The budget real traffic spends, reached only once the caller has
+        // proved who it is.
+        if (!rateLimiter.allow(clientIp)) {
+          sendJson(res, 429, { error: "Too many requests" });
           return;
         }
 

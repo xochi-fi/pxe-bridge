@@ -316,15 +316,19 @@ describe("HTTP server with auth", () => {
   });
 });
 
-// The rate limit used to run AFTER auth, so a 401 returned before `allow()`
-// was ever called. That left API key guessing unthrottled: the documented
-// "60 requests/min" bounded only callers who already had the key. Its own
-// server so the limiter starts fresh and no other suite shares the budget.
-describe("rate limiting applies to failed auth", () => {
+// Key guessing has to be throttled, and an unauthenticated caller must not be
+// able to spend the budget real traffic needs. One shared bucket cannot do
+// both: auth-first leaves guessing unlimited, limiter-first lets any stranger
+// starve every legitimate caller. Nothing reads X-Forwarded-For, so behind the
+// reverse proxy this is documented to run behind, every client shares one
+// bucket and starving it is a whole-bridge outage.
+//
+// Its own server so the limiters start fresh and no other suite shares them.
+describe("auth failures are throttled separately from real traffic", () => {
   let rlServer: Server;
   let rlBaseUrl: string;
   const RL_API_KEY = "rate-limit-suite-key";
-  const RATE_LIMIT_MAX = 60;
+  const AUTH_FAILURE_MAX = 10;
 
   beforeAll(async () => {
     rlServer = createApp(new FakeAztecClient(), { apiKey: RL_API_KEY });
@@ -343,23 +347,28 @@ describe("rate limiting applies to failed auth", () => {
     await new Promise<void>((resolve) => rlServer.close(() => resolve()));
   });
 
-  it("spends the budget on wrong keys, so a correct key is throttled too", async () => {
+  const guess = () =>
+    jsonPost(rlBaseUrl, rpcBody("aztec_getVersion"), { Authorization: "Bearer wrong-key" });
+
+  it("throttles guessing after its own budget, and leaves real traffic alone", async () => {
     const statuses: number[] = [];
-    for (let i = 0; i < RATE_LIMIT_MAX; i++) {
-      const res = await jsonPost(rlBaseUrl, rpcBody("aztec_getVersion"), {
-        Authorization: "Bearer wrong-key",
-      });
-      statuses.push(res.status);
+    for (let i = 0; i < AUTH_FAILURE_MAX; i++) {
+      statuses.push((await guess()).status);
     }
-    // Every guess is refused on its merits, not yet on volume.
+    // Refused on their merits while the guess budget lasts.
     expect(new Set(statuses)).toEqual(new Set([401]));
 
-    // The budget is now spent. A caller holding the real key is refused for
-    // volume, which is the proof the failed attempts were counted at all.
-    const throttled = await jsonPost(rlBaseUrl, rpcBody("aztec_getVersion"), {
+    // Then on volume. Guessing is bounded, which is the half the reorder was
+    // originally for.
+    expect((await guess()).status).toBe(429);
+
+    // And the caller holding the real key is unaffected. This is the half the
+    // reorder broke: with one bucket, the guesses above would have spent the
+    // budget this request needs and it would answer 429.
+    const authorized = await jsonPost(rlBaseUrl, rpcBody("aztec_getVersion"), {
       Authorization: `Bearer ${RL_API_KEY}`,
     });
-    expect(throttled.status).toBe(429);
+    expect(authorized.status).toBe(200);
   });
 });
 
