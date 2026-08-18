@@ -43,6 +43,15 @@ export async function resolveSecretKey(): Promise<SecretKeyResult> {
   }
 
   const normalized = await validateKey(envKey);
+
+  // Drop it from the environment now that it has been read. It stays visible
+  // in /proc/self/environ and `docker inspect` for as long as it is there,
+  // which is the exposure the ARN path exists to avoid; leaving it set means
+  // the dev path keeps it readable for the life of the process long after the
+  // wallet is derived. Both operator scripts already do this. Not a substitute
+  // for the ARN, and it cannot unpublish the value from whatever set it.
+  delete process.env["PXE_BRIDGE_SECRET_KEY"];
+
   return { key: normalized, source: "env" };
 }
 

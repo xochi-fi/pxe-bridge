@@ -49,6 +49,27 @@ describe("resolveSecretKey", () => {
       expect(result.source).toBe("env");
     });
 
+    // It stays in /proc/self/environ and `docker inspect` for as long as it is
+    // set, which is the exposure the ARN path exists to avoid. Both operator
+    // scripts already drop it; the bridge did not.
+    it("drops the key from the environment once it is read", async () => {
+      process.env["PXE_BRIDGE_SECRET_KEY"] = VALID_KEY;
+
+      await resolveSecretKey();
+
+      expect(process.env["PXE_BRIDGE_SECRET_KEY"]).toBeUndefined();
+    });
+
+    // Dropping it must not happen before validation: an invalid key has to
+    // stay reportable, and the operator needs the variable named.
+    it("keeps the key in the environment when it is rejected", async () => {
+      process.env["PXE_BRIDGE_SECRET_KEY"] = "nothex";
+
+      await expect(resolveSecretKey()).rejects.toThrow();
+
+      expect(process.env["PXE_BRIDGE_SECRET_KEY"]).toBe("nothex");
+    });
+
     it("strips 0x prefix", async () => {
       process.env["PXE_BRIDGE_SECRET_KEY"] = `0x${VALID_KEY}`;
 
