@@ -83,11 +83,19 @@ describe("AuditLogger", () => {
     files.push(path);
     const logger = new AuditLogger(path);
 
-    await logger.log(entry({ tradeId: "0x" + "c".repeat(64) }));
+    // All three trade-context fields, not just the id. The schema requires
+    // them together, and the log used to carry the leg index without the count
+    // it is an index into, so no reader could tell a complete set from a
+    // partial one.
+    await logger.log(
+      entry({ tradeId: "0x" + "c".repeat(64), subTradeIndex: 1, totalSubTrades: 3 }),
+    );
 
     const content = await readFile(path, "utf8");
     const parsed = JSON.parse(content.trim());
     expect(parsed.tradeId).toBe("0x" + "c".repeat(64));
+    expect(parsed.subTradeIndex).toBe(1);
+    expect(parsed.totalSubTrades).toBe(3);
   });
 
   it("omits undefined optional fields", async () => {
@@ -154,6 +162,31 @@ describe("replayAuditLog", () => {
       const path = await writeLog([
         { timestamp: iso(0), amount: "100", status: "submitting" },
         { timestamp: iso(0), amount: "100", status: "success" },
+      ]);
+
+      expect(amounts(await replayAuditLog(path, 0))).toEqual([100n]);
+    });
+
+    // The crash-mid-send case. Both rebuilds read this one line, and they used
+    // to reach opposite conclusions from it: the key was held against a
+    // transfer that may have landed while the window handed the budget back as
+    // if nothing had. Whatever the answer is, it has to be the same answer.
+    it("counts an orphan submitting record as a spend", async () => {
+      const path = await writeLog([
+        { timestamp: iso(0), amount: "100", status: "submitting", idempotencyKey: "k1" },
+      ]);
+
+      const replayed = await replayAuditLog(path, 0);
+
+      expect(amounts(replayed)).toEqual([100n]);
+      expect(replayed.keys).toHaveLength(1);
+    });
+
+    // The pair is one transfer, not two, and the outcome is the last word.
+    it("counts a keyed submitting and its outcome once", async () => {
+      const path = await writeLog([
+        { timestamp: iso(0), amount: "100", status: "submitting", idempotencyKey: "k1" },
+        { timestamp: iso(0), amount: "100", status: "success", idempotencyKey: "k1" },
       ]);
 
       expect(amounts(await replayAuditLog(path, 0))).toEqual([100n]);

@@ -28,6 +28,13 @@ export interface AuditEntry {
   chainId: number;
   tradeId?: string | undefined;
   subTradeIndex?: number | undefined;
+  /**
+   * The denominator. Recorded because without it the log has the index of a
+   * leg and no way to say how many legs the trade has, so no reader can tell a
+   * complete sub-trade set from one that stopped halfway. The schema requires
+   * it alongside the other two, so an entry carrying one carries all three.
+   */
+  totalSubTrades?: number | undefined;
   /** Present when the caller sent an `Idempotency-Key` header. */
   idempotencyKey?: string | undefined;
   clientIp: string;
@@ -65,6 +72,26 @@ export interface AuditReplay {
 
 /** Statuses under which the amount is counted as having left the account. */
 const SPENT: ReadonlySet<AuditStatus> = new Set<AuditStatus>(["success", "unknown"]);
+
+/**
+ * The same, plus `submitting`, for when the entry is the LAST word on a key.
+ *
+ * An orphan `submitting` is a crash between the send and the record of what it
+ * did, which is the event `outcomeFor` already replays as "may have moved
+ * funds". Excluding it made the two rebuilds contradict each other over one
+ * line: the idempotency store held the key against a possible transfer while
+ * the rolling window handed the budget back as if nothing had happened.
+ *
+ * Only reachable for keyed entries, and deliberately so. Pairing a
+ * `submitting` with its outcome needs an identifier, and the key is the only
+ * one; a keyless `submitting` could not be told from a stale duplicate, so it
+ * would double count. `rpc.ts` writes the intent record only when a key is
+ * present, so there is no keyless case to lose.
+ */
+const SPENT_IF_FINAL: ReadonlySet<AuditStatus> = new Set<AuditStatus>([
+  ...SPENT,
+  "submitting",
+]);
 
 /**
  * Rebuilds both pieces of durable state from the JSON-lines audit log.
@@ -109,7 +136,32 @@ export async function replayAuditLog(logPath: string, sinceMs: number): Promise<
     const timestamp = Date.parse(entry.timestamp ?? "");
     if (Number.isNaN(timestamp) || timestamp < sinceMs) continue;
 
-    if (entry.status !== undefined && SPENT.has(entry.status) && typeof entry.amount === "string") {
+    // A keyless request writes no `submitting` record, so each line it
+    // produces is one outcome and counts as it arrives. A keyed request writes
+    // two, so counting per line would double it; those are counted once per
+    // key below, off the last line seen for that key.
+    if (typeof entry.idempotencyKey === "string") {
+      latestByKey.set(entry.idempotencyKey, { entry, timestamp });
+    } else if (
+      entry.status !== undefined &&
+      SPENT.has(entry.status) &&
+      typeof entry.amount === "string"
+    ) {
+      try {
+        spends.push({ amount: BigInt(entry.amount), timestamp });
+      } catch {
+        skipped++;
+      }
+    }
+  }
+
+  const keys: RecordedKey[] = [];
+  for (const [key, { entry, timestamp }] of latestByKey) {
+    if (
+      entry.status !== undefined &&
+      SPENT_IF_FINAL.has(entry.status) &&
+      typeof entry.amount === "string"
+    ) {
       try {
         spends.push({ amount: BigInt(entry.amount), timestamp });
       } catch {
@@ -117,13 +169,6 @@ export async function replayAuditLog(logPath: string, sinceMs: number): Promise<
       }
     }
 
-    if (typeof entry.idempotencyKey === "string") {
-      latestByKey.set(entry.idempotencyKey, { entry, timestamp });
-    }
-  }
-
-  const keys: RecordedKey[] = [];
-  for (const [key, { entry, timestamp }] of latestByKey) {
     const outcome = outcomeFor(entry);
     if (outcome) keys.push({ key, outcome, timestamp });
   }
