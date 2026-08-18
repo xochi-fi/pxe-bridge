@@ -13,7 +13,7 @@ import {
 } from "./spending-limit-account.js";
 
 const MAX_TOKEN_CACHE_SIZE = 100;
-const TX_TIMEOUT_MS = 120_000; // 2 minutes
+export const TX_TIMEOUT_MS = 120_000; // 2 minutes
 
 // Multiplier applied to the worst predicted base fee when deploying the
 // account. Deployment happens once at startup and the max is a ceiling rather

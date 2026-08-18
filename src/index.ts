@@ -1,5 +1,5 @@
-import { AztecClient, FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR } from "./aztec-client.js";
-import { createApp } from "./server.js";
+import { AztecClient, FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR, TX_TIMEOUT_MS } from "./aztec-client.js";
+import { createApp, RESPONSE_TIMEOUT_MS } from "./server.js";
 import { FeeJuiceClaimSchema } from "./types.js";
 import { TransactionLimits, type LimitsConfig } from "./limits.js";
 import { AuditLogger, replayAuditLog } from "./audit.js";
@@ -9,6 +9,11 @@ import type { SpendingLimitConfig } from "./spending-limit-account.js";
 
 // Must match WINDOW_MS in limits.ts: it bounds the same rolling window.
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+// What a pre-send delay can spend without pushing the transaction past the
+// response deadline. Derived rather than written down, so moving either
+// timeout moves this with it.
+const MAX_COOLDOWN_DELAY_MS = RESPONSE_TIMEOUT_MS - TX_TIMEOUT_MS;
 
 const PORT = parseInt(process.env["PXE_BRIDGE_PORT"] ?? "8547", 10);
 if (isNaN(PORT) || PORT < 0 || PORT > 65535) {
@@ -98,6 +103,22 @@ if (COOLDOWN_THRESHOLD_RAW && COOLDOWN_DELAY_RAW) {
   limitsConfig.cooldownDelayMs = parseInt(COOLDOWN_DELAY_RAW, 10);
   if (isNaN(limitsConfig.cooldownDelayMs) || limitsConfig.cooldownDelayMs <= 0) {
     console.error("[pxe-bridge] PXE_BRIDGE_COOLDOWN_DELAY_MS must be a positive integer");
+    process.exit(1);
+  }
+  // The cooldown is spent BEFORE the send, so it and the transaction share one
+  // response budget. Only the lower bound was checked, and the 150s response
+  // deadline is justified as being above the 120s tx timeout "so a legitimate
+  // transfer is never cut off by it" -- which stops being true at 30s of
+  // cooldown. Past that the caller gets a bare 504 with no txHash while the
+  // transfer proceeds, and it is large amounts specifically that wait, so the
+  // ambiguous outcome would land on exactly the transfers the delay protects.
+  // TODO.md suggests 30s as an example value, one millisecond inside the edge.
+  if (limitsConfig.cooldownDelayMs > MAX_COOLDOWN_DELAY_MS) {
+    console.error(
+      `[pxe-bridge] PXE_BRIDGE_COOLDOWN_DELAY_MS must be at most ${MAX_COOLDOWN_DELAY_MS}ms. ` +
+        `The cooldown runs before the send, so it shares the ${RESPONSE_TIMEOUT_MS}ms response ` +
+        `deadline with the ${TX_TIMEOUT_MS}ms transaction timeout.`,
+    );
     process.exit(1);
   }
 } else if (COOLDOWN_THRESHOLD_RAW || COOLDOWN_DELAY_RAW) {

@@ -17,7 +17,7 @@ const REQUEST_TIMEOUT_MS = 30_000;
 // Bounds PRODUCING the response. Above aztec-client's 120s TX_TIMEOUT_MS, so a
 // legitimate transfer is never cut off by it; a socket that outlives even that
 // is not waiting on anything the bridge is going to deliver.
-const RESPONSE_TIMEOUT_MS = 150_000;
+export const RESPONSE_TIMEOUT_MS = 150_000;
 
 export interface ServerOptions {
   apiKey?: string | undefined;
@@ -218,6 +218,15 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
         }
         if (!checkAuth(req, opts.adminKey)) {
           sendJson(res, 401, { error: "Unauthorized" });
+          return;
+        }
+        // Same Content-Type requirement as the RPC branch. The docs state it
+        // for POST without qualifying which POST, and this one was exempt. A
+        // browser cannot forge the Authorization header above, so the CSRF
+        // risk was nil; the point is that the stated property now holds.
+        const adminContentType = req.headers["content-type"];
+        if (!adminContentType || !adminContentType.startsWith("application/json")) {
+          sendJson(res, 415, { error: "Content-Type must be application/json" });
           return;
         }
         if (!opts.limits) {
