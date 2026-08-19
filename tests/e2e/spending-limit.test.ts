@@ -7,6 +7,8 @@ import {
   feeWithHeadroom,
   fundFeeJuice,
   mintOne,
+  mintTo,
+  FUNDER_KEY,
 } from "./helpers.js";
 
 /**
@@ -35,9 +37,6 @@ import {
  */
 
 const config = getTestConfig();
-
-// Distinct from the bridge key so the two accounts do not collide.
-const FUNDER_KEY = "0x000000000000000000000000000000000000000000000000000000000000cafe";
 
 // A third account that is neither the admin nor the bridge. Needed because
 // every other wallet in this file is privileged: the funder IS the admin, and
@@ -656,38 +655,6 @@ async function removeRecipient(
   ).at(AztecAddress.fromStringUnsafe(account), artifact, wallet);
   await c.methods["remove_recipient"]!(AztecAddress.fromStringUnsafe(recipient)).send({
     from: AztecAddress.fromStringUnsafe(admin),
-    fee: await feeWithHeadroom(wallet),
-  });
-}
-
-async function mintTo(
-  wallet: unknown,
-  token: string,
-  to: string,
-  amount: bigint,
-  minter: string,
-): Promise<void> {
-  const { TokenContract } = await import("@aztec/noir-contracts.js/Token");
-  const { AztecAddress } = await import("@aztec/aztec.js/addresses");
-  const contract = await (
-    TokenContract as unknown as {
-      at: (a: unknown, w: unknown) => Promise<{
-        methods: Record<
-        string,
-        (...a: unknown[]) => { send: (o: { from: unknown; fee: unknown }) => Promise<unknown> }
-      >;
-      }>;
-    }
-  ).at(AztecAddress.fromStringUnsafe(token), wallet);
-  // transfer_to_private moves the sender's PUBLIC balance into a private note
-  // for the recipient, so the account has to be funded publicly. Minting to
-  // private leaves the public balance at zero and the transfer fails inside the
-  // token with "attempt to subtract with overflow".
-  await contract.methods["mint_to_public"]!(
-    AztecAddress.fromStringUnsafe(to),
-    amount,
-  ).send({
-    from: AztecAddress.fromStringUnsafe(minter),
     fee: await feeWithHeadroom(wallet),
   });
 }

@@ -13,6 +13,17 @@ export interface E2EConfig {
 // Test-only key well under BN254 Fr modulus -- never use with real funds
 const DEFAULT_SECRET_KEY = "0x000000000000000000000000000000000000000000000000000000000000beef";
 
+/**
+ * The account that mints tokens and pays for other accounts' fee juice.
+ *
+ * Distinct from the bridge key so the two accounts do not collide, and shared
+ * between global-setup and the spending-limit suite so the second one to
+ * connect recovers the account rather than deploying a second funder. An extra
+ * deployment is not free here: it raises the sandbox base fee, which is what
+ * `headroomGasSettings` exists to absorb.
+ */
+export const FUNDER_KEY = "0x000000000000000000000000000000000000000000000000000000000000cafe";
+
 /** One resolution for the node URL, shared by getTestConfig and the fee helper. */
 export function resolveNodeUrl(): string {
   return process.env["AZTEC_NODE_URL"] ?? "http://localhost:8080";
@@ -34,6 +45,29 @@ export function getTestConfig(): E2EConfig {
     // absent key from one set to undefined, and E2EConfig declares it optional.
     ...(feeJuiceClaim ? { feeJuiceClaim } : {}),
   };
+}
+
+/**
+ * The token global-setup provisioned, or a failure explaining why there is not
+ * one.
+ *
+ * Throwing rather than skipping is the point. Both note suites used to guard on
+ * `it.skipIf(!process.env.E2E_TOKEN_ADDRESS)` against a variable that was set
+ * nowhere in the repo, so the default createNote path never executed and CI
+ * stayed green over it for the whole life of the branch. A skip is invisible in
+ * a passing run; a throw is not.
+ */
+export function requireTestToken(): string {
+  const token = process.env["E2E_TOKEN_ADDRESS"];
+  if (token) return token;
+
+  const reason = process.env["E2E_TOKEN_SETUP_ERROR"];
+  throw new Error(
+    reason
+      ? `global-setup could not provision a test token: ${reason}`
+      : "E2E_TOKEN_ADDRESS is unset and global-setup recorded no failure, so " +
+        "provisioning did not run or did not reach this process",
+  );
 }
 
 export async function waitForNode(url: string, timeoutMs = 120_000): Promise<void> {
@@ -170,12 +204,50 @@ export async function mintOne(
 }
 
 /**
+ * Mints `amount` of `token` into `to`'s PUBLIC balance.
+ *
+ * Public and not private, deliberately. transfer_to_private moves the sender's
+ * public balance into a private note for the recipient, so the sending account
+ * has to be funded publicly. Minting to private leaves the public balance at
+ * zero and the transfer fails inside the token with "attempt to subtract with
+ * overflow".
+ */
+export async function mintTo(
+  wallet: unknown,
+  token: string,
+  to: string,
+  amount: bigint,
+  minter: string,
+): Promise<void> {
+  const { TokenContract } = await import("@aztec/noir-contracts.js/Token");
+  const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+  const contract = await (
+    TokenContract as unknown as {
+      at: (a: unknown, w: unknown) => Promise<{
+        methods: Record<
+          string,
+          (...a: unknown[]) => { send: (o: { from: unknown; fee: unknown }) => Promise<unknown> }
+        >;
+      }>;
+    }
+  ).at(AztecAddress.fromStringUnsafe(token), wallet);
+
+  await contract.methods["mint_to_public"]!(
+    AztecAddress.fromStringUnsafe(to),
+    amount,
+  ).send({
+    from: AztecAddress.fromStringUnsafe(minter),
+    fee: await feeWithHeadroom(wallet),
+  });
+}
+
+/**
  * Deploys an 18-decimal test token with `admin` as its minter.
  *
  * v5.1.0 requires an explicit `from` on send(), and send() resolves to
  * { contract, instance, receipt } after waiting -- not to the contract itself.
- * This helper had never been called (the note tests skip without
- * E2E_TOKEN_ADDRESS) so both mismatches went unnoticed.
+ * Both mismatches went unnoticed while this helper had no caller, which is what
+ * E2E_TOKEN_ADDRESS being set nowhere used to mean.
  */
 export async function deployTestToken(wallet: unknown, admin: string): Promise<string> {
   const { TokenContract } = await import("@aztec/noir-contracts.js/Token");

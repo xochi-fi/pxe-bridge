@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import type { Server } from "node:http";
 import { AztecClient } from "../../src/aztec-client.js";
 import { createApp } from "../../src/server.js";
-import { getTestConfig } from "./helpers.js";
+import { getTestConfig, requireTestToken } from "./helpers.js";
 
 const config = getTestConfig();
 
@@ -83,12 +83,10 @@ describe("HTTP server (e2e)", () => {
   });
 
   describe("aztec_createNote via JSON-RPC", () => {
-    const tokenAddress = process.env["E2E_TOKEN_ADDRESS"];
-
-    it.skipIf(!tokenAddress)("creates note via full HTTP round-trip", async () => {
+    it("creates note via full HTTP round-trip", async () => {
       const params = {
-        recipient: tokenAddress!,
-        token: tokenAddress!,
+        recipient: client.getAddress()!,
+        token: requireTestToken(),
         amount: "500",
         chainId: 1,
       };
