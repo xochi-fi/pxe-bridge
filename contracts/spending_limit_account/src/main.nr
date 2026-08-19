@@ -219,15 +219,14 @@ pub contract SpendingLimitAccount {
         assert(!self.storage.initialized.read(), "Already initialized");
 
         assert_limits_valid(initial_max_per_tx, initial_daily_limit);
+        assert_construction_addresses_valid(admin_address, token_address, seed_recipient);
 
         self.storage.max_amount_per_tx.write(initial_max_per_tx);
         self.storage.daily_limit.write(initial_daily_limit);
-        assert(!token_address.is_zero(), "Token must not be zero");
         // Genesis seeding: the only untimelocked write to the allowlist.
         // Without it the list is empty at deployment and every addition waits
         // out PARAM_TIMELOCK_SECONDS, so the bridge could not transfer for 24
         // hours after each cutover.
-        assert(!seed_recipient.is_zero(), "Seed recipient must not be zero");
         self.storage.allowlist.at(0 as Field).write(seed_recipient);
         assert_anonymity_valid(initial_min_anonymity);
         self.storage.min_anonymity_set.write(initial_min_anonymity);
@@ -985,6 +984,32 @@ pub contract SpendingLimitAccount {
         assert(daily_limit >= max_per_tx, "Daily limit must be >= per-tx max");
     }
 
+    // The three addresses fixed at construction. `0x00..0` is a well-formed
+    // AztecAddress, so none of them can be left to the caller to get right.
+    //
+    // Extracted rather than left inline for the same reason assert_limits_valid
+    // is: initialize_public_state is a public external that asserts on
+    // msg_sender, and no `nargo test` can build that context, so an inline
+    // assert there is unreachable from the test suite. The token and seed
+    // checks were inline and untested until this helper existed.
+    #[contract_library_method]
+    fn assert_construction_addresses_valid(
+        admin: AztecAddress,
+        token: AztecAddress,
+        seed_recipient: AztecAddress,
+    ) {
+        assert(!token.is_zero(), "Token must not be zero");
+        assert(!seed_recipient.is_zero(), "Seed recipient must not be zero");
+        // `admin` is PublicImmutable with no rotation path, and every lever on
+        // this account gates on `maybe_msg_sender().unwrap() == admin.read()`.
+        // msg_sender is never the zero address, so a zero admin does not fail
+        // the deployment -- it succeeds and produces an account nobody can ever
+        // administer: no pause, no revocation, no limit change, and funds that
+        // can only ever reach the one seeded recipient. Terminal and silent,
+        // which is why it is the worst of the three.
+        assert(!admin.is_zero(), "Admin must not be zero");
+    }
+
     // ================================================================
     // Tests (run with `nargo test`; no sandbox or proving required)
     // ================================================================
@@ -1453,5 +1478,45 @@ pub contract SpendingLimitAccount {
     #[test(should_fail_with = "Daily limit must be >= per-tx max")]
     fn daily_below_per_tx_rejected() {
         assert_limits_valid(10_000, 1_000);
+    }
+
+    #[test]
+    fn nonzero_construction_addresses_accepted() {
+        assert_construction_addresses_valid(
+            AztecAddress::from_field(1),
+            AztecAddress::from_field(2),
+            AztecAddress::from_field(3),
+        );
+    }
+
+    // The one that motivated the helper. A zero admin is not a failed
+    // deployment, it is a successful one that can never be administered again,
+    // and nothing above the contract stopped it: the bridge validated this
+    // address with a hex-shape regex that `0x00..0` satisfies.
+    #[test(should_fail_with = "Admin must not be zero")]
+    fn zero_admin_rejected() {
+        assert_construction_addresses_valid(
+            AztecAddress::from_field(0),
+            AztecAddress::from_field(2),
+            AztecAddress::from_field(3),
+        );
+    }
+
+    #[test(should_fail_with = "Token must not be zero")]
+    fn zero_token_rejected() {
+        assert_construction_addresses_valid(
+            AztecAddress::from_field(1),
+            AztecAddress::from_field(0),
+            AztecAddress::from_field(3),
+        );
+    }
+
+    #[test(should_fail_with = "Seed recipient must not be zero")]
+    fn zero_seed_recipient_rejected() {
+        assert_construction_addresses_valid(
+            AztecAddress::from_field(1),
+            AztecAddress::from_field(2),
+            AztecAddress::from_field(0),
+        );
     }
 }

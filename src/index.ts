@@ -167,23 +167,52 @@ const SPENDING_LIMIT_SEED = process.env["PXE_BRIDGE_SPENDING_LIMIT_SEED_RECIPIEN
 const SPENDING_LIMIT_MIN_ANON = Number(
   process.env["PXE_BRIDGE_SPENDING_LIMIT_MIN_ANONYMITY"] ?? "1",
 );
+// `0x00...0` satisfies the 32-byte hex pattern, so every address below is
+// checked against it separately. The contract asserts all three are non-zero,
+// and without this the mistake surfaces as an in-circuit assert part-way
+// through a deployment that has already been paid for, rather than as a startup
+// error naming the variable that was wrong. An empty-but-present env var
+// expanding to zeros is enough to reach it.
+const IS_ZERO_ADDRESS = /^0x0{64}$/;
 if (SPENDING_LIMIT_ADMIN) {
   if (!/^0x[0-9a-fA-F]{64}$/.test(SPENDING_LIMIT_ADMIN)) {
     console.error("[pxe-bridge] PXE_BRIDGE_SPENDING_LIMIT_ADMIN must be a 32-byte hex address");
     process.exit(1);
   }
-  // Fixed at construction, no setter, so it must be supplied explicitly.
-  if (!SPENDING_LIMIT_TOKEN || !/^0x[0-9a-fA-F]{64}$/.test(SPENDING_LIMIT_TOKEN)) {
+  // Worth its own message rather than folding into the check above, because
+  // the consequence is not "this deployment fails" but "this deployment
+  // succeeds and is permanently unadministrable". `admin` is PublicImmutable
+  // with no rotation path, every lever compares msg_sender against it, and
+  // msg_sender is never zero: no pause, no revocation, no limit change, ever,
+  // and funds can only ever reach the one seeded recipient.
+  if (IS_ZERO_ADDRESS.test(SPENDING_LIMIT_ADMIN)) {
     console.error(
-      "[pxe-bridge] PXE_BRIDGE_SPENDING_LIMIT_TOKEN must be a 32-byte hex address when the spending limit account is enabled",
+      "[pxe-bridge] PXE_BRIDGE_SPENDING_LIMIT_ADMIN must not be the zero address -- " +
+        "the admin cannot be rotated, so a zero admin permanently disables pause, " +
+        "revocation and every limit change",
+    );
+    process.exit(1);
+  }
+  // Fixed at construction, no setter, so it must be supplied explicitly.
+  if (
+    !SPENDING_LIMIT_TOKEN ||
+    !/^0x[0-9a-fA-F]{64}$/.test(SPENDING_LIMIT_TOKEN) ||
+    IS_ZERO_ADDRESS.test(SPENDING_LIMIT_TOKEN)
+  ) {
+    console.error(
+      "[pxe-bridge] PXE_BRIDGE_SPENDING_LIMIT_TOKEN must be a non-zero 32-byte hex address when the spending limit account is enabled",
     );
     process.exit(1);
   }
   // Seeded into allowlist slot 0 by the constructor. Without it the account
   // cannot transfer until an addition clears the 24h timelock.
-  if (!SPENDING_LIMIT_SEED || !/^0x[0-9a-fA-F]{64}$/.test(SPENDING_LIMIT_SEED)) {
+  if (
+    !SPENDING_LIMIT_SEED ||
+    !/^0x[0-9a-fA-F]{64}$/.test(SPENDING_LIMIT_SEED) ||
+    IS_ZERO_ADDRESS.test(SPENDING_LIMIT_SEED)
+  ) {
     console.error(
-      "[pxe-bridge] PXE_BRIDGE_SPENDING_LIMIT_SEED_RECIPIENT must be a 32-byte hex address when the spending limit account is enabled",
+      "[pxe-bridge] PXE_BRIDGE_SPENDING_LIMIT_SEED_RECIPIENT must be a non-zero 32-byte hex address when the spending limit account is enabled",
     );
     process.exit(1);
   }
