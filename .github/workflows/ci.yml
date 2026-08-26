@@ -53,18 +53,50 @@ jobs:
           echo "$HOME/.aztec/bin" >> "$GITHUB_PATH"
       - name: Pin toolchain and expose it on PATH
         run: |
+          # The installer's exit code is not the question. `aztec-up` finishes
+          # with install_native_symlinks, which fails the whole install if any
+          # bundled binary is missing, and as of 2026-08-26 `forge` is missing
+          # from the 5.1.0 bundle:
+          #
+          #   Error: expected bundled binary 'forge' missing from
+          #          ~/.aztec/versions/5.1.0/internal-bin
+          #
+          # This job compiles a Noir contract. It never touches Foundry. The
+          # same commit that passed on 19 Aug fails this way now, from a
+          # version we pin, because `aztec-up install 5.1.0` pins the toolchain
+          # and not the installer that fetches it. That is the build supply
+          # chain risk in SECURITY.md arriving in practice.
+          #
+          # So record the installer's verdict and then check for the two
+          # binaries this job actually runs. Failing on a missing `forge` is a
+          # red build over something we do not use; failing on a missing
+          # `aztec` or `aztec-nargo` is real and still fails below.
+          set +e
           aztec-up install 5.1.0
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "::warning::aztec-up exited $status; continuing only if the needed binaries are present"
+          fi
           # aztec-up keeps versioned binaries outside ~/.aztec/bin and only
           # updates PATH for a login shell, which workflow steps do not get.
           bin=$(find "$HOME/.aztec" \( -type f -o -type l \) -name aztec-nargo | head -1)
           if [ -z "$bin" ]; then
-            echo "aztec-nargo not found; tree under ~/.aztec:"
+            echo "aztec-nargo not found (aztec-up exited $status); tree under ~/.aztec:"
             find "$HOME/.aztec" -maxdepth 3 -name '*nargo*'
             exit 1
           fi
-          dirname "$bin" >> "$GITHUB_PATH"
+          dir=$(dirname "$bin")
+          if [ ! -x "$dir/aztec" ]; then
+            echo "aztec not found beside aztec-nargo (aztec-up exited $status); contents of $dir:"
+            ls -la "$dir"
+            exit 1
+          fi
+          echo "$dir" >> "$GITHUB_PATH"
       - name: Toolchain versions
-        run: aztec-nargo --version
+        run: |
+          aztec-nargo --version
+          aztec --version
       - name: Contract unit tests (spending-limit guard)
         working-directory: contracts/spending_limit_account
         run: aztec-nargo test

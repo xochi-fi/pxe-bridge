@@ -278,6 +278,19 @@ The `contract` CI job installs the Aztec toolchain by piping
 against, so the build trusts that endpoint. `aztec-up install 5.1.0` pins the
 toolchain version but not the installer that fetches it.
 
+**This has already bitten, benignly.** On 2026-08-26 every `contract` job began
+failing at install with `expected bundled binary 'forge' missing from
+~/.aztec/versions/5.1.0/internal-bin`. The commit that passed on 19 Aug fails the
+same way on re-run, from the same pinned version, because the installer changed
+underneath it. `forge` is Foundry and this job compiles a Noir contract, so the
+job now records the installer's exit code and checks for `aztec` and
+`aztec-nargo` rather than trusting its verdict. A missing binary this job
+actually uses still fails.
+
+The underlying exposure is unchanged: a compromised or merely updated installer
+can still change what gets built. The class ID pin is the control, and it is
+downstream of this, which is the right order.
+
 The artifact it produces is not committed, so the mitigation is downstream:
 `scripts/contract-class-id.js` compares the resulting contract class ID against
 `contracts/spending_limit_account/CLASS_ID` and fails the job on drift. A
