@@ -25,6 +25,8 @@ npm run dev              # run with tsx (no build step)
 npm start                # run compiled dist/index.js
 npm run bridge-fee-juice # bridge fee juice from L1, print FEE_JUICE_CLAIM (Schnorr only)
 npm run top-up-fee-juice # bridge + claim on an account's behalf (spending limit account)
+npm run update-allowlist -- --add 0x<addr> --index <n>   # add one allowlist recipient
+npm run update-allowlist -- --revoke 0x<addr>            # revoke one allowlist recipient
 ```
 
 CI runs `typecheck` -> `test` -> `build`, then a separate `e2e` job via docker compose.

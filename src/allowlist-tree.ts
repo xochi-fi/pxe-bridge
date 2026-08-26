@@ -127,7 +127,8 @@ export async function rootFromSiblingPath(
 export class AllowlistTree {
   private constructor(
     private readonly layers: FrType[][],
-    private readonly byAddress: Map<string, { index: number; salt: FrType }>,
+    private readonly salts: readonly FrType[],
+    private readonly byAddress: Map<string, number>,
   ) {}
 
   /**
@@ -173,18 +174,19 @@ export class AllowlistTree {
       seen.add(address);
     }
 
-    const byAddress = new Map<string, { index: number; salt: FrType }>();
+    const byAddress = new Map<string, number>();
+    const salts: FrType[] = new Array(ALLOWLIST_CAPACITY);
     const leaves: FrType[] = new Array(ALLOWLIST_CAPACITY);
     for (let i = 0; i < ALLOWLIST_CAPACITY; i++) {
-      const salt = await deriveSalt(seedFr, i);
+      salts[i] = await deriveSalt(seedFr, i);
       const address = occupied.get(i);
       // An unoccupied position commits to the zero address, not to zero. A
       // literal zero leaf is recognisable as empty, and the contract rejects
       // one on the admin path for that reason.
       const recipient = address === undefined ? Fr.ZERO : Fr.fromString(address);
-      leaves[i] = await allowlistLeaf(recipient, salt);
+      leaves[i] = await allowlistLeaf(recipient, salts[i]!);
       if (address !== undefined) {
-        byAddress.set(address, { index: i, salt });
+        byAddress.set(address, i);
       }
     }
 
@@ -198,7 +200,7 @@ export class AllowlistTree {
       layers.push(above);
     }
 
-    return new AllowlistTree(layers, byAddress);
+    return new AllowlistTree(layers, salts, byAddress);
   }
 
   /** The value `check_spending_public` compares against. */
@@ -219,19 +221,40 @@ export class AllowlistTree {
    * simulations that carry no transfer at all.
    */
   witnessFor(address: string): AllowlistWitness | undefined {
-    const entry = this.byAddress.get(address.toLowerCase());
-    if (entry === undefined) return undefined;
+    const index = this.byAddress.get(address.toLowerCase());
+    return index === undefined ? undefined : this.witnessAt(index);
+  }
 
+  /**
+   * Witness for a POSITION, occupied or not.
+   *
+   * The admin path needs this: an addition proves the old leaf, which is the
+   * commitment to the zero address that the empty position already holds. There
+   * is no separate "empty" case, which is the same reason the contract cannot
+   * tell an addition from a revocation.
+   */
+  witnessAt(index: number): AllowlistWitness {
+    if (!Number.isInteger(index) || index < 0 || index >= ALLOWLIST_CAPACITY) {
+      throw new Error(`index ${index} is outside [0, ${ALLOWLIST_CAPACITY})`);
+    }
     const siblingPath: FrType[] = new Array(ALLOWLIST_TREE_HEIGHT);
-    let index = entry.index;
+    let remaining = index;
     for (let level = 0; level < ALLOWLIST_TREE_HEIGHT; level++) {
       // root_from_sibling_path consumes bit `level` of the index to decide
       // which side the running node goes on, so the sibling is the node whose
       // index differs in exactly that bit.
-      siblingPath[level] = this.layers[level]![index ^ 1]!;
-      index >>= 1;
+      siblingPath[level] = this.layers[level]![remaining ^ 1]!;
+      remaining >>= 1;
     }
-    return { leafSalt: entry.salt, leafIndex: entry.index, siblingPath };
+    return { leafSalt: this.salts[index]!, leafIndex: index, siblingPath };
+  }
+
+  /** The salt at a position, which the admin path needs to rebuild its leaves. */
+  saltAt(index: number): FrType {
+    if (!Number.isInteger(index) || index < 0 || index >= ALLOWLIST_CAPACITY) {
+      throw new Error(`index ${index} is outside [0, ${ALLOWLIST_CAPACITY})`);
+    }
+    return this.salts[index]!;
   }
 
   /**
