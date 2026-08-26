@@ -12,31 +12,48 @@ compromised and aims to limit the damage via per-transaction amount caps, a
 fixed at construction, all enforced on-chain and independent of the
 application-level limits in `src/limits.ts`.
 
-The admin is a separate party from the signing key holder, and every admin
-lever follows one asymmetry: **tightening waits out the 24h timelock,
-loosening and stopping are immediate.**
+The admin is a separate party from the signing key holder.
 
 | Lever | Direction | Timing |
 | --- | --- | --- |
 | `pause` / `unpause` | Stop everything | Immediate |
-| `remove_recipient` | Revoke a payee | Immediate |
-| `lower_min_anonymity` | Loosen the hint floor | Immediate |
-| `propose_recipient` + `apply_recipient` | Add a payee | 24h |
-| `propose_limits` + `apply_limits` | Change caps or raise the floor | 24h |
+| `update_recipient` | Add, revoke or substitute one payee | Immediate |
+| `propose_limits` + `apply_limits` | Change caps | 24h |
 
 `pause` is the response to a compromised signing key: it is checked in
 `check_spending_public`, so it stops a transaction however far through proving
 it already is. A timelock on it would hand an attacker exactly the notice
 period they need.
 
-`remove_recipient` is deliberately not blocked when it would leave fewer live
-entries than `min_anonymity_set`, which makes every hint unsatisfiable and
-stops all transfers. Refusing an emergency revocation to protect an
-availability property is the wrong trade; `lower_min_anonymity` is the
-untimelocked way back.
+`update_recipient` is untimelocked, and that is a change from the array design,
+where additions waited 24h and removals were immediate. Under a Merkle
+allowlist the contract cannot tell the two apart: leaves are commitments, so
+adding, revoking and substituting are one operation on one leaf, and that
+indistinguishability is the privacy property. One policy therefore has to cover
+all three. The timelock is the half that had to go, because the notice it gave
+was legible only when the allowlist was public, while revocation latency is a
+cost that lands during an incident.
 
-An attacker holding the **admin** key is outside this model. They have
-`propose_limits`, and a 24h public notice is the whole defence.
+### An attacker holding the admin key
+
+This is **not** recoverable, and the 24h notice was never the defence it looked
+like. `pause` and `update_recipient` are both immediate, and the entrypoint only
+pays an allowlisted recipient, so an attacker with the admin key stops the
+account or strips the allowlist before any notice period could elapse. The owner
+has nowhere to withdraw to and no lever to reach for.
+
+What does bound the damage is that **the tree is a second factor**.
+`update_recipient` must supply a sibling path that verifies against the current
+root, and the salts that make the leaves are derived from a seed the admin holds
+off chain. An attacker who takes the admin key without also taking the seed and
+the recipient list cannot produce a valid path, so they cannot add a payee of
+their own. They can still pause, and they can still propose limits.
+
+They also cannot spend. Paying a newly added recipient needs the signing key,
+which is a different party under this model.
+
+Practically: admin key custody is the control, and the allowlist seed must be
+archived and protected separately from it. See "Losing the allowlist" below.
 
 ## Declared-vs-actual amount binding
 
@@ -67,17 +84,13 @@ constructor's enqueued initializer has not been mined yet.
 
 Combined with the rest of this change set:
 
-- Recipient allowlist: enforced, but `check_spending_public` does not receive
-  the recipient. Membership is proven in private against a caller-supplied
-  hint, and the hint is bound to live storage in public by positional masking
-  (`hint[i]` must equal `live[i]` or zero). `recipient IN hint` plus
-  `hint masks live` gives `recipient IN live` evaluated at inclusion time,
-  which is what lets an immediate removal invalidate an already-proven
-  transfer. A transfer must carry at least `min_anonymity_set` slots, so the
-  recipient is one of at least N; that is a count, not unlinkability, and the
-  allowlist itself stays public because the admin writes entries in the clear.
-  A zero recipient is rejected at both the circuit (`Recipient must not be
-  zero`) and the RPC validation layer (`src/types.ts`).
+- Recipient allowlist: enforced, but `check_spending_public` receives neither
+  the recipient nor the set. Membership is proven in private against a Merkle
+  root, and public asserts only that the proven root equals the stored one. That
+  equality is evaluated at inclusion time, which is what lets a revocation
+  invalidate an already-proven transfer. A zero recipient is rejected at both
+  the circuit (`Recipient must not be zero`) and the RPC validation layer
+  (`src/types.ts`).
 - Third-party authwit: disabled (`verify_private_authwit` returns invalid), so
   the authwit side channel can no longer bypass the spending checks.
 - Per-tx and daily volume caps: enforced against the bound (actual) amount.
@@ -96,8 +109,10 @@ Aztec v5.1.0. It is validated three ways:
   the offsets the guard reads; `mismatched_transfer_reverts`,
   `hidden_second_call_reverts`, and `empty_payload_reverts` prove the guard
   rejects a declared/actual mismatch, a hidden second call, and an empty
-  payload; `stale_hint_is_rejected` and `minimal_hint_is_rejected` cover the
-  allowlist binding and the anonymity floor. The `contract` CI job runs these
+  payload; `stale_witness_is_rejected` and `update_with_a_forged_old_leaf_is_rejected`
+  cover the allowlist binding and the single-leaf constraint on admin updates;
+  `leaf_and_node_hashes_match_typescript` pins the hashes against
+  `tests/allowlist-tree.test.ts`. The `contract` CI job runs these
   and `aztec compile`.
 - e2e tests in `tests/e2e/spending-limit.test.ts` reach what `aztec-nargo test`
   cannot. The guard itself is private, so it runs in ACIR either way; what only
@@ -168,22 +183,59 @@ The contract enforces its limits against public state, and a public function's
 arguments are part of the transaction. Every transfer therefore publishes:
 
 - **The amount.** `declared_amount` is an argument to `check_spending_public`.
-- **A candidate recipient set.** `allowlist_hint` is an argument to the same
-  call. It names between `min_anonymity_set` and `ALLOWLIST_SIZE` (8) addresses,
-  one of which is the recipient. Which one is not published.
 - **The token.** Pinned at construction and visible as the call target.
-
-The allowlist is public regardless, because `propose_recipient` and
-`remove_recipient` take the address as an ordinary public argument, so the
-admin's own transactions publish every entry. The hint therefore leaks nothing
-the chain does not already show; what it does is narrow each transfer's
-recipient to a member of a small, published set.
+- **The allowlist root**, and the fact that a transfer proved membership against
+  it. Not the recipient, and not the set.
 
 This is inherent to checking a value against public storage and is not
-remediated. Enforcing the same limits privately would mean nullifier-based
-counters and a different contract. The recipient's identity and the note
-contents remain private; the amount does not. Callers who need the amount
-private cannot use the spending-limit account.
+remediated for the amount. Enforcing that privately would mean nullifier-based
+counters and a different contract. Callers who need the amount private cannot
+use the spending-limit account.
+
+The recipient is a different story since NM-1019 [Medium]. The array design
+published a candidate set of up to eight addresses per transfer, and the set was
+public anyway because the admin's add and remove calls carried each address in
+the clear. Both are gone. The allowlist is now a Merkle tree whose leaves are
+commitments `h(recipient, salt)` under a secret seed; the chain holds one root,
+membership is proven in private, and `update_recipient` moves one opaque leaf to
+another.
+
+What an observer can still learn from an admin update is the **position** that
+changed. Positions are therefore assigned randomly rather than filled left to
+right, or the first touch of position `k` would be visibly an addition. What
+they cannot learn is which address occupies it, whether the update added,
+revoked or substituted, or how full the tree is: empty positions hold
+`h(0, salt_i)` with that position's own salt, so they are not recognisable as
+empty and the canonical empty-subtree roots never appear in a sibling path.
+
+Anonymity is still bounded by how many recipients are actually allowlisted. A
+tree removes the mechanism's ceiling; it does not supply recipients. Run with
+three and the set is three, though under this design the count is no longer
+public.
+
+## Losing the allowlist
+
+The account stores only a root. Unlike the public array it replaces, **the set
+cannot be recovered from the chain.** Losing either the seed
+(`PXE_BRIDGE_ALLOWLIST_SEED`) or the list of `(address, position)` pairs is
+terminal for allowlist management: no witness can be built, so no transfer can
+be sent, and no `update_recipient` can be constructed, so nothing can be
+repaired on chain.
+
+Archive both with the same discipline as the contract artifact. This account
+already has permanent-brick modes -- `permitted_token` has no setter, and a zero
+admin is unrecoverable -- and this is one more.
+
+The seed is a secret, but a weaker one than the signing key: holding it lets
+someone test a candidate address against a leaf, which costs recipient privacy
+and not custody. It is warned about rather than refused when read from the
+environment in production.
+
+The bridge checks its copy against the chain before every send, via
+`get_allowlist_root`, and refuses to send on a mismatch. That check is what makes
+a secret set monitorable: the root commits to exactly the set that produces it,
+so an operator can verify a published set against the chain and a compromised
+admin cannot publish one set while committing another.
 
 ## Transaction cancellation is not supported
 

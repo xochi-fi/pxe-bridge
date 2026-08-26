@@ -44,16 +44,22 @@ authorization logic on-chain so it's enforced even if the bridge is compromised.
       does not make the tx unprovable: it is proven, included, and reverted in
       the public phase. That is deliberate, and it is what makes revocation
       immediate.
-- [x] **Recipient allowlist** -- 8 slots of public storage. Membership is
-      proven in private against a caller-supplied hint, then rebound to live
-      storage in public by positional masking, so a transfer proven against a
-      superseded allowlist cannot be included. A `min_anonymity_set` floor
-      requires each transfer to carry at least N slots.
+- [x] **Recipient allowlist** -- one storage slot holding the root of a
+      height-10 Merkle tree whose leaves are commitments `h(recipient, salt)`.
+      Membership is proven in private; public compares only the proven root
+      against the stored one, so a transfer proven against a superseded
+      allowlist cannot be included. Replaced 8 slots of public storage, which
+      published a candidate set on every transfer and published every entry
+      through the admin's own calls (NM-1019 [Medium]). `min_anonymity_set` and
+      its floor plumbing are gone with it: a root has no candidate set to size.
 - [x] **Timelock for parameter changes** -- 24h
       (`PARAM_TIMELOCK_SECONDS`), timestamp-based rather than block-based, with
-      a 24h window to apply before a proposal expires. Covers limit changes and
-      allowlist additions. Removals, `pause` and `lower_min_anonymity` are
-      immediate by design: tightening waits, loosening and stopping do not.
+      a 24h window to apply before a proposal expires. Covers limit changes
+      only. `pause` and `update_recipient` are immediate: `pause` because a
+      timelock would hand a compromised signer the notice they need, and
+      `update_recipient` because addition and revocation are indistinguishable
+      by construction, so one policy has to cover both and revocation is the
+      one that cannot wait.
 
 Compiled with `aztec compile`, not `nargo compile` or `aztec-nargo compile`.
 The latter is a symlink to plain `nargo`, ships no transpiler, and emits
@@ -132,9 +138,13 @@ Known limitations (acceptable for alpha):
 - Rate limiter uses `socket.remoteAddress`; deploy behind reverse proxy
   for accurate client IP.
 - Transfer amounts are public. `declared_amount` is an argument to
-  `check_spending_public`, along with a candidate recipient set of up to 8
-  addresses and the token. Inherent to checking against public storage. See
-  SECURITY.md, "What is public".
+  `check_spending_public`, along with the token and the allowlist root.
+  Inherent to checking against public storage. The recipient is not: it is
+  proven against the root in private. See SECURITY.md, "What is public".
+- The allowlist cannot be recovered from the chain. Losing the seed or the
+  position list is terminal for allowlist management, and unlike the public
+  array it replaced there is no way to read the set back. See SECURITY.md,
+  "Losing the allowlist".
 - `aztec compile` is not reproducible, so the account address cannot be rebuilt
   from source. Mitigated by the `CLASS_ID` pin and by archiving the artifact a
   deployment was made against. See the class ID note under Phase 2.
