@@ -187,28 +187,37 @@ private cannot use the spending-limit account.
 
 ## Transaction cancellation is not supported
 
-The entrypoint takes a `cancellable` flag and, when set, pushes a nullifier
-derived from the payload's `tx_nonce`, which is the mechanism a wallet would use
-to replace a pending transaction. This account offers no way to use it, and
+The entrypoint used to push a nullifier derived from the payload's `tx_nonce`
+when its `cancellable` flag was set, which is the mechanism a wallet would use to
+replace a pending transaction. This account offered no way to use it, and
 NM-1019 [Low] records that: the only path through the entrypoint is a real
 transfer, so cancelling means sending another one, which costs an allowlisted
 recipient, unspent per-tx cap and room in the daily window. There are reachable
 states with none of those, and they are exactly the states where cancelling
 matters.
 
-Accepted rather than fixed, because the branch cannot be entered. `cancellable`
-arrives from `BaseWallet.cancellableTransactions`, which is `protected`,
-initialised `false`, and has no setter anywhere in the SDK. The bridge does not
-subclass the wallet, so every transaction it sends passes `false` and no
-cancellation nullifier is ever emitted. Operationally the bridge does not want
-the feature either: it submits and reconciles through the idempotency store
-rather than leaving a transaction pending for someone to withdraw.
+The branch is now deleted. It was previously accepted rather than fixed on the
+grounds that it could not be entered: `cancellable` arrives from
+`BaseWallet.cancellableTransactions`, which is `protected`, initialised `false`,
+and has no setter anywhere in the SDK, and the bridge does not subclass the
+wallet. That reasoning held for today's SDK and not for tomorrow's. The finding
+named its own trigger, a later SDK making cancellation the default, at which
+point the account would have begun advertising a cancellation it cannot honour.
+Deleting the branch fails safe against that: the account offers no cancellation
+rather than one it cannot deliver.
 
-What this costs: if a later SDK makes cancellation the default, the account would
-begin advertising a cancellation it cannot honour. That is the finding as
-written, and it is the trigger for revisiting this. Both fixes move the contract
-class ID and therefore the account address, so either lands before a deployment
-is fixed, not after.
+The alternative was NM-1019's own recommendation, branching on zero non-empty
+calls so a cancellation carries no transfer. That was not taken. It skips
+`assert_declared_matches_transfer`, the zero-recipient assert, the membership
+proof and the `check_spending_public` enqueue together, so it is a second shape
+through the entrypoint on which the fee branch still runs, and a compromised
+signing key could burn fee juice on empty cancellations. Operationally the bridge
+does not want the feature either: it submits and reconciles through the
+idempotency store rather than leaving a transaction pending for someone to
+withdraw.
+
+The `cancellable` ABI parameter remains, read and ignored. Entrypoint arguments
+are encoded positionally, so removing it would shift every argument after it.
 
 ## Build supply chain
 

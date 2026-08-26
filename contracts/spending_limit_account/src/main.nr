@@ -33,7 +33,6 @@ pub contract SpendingLimitAccount {
         protocol::{
             abis::function_selector::FunctionSelector,
             address::AztecAddress,
-            constants::DOM_SEP__TX_NULLIFIER,
             hash::poseidon2_hash_with_separator,
             merkle_tree::root::root_from_sibling_path,
             traits::{FromField, Hash, Serialize, ToField},
@@ -372,42 +371,30 @@ pub contract SpendingLimitAccount {
             .check_spending_public(declared_amount, claimed_root, call_target)
             .enqueue(self.context);
 
-        // --- Cancellation nullifier ---
-        // NOT SUPPORTED, and deliberately left as-is. NM-1019 [Low] observes
-        // that this account emits a cancellation nullifier while offering no
-        // way to cancel: the only path here is a real transfer, so replacing a
-        // pending tx costs an allowlisted recipient, an unspent per-tx cap and
-        // room in the daily window, and there are reachable states with none of
-        // those. The observation is correct.
+        // --- Cancellation ---
+        // NOT SUPPORTED, and no longer advertised. NM-1019 [Low] observed that
+        // this account pushed a cancellation nullifier while offering no way to
+        // use it: the only path through this entrypoint is a real transfer, so
+        // cancelling meant sending another one, which costs an allowlisted
+        // recipient, unspent per-tx cap and room in the daily window. There are
+        // reachable states with none of those, and they are exactly the states
+        // where cancelling matters.
         //
-        // Not fixed this pass because the branch is unreachable. `cancellable`
-        // comes from `BaseWallet.cancellableTransactions`, which is `protected`,
-        // initialised `false`, and has no setter anywhere in the SDK; the bridge
-        // does not subclass the wallet. Every transaction it sends passes
-        // `false`, so no nullifier is ever pushed and no cancellation is ever
-        // advertised.
+        // The branch is deleted rather than completed. Completing it means
+        // NM-1019's recommendation, branching on zero non-empty calls, which
+        // skips assert_declared_matches_transfer, the zero-recipient assert,
+        // the membership proof and the check_spending_public enqueue together.
+        // That path can move no value, but it is a second shape through the
+        // entrypoint and the fee branch still runs on it, so a compromised
+        // signing key could burn fee juice on empty cancellations. Deleting
+        // keeps the entrypoint single-shape and fails safe: if a future SDK
+        // makes cancellation the default, this account offers none rather than
+        // advertising one it cannot honour, which was the trigger the finding
+        // named.
         //
-        // Two ways out when it is worth spending a class ID change on. Delete
-        // the branch, which keeps the entrypoint single-shape and fails safe if
-        // a future SDK flips that default (no cancellation offered, rather than
-        // one offered and not deliverable). Or take NM-1019's recommendation and
-        // branch on zero non-empty calls, which means skipping
-        // assert_declared_matches_transfer, the zero-recipient assert, the
-        // allowlist assert and the check_spending_public enqueue together. That
-        // path can move no value, but it is a second shape through the
-        // entrypoint and the fee branch still runs on it, so a compromised key
-        // could burn fee juice on empty cancellations.
-        //
-        // The ABI parameter stays either way: the SDK encodes it positionally.
-        if cancellable {
-            let tx_nullifier = poseidon2_hash_with_separator(
-                [app_payload.tx_nonce],
-                DOM_SEP__TX_NULLIFIER,
-            );
-            // v5.1.0 renamed PrivateContext::push_nullifier to
-            // push_nullifier_unsafe.
-            self.context.push_nullifier_unsafe(tx_nullifier);
-        }
+        // The `cancellable` ABI parameter stays. The SDK encodes entrypoint
+        // arguments positionally, so removing it would shift every argument
+        // after it. It is now read and ignored.
     }
 
     // ================================================================

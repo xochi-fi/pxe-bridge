@@ -114,15 +114,16 @@ Cross-cutting fixes from security audit against 2026 threat landscape
       untimelocked admin write of `daily_spent = 0` is the same impact as
       NM-1019 [High] "Daily counter can be reset to zero", just reached
       through the admin instead of through field arithmetic.
-- [ ] **Transaction cancellation** -- DEFERRED, not fixed this pass. NM-1019
-      [Low] "cancellable transactions cannot be cancelled" is correct: the
-      entrypoint emits a cancellation nullifier and offers no path to use it.
-      The branch is unreachable, because `BaseWallet.cancellableTransactions`
-      is `protected`, hardcoded `false`, has no SDK setter, and the bridge does
-      not subclass the wallet. Resolve by deleting the branch (preferred, fails
-      safe if a future SDK flips that default) or by branching on zero
-      non-empty calls. Both move the contract class ID, so either lands before
-      an address is fixed (see the class ID note under Phase 2). Rationale in
+- [x] **Transaction cancellation** -- FIXED. NM-1019 [Low] "cancellable
+      transactions cannot be cancelled" was correct: the entrypoint pushed a
+      cancellation nullifier and offered no path to use it. The branch is
+      deleted, which was the preferred of the two resolutions because it fails
+      safe if a future SDK flips `BaseWallet.cancellableTransactions` off its
+      hardcoded `false`. The alternative, branching on zero non-empty calls,
+      was rejected: it is a second shape through the entrypoint on which the
+      fee branch still runs. The `cancellable` ABI parameter stays, read and
+      ignored, because entrypoint arguments are positional. Landed with the
+      Merkle allowlist so the two share one class ID move. Rationale in
       SECURITY.md, "Transaction cancellation is not supported".
 
 Known limitations (acceptable for alpha):
