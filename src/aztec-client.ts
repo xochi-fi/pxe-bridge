@@ -7,7 +7,6 @@ import type { GasFees } from "@aztec/stdlib/gas";
 import { PostSubmissionError } from "./types.js";
 import type { CreateNoteParams, CreateNoteResult, FeeJuiceClaim, IAztecClient } from "./types.js";
 import {
-  ALLOWLIST_SIZE,
   SpendingLimitAccountContract,
   type SpendingLimitConfig,
 } from "./spending-limit-account.js";
@@ -494,17 +493,19 @@ export class AztecClient implements IAztecClient {
 
     const submit = async () => {
       if (this.spendingLimitContract) {
-        // The hint must mask live storage POSITIONALLY, so it has to be read
-        // fresh: check_spending_public re-derives the allowlist at inclusion
-        // time and rejects a hint built against a superseded list. Carrying
-        // every live slot maximises the set the recipient hides in; the
-        // contract only enforces a floor.
+        // Reconcile before spending a fee. The bridge holds the allowlist off
+        // chain now, so a drift between its copy and the account's stored root
+        // would otherwise surface as every transfer reverting in public, with
+        // nothing on chain to say which side is stale.
         //
-        // The declared amount and recipient are NOT set here. The entrypoint
-        // reads them off the payload it is signing, so there is no per-call
-        // state for a concurrent send to overwrite and nothing to serialize
-        // around.
-        this.spendingLimitContract.setAllowlistHint(await this.readAllowlist());
+        // Cheap: one utility read, the same shape the allowlist read used to
+        // be. The tree itself is built once and cached.
+        //
+        // Neither the declared amount and recipient nor the membership witness
+        // are pushed in here. The entrypoint derives all three from the payload
+        // it is signing, so there is no per-call state for a concurrent send to
+        // overwrite and nothing to serialize around.
+        await this.assertAllowlistRootCurrent();
       }
 
       return withTimeout(
@@ -608,11 +609,17 @@ export class AztecClient implements IAztecClient {
   }
 
   /**
-   * Reads the account's allowlist slots via its get_allowlist utility function.
-   * Returns entries in slot order, zero-padded, which is the shape the
-   * entrypoint's allowlist_hint expects.
+   * Checks the configured allowlist against the account's stored root.
+   *
+   * Replaces the old readAllowlist. There is no set on chain to read any more,
+   * so this reconciles in the other direction: the bridge asserts that the tree
+   * it holds is the one the account is enforcing.
+   *
+   * This is checkable rather than trusted, which matters for monitoring. A
+   * compromised admin cannot publish one set and commit another, because the
+   * root commits to exactly the set that produces it.
    */
-  private async readAllowlist(): Promise<string[]> {
+  private async assertAllowlistRootCurrent(): Promise<void> {
     if (!this.wallet || !this.solverAddress || !this.spendingLimitContract) {
       throw new Error("Spending limit account not initialized");
     }
@@ -625,28 +632,31 @@ export class AztecClient implements IAztecClient {
     );
     // `from` scopes the utility execution. Without it PXE throws, and its own
     // error formatter then crashes on undefined args, masking the cause.
-    const entries = (await account.methods["get_allowlist"]!().simulate({
+    const raw = (await account.methods["get_allowlist_root"]!().simulate({
       from: this.solverAddress,
     })) as unknown;
 
     // simulate() resolves to { result, offchainEffects, offchainMessages };
-    // the utility's [Field; N] return value is under `result`.
-    const value = (entries as { result?: unknown })?.result ?? entries;
-    const raw: unknown[] = Array.isArray(value)
-      ? value
-      : value && typeof value === "object"
-        ? Object.values(value as Record<string, unknown>)
-        : [];
-    if (raw.length !== ALLOWLIST_SIZE) {
+    // the utility's Field return value is under `result`.
+    const value = (raw as { result?: unknown })?.result ?? raw;
+    if (value === undefined || value === null) {
+      throw new Error("get_allowlist_root returned nothing");
+    }
+    const onChain =
+      typeof value === "bigint" ? value : BigInt((value as { toString(): string }).toString());
+
+    const tree = await this.spendingLimitContract.allowlistTree();
+    const local = tree.root.toBigInt();
+    if (onChain !== local) {
       throw new Error(
-        `get_allowlist returned ${raw.length} entries, expected ${ALLOWLIST_SIZE}`,
+        `Allowlist root mismatch: the account is enforcing ` +
+          `0x${onChain.toString(16).padStart(64, "0")} but the configured allowlist produces ` +
+          `0x${local.toString(16).padStart(64, "0")}. Either an admin changed the allowlist ` +
+          `and this bridge's configuration was not updated, or the configuration is for a ` +
+          `different account. Reconcile before sending; no transfer can succeed until the ` +
+          `two agree.`,
       );
     }
-
-    return raw.map((e) => {
-      const v = typeof e === "bigint" ? e : BigInt((e as { toString(): string }).toString());
-      return "0x" + v.toString(16).padStart(64, "0");
-    });
   }
 
   /**

@@ -35,13 +35,14 @@ import type { DefaultAccountEntrypointOptions } from "@aztec/entrypoints/account
 import type { GasSettings } from "@aztec/stdlib/gas";
 import type { CompleteAddress } from "@aztec/stdlib/contract";
 import { BaseAccount, type Account, type AccountContract } from "@aztec/aztec.js/account";
+import {
+  ALLOWLIST_TREE_HEIGHT,
+  AllowlistTree,
+  type AllowlistRecipient,
+} from "./allowlist-tree.js";
 
 // Must match DOM_SEP__SPENDING_LIMIT in the Noir contract (main.nr)
 export const DOM_SEP_SPENDING_LIMIT = 10042;
-
-// Must match ALLOWLIST_SIZE in main.nr. It is part of the entrypoint ABI, so a
-// mismatch changes the selector and the account address.
-export const ALLOWLIST_SIZE = 8;
 
 // The only call this account may make. The entrypoint reads the declared
 // amount and recipient out of this call's args, and main.nr pins the same
@@ -62,22 +63,27 @@ export interface SpendingLimitConfig {
   /** Single token this account may move. Fixed at construction, no setter. */
   token: string; // AztecAddress as 0x-prefixed 64-char hex
   /**
-   * Written to allowlist slot 0 by the constructor. Without it the allowlist is
-   * empty at deployment and every addition waits out the timelock, so the
-   * bridge could not transfer for 24 hours after each cutover.
+   * Secret seed every leaf salt derives from. SENSITIVE: it is what makes the
+   * allowlist a secret set rather than an unpublished one. Anyone holding it
+   * can test a candidate address against a leaf.
+   *
+   * Losing it is unrecoverable. The account stores only a root, so the set
+   * cannot be read back off chain the way the old array could, and without the
+   * seed no witness can be built and no allowlist change can be made. Archive
+   * it with the same discipline as the contract artifact.
    */
-  seedRecipient: string; // AztecAddress as 0x-prefixed 64-char hex
+  allowlistSeed: string; // 32-byte hex
   /**
-   * How many allowlist slots a transfer must carry, so a degenerate client
-   * cannot publish the recipient by carrying only its slot. 1 means no floor.
-   * Stored on-chain and changed only through the limits timelock, so it cannot
-   * rise underneath an already-proven transaction. Raise it as the allowlist
-   * grows; the contract does not do so automatically.
+   * The allowlist, as (address, tree position) pairs. Positions not named here
+   * hold a commitment to the zero address under that position's own salt, so
+   * they are indistinguishable from occupied ones without the seed.
+   *
+   * The whole set installs at construction as one root, which is why there is
+   * no seed recipient any more: the array could only seed one entry and every
+   * further addition waited out a 24h timelock.
    */
-  minAnonymitySet: number;
+  allowlistRecipients: readonly AllowlistRecipient[];
 }
-
-const ZERO_ADDRESS = "0x" + "0".repeat(64);
 
 // ============================================================
 // Account contract
@@ -85,22 +91,21 @@ const ZERO_ADDRESS = "0x" + "0".repeat(64);
 
 export class SpendingLimitAccountContract implements AccountContract {
   /**
-   * Live allowlist snapshot for the next transaction.
+   * The allowlist tree, shared with every entrypoint BY REFERENCE through this
+   * holder and populated in place.
    *
-   * Shared with every entrypoint BY REFERENCE and mutated in place. The SDK
-   * calls AccountContract.getAccount() afresh on each resolution and does not
-   * memoize, so an entrypoint owning its own copy is reliably not the one that
-   * ends up building the request: the value would be written to an orphan and
-   * the payload would carry zeros.
+   * A holder rather than a field because the SDK calls
+   * AccountContract.getAccount() afresh on each resolution and does not
+   * memoize, so an entrypoint capturing the tree by value at construction is
+   * reliably not the one that ends up building the request.
    *
-   * Sharing this across concurrent sends is safe in a way that sharing the
-   * declared amount and recipient was not. Every caller wants the same live
-   * list, the hint is not signed, and the contract validates it positionally
-   * against storage at inclusion time. Whichever snapshot a payload ends up
-   * carrying is a valid one; carrying a slightly newer one is if anything
-   * better, since a revocation in it is a revocation that should apply.
+   * Sharing one tree across concurrent sends is safe. It is not per-call state:
+   * every caller wants the same set, the witness derived from it is not signed,
+   * and the contract revalidates the root it produces against live storage at
+   * inclusion time. Whichever version of the tree a payload ends up proving
+   * against either matches the stored root or does not.
    */
-  private allowlistHint: string[] = new Array(ALLOWLIST_SIZE).fill(ZERO_ADDRESS);
+  private readonly treeRef: { tree: AllowlistTree | null } = { tree: null };
 
   constructor(
     private signingPrivateKey: GrumpkinScalarType,
@@ -108,22 +113,18 @@ export class SpendingLimitAccountContract implements AccountContract {
   ) {}
 
   /**
-   * Publish the live allowlist for subsequent sends.
+   * Build the tree once and cache it.
    *
-   * Unlike the amount and recipient, this cannot be derived from the payload:
-   * it is a snapshot of on-chain state that only the caller can read.
+   * Costs 2 * ALLOWLIST_CAPACITY hashes, roughly 0.7s, because per-leaf salts
+   * leave no canonical empty subtrees to short-circuit. Paid at deploy or at
+   * first send, not per transfer.
    */
-  setAllowlistHint(allowlistHint: string[]): void {
-    if (allowlistHint.length !== ALLOWLIST_SIZE) {
-      throw new Error(
-        `allowlistHint must have ${ALLOWLIST_SIZE} entries, got ${allowlistHint.length}`,
-      );
-    }
-    // Copy into the existing array rather than replacing it: entrypoints
-    // already handed out hold a reference to this one.
-    for (let i = 0; i < ALLOWLIST_SIZE; i++) {
-      this.allowlistHint[i] = allowlistHint[i]!;
-    }
+  async allowlistTree(): Promise<AllowlistTree> {
+    this.treeRef.tree ??= await AllowlistTree.build(
+      this.config.allowlistSeed,
+      this.config.allowlistRecipients,
+    );
+    return this.treeRef.tree;
   }
 
   // v5 AccountContract interface member. Address derivation includes an
@@ -159,6 +160,7 @@ export class SpendingLimitAccountContract implements AccountContract {
 
     const schnorr = new Schnorr();
     const pubKey = await schnorr.computePublicKey(this.signingPrivateKey);
+    const tree = await this.allowlistTree();
 
     return {
       constructorName: "constructor",
@@ -169,8 +171,10 @@ export class SpendingLimitAccountContract implements AccountContract {
         this.config.dailyLimit,
         AztecAddress.fromStringUnsafe(this.config.admin),
         AztecAddress.fromStringUnsafe(this.config.token),
-        AztecAddress.fromStringUnsafe(this.config.seedRecipient),
-        this.config.minAnonymitySet,
+        // The whole allowlist, as one root. This value feeds address
+        // derivation through the constructor args, so a different seed or a
+        // different set is a different account.
+        tree.root,
       ],
     };
   }
@@ -187,7 +191,7 @@ export class SpendingLimitAccountContract implements AccountContract {
     const entrypoint = new SpendingLimitEntrypoint(
       completeAddress.address,
       authProvider,
-      this.allowlistHint,
+      this.treeRef,
     );
     return new BaseAccount(entrypoint, authProvider, completeAddress);
   }
@@ -222,18 +226,24 @@ class SpendingLimitAuthWitnessProvider implements AuthWitnessProvider {
 
 /**
  * Entrypoint that encodes the spending limit contract's extended signature:
- *   entrypoint(AppPayload, u8, bool, u128, AztecAddress, [Field; 8])
+ *   entrypoint(AppPayload, u8, bool, u128, AztecAddress, Field, Field,
+ *              [Field; ALLOWLIST_TREE_HEIGHT])
  *
  * Signs over poseidon2([payloadHash, declaredAmount, declaredRecipient],
  * DOM_SEP_SPENDING_LIMIT) instead of plain payloadHash, binding the
  * spending info to the transaction cryptographically.
+ *
+ * The membership witness is deliberately NOT signed, for the same reason the
+ * allowlist hint was not: it is a snapshot of state the signer cannot know at
+ * signing time, and the circuit rebuilds the leaf from the signed recipient, so
+ * a witness for anyone else proves nothing about this transfer.
  */
 class SpendingLimitEntrypoint implements EntrypointInterface {
   constructor(
     private address: import("@aztec/stdlib/aztec-address").AztecAddress,
     private auth: AuthWitnessProvider,
     /** Shared with the contract and every sibling entrypoint. Never reassign. */
-    private allowlistHint: string[],
+    private treeRef: { tree: AllowlistTree | null },
   ) {}
 
   /**
@@ -309,6 +319,45 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
   }
 
   /**
+   * Membership witness for the recipient this payload actually pays.
+   *
+   * Looked up here rather than pushed in beforehand for the same reason the
+   * declaration is derived rather than declared: the recipient comes off the
+   * payload being signed, so there is no per-call state for a concurrent send
+   * to overwrite and nothing to serialize around.
+   *
+   * An unlisted recipient fails HERE, before a fee is committed. The circuit
+   * would catch it too, at the root comparison in public, but set_as_fee_payer
+   * runs in the non-revertible setup phase so that failure costs money.
+   */
+  private async witnessFor(
+    recipient: import("@aztec/stdlib/aztec-address").AztecAddress,
+  ): Promise<import("./allowlist-tree.js").AllowlistWitness> {
+    // No recipient means no transfer: a private view simulation routed through
+    // the entrypoint. The arguments still have to encode. See deriveDeclaration.
+    if (recipient.isZero()) {
+      return AllowlistTree.zeroWitness();
+    }
+
+    const tree = this.treeRef.tree;
+    if (tree === null) {
+      throw new Error(
+        "Spending limit account has no allowlist tree; call allowlistTree() before sending",
+      );
+    }
+
+    const witness = tree.witnessFor(recipient.toString());
+    if (witness === undefined) {
+      throw new Error(
+        `Recipient ${recipient.toString()} is not in the allowlist. The bridge holds the ` +
+          `allowlist off chain, so this means either the recipient was never added or the ` +
+          `configured set has drifted from the account's stored root.`,
+      );
+    }
+    return witness;
+  }
+
+  /**
    * Everything both entrypoint paths need: encoded args, selector, signature.
    *
    * Extracted because the two used to build it independently, line for line,
@@ -336,16 +385,21 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
 
     const encodedCalls = await EncodedAppEntrypointCalls.create(exec.calls, txNonce);
     const { amount, recipient } = await this.deriveDeclaration(exec.calls);
+    const witness = await this.witnessFor(recipient);
 
     const abi = this.getEntrypointAbi();
     const encodedArgs = encodeArguments(abi, [
       encodedCalls,
       feePaymentMethodOptions,
+      // Read and ignored by the contract since the cancellation branch was
+      // deleted. The parameter stays because arguments are positional.
       !!cancellable,
       // Raw bigint: the ABI parameter is a u128 integer, not a field.
       amount,
       recipient,
-      this.allowlistHint.map((h) => Fr.fromString(h)),
+      witness.leafSalt,
+      new Fr(BigInt(witness.leafIndex)),
+      witness.siblingPath,
     ]);
     const functionSelector = await FunctionSelector.fromNameAndParameters(abi.name, abi.parameters);
 
@@ -437,10 +491,15 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
    * ABI for the extended entrypoint signature. Hand-maintained against the
    * Noir contract's entrypoint:
    *
-   *   entrypoint(AppPayload, u8, bool, u128, AztecAddress, [Field; ALLOWLIST_SIZE])
+   *   entrypoint(AppPayload, u8, bool, u128, AztecAddress, Field, Field,
+   *              [Field; ALLOWLIST_TREE_HEIGHT])
    *
-   * Drift is not a type error anywhere. It changes the selector, which changes
-   * the contract class, which changes the account address.
+   * Drift is not a type error anywhere, and it does NOT move the account
+   * address: the class ID derives from the compiled artifact, not from this
+   * table. What drift produces is a wrong selector or misplaced arguments
+   * against the SAME address, which is a transaction that fails on chain.
+   * `entrypoint_abi_matches_artifact` in tests/spending-limit-account.test.ts
+   * is what catches it.
    */
   private getEntrypointAbi(): FunctionAbi {
     return {
@@ -528,10 +587,19 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
           },
         },
         {
-          // Hand-maintained pair with `allowlist_hint: [Field; ALLOWLIST_SIZE]`
-          // in main.nr's entrypoint.
-          name: "allowlist_hint",
-          type: { kind: "array", length: ALLOWLIST_SIZE, type: { kind: "field" } },
+          // Hand-maintained triple with `leaf_salt`, `leaf_index` and
+          // `sibling_path` in main.nr's entrypoint. Order matters: arguments
+          // are encoded positionally.
+          name: "leaf_salt",
+          type: { kind: "field" },
+        },
+        {
+          name: "leaf_index",
+          type: { kind: "field" },
+        },
+        {
+          name: "sibling_path",
+          type: { kind: "array", length: ALLOWLIST_TREE_HEIGHT, type: { kind: "field" } },
         },
       ],
       returnTypes: [],

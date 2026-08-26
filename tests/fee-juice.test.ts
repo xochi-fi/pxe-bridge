@@ -37,8 +37,8 @@ const SPENDING_LIMITS: SpendingLimitConfig = {
   dailyLimit: 10_000n,
   admin: "0x" + "0a".repeat(32),
   token: "0x" + "0b".repeat(32),
-  seedRecipient: RECIPIENT,
-  minAnonymitySet: 1,
+  allowlistSeed: "0x" + "07".repeat(32),
+  allowlistRecipients: [{ address: RECIPIENT, index: 0 }],
 };
 
 /** The salt the bridge derives, computed independently of the code under test. */

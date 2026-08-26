@@ -1151,6 +1151,38 @@ pub contract SpendingLimitAccount {
         assert(ALLOWLIST_TREE_HEIGHT == 10, "allowlist tree height changed");
     }
 
+    // CROSS-CHECK against the TypeScript side. The bridge builds the tree
+    // off-chain and the contract only ever verifies paths, so the two
+    // implementations never meet: a mismatched domain separator or a swapped
+    // argument order produces witnesses that reproduce a different root, and
+    // every transfer fails on the root comparison with nothing naming the
+    // cause. These values are pinned identically in
+    // tests/allowlist-tree.test.ts. Modelled on Aztec's own
+    // test_merkle_roots_match_typescript.
+    #[test]
+    fn leaf_and_node_hashes_match_typescript() {
+        assert_eq(
+            allowlist_leaf(A, SALT_A),
+            0x2b3ecd2e783b91419ce504e161af3369b15693052b8d91053c11ae18713e866c,
+        );
+        assert_eq(
+            allowlist_leaf(B, SALT_B),
+            0x153a2305b86080c96c3097c14ea9c839f2bba69bf3d2d975e59f7dabf5fe6179,
+        );
+        assert_eq(
+            aztec::protocol::merkle_tree::merkle_tree::merkle_hash(
+                allowlist_leaf(A, SALT_A),
+                allowlist_leaf(B, SALT_B),
+            ),
+            0x133cf86ffe27a4828f3f6691affe6b955c8daac660e3b5221fffacf70eee5d2c,
+        );
+        // An empty position commits to the zero address, not to zero.
+        assert_eq(
+            allowlist_leaf(0, 0x5555),
+            0x0652dcfe4f122ce546e2328a45993c0fb0d23fc3a369433596fa3641255228ad,
+        );
+    }
+
     // Leaves and internal nodes must not share a hash. Without the domain
     // split, an internal node is a well-formed leaf and a path one level short
     // proves membership of something that is not a recipient.

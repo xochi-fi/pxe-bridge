@@ -1,6 +1,6 @@
 import { AztecClient, FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR, TX_TIMEOUT_MS } from "./aztec-client.js";
 import { createApp, RESPONSE_TIMEOUT_MS } from "./server.js";
-import { FeeJuiceClaimSchema } from "./types.js";
+import { AllowlistRecipientsSchema, FeeJuiceClaimSchema } from "./types.js";
 import { TransactionLimits, type LimitsConfig } from "./limits.js";
 import { AuditLogger, replayAuditLog } from "./audit.js";
 import { IdempotencyStore } from "./idempotency.js";
@@ -161,12 +161,8 @@ if (limits && !ADMIN_KEY) {
 let spendingLimitConfig: SpendingLimitConfig | undefined;
 const SPENDING_LIMIT_ADMIN = process.env["PXE_BRIDGE_SPENDING_LIMIT_ADMIN"];
 const SPENDING_LIMIT_TOKEN = process.env["PXE_BRIDGE_SPENDING_LIMIT_TOKEN"];
-const SPENDING_LIMIT_SEED = process.env["PXE_BRIDGE_SPENDING_LIMIT_SEED_RECIPIENT"];
-// Defaults to 1 (no floor), which is the only value a freshly seeded
-// single-entry allowlist can satisfy. Raise it as the allowlist grows.
-const SPENDING_LIMIT_MIN_ANON = Number(
-  process.env["PXE_BRIDGE_SPENDING_LIMIT_MIN_ANONYMITY"] ?? "1",
-);
+const ALLOWLIST_SEED = process.env["PXE_BRIDGE_ALLOWLIST_SEED"];
+const ALLOWLIST_RECIPIENTS_RAW = process.env["PXE_BRIDGE_ALLOWLIST_RECIPIENTS"];
 // `0x00...0` satisfies the 32-byte hex pattern, so every address below is
 // checked against it separately. The contract asserts all three are non-zero,
 // and without this the mistake surfaces as an in-circuit assert part-way
@@ -204,25 +200,71 @@ if (SPENDING_LIMIT_ADMIN) {
     );
     process.exit(1);
   }
-  // Seeded into allowlist slot 0 by the constructor. Without it the account
-  // cannot transfer until an addition clears the 24h timelock.
+  // Every leaf salt derives from this. It is what makes the allowlist a secret
+  // set rather than an unpublished one: addresses are enumerable, so without a
+  // secret salt anyone could recompute a leaf and test candidates against it.
+  //
+  // Zero is rejected along with the wrong shape. It is a well-formed Fr and
+  // would produce a perfectly valid tree, just one whose salts anyone can
+  // reproduce, which is the whole failure this variable exists to prevent and
+  // is silent on chain.
   if (
-    !SPENDING_LIMIT_SEED ||
-    !/^0x[0-9a-fA-F]{64}$/.test(SPENDING_LIMIT_SEED) ||
-    IS_ZERO_ADDRESS.test(SPENDING_LIMIT_SEED)
+    !ALLOWLIST_SEED ||
+    !/^0x[0-9a-fA-F]{64}$/.test(ALLOWLIST_SEED) ||
+    IS_ZERO_ADDRESS.test(ALLOWLIST_SEED)
   ) {
     console.error(
-      "[pxe-bridge] PXE_BRIDGE_SPENDING_LIMIT_SEED_RECIPIENT must be a non-zero 32-byte hex address when the spending limit account is enabled",
+      "[pxe-bridge] PXE_BRIDGE_ALLOWLIST_SEED must be a non-zero 32-byte hex value when the " +
+        "spending limit account is enabled -- it is the secret every allowlist leaf salt " +
+        "derives from",
     );
     process.exit(1);
   }
-  if (
-    !Number.isInteger(SPENDING_LIMIT_MIN_ANON) ||
-    SPENDING_LIMIT_MIN_ANON < 1 ||
-    SPENDING_LIMIT_MIN_ANON > 8
-  ) {
+  // Warned rather than refused. Unlike the signing key this cannot move funds:
+  // leaking it costs recipient privacy, not custody. It is still a secret, and
+  // it belongs in the same store the signing key comes from.
+  if (process.env["NODE_ENV"] === "production") {
+    console.warn(
+      "[pxe-bridge] PXE_BRIDGE_ALLOWLIST_SEED is being read from the environment in " +
+        "production. It is a secret: anyone holding it can test a candidate address against " +
+        "the on-chain allowlist. Environment variables are visible in /proc/pid/environ, " +
+        "docker inspect and crash dumps.",
+    );
+  }
+
+  // The allowlist itself. Losing this and the seed together is unrecoverable:
+  // the account stores only a root, so unlike the old public array the set
+  // cannot be read back off chain.
+  if (!ALLOWLIST_RECIPIENTS_RAW) {
     console.error(
-      "[pxe-bridge] PXE_BRIDGE_SPENDING_LIMIT_MIN_ANONYMITY must be an integer in [1, 8]",
+      "[pxe-bridge] PXE_BRIDGE_ALLOWLIST_RECIPIENTS is required when the spending limit " +
+        'account is enabled. JSON, e.g. [{"address":"0x...","index":137}]',
+    );
+    process.exit(1);
+  }
+  let allowlistJson: unknown;
+  try {
+    allowlistJson = JSON.parse(ALLOWLIST_RECIPIENTS_RAW);
+  } catch {
+    console.error("[pxe-bridge] PXE_BRIDGE_ALLOWLIST_RECIPIENTS is not valid JSON");
+    process.exit(1);
+  }
+  const allowlistParsed = AllowlistRecipientsSchema.safeParse(allowlistJson);
+  if (!allowlistParsed.success) {
+    console.error(
+      "[pxe-bridge] PXE_BRIDGE_ALLOWLIST_RECIPIENTS must be an array of " +
+        "{address: 32-byte hex, index: integer in [0, 1023]}: " +
+        allowlistParsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
+    );
+    process.exit(1);
+  }
+  // An empty allowlist deploys fine and cannot transfer to anyone. That is a
+  // legitimate state to choose, but never one to reach by leaving a variable
+  // set to "[]" by accident.
+  if (allowlistParsed.data.length === 0) {
+    console.error(
+      "[pxe-bridge] PXE_BRIDGE_ALLOWLIST_RECIPIENTS is empty, so no transfer could ever " +
+        "succeed. Name at least one recipient.",
     );
     process.exit(1);
   }
@@ -257,8 +299,8 @@ if (SPENDING_LIMIT_ADMIN) {
     dailyLimit: limitsConfig.dailyLimit,
     admin: SPENDING_LIMIT_ADMIN,
     token: SPENDING_LIMIT_TOKEN,
-    seedRecipient: SPENDING_LIMIT_SEED,
-    minAnonymitySet: SPENDING_LIMIT_MIN_ANON,
+    allowlistSeed: ALLOWLIST_SEED,
+    allowlistRecipients: allowlistParsed.data,
   };
 }
 

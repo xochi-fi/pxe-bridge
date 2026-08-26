@@ -100,6 +100,25 @@ export const FeeJuiceClaimSchema = z.object({
 export type FeeJuiceClaim = z.infer<typeof FeeJuiceClaimSchema>;
 
 /**
+ * One allowlisted recipient and the tree position it occupies.
+ *
+ * The index is not decorative. The account stores only a root, so the bridge
+ * has to reproduce the exact tree the admin built, and a leaf at the wrong
+ * position produces a different root. It is also published in the admin's
+ * `update_recipient` call, which is why positions are assigned randomly rather
+ * than filled left to right: a first touch of position k would otherwise be
+ * visibly an addition.
+ *
+ * The upper bound is 2^ALLOWLIST_TREE_HEIGHT, which the contract also asserts.
+ */
+export const AllowlistRecipientSchema = z.object({
+  address: z.string().regex(/^0x[0-9a-fA-F]{64}$/, "Must be a 32-byte hex AztecAddress"),
+  index: z.number().int().min(0).max(1023),
+});
+
+export const AllowlistRecipientsSchema = z.array(AllowlistRecipientSchema);
+
+/**
  * Raised when createNote fails at a point where the transfer may already be on
  * chain: the send deadline expired, or the transfer succeeded and only reading
  * the result back failed.

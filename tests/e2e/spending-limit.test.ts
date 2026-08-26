@@ -23,7 +23,7 @@ import {
  *
  *   PHASE ORDERING -- an over-limit transfer must revert AND leave no note.
  *   If end_setup() ever moves below execute_calls the transfer lands in the
- *   non-revertible phase, every limit silently becomes advisory, and all 44
+ *   non-revertible phase, every limit silently becomes advisory, and all 54
  *   Noir tests still pass. Nothing but this test can catch that.
  *
  *   L2 REVOCATION -- an immediate removal must stop further transfers to that
@@ -58,9 +58,15 @@ const MINT_AMOUNT = 100_000_000_000_000_000_000_000n; // 100k tokens
 // test repeats until a limit rejects one.
 const FEE_JUICE_AMOUNT = 1_000_000_000_000_000_000_000n;
 
-// Any well-formed address works: the allowlist only ever compares equality.
+// Any well-formed address works: the tree only ever commits to it.
 const SEED_RECIPIENT = "0x" + "11".repeat(32);
 const UNLISTED_RECIPIENT = "0x" + "22".repeat(32);
+
+// The secret every leaf salt derives from, and the position the one recipient
+// occupies. The index is deliberately not 0: filling left to right makes the
+// first touch of a position visibly an addition.
+const ALLOWLIST_SEED = "0x" + "07".repeat(32);
+const SEED_RECIPIENT_INDEX = 137;
 
 
 describe("spending limit account (e2e)", () => {
@@ -89,9 +95,8 @@ describe("spending limit account (e2e)", () => {
       dailyLimit: DAILY_LIMIT,
       admin: adminAddress,
       token: tokenAddress,
-      seedRecipient: SEED_RECIPIENT,
-      // A one-entry allowlist can only satisfy a floor of 1.
-      minAnonymitySet: 1,
+      allowlistSeed: ALLOWLIST_SEED,
+      allowlistRecipients: [{ address: SEED_RECIPIENT, index: SEED_RECIPIENT_INDEX }],
     };
 
     client = new AztecClient(
@@ -165,6 +170,10 @@ describe("spending limit account (e2e)", () => {
     expect(after).toBe(before);
   });
 
+  // Rejected before a proof exists, and now before a witness exists: the tree
+  // has no leaf for this address, so there is nothing to build a path from.
+  // Pinned to the message rather than left as a bare throw, so a failure for
+  // some unrelated reason does not pass as allowlist enforcement.
   it("rejects a recipient that is not allowlisted", async (ctx) => {
     if (deployFailure) return ctx.skip();
     await expect(
@@ -174,7 +183,7 @@ describe("spending limit account (e2e)", () => {
         recipient: UNLISTED_RECIPIENT,
         amount: "1000",
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow("is not in the allowlist");
   });
 
   // TOKEN PIN. check_spending_public asserts the matched call's target equals
@@ -274,27 +283,27 @@ describe("spending limit account (e2e)", () => {
     expect(rejected).toBe(true);
   }, 600_000);
 
-  // L2 REVOCATION, the strong half: a removal must reach a transaction that is
-  // ALREADY PROVEN. A private proof commits to the allowlist as it stood when
-  // the proof was made, so nothing inside it can notice a later removal. Only
-  // check_spending_public re-derives the list at inclusion and rebinds the hint
-  // to it (invariant 4 on the entrypoint). That check alone is the immediacy
-  // claim, and this is the only test that reaches it: every other rejection in
-  // this file happens in private, before a proof exists.
+  // L2 REVOCATION, the strong half: a revocation must reach a transaction that
+  // is ALREADY PROVEN. A private proof commits to the root as it stood when the
+  // proof was made, so nothing inside it can notice a later change. Only
+  // check_spending_public compares the proven root against storage at inclusion
+  // (invariant 5 on the entrypoint). That check alone is the immediacy claim,
+  // and this is the only test that reaches it: every other rejection in this
+  // file happens before a proof exists.
   //
-  // Two transfers are proven together, against the same allowlist and the same
-  // anchor state, and submitted either side of the removal. The node reports a
-  // bare "reverted" with no reason, so the reason is established by the pair
+  // Two transfers are proven together, against the same root and the same
+  // anchor state, and submitted either side of the revocation. The node reports
+  // a bare "reverted" with no reason, so the reason is established by the pair
   // rather than by the receipt: identical transactions, identical proving
   // conditions, and the only difference between the one that lands and the one
-  // that does not is the removal.
+  // that does not is the revocation.
   //
   // Amounts are small on purpose. The daily-window test above left the window
   // near its cap, and a rejection for volume would prove nothing about
   // revocation.
   //
   // This test performs the removal that the next one then observes.
-  it("invalidates a transfer proven before the recipient was removed", async (ctx) => {
+  it("invalidates a transfer proven before the recipient was revoked", async (ctx) => {
     if (deployFailure) return ctx.skip();
 
     const control = await proveTransfer(client, tokenAddress, SEED_RECIPIENT, 1000n);
@@ -306,7 +315,7 @@ describe("spending limit account (e2e)", () => {
     expect(await control.submit()).toBe("success");
     expect(await balanceOf(client, tokenAddress, accountAddress)).toBe(before - 1000n);
 
-    await removeRecipient(funderWallet, client, accountAddress, SEED_RECIPIENT, adminAddress);
+    await revokeRecipient(funderWallet, client, accountAddress, SEED_RECIPIENT, adminAddress);
 
     // "reverted", not a refusal at admission, is the result that carries the
     // claim: the proof was valid, the node accepted the transaction and put it
@@ -319,10 +328,23 @@ describe("spending limit account (e2e)", () => {
     expect(await balanceOf(client, tokenAddress, accountAddress)).toBe(afterControl);
   }, 600_000);
 
-  // L2 REVOCATION, the weak half: once removed, a transfer built from scratch
-  // never gets as far as proving, because is_allowlisted rejects it in private.
-  // The removal happened in the test above.
-  it("stops transfers to a recipient the admin removes", async (ctx) => {
+  // L2 REVOCATION, the weak half: once revoked, a transfer built from scratch
+  // never gets as far as proving. The revocation happened in the test above.
+  //
+  // The rejection now comes from a different place, and the difference is worth
+  // recording. Under the array the bridge re-read the allowlist before every
+  // send, so a removal simply disappeared from the hint and is_allowlisted
+  // rejected the recipient in private. There is no set on chain to re-read any
+  // more, so the bridge instead compares the root it can build against the root
+  // the account stores, and an admin change it has not been told about shows up
+  // as drift rather than as an unlisted recipient.
+  //
+  // That is the honest failure. The bridge cannot know whether the recipient
+  // was revoked, whether someone else was added, or whether its configuration
+  // is for a different account, and saying "not allowlisted" would be claiming
+  // knowledge it does not have. It fails closed either way: no transfer can be
+  // built until the operator reconciles.
+  it("stops transfers once the admin revokes the recipient", async (ctx) => {
     if (deployFailure) return ctx.skip();
 
     await expect(
@@ -332,7 +354,7 @@ describe("spending limit account (e2e)", () => {
         recipient: SEED_RECIPIENT,
         amount: "1000",
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow("Allowlist root mismatch");
   }, 600_000);
 
   // ADMIN AUTH. apply_limits originally had no caller check at all, so anyone
@@ -370,7 +392,6 @@ describe("spending limit account (e2e)", () => {
       await callAccount(client, accountAddress, funderWallet, adminAddress, "propose_limits", [
         MAX_PER_TX * 2n,
         DAILY_LIMIT * 2n,
-        1,
       ]),
     ).toBe("success");
 
@@ -552,18 +573,19 @@ async function proveTransfer(
   const inner = client as unknown as {
     wallet: WalletInternals;
     solverAddress: unknown;
-    spendingLimitContract: { setAllowlistHint: (hint: string[]) => void };
-    readAllowlist: () => Promise<string[]>;
+    spendingLimitContract: {
+      allowlistTree: () => Promise<import("../../src/allowlist-tree.js").AllowlistTree>;
+    };
   };
   const wallet = inner.wallet;
   const from = inner.solverAddress;
 
-  // The one thing createNote sets before it sends. The declared amount and
-  // recipient are not pushed in any more -- the entrypoint reads them off the
-  // payload -- but the hint is a snapshot of on-chain state the payload cannot
-  // supply, and it is read against the allowlist as it stands now, which is the
-  // state this test is about to invalidate.
-  inner.spendingLimitContract.setAllowlistHint(await inner.readAllowlist.call(client));
+  // Nothing is pushed in before the send any more. The entrypoint derives the
+  // declared amount, the recipient AND the membership witness from the payload
+  // it signs. All this needs is for the tree to exist, so the witness lookup
+  // resolves against the allowlist as it stands now, which is the state this
+  // test is about to invalidate.
+  await inner.spendingLimitContract.allowlistTree();
 
   const contract = await (
     TokenContract as unknown as {
@@ -630,7 +652,20 @@ async function waitForExecution(
   return "not mined within the timeout";
 }
 
-async function removeRecipient(
+/**
+ * Revoke a recipient by replacing its leaf with a freshly salted empty.
+ *
+ * There is no remove_recipient any more. Addition, removal and substitution are
+ * one call, because the contract cannot tell them apart: a leaf is a
+ * commitment, so h(0, salt) and h(recipient, salt) are the same shape. The
+ * admin supplies the old leaf and a path, the contract verifies both against
+ * the current root and recomputes.
+ *
+ * The replacement salt is arbitrary here. In production it comes from the
+ * operator's seed so the tree stays reconstructible; this test only needs the
+ * root to move.
+ */
+async function revokeRecipient(
   wallet: unknown,
   client: AztecClient,
   account: string,
@@ -639,9 +674,28 @@ async function removeRecipient(
 ): Promise<void> {
   const { Contract } = await import("@aztec/aztec.js/contracts");
   const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+  const { Fr } = await import("@aztec/foundation/curves/bn254");
+  const { allowlistLeaf } = await import("../../src/allowlist-tree.js");
+
   const slc = (client as unknown as {
-    spendingLimitContract: { getContractArtifact: () => Promise<unknown> };
+    spendingLimitContract: {
+      getContractArtifact: () => Promise<unknown>;
+      allowlistTree: () => Promise<
+        import("../../src/allowlist-tree.js").AllowlistTree
+      >;
+    };
   }).spendingLimitContract;
+
+  const tree = await slc.allowlistTree();
+  const witness = tree.witnessFor(recipient);
+  if (witness === undefined) {
+    throw new Error(`cannot revoke ${recipient}: it is not in the configured allowlist`);
+  }
+  const oldLeaf = await allowlistLeaf(Fr.fromString(recipient), witness.leafSalt);
+  // A distinct salt, so the new empty is not recognisable as one. A literal
+  // zero leaf is rejected by the contract for exactly that reason.
+  const newLeaf = await allowlistLeaf(Fr.ZERO, new Fr(0x9abcn));
+
   const artifact = await slc.getContractArtifact();
   const c = await (
     Contract as unknown as {
@@ -653,7 +707,12 @@ async function removeRecipient(
       }>;
     }
   ).at(AztecAddress.fromStringUnsafe(account), artifact, wallet);
-  await c.methods["remove_recipient"]!(AztecAddress.fromStringUnsafe(recipient)).send({
+  await c.methods["update_recipient"]!(
+    witness.leafIndex,
+    oldLeaf,
+    newLeaf,
+    witness.siblingPath,
+  ).send({
     from: AztecAddress.fromStringUnsafe(admin),
     fee: await feeWithHeadroom(wallet),
   });
