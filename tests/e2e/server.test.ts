@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import type { Server } from "node:http";
 import { AztecClient } from "../../src/aztec-client.js";
 import { createApp } from "../../src/server.js";
-import { getTestConfig } from "./helpers.js";
+import { getTestConfig, requireTestToken } from "./helpers.js";
 
 const config = getTestConfig();
 
@@ -53,6 +53,7 @@ describe("HTTP server (e2e)", () => {
     it("returns version from live node via POST /", async () => {
       const res = await fetch(baseUrl, {
         method: "POST",
+        headers: { "content-type": "application/json" },
         body: rpcBody("aztec_getVersion"),
       });
       expect(res.status).toBe(200);
@@ -71,6 +72,7 @@ describe("HTTP server (e2e)", () => {
     it("works via POST /api/rpc alias", async () => {
       const res = await fetch(`${baseUrl}/api/rpc`, {
         method: "POST",
+        headers: { "content-type": "application/json" },
         body: rpcBody("aztec_getVersion"),
       });
       expect(res.status).toBe(200);
@@ -81,18 +83,17 @@ describe("HTTP server (e2e)", () => {
   });
 
   describe("aztec_createNote via JSON-RPC", () => {
-    const tokenAddress = process.env["E2E_TOKEN_ADDRESS"];
-
-    it.skipIf(!tokenAddress)("creates note via full HTTP round-trip", async () => {
+    it("creates note via full HTTP round-trip", async () => {
       const params = {
-        recipient: tokenAddress!,
-        token: tokenAddress!,
+        recipient: client.getAddress()!,
+        token: requireTestToken(),
         amount: "500",
         chainId: 1,
       };
 
       const res = await fetch(baseUrl, {
         method: "POST",
+        headers: { "content-type": "application/json" },
         body: rpcBody("aztec_createNote", [params]),
       });
       expect(res.status).toBe(200);
@@ -119,6 +120,7 @@ describe("HTTP server (e2e)", () => {
 
       const res = await fetch(baseUrl, {
         method: "POST",
+        headers: { "content-type": "application/json" },
         body: rpcBody("aztec_createNote", [params]),
       });
       expect(res.status).toBe(200);
@@ -135,6 +137,7 @@ describe("HTTP server (e2e)", () => {
     it("returns METHOD_NOT_FOUND for unknown method", async () => {
       const res = await fetch(baseUrl, {
         method: "POST",
+        headers: { "content-type": "application/json" },
         body: rpcBody("unknown_method"),
       });
       expect(res.status).toBe(200);

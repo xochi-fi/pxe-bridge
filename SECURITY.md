@@ -8,57 +8,315 @@ Report vulnerabilities privately to the maintainers before public disclosure.
 
 The spending-limit account contract assumes the bridge signing key may be
 compromised and aims to limit the damage via per-transaction amount caps, a
-24h rolling volume cap, and a recipient allowlist, all enforced on-chain and
-independent of the application-level limits in `src/limits.ts`.
+24h rolling volume cap, a recipient allowlist, and a single permitted token
+fixed at construction, all enforced on-chain and independent of the
+application-level limits in `src/limits.ts`.
+
+The admin is a separate party from the signing key holder.
+
+| Lever | Direction | Timing |
+| --- | --- | --- |
+| `pause` / `unpause` | Stop everything | Immediate |
+| `update_recipient` | Add, revoke or substitute one payee | Immediate |
+| `propose_limits` + `apply_limits` | Change caps | 24h |
+
+`pause` is the response to a compromised signing key: it is checked in
+`check_spending_public`, so it stops a transaction however far through proving
+it already is. A timelock on it would hand an attacker exactly the notice
+period they need.
+
+`update_recipient` is untimelocked, and that is a change from the array design,
+where additions waited 24h and removals were immediate. Under a Merkle
+allowlist the contract cannot tell the two apart: leaves are commitments, so
+adding, revoking and substituting are one operation on one leaf, and that
+indistinguishability is the privacy property. One policy therefore has to cover
+all three. The timelock is the half that had to go, because the notice it gave
+was legible only when the allowlist was public, while revocation latency is a
+cost that lands during an incident.
+
+### An attacker holding the admin key
+
+This is **not** recoverable, and the 24h notice was never the defence it looked
+like. `pause` and `update_recipient` are both immediate, and the entrypoint only
+pays an allowlisted recipient, so an attacker with the admin key stops the
+account or strips the allowlist before any notice period could elapse. The owner
+has nowhere to withdraw to and no lever to reach for.
+
+What does bound the damage is that **the tree is a second factor**.
+`update_recipient` must supply a sibling path that verifies against the current
+root, and the salts that make the leaves are derived from a seed the admin holds
+off chain. An attacker who takes the admin key without also taking the seed and
+the recipient list cannot produce a valid path, so they cannot add a payee of
+their own. They can still pause, and they can still propose limits.
+
+They also cannot spend. Paying a newly added recipient needs the signing key,
+which is a different party under this model.
+
+Practically: admin key custody is the control, and the allowlist seed must be
+archived and protected separately from it. See "Losing the allowlist" below.
 
 ## Declared-vs-actual amount binding
 
 `contracts/spending_limit_account/src/main.nr` enforces spending limits against
-`declared_amount` / `declared_recipient`, which the entrypoint caller supplies.
-Without further checks these declared values are just numbers the caller
-invents, so a key holder could declare `amount = 1` while the payload transfers
-more.
+`declared_amount`, which the entrypoint caller supplies. Without further checks
+that is just a number the caller invents, so a key holder could declare
+`amount = 1` while the payload transfers more.
 
-The entrypoint now binds declared to actual via
-`assert_declared_matches_transfer`: it reconstructs the transfer call's
-`args_hash` as `hash_args([declared_recipient.to_field(), declared_amount])`
-(the same encoding the SDK uses for private call args) and asserts the payload
-contains exactly one non-empty call whose `args_hash` equals it. Because
-`createNote` issues exactly one `transfer_to_private(to, amount)` call, this
-pins both the recipient and the amount of the real transfer to the declared
-values -- no hidden second call can ride along, and a smaller declared amount no
-longer under-reports a larger transfer.
+The entrypoint binds declared to actual via `assert_declared_matches_transfer`,
+which runs in private: it reconstructs the transfer call's `args_hash` as
+`hash_args([declared_recipient.to_field(), declared_amount as Field])` (the same
+encoding the SDK uses for private call args, the cast reproducing how a u128
+packs into one field) and asserts the payload contains exactly one non-empty
+call whose `args_hash` equals it. Because `createNote` issues exactly one
+`transfer_to_private(to, amount)` call, this pins both the recipient and the
+amount of the real transfer to the declared values. No hidden second call can
+ride along, and a smaller declared amount no longer under-reports a larger
+transfer.
+
+The guard also pins the call's selector to `transfer_to_private` as a
+compile-time constant, along with `is_public`, `hide_msg_sender` and
+`is_static`, so a different function with a colliding `args_hash` cannot
+satisfy it. It returns the matched call's target, which
+`check_spending_public` compares against the permitted token. That comparison
+is in public deliberately: reading `permitted_token` from private would be a
+historical read at the anchor block, and on the first transaction the
+constructor's enqueued initializer has not been mined yet.
 
 Combined with the rest of this change set:
 
-- Recipient allowlist: enforced. The zero-address sentinel skip was removed, and
-  a zero recipient is rejected at both the circuit (`Recipient must not be zero`)
-  and the RPC validation layer (`src/types.ts`).
+- Recipient allowlist: enforced, but `check_spending_public` receives neither
+  the recipient nor the set. Membership is proven in private against a Merkle
+  root, and public asserts only that the proven root equals the stored one. That
+  equality is evaluated at inclusion time, which is what lets a revocation
+  invalidate an already-proven transfer. A zero recipient is rejected at both
+  the circuit (`Recipient must not be zero`) and the RPC validation layer
+  (`src/types.ts`).
 - Third-party authwit: disabled (`verify_private_authwit` returns invalid), so
   the authwit side channel can no longer bypass the spending checks.
 - Per-tx and daily volume caps: enforced against the bound (actual) amount.
+  The daily cap is a sliding window of 25 hourly buckets, sized so that
+  `(N-1)*W >= 86400` holds exactly and two full-limit spends can never fit
+  inside 24 hours.
 
 ### Validation
 
 The binding depends on the `AppPayload` serialized layout (`[FunctionCall; 5]`
 + `tx_nonce` = 31 fields, each call serialized in declaration order) pinned to
-Aztec v4.2.0. It is validated two ways:
+Aztec v5.1.0. It is validated three ways:
 
-- `nargo test` unit tests in `contracts/spending_limit_account/src/main.nr`:
+- `aztec-nargo test` unit tests in `contracts/spending_limit_account/src/main.nr`:
   `function_call_serialize_layout` asserts `args_hash`/`target_address` sit at
   the offsets the guard reads; `mismatched_transfer_reverts`,
   `hidden_second_call_reverts`, and `empty_payload_reverts` prove the guard
   rejects a declared/actual mismatch, a hidden second call, and an empty
-  payload. The `contract` CI job runs these and `nargo compile`.
+  payload; `stale_witness_is_rejected` and `update_with_a_forged_old_leaf_is_rejected`
+  cover the allowlist binding and the single-leaf constraint on admin updates;
+  `leaf_and_node_hashes_match_typescript` pins the hashes against
+  `tests/allowlist-tree.test.ts`. The `contract` CI job runs these
+  and `aztec compile`.
+- e2e tests in `tests/e2e/spending-limit.test.ts` reach what `aztec-nargo test`
+  cannot. The guard itself is private, so it runs in ACIR either way; what only
+  the sandbox exercises is `check_spending_public` as transpiled AVM bytecode,
+  plus everything that depends on `msg_sender` or a public read: the token pin,
+  admin authorization, phase ordering, and revocation of an already-proven
+  transfer.
 - The check is fail-closed: any mismatch reverts the transaction, so an error
   surfaces as a failing tx, never a silent bypass.
 
-Barretenberg proving SIGILLs on Apple Silicon (ARM), so the full sandbox e2e
-runs only on x86 CI; `nargo compile`/`nargo test` run anywhere.
+On the TypeScript side, the entrypoint no longer accepts a declaration at all.
+It reads `declared_amount` and `declared_recipient` out of the
+`transfer_to_private` call in the payload it is signing, so declared == actual
+holds by construction there and the circuit re-proves it rather than catching
+the client out. A payload without exactly one such call is refused before it
+costs a fee.
+
+Barretenberg SIGILLs on Apple Silicon (ARM), so the sandbox e2e runs only on
+x86 CI. `aztec compile` does not finish there either, since it generates
+verification keys through the same library; `aztec-nargo test` runs anywhere.
 
 The binding assumes `createNote`'s single-transfer shape. If the bridge later
 issues multi-call payloads, extend the helper to match and sum every
 value-moving call rather than requiring exactly one.
+
+## Fee juice
+
+The spending-limit account's guard also stops it paying its own way. Its
+entrypoint admits exactly one call and requires it to be `transfer_to_private`
+on the pinned token; `FeeJuice.claim` is not that call, and every fee payment
+method the SDK offers contributes a second call which `mergeExecutionPayloads`
+folds into the same `AppPayload` the entrypoint receives. `PREEXISTING_FEE_JUICE`
+is the only branch left, and it is also the only one that calls `end_setup()`,
+which is the phase boundary the limit checks depend on.
+
+Somebody else therefore has to put a balance there. `scripts/top-up-fee-juice.ts`
+bridges from L1 naming the bridge as recipient and then sends
+`FeeJuice.claim(to = bridge, ...)` from a separate payer account, which works
+because `claim` takes its beneficiary as an argument rather than as `msg_sender`.
+
+This introduces an operational key (`FEE_JUICE_PAYER_KEY`) but no new trusted
+party for funds:
+
+- The L1 to L2 message hash commits to the recipient
+  (`get_bridge_gas_msg_hash(owner, amount)`), so the claim can only credit the
+  account it was bridged to. A payer that goes rogue, or a leaked claim secret,
+  can consume the message early but cannot redirect it. The failure mode is
+  liveness, not theft.
+- Fee juice cannot be moved once credited. `FeeJuice` has `claim`,
+  `claim_and_end_setup` and `public_dispatch`, and no transfer or withdrawal.
+  That also means a top-up sent to a mistyped address is lost to everyone, which
+  is why the script validates the address before the L1 write.
+- The payer's own balance pays for the claim transaction, so a compromised payer
+  key spends the payer's fee juice and nothing of the bridge's.
+
+`FEE_JUICE_CLAIM` is refused at startup when `PXE_BRIDGE_SPENDING_LIMIT_ADMIN`
+is set. Attaching a claim to that account names it as fee payer on a deploy sent
+from the separate deployer account, and `BaseWallet.completeFeeOptions` only
+emits `FEE_JUICE_WITH_CLAIM` when the sender is the fee payer; otherwise the
+sender's entrypoint gets `EXTERNAL` and sets no fee payer at all. Since
+`claim_and_end_setup` does not call `set_as_fee_payer` either, the transaction
+would have none. Failing at startup with the reason beats failing during
+deployment with a message about fee payers.
+
+## What is public
+
+The contract enforces its limits against public state, and a public function's
+arguments are part of the transaction. Every transfer therefore publishes:
+
+- **The amount.** `declared_amount` is an argument to `check_spending_public`.
+- **The token.** Pinned at construction and visible as the call target.
+- **The allowlist root**, and the fact that a transfer proved membership against
+  it. Not the recipient, and not the set.
+
+This is inherent to checking a value against public storage and is not
+remediated for the amount. Enforcing that privately would mean nullifier-based
+counters and a different contract. Callers who need the amount private cannot
+use the spending-limit account.
+
+The recipient is a different story since NM-1019 [Medium]. The array design
+published a candidate set of up to eight addresses per transfer, and the set was
+public anyway because the admin's add and remove calls carried each address in
+the clear. Both are gone. The allowlist is now a Merkle tree whose leaves are
+commitments `h(recipient, salt)` under a secret seed; the chain holds one root,
+membership is proven in private, and `update_recipient` moves one opaque leaf to
+another.
+
+What an observer can still learn from an admin update is the **position** that
+changed. Positions are therefore assigned randomly rather than filled left to
+right, or the first touch of position `k` would be visibly an addition. What
+they cannot learn is which address occupies it, whether the update added,
+revoked or substituted, or how full the tree is: empty positions hold
+`h(0, salt_i)` with that position's own salt, so they are not recognisable as
+empty and the canonical empty-subtree roots never appear in a sibling path.
+
+Anonymity is still bounded by how many recipients are actually allowlisted. A
+tree removes the mechanism's ceiling; it does not supply recipients. Run with
+three and the set is three, though under this design the count is no longer
+public.
+
+## Losing the allowlist
+
+The account stores only a root. Unlike the public array it replaces, **the set
+cannot be recovered from the chain.** Losing either the seed
+(`PXE_BRIDGE_ALLOWLIST_SEED`) or the list of `(address, position)` pairs is
+terminal for allowlist management: no witness can be built, so no transfer can
+be sent, and no `update_recipient` can be constructed, so nothing can be
+repaired on chain.
+
+Archive both with the same discipline as the contract artifact. This account
+already has permanent-brick modes -- `permitted_token` has no setter, and a zero
+admin is unrecoverable -- and this is one more.
+
+The seed is a secret, but a weaker one than the signing key: holding it lets
+someone test a candidate address against a leaf, which costs recipient privacy
+and not custody. It is warned about rather than refused when read from the
+environment in production.
+
+The bridge checks its copy against the chain before every send, via
+`get_allowlist_root`, and refuses to send on a mismatch. That check is what makes
+a secret set monitorable: the root commits to exactly the set that produces it,
+so an operator can verify a published set against the chain and a compromised
+admin cannot publish one set while committing another.
+
+## Transaction cancellation is not supported
+
+The entrypoint used to push a nullifier derived from the payload's `tx_nonce`
+when its `cancellable` flag was set, which is the mechanism a wallet would use to
+replace a pending transaction. This account offered no way to use it, and
+NM-1019 [Low] records that: the only path through the entrypoint is a real
+transfer, so cancelling means sending another one, which costs an allowlisted
+recipient, unspent per-tx cap and room in the daily window. There are reachable
+states with none of those, and they are exactly the states where cancelling
+matters.
+
+The branch is now deleted. It was previously accepted rather than fixed on the
+grounds that it could not be entered: `cancellable` arrives from
+`BaseWallet.cancellableTransactions`, which is `protected`, initialised `false`,
+and has no setter anywhere in the SDK, and the bridge does not subclass the
+wallet. That reasoning held for today's SDK and not for tomorrow's. The finding
+named its own trigger, a later SDK making cancellation the default, at which
+point the account would have begun advertising a cancellation it cannot honour.
+Deleting the branch fails safe against that: the account offers no cancellation
+rather than one it cannot deliver.
+
+The alternative was NM-1019's own recommendation, branching on zero non-empty
+calls so a cancellation carries no transfer. That was not taken. It skips
+`assert_declared_matches_transfer`, the zero-recipient assert, the membership
+proof and the `check_spending_public` enqueue together, so it is a second shape
+through the entrypoint on which the fee branch still runs, and a compromised
+signing key could burn fee juice on empty cancellations. Operationally the bridge
+does not want the feature either: it submits and reconciles through the
+idempotency store rather than leaving a transaction pending for someone to
+withdraw.
+
+The `cancellable` ABI parameter remains, read and ignored. Entrypoint arguments
+are encoded positionally, so removing it would shift every argument after it.
+
+## Build supply chain
+
+The `contract` CI job installs the Aztec toolchain by piping
+`https://install.aztec.network` into bash. There is no published checksum to pin
+against, so the build trusts that endpoint. `aztec-up install 5.1.0` pins the
+toolchain version but not the installer that fetches it.
+
+**This has already bitten, benignly.** On 2026-08-26 every `contract` job began
+failing at install with `expected bundled binary 'forge' missing from
+~/.aztec/versions/5.1.0/internal-bin`. The commit that passed on 19 Aug fails the
+same way on re-run, from the same pinned version, because the installer changed
+underneath it. `forge` is Foundry and this job compiles a Noir contract, so the
+job now records the installer's exit code and checks for `aztec` and
+`aztec-nargo` rather than trusting its verdict. A missing binary this job
+actually uses still fails.
+
+The underlying exposure is unchanged: a compromised or merely updated installer
+can still change what gets built. The class ID pin is the control, and it is
+downstream of this, which is the right order.
+
+The artifact it produces is not committed, so the mitigation is downstream:
+`scripts/contract-class-id.js` compares the resulting contract class ID against
+`contracts/spending_limit_account/CLASS_ID` and fails the job on drift. A
+compromised or merely updated toolchain changes that ID, and the account address
+derives from it.
+
+### `aztec compile` is not reproducible
+
+Introducing that check immediately found the following. Across four CI runs of
+identical sources, with identical reported toolchain versions (aztec 5.1.0, noir
+`1.0.0-beta.22+c57152f9`), three produced class ID `0x0df61951...` and one
+produced `0x2ff3ed37...`. Re-running the odd job passed.
+
+The consequences are worth stating plainly:
+
+- **The account address is not reproducible from source.** Rebuilding the
+  artifact can yield a different contract class and therefore a different
+  address, holding no funds.
+- **The artifact that a deployment was made against must be archived**, not
+  regenerated. The CI job uploads it on every run, before the class ID check, so
+  a drifted build is preserved for comparison rather than discarded.
+- **A red class ID check may be this flake rather than a real change.** Diff the
+  uploaded artifact against a known-good one before concluding either way.
+
+Root cause is not established. Nothing here depends on the ID being stable
+except deployment itself, which is exactly the thing that cannot tolerate it.
 
 ## Application-level limits
 
@@ -67,3 +325,60 @@ checks reserve the amount against the rolling window at admission time
 (`reserve()`), commit on success, and release on failure, so concurrent
 in-flight requests cannot each pass on a stale total and collectively exceed the
 daily cap.
+
+A failure that may have left the transfer on chain -- the send deadline, or a
+receipt that could not be read back -- commits rather than releases, and answers
+with a distinct RPC message carrying the txHash. Releasing those let a caller
+repeat whatever caused the failure and move past the cap without the window
+seeing it.
+
+## Idempotency
+
+That distinct message tells a caller not to retry blindly, but nothing enforced
+it. The `Idempotency-Key` request header does: a duplicate replays the first
+attempt's response rather than transferring again, so the ambiguous case stays
+ambiguous instead of being resolved by moving funds a second time.
+
+Three properties carry the weight:
+
+- **The claim is synchronous.** `begin()` marks the key before any await, so two
+  concurrent requests with one key cannot both proceed. The duplicate this
+  exists to stop is exactly the one that would otherwise race past the check.
+- **Intent is recorded before the send.** A `submitting` entry is flushed to the
+  audit log first, so a crash between submitting and recording the outcome is
+  recoverable: on restart, a key left at `submitting` replays as `unknown`.
+  Without it, the crash-mid-send window -- the one that most needs covering --
+  would hand the key back as fresh.
+- **Only transfers are protected.** A request stopped by validation or by the
+  limits frees its key, because there is no transfer to repeat and recording the
+  failure would leave the caller unable to settle the trade at all. This departs
+  from Stripe's replay-errors-forever semantics deliberately.
+
+The residual window is a crash before the `submitting` record reaches disk. At
+that point the send has not been made, so a retry is correct.
+
+Keys are held 24h, and durability depends on `PXE_BRIDGE_AUDIT_LOG` being a file
+path. Without it the store is in-memory and a restart forgets every key.
+
+The circuit breaker trips when committed volume reaches the daily cap, not when
+a single request would overshoot it. A request larger than the remaining budget
+is rejected on its own; tripping there meant one oversized request, needing no
+prior volume when `PXE_BRIDGE_MAX_AMOUNT` was unset, stopped the bridge for a
+full window.
+
+The rolling window is rebuilt from `PXE_BRIDGE_AUDIT_LOG` at startup. Without
+that path set it is in-memory only and a restart hands back the full daily
+budget, which matters because a restart used to be the only way to clear a
+tripped breaker. `POST /admin/resume` is now that way, gated on
+`PXE_BRIDGE_ADMIN_KEY` -- separate from the RPC key, so a caller who can move
+funds cannot clear the breaker that stopped them.
+
+## Transport
+
+- 30s deadline on receiving a request (`server.requestTimeout`) and 150s on
+  producing a response (`res.setTimeout`), the latter above the client's 120s
+  transaction timeout. These are separate limits: `requestTimeout` alone, which
+  is all this had, bounds nothing about how long a reply may take, so a stalled
+  node held sockets open indefinitely.
+- 64KB body limit, 60 requests/min per IP, `Content-Type: application/json`
+  required on POST.

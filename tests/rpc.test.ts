@@ -1,24 +1,41 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { handleRpcRequest } from "../src/rpc.js";
+import { handleRpcRequest, type RpcContext } from "../src/rpc.js";
+import { TransactionLimits } from "../src/limits.js";
+import { IdempotencyStore } from "../src/idempotency.js";
+import { PostSubmissionError, SUBMITTED_UNKNOWN_MESSAGE } from "../src/types.js";
+import type { AuditEntry, AuditLogger } from "../src/audit.js";
 import type { CreateNoteParams, CreateNoteResult, IAztecClient } from "../src/types.js";
 
 const VALID_ADDR = "0x" + "a".repeat(64);
 
 class FakeAztecClient implements IAztecClient {
   createNoteResult: CreateNoteResult = {
+    // Two note hashes and three nullifiers, matching what a real
+    // transfer_to_private emits: a fake with one of each would hide the reason
+    // the scalar fields below are ambiguous.
+    noteHashes: ["0xcommit", "0xcommit2"],
+    nullifiers: ["0xnullifier", "0xnullifier2", "0xnullifier3"],
+    l2TxHash: "0xtx",
     noteCommitment: "0xcommit",
     nullifierHash: "0xnullifier",
-    l2TxHash: "0xtx",
   };
   createNoteError: Error | null = null;
   versionResult = "4.1.3";
   versionError: Error | null = null;
   lastCreateNoteParams: CreateNoteParams | null = null;
+  /** Counts real executions, so a replay is distinguishable from a re-run. */
+  createNoteCalls = 0;
+  /** Holds the call open long enough for a concurrent duplicate to arrive. */
+  createNoteDelayMs = 0;
 
   async connect(): Promise<void> {}
 
   async createNote(params: CreateNoteParams): Promise<CreateNoteResult> {
     this.lastCreateNoteParams = params;
+    this.createNoteCalls++;
+    if (this.createNoteDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, this.createNoteDelayMs));
+    }
     if (this.createNoteError) throw this.createNoteError;
     return this.createNoteResult;
   }
@@ -104,6 +121,21 @@ describe("handleRpcRequest", () => {
       expect(res).toHaveProperty("result");
       if ("result" in res) {
         expect(res.result).toEqual(client.createNoteResult);
+      }
+    });
+
+    it("returns every note hash and nullifier, not just the first", async () => {
+      const res = await handleRpcRequest(rpcRequest("aztec_createNote", [validParams]), client);
+      expect(res).toHaveProperty("result");
+      if ("result" in res) {
+        const result = res.result as CreateNoteResult;
+        // The whole point of the shape: a transfer emits more than one of each,
+        // so truncating to a scalar loses the values a caller may actually want.
+        expect(result.noteHashes).toHaveLength(2);
+        expect(result.nullifiers).toHaveLength(3);
+        // The deprecated scalars stay consistent with the arrays they alias.
+        expect(result.noteCommitment).toBe(result.noteHashes[0]);
+        expect(result.nullifierHash).toBe(result.nullifiers[0]);
       }
     });
 
@@ -237,6 +269,316 @@ describe("handleRpcRequest", () => {
         client,
       );
       expect(res.id).toBe("req-123");
+    });
+  });
+
+  // A transfer that may already be on chain must not be accounted as if
+  // nothing happened. Releasing the reservation let a caller repeat whatever
+  // caused the failure -- a slow node, most obviously -- and move funds past
+  // the daily cap without the window ever seeing them.
+  describe("post-submission failures", () => {
+    const noteParams = {
+      recipient: VALID_ADDR,
+      token: VALID_ADDR,
+      amount: "3000",
+      chainId: 1,
+    };
+
+    it("counts the amount against the window instead of releasing it", async () => {
+      const limits = new TransactionLimits({ dailyLimit: 5000n });
+      client.createNoteError = new PostSubmissionError("Incomplete receipt", "0xabc");
+
+      await handleRpcRequest(rpcRequest("aztec_createNote", [noteParams]), client, { limits });
+
+      // 3000 stayed counted, so a second 3000 no longer fits under 5000.
+      expect(limits.check(3000n).allowed).toBe(false);
+    });
+
+    it("still releases when the failure was before submission", async () => {
+      const limits = new TransactionLimits({ dailyLimit: 5000n });
+      client.createNoteError = new Error("simulation reverted");
+
+      await handleRpcRequest(rpcRequest("aztec_createNote", [noteParams]), client, { limits });
+
+      expect(limits.check(5000n).allowed).toBe(true);
+    });
+
+    it("returns a distinct message and the txHash to reconcile against", async () => {
+      client.createNoteError = new PostSubmissionError("Incomplete receipt", "0xabc");
+
+      const res = await handleRpcRequest(rpcRequest("aztec_createNote", [noteParams]), client);
+
+      expect("error" in res && res.error.message).toContain("do not retry");
+      expect("error" in res && res.error.data).toEqual({ txHash: "0xabc" });
+    });
+
+    // Without a hash there is nothing to reconcile against, so the message has
+    // to carry the warning on its own.
+    it("omits data when no txHash is known", async () => {
+      client.createNoteError = new PostSubmissionError("Timed out");
+
+      const res = await handleRpcRequest(rpcRequest("aztec_createNote", [noteParams]), client);
+
+      expect("error" in res && res.error.message).toContain("result unknown");
+      expect("error" in res && "data" in res.error).toBe(false);
+    });
+
+    it("records the failure as unknown, not error", async () => {
+      const logged: AuditEntry[] = [];
+      const audit = { log: async (e: AuditEntry) => void logged.push(e) } as AuditLogger;
+      client.createNoteError = new PostSubmissionError("Incomplete receipt", "0xabc");
+
+      await handleRpcRequest(rpcRequest("aztec_createNote", [noteParams]), client, { audit });
+
+      // "this moved nothing" and "we do not know whether this moved funds"
+      // call for opposite responses on replay.
+      expect(logged.at(-1)?.status).toBe("unknown");
+    });
+
+    it("records the txHash on the audit entry", async () => {
+      const logged: AuditEntry[] = [];
+      const audit = { log: async (e: AuditEntry) => void logged.push(e) } as AuditLogger;
+      client.createNoteError = new PostSubmissionError("Incomplete receipt", "0xabc");
+
+      await handleRpcRequest(rpcRequest("aztec_createNote", [noteParams]), client, { audit });
+
+      expect(logged.at(-1)?.status).toBe("unknown");
+      expect(logged.at(-1)?.txHash).toBe("0xabc");
+    });
+  });
+
+  describe("idempotency", () => {
+    const noteParams = {
+      recipient: VALID_ADDR,
+      token: VALID_ADDR,
+      amount: "3000",
+      chainId: 1,
+    };
+    const send = (ctx: RpcContext) =>
+      handleRpcRequest(rpcRequest("aztec_createNote", [noteParams]), client, ctx);
+
+    let idempotency: IdempotencyStore;
+    beforeEach(() => {
+      idempotency = new IdempotencyStore();
+    });
+
+    // The failure this whole mechanism exists for: a transfer that may be on
+    // chain, an error the caller cannot distinguish from a clean rejection,
+    // and a retry that moves funds a second time.
+    it("does not re-transfer when a retry replays a landed failure", async () => {
+      client.createNoteError = new PostSubmissionError("Incomplete receipt", "0xabc");
+      const ctx: RpcContext = { idempotency, idempotencyKey: "k1" };
+
+      const first = await send(ctx);
+      const callsAfterFirst = client.createNoteCalls;
+      const second = await send(ctx);
+
+      expect(client.createNoteCalls).toBe(callsAfterFirst);
+      expect(second).toEqual(first);
+    });
+
+    it("replays a success without calling the client again", async () => {
+      const ctx: RpcContext = { idempotency, idempotencyKey: "k1" };
+
+      const first = await send(ctx);
+      const second = await send(ctx);
+
+      expect(client.createNoteCalls).toBe(1);
+      expect(second).toEqual(first);
+    });
+
+    // The replay has to answer the request in front of it. Storing the whole
+    // original response would have handed the first caller's id to the second.
+    it("replays under the retrying request's own id", async () => {
+      const ctx: RpcContext = { idempotency, idempotencyKey: "k1" };
+      await send(ctx);
+
+      const replayed = await handleRpcRequest(
+        { jsonrpc: "2.0", id: "second-request", method: "aztec_createNote", params: [noteParams] },
+        client,
+        ctx,
+      );
+
+      expect(replayed.id).toBe("second-request");
+      expect("result" in replayed && replayed.result).toEqual(client.createNoteResult);
+    });
+
+    // A retry after a definitive failure is legitimate: nothing moved, so the
+    // key is free and the trade can still settle. Recording the error would
+    // strand the caller with no way forward.
+    it("lets a retry through after a clean failure", async () => {
+      const ctx: RpcContext = { idempotency, idempotencyKey: "k1" };
+      client.createNoteError = new Error("simulation reverted");
+      await send(ctx);
+
+      client.createNoteError = null;
+      const retry = await send(ctx);
+
+      expect(client.createNoteCalls).toBe(2);
+      expect("result" in retry).toBe(true);
+    });
+
+    it("lets a retry through after the limits rejected it", async () => {
+      const limits = new TransactionLimits({ maxAmount: 100n });
+      const ctx: RpcContext = { idempotency, idempotencyKey: "k1", limits };
+
+      expect("error" in (await send(ctx))).toBe(true);
+      expect(client.createNoteCalls).toBe(0);
+
+      // Same key, now under a limit that admits it.
+      const allowed = await send({ idempotency, idempotencyKey: "k1" });
+      expect("result" in allowed).toBe(true);
+    });
+
+    it("refuses a concurrent duplicate rather than running it twice", async () => {
+      const ctx: RpcContext = { idempotency, idempotencyKey: "k1" };
+      client.createNoteDelayMs = 20;
+
+      const [a, b] = await Promise.all([send(ctx), send(ctx)]);
+
+      expect(client.createNoteCalls).toBe(1);
+      const messages = [a, b].map((r) => ("error" in r ? r.error.message : "ok"));
+      expect(messages).toContain("ok");
+      expect(messages.join(" ")).toContain("still in flight");
+    });
+
+    it("keeps distinct keys independent", async () => {
+      await send({ idempotency, idempotencyKey: "k1" });
+      await send({ idempotency, idempotencyKey: "k2" });
+
+      expect(client.createNoteCalls).toBe(2);
+    });
+
+    // Unchanged behaviour for callers that send no header: every request runs.
+    it("does not dedupe when no key is supplied", async () => {
+      await send({ idempotency });
+      await send({ idempotency });
+
+      expect(client.createNoteCalls).toBe(2);
+    });
+
+    it("writes the intent record before the send", async () => {
+      const logged: AuditEntry[] = [];
+      const audit = { log: async (e: AuditEntry) => void logged.push(e) } as AuditLogger;
+
+      await send({ idempotency, idempotencyKey: "k1", audit });
+
+      // Ordering is the whole point: a crash between the two is recoverable
+      // only because the first one is already on disk.
+      expect(logged.map((e) => e.status)).toEqual(["submitting", "success"]);
+      expect(logged.every((e) => e.idempotencyKey === "k1")).toBe(true);
+    });
+
+    // No key means no crash-window to protect, and the intent record only
+    // exists to close that window.
+    it("writes no intent record without a key", async () => {
+      const logged: AuditEntry[] = [];
+      const audit = { log: async (e: AuditEntry) => void logged.push(e) } as AuditLogger;
+
+      await send({ idempotency, audit });
+
+      expect(logged.map((e) => e.status)).toEqual(["success"]);
+    });
+
+    it("records the note effects so a replay after restart is faithful", async () => {
+      const logged: AuditEntry[] = [];
+      const audit = { log: async (e: AuditEntry) => void logged.push(e) } as AuditLogger;
+
+      await send({ idempotency, idempotencyKey: "k1", audit });
+
+      expect(logged.at(-1)?.noteHashes).toEqual(client.createNoteResult.noteHashes);
+      expect(logged.at(-1)?.nullifiers).toEqual(client.createNoteResult.nullifiers);
+    });
+
+    // Every audit double above resolves, which is why none of the following
+    // was ever exercised. A real logger writes to a disk that fills.
+    describe("when the audit log cannot be written", () => {
+      /** Rejects on the Nth call, 1-indexed. 0 never rejects. */
+      const failingAudit = (failOn: number, logged: AuditEntry[]) => {
+        let calls = 0;
+        return {
+          log: async (e: AuditEntry) => {
+            calls += 1;
+            if (calls === failOn) throw new Error("ENOSPC: no space left on device");
+            logged.push(e);
+          },
+        } as AuditLogger;
+      };
+
+      // Fail-closed. The intent record is what makes a crash mid-send
+      // recoverable, so without it the send must not happen at all.
+      it("refuses to send when the intent record cannot be written", async () => {
+        const logged: AuditEntry[] = [];
+        const audit = failingAudit(1, logged);
+        const limits = new TransactionLimits({ dailyLimit: 5000n });
+
+        const res = await send({ idempotency, idempotencyKey: "k1", audit, limits });
+
+        expect(client.createNoteCalls).toBe(0);
+        expect("error" in res && res.error.message).toBe("Internal error");
+        expect(logged).toEqual([]);
+      });
+
+      // The reservation and the key are both claimed before the intent write.
+      // Leaving either behind punishes a caller whose transfer never happened:
+      // the amount would hold budget for 24h and the key would report itself
+      // still in flight forever.
+      it("releases the reservation and frees the key when the intent write fails", async () => {
+        // 5000 admits one 3000 transfer and not two, so a leaked reservation
+        // surfaces as the retry being refused for budget rather than running.
+        const limits = new TransactionLimits({ dailyLimit: 5000n });
+        const logged: AuditEntry[] = [];
+
+        await send({ idempotency, idempotencyKey: "k1", audit: failingAudit(1, logged), limits });
+
+        // Same key, working logger. Both claims had to be released for this to
+        // reach the client: the key, or it reports itself in flight; the
+        // reservation, or the limits refuse it.
+        const retry = await send({
+          idempotency,
+          idempotencyKey: "k1",
+          audit: failingAudit(0, logged),
+          limits,
+        });
+
+        expect("result" in retry).toBe(true);
+        expect(client.createNoteCalls).toBe(1);
+      });
+
+      // The damaging one. The write used to sit inside the same try as the
+      // send, so failing it looked identical to the transfer failing: the key
+      // was abandoned and the next retry sent a second transfer.
+      it("still reports success when the outcome write fails after a landed transfer", async () => {
+        const logged: AuditEntry[] = [];
+        const audit = failingAudit(2, logged);
+
+        const res = await send({ idempotency, idempotencyKey: "k1", audit });
+
+        expect("result" in res).toBe(true);
+        expect(logged.map((e) => e.status)).toEqual(["submitting"]);
+      });
+
+      it("does not re-transfer when a retry follows a failed outcome write", async () => {
+        const logged: AuditEntry[] = [];
+
+        await send({ idempotency, idempotencyKey: "k1", audit: failingAudit(2, logged) });
+        const retry = await send({ idempotency, idempotencyKey: "k1", audit: failingAudit(0, logged) });
+
+        expect(client.createNoteCalls).toBe(1);
+        expect("result" in retry).toBe(true);
+      });
+
+      // A failed write on the error path must not cost the caller the one
+      // response that tells them to reconcile rather than retry.
+      it("still reports the reconcile message when the outcome write fails", async () => {
+        client.createNoteError = new PostSubmissionError("Incomplete receipt", "0xabc");
+        const logged: AuditEntry[] = [];
+
+        const res = await send({ idempotency, idempotencyKey: "k1", audit: failingAudit(2, logged) });
+
+        expect("error" in res && res.error.message).toBe(SUBMITTED_UNKNOWN_MESSAGE);
+        expect("error" in res && res.error.data).toEqual({ txHash: "0xabc" });
+      });
     });
   });
 });

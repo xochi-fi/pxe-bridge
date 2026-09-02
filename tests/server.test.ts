@@ -1,23 +1,34 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import type { Server } from "node:http";
 import { createApp, type ServerOptions } from "../src/server.js";
+import { TransactionLimits } from "../src/limits.js";
+import { IdempotencyStore } from "../src/idempotency.js";
 import type { CreateNoteParams, CreateNoteResult, IAztecClient } from "../src/types.js";
+import { rpcJson } from "./helpers.js";
 
 const VALID_ADDR = "0x" + "a".repeat(64);
 const JSON_HEADERS = { "Content-Type": "application/json" };
 
 class FakeAztecClient implements IAztecClient {
   createNoteResult: CreateNoteResult = {
+    // Two note hashes and three nullifiers, matching what a real
+    // transfer_to_private emits: a fake with one of each would hide the reason
+    // the scalar fields below are ambiguous.
+    noteHashes: ["0xcommit", "0xcommit2"],
+    nullifiers: ["0xnullifier", "0xnullifier2", "0xnullifier3"],
+    l2TxHash: "0xtx",
     noteCommitment: "0xcommit",
     nullifierHash: "0xnullifier",
-    l2TxHash: "0xtx",
   };
   versionResult = "4.1.3";
   versionError: Error | null = null;
+  /** Counts real executions, so a replay is distinguishable from a re-run. */
+  createNoteCalls = 0;
 
   async connect(): Promise<void> {}
 
   async createNote(_params: CreateNoteParams): Promise<CreateNoteResult> {
+    this.createNoteCalls++;
     return this.createNoteResult;
   }
 
@@ -104,7 +115,7 @@ describe("HTTP server", () => {
       const res = await jsonPost(baseUrl, rpcBody("aztec_getVersion"));
       expect(res.status).toBe(200);
       expect(res.headers.get("content-type")).toBe("application/json");
-      const body = await res.json();
+      const body = await rpcJson(res);
       expect(body).toEqual({ jsonrpc: "2.0", id: 1, result: "4.1.3" });
     });
 
@@ -117,7 +128,7 @@ describe("HTTP server", () => {
       };
       const res = await jsonPost(baseUrl, rpcBody("aztec_createNote", [params]));
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = await rpcJson<CreateNoteResult>(res);
       expect(body.result).toEqual(client.createNoteResult);
     });
   });
@@ -126,7 +137,7 @@ describe("HTTP server", () => {
     it("works same as POST /", async () => {
       const res = await jsonPost(`${baseUrl}/api/rpc`, rpcBody("aztec_getVersion"));
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = await rpcJson<string>(res);
       expect(body.result).toBe("4.1.3");
     });
   });
@@ -163,15 +174,15 @@ describe("HTTP server", () => {
     it("returns INVALID_REQUEST for JSON string body", async () => {
       const res = await jsonPost(baseUrl, JSON.stringify("hello"));
       expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(body.error.code).toBe(-32600);
+      const body = await rpcJson(res);
+      expect(body.error?.code).toBe(-32600);
     });
 
     it("returns INVALID_REQUEST for JSON number body", async () => {
       const res = await jsonPost(baseUrl, JSON.stringify(42));
       expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(body.error.code).toBe(-32600);
+      const body = await rpcJson(res);
+      expect(body.error?.code).toBe(-32600);
     });
   });
 
@@ -194,7 +205,7 @@ describe("HTTP server", () => {
       expect(Buffer.byteLength(body)).toBe(64 * 1024);
       const res = await jsonPost(baseUrl, body);
       expect(res.status).toBe(200);
-      const json = await res.json();
+      const json = await rpcJson<string>(res);
       expect(json.result).toBe("4.1.3");
     });
   });
@@ -203,8 +214,8 @@ describe("HTTP server", () => {
     it("returns 400 for invalid JSON", async () => {
       const res = await jsonPost(baseUrl, "not json{{{");
       expect(res.status).toBe(400);
-      const body = await res.json();
-      expect(body.error.code).toBe(-32700);
+      const body = await rpcJson(res);
+      expect(body.error?.code).toBe(-32700);
     });
 
     it("returns 400 for empty body", async () => {
@@ -295,12 +306,294 @@ describe("HTTP server with auth", () => {
       Authorization: `Bearer ${TEST_API_KEY}`,
     });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = await rpcJson<string>(res);
     expect(body.result).toBe("4.1.3");
   });
 
   it("allows /status without auth", async () => {
     const res = await fetch(`${authBaseUrl}/status`);
     expect(res.status).toBe(200);
+  });
+});
+
+// Key guessing has to be throttled, and an unauthenticated caller must not be
+// able to spend the budget real traffic needs. One shared bucket cannot do
+// both: auth-first leaves guessing unlimited, limiter-first lets any stranger
+// starve every legitimate caller. Nothing reads X-Forwarded-For, so behind the
+// reverse proxy this is documented to run behind, every client shares one
+// bucket and starving it is a whole-bridge outage.
+//
+// Its own server so the limiters start fresh and no other suite shares them.
+describe("auth failures are throttled separately from real traffic", () => {
+  let rlServer: Server;
+  let rlBaseUrl: string;
+  const RL_API_KEY = "rate-limit-suite-key";
+  const AUTH_FAILURE_MAX = 10;
+
+  beforeAll(async () => {
+    rlServer = createApp(new FakeAztecClient(), { apiKey: RL_API_KEY });
+    await new Promise<void>((resolve) => {
+      rlServer.listen(0, () => {
+        const addr = rlServer.address();
+        if (addr && typeof addr === "object") {
+          rlBaseUrl = `http://127.0.0.1:${addr.port}`;
+        }
+        resolve();
+      });
+    });
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => rlServer.close(() => resolve()));
+  });
+
+  const guess = () =>
+    jsonPost(rlBaseUrl, rpcBody("aztec_getVersion"), { Authorization: "Bearer wrong-key" });
+
+  it("throttles guessing after its own budget, and leaves real traffic alone", async () => {
+    const statuses: number[] = [];
+    for (let i = 0; i < AUTH_FAILURE_MAX; i++) {
+      statuses.push((await guess()).status);
+    }
+    // Refused on their merits while the guess budget lasts.
+    expect(new Set(statuses)).toEqual(new Set([401]));
+
+    // Then on volume. Guessing is bounded, which is the half the reorder was
+    // originally for.
+    expect((await guess()).status).toBe(429);
+
+    // And the caller holding the real key is unaffected. This is the half the
+    // reorder broke: with one bucket, the guesses above would have spent the
+    // budget this request needs and it would answer 429.
+    const authorized = await jsonPost(rlBaseUrl, rpcBody("aztec_getVersion"), {
+      Authorization: `Bearer ${RL_API_KEY}`,
+    });
+    expect(authorized.status).toBe(200);
+  });
+});
+
+describe("Idempotency-Key header", () => {
+  async function boot(): Promise<{
+    url: string;
+    client: FakeAztecClient;
+    close: () => Promise<void>;
+  }> {
+    const c = new FakeAztecClient();
+    const srv = createApp(c, { idempotency: new IdempotencyStore() });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const port = addr && typeof addr === "object" ? addr.port : 0;
+    return {
+      url: `http://127.0.0.1:${port}`,
+      client: c,
+      close: () => new Promise<void>((resolve) => srv.close(() => resolve())),
+    };
+  }
+
+  const noteBody = () =>
+    rpcBody("aztec_createNote", [
+      { recipient: VALID_ADDR, token: VALID_ADDR, amount: "1000", chainId: 1 },
+    ]);
+
+  it("carries the header through to replay a duplicate", async () => {
+    const { url, close } = await boot();
+    try {
+      const first = await jsonPost(url, noteBody(), { "Idempotency-Key": "trade-1" });
+      const second = await jsonPost(url, noteBody(), { "Idempotency-Key": "trade-1" });
+
+      expect(await rpcJson(first)).toEqual(await rpcJson(second));
+    } finally {
+      await close();
+    }
+  });
+
+  it("treats different keys as different requests", async () => {
+    const { url, close } = await boot();
+    try {
+      await jsonPost(url, noteBody(), { "Idempotency-Key": "trade-1" });
+      const other = await jsonPost(url, noteBody(), { "Idempotency-Key": "trade-2" });
+
+      expect(other.status).toBe(200);
+      expect("result" in (await rpcJson(other))).toBe(true);
+    } finally {
+      await close();
+    }
+  });
+
+  // Rejected, not sanitised. A key that is silently altered stops matching the
+  // one the caller retries with, which turns the protection off precisely when
+  // it is needed.
+  //
+  // A newline is absent from this list because fetch refuses to send one, so
+  // no conforming client can produce it; the validator still rejects control
+  // characters for anything that reaches the socket by other means.
+  it("rejects a malformed key rather than cleaning it up", async () => {
+    const { url, close } = await boot();
+    try {
+      for (const bad of ["", "   ", "x".repeat(129), "tab\there"]) {
+        const res = await jsonPost(url, noteBody(), { "Idempotency-Key": bad });
+        expect(res.status, `should reject ${JSON.stringify(bad)}`).toBe(400);
+      }
+    } finally {
+      await close();
+    }
+  });
+
+  it("accepts a key at the length limit", async () => {
+    const { url, close } = await boot();
+    try {
+      const res = await jsonPost(url, noteBody(), { "Idempotency-Key": "x".repeat(128) });
+      expect(res.status).toBe(200);
+    } finally {
+      await close();
+    }
+  });
+
+  it("runs normally when no key is sent", async () => {
+    const { url, client, close } = await boot();
+    try {
+      await jsonPost(url, noteBody());
+      await jsonPost(url, noteBody());
+      expect(client.createNoteCalls).toBe(2);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe("POST /admin/resume", () => {
+  const ADMIN_KEY = "admin-secret-key-67890";
+  const RPC_KEY = "rpc-secret-key-12345";
+
+  /** Boots a server on an ephemeral port and returns its URL plus a closer. */
+  async function boot(opts: ServerOptions): Promise<{ url: string; close: () => Promise<void> }> {
+    const srv = createApp(new FakeAztecClient(), opts);
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const port = addr && typeof addr === "object" ? addr.port : 0;
+    return {
+      url: `http://127.0.0.1:${port}`,
+      close: () => new Promise<void>((resolve) => srv.close(() => resolve())),
+    };
+  }
+
+  function resume(url: string, key?: string) {
+    return fetch(`${url}/admin/resume`, {
+      method: "POST",
+      headers: key ? { ...JSON_HEADERS, Authorization: `Bearer ${key}` } : { ...JSON_HEADERS },
+    });
+  }
+
+  // The case where a resume actually restores service: the volume that tripped
+  // the breaker has aged out, so nothing re-trips it.
+  it("reports a drained window as recovered", async () => {
+    const limits = new TransactionLimits({ dailyLimit: 5000n });
+    const { url, close } = await boot({ adminKey: ADMIN_KEY, limits });
+    try {
+      const res = await resume(url, ADMIN_KEY);
+      expect(await res.json()).toEqual({
+        status: "resumed",
+        paused: false,
+        windowTotal: "0",
+        dailyLimit: "5000",
+        willTripAgain: false,
+      });
+      expect(limits.check(1n).allowed).toBe(true);
+    } finally {
+      await close();
+    }
+  });
+
+  it("rejects a resume without the JSON content type", async () => {
+    const limits = new TransactionLimits({ dailyLimit: 5000n });
+    const { url, close } = await boot({ adminKey: ADMIN_KEY, limits });
+    try {
+      const res = await fetch(`${url}/admin/resume`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${ADMIN_KEY}` },
+      });
+      expect(res.status).toBe(415);
+    } finally {
+      await close();
+    }
+  });
+
+  it("clears a tripped breaker and reports the new state", async () => {
+    const limits = new TransactionLimits({ dailyLimit: 5000n });
+    limits.recordSpend(5000n);
+    limits.check(1n);
+    expect(limits.isPaused()).toBe(true);
+
+    const { url, close } = await boot({ adminKey: ADMIN_KEY, limits });
+    try {
+      const res = await resume(url, ADMIN_KEY);
+      expect(res.status).toBe(200);
+      // The latch is cleared and the window is not, so the response says both.
+      // `paused: false` alone was true and read as "service restored", which
+      // is the one thing it does not mean while the budget is still spent.
+      expect(await res.json()).toEqual({
+        status: "resumed",
+        paused: false,
+        windowTotal: "5000",
+        dailyLimit: "5000",
+        willTripAgain: true,
+      });
+      expect(limits.isPaused()).toBe(false);
+
+      // What willTripAgain is warning about. Nothing tested this before, so
+      // the gap between the 200 and the recovery was never visible.
+      expect(limits.check(1n).allowed).toBe(false);
+      expect(limits.isPaused()).toBe(true);
+    } finally {
+      await close();
+    }
+  });
+
+  it("rejects a missing or wrong admin key", async () => {
+    const { url, close } = await boot({
+      adminKey: ADMIN_KEY,
+      limits: new TransactionLimits({ dailyLimit: 5000n }),
+    });
+    try {
+      expect((await resume(url)).status).toBe(401);
+      expect((await resume(url, "wrong-key")).status).toBe(401);
+    } finally {
+      await close();
+    }
+  });
+
+  // The whole reason the key is separate: a caller who can move funds must not
+  // be able to clear the breaker that stopped them.
+  it("does not accept the RPC key", async () => {
+    const { url, close } = await boot({
+      apiKey: RPC_KEY,
+      adminKey: ADMIN_KEY,
+      limits: new TransactionLimits({ dailyLimit: 5000n }),
+    });
+    try {
+      expect((await resume(url, RPC_KEY)).status).toBe(401);
+    } finally {
+      await close();
+    }
+  });
+
+  // 404 rather than 403: an endpoint that cannot be used should not confirm
+  // that it exists.
+  it("is invisible when no admin key is configured", async () => {
+    const { url, close } = await boot({ limits: new TransactionLimits({ dailyLimit: 5000n }) });
+    try {
+      expect((await resume(url, ADMIN_KEY)).status).toBe(404);
+    } finally {
+      await close();
+    }
+  });
+
+  it("reports 409 when no limits are configured", async () => {
+    const { url, close } = await boot({ adminKey: ADMIN_KEY });
+    try {
+      expect((await resume(url, ADMIN_KEY)).status).toBe(409);
+    } finally {
+      await close();
+    }
   });
 });

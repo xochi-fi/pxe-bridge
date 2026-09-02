@@ -1,16 +1,22 @@
 import {
   JsonRpcRequestSchema,
   CreateNoteParamsSchema,
+  PostSubmissionError,
   RPC_ERRORS,
+  SUBMITTED_UNKNOWN_MESSAGE,
   type IAztecClient,
   type JsonRpcResponse,
 } from "./types.js";
 import type { TransactionLimits } from "./limits.js";
+import type { IdempotencyStore, IdempotentOutcome } from "./idempotency.js";
 import type { AuditLogger, AuditEntry } from "./audit.js";
 
 export interface RpcContext {
   limits?: TransactionLimits | undefined;
   audit?: AuditLogger | undefined;
+  idempotency?: IdempotencyStore | undefined;
+  /** From the `Idempotency-Key` request header, when the caller sent one. */
+  idempotencyKey?: string | undefined;
   clientIp?: string | undefined;
 }
 
@@ -21,6 +27,8 @@ function auditBase(
     amount: string;
     chainId: number;
     tradeId?: string | undefined;
+    subTradeIndex?: number | undefined;
+    totalSubTrades?: number | undefined;
   },
   ctx: RpcContext,
 ): Omit<AuditEntry, "status" | "txHash" | "error"> {
@@ -32,16 +40,35 @@ function auditBase(
     amount: params.amount,
     chainId: params.chainId,
     tradeId: params.tradeId,
+    subTradeIndex: params.subTradeIndex,
+    totalSubTrades: params.totalSubTrades,
+    idempotencyKey: ctx.idempotencyKey,
     clientIp: ctx.clientIp ?? "unknown",
   };
+}
+
+/** Applies a recorded outcome to the id of the request replaying it. */
+function replay(id: number | string, outcome: IdempotentOutcome): JsonRpcResponse {
+  return outcome.kind === "result"
+    ? success(id, outcome.result)
+    : rpcError(id, outcome.code, outcome.message, outcome.data);
 }
 
 function success(id: number | string | null, result: unknown): JsonRpcResponse {
   return { jsonrpc: "2.0", id, result };
 }
 
-function rpcError(id: number | string | null, code: number, message: string): JsonRpcResponse {
-  return { jsonrpc: "2.0", id, error: { code, message } };
+function rpcError(
+  id: number | string | null,
+  code: number,
+  message: string,
+  data?: unknown,
+): JsonRpcResponse {
+  return {
+    jsonrpc: "2.0",
+    id,
+    error: { code, message, ...(data !== undefined ? { data } : {}) },
+  };
 }
 
 export async function handleRpcRequest(
@@ -86,6 +113,62 @@ async function handleCreateNote(
   const noteParams = parsed.data;
   const amount = BigInt(noteParams.amount);
 
+  // Claimed before the limits are touched, so a duplicate neither transfers
+  // nor consumes budget. Claiming is synchronous, so two concurrent requests
+  // carrying the same key cannot both proceed.
+  const key = ctx.idempotency && ctx.idempotencyKey ? ctx.idempotencyKey : undefined;
+  if (ctx.idempotency && key !== undefined) {
+    const lookup = ctx.idempotency.begin(key);
+    if (lookup.state === "settled") {
+      console.log(`[rpc] Replaying idempotency key ${key}`);
+      return replay(id, lookup.outcome);
+    }
+    if (lookup.state === "in-flight") {
+      console.warn(`[rpc] Idempotency key ${key} is already in flight`);
+      return rpcError(
+        id,
+        RPC_ERRORS.REQUEST_IN_FLIGHT,
+        "A request with this Idempotency-Key is still in flight",
+      );
+    }
+  }
+
+  /** Frees the key: nothing moved, so a retry is legitimate. */
+  const abandon = (): void => {
+    if (ctx.idempotency && key !== undefined) ctx.idempotency.abandon(key);
+  };
+  /** Holds the key: a duplicate must replay this rather than transfer again. */
+  const settle = (outcome: IdempotentOutcome): void => {
+    if (ctx.idempotency && key !== undefined) ctx.idempotency.settle(key, outcome);
+  };
+
+  /**
+   * Records an outcome without letting the write decide the outcome.
+   *
+   * Every call below happens AFTER the decision it describes: the reservation
+   * is committed or released, the key is settled or abandoned, the response is
+   * chosen. A rejected write (ENOSPC, EACCES, EMFILE) used to unwind those
+   * decisions instead of reporting beside them. The damaging case was the
+   * success path: the write sat inside the same `try` as the send, so a failed
+   * write landed in the catch with `landed` false, `abandon()` freed the key of
+   * a transfer that had moved funds, and the caller got "Internal error" with
+   * no txHash. The next retry sent a second transfer.
+   *
+   * Losing the line is survivable in a way that losing the decision is not.
+   * The `submitting` intent is already on disk, so a reader that finds no
+   * successor replays it as `unknown` -- "may have moved funds", which is the
+   * safe direction. Logged loudly rather than swallowed: this is the durable
+   * record failing, and an operator has to know the log is now incomplete.
+   */
+  const logOutcome = async (entry: AuditEntry): Promise<void> => {
+    if (!ctx.audit) return;
+    try {
+      await ctx.audit.log(entry);
+    } catch (cause) {
+      console.error("[rpc] AUDIT WRITE FAILED -- outcome not recorded:", cause);
+    }
+  };
+
   // Enforce transaction limits (ceiling, daily volume, circuit breaker).
   // reserve() counts the amount against the rolling window immediately, so
   // concurrent in-flight requests cannot each pass on a stale total and
@@ -96,13 +179,12 @@ async function handleCreateNote(
     const reservation = ctx.limits.reserve(amount);
     if (!reservation.allowed) {
       console.error("[rpc] Limit rejected:", reservation.reason);
-      if (ctx.audit) {
-        await ctx.audit.log({
-          ...auditBase(noteParams, ctx),
-          status: "rejected",
-          error: reservation.reason,
-        });
-      }
+      abandon();
+      await logOutcome({
+        ...auditBase(noteParams, ctx),
+        status: "rejected",
+        error: reservation.reason,
+      });
       return rpcError(id, RPC_ERRORS.INVALID_PARAMS, reservation.reason);
     }
 
@@ -116,6 +198,30 @@ async function handleCreateNote(
     }
   }
 
+  // Intent, written and flushed BEFORE the send. A crash between submitting
+  // and recording the outcome would otherwise leave the log silent about a
+  // transfer that may have landed, and a restart would hand the key back as
+  // fresh. Replaying a `submitting` entry with no successor as "unknown" is
+  // what closes that window, and only this write makes it visible.
+  //
+  // Fail-closed, and the only audit write that still decides control flow. If
+  // the intent cannot be recorded, sending anyway reopens exactly the window
+  // this write exists to close, so we do not send. Unwinding has to undo BOTH
+  // claims: the write used to sit outside the try below, so a throw escaped
+  // the function with the reservation neither committed nor released -- it
+  // counted against the window for 24h -- and with the key held, so every
+  // retry was told a transfer that never happened was still in flight.
+  if (ctx.audit && key !== undefined) {
+    try {
+      await ctx.audit.log({ ...auditBase(noteParams, ctx), status: "submitting" });
+    } catch (cause) {
+      console.error("[rpc] Intent write failed -- refusing to send:", cause);
+      if (ctx.limits && reservationId !== undefined) ctx.limits.release(reservationId);
+      abandon();
+      return rpcError(id, RPC_ERRORS.INTERNAL_ERROR, "Internal error");
+    }
+  }
+
   try {
     const result = await client.createNote(noteParams);
 
@@ -124,32 +230,61 @@ async function handleCreateNote(
       ctx.limits.commit(reservationId);
     }
 
-    if (ctx.audit) {
-      await ctx.audit.log({
-        ...auditBase(noteParams, ctx),
-        status: "success",
-        txHash: result.l2TxHash,
-      });
-    }
+    settle({ kind: "result", result });
+
+    await logOutcome({
+      ...auditBase(noteParams, ctx),
+      status: "success",
+      txHash: result.l2TxHash,
+      noteHashes: result.noteHashes,
+      nullifiers: result.nullifiers,
+    });
 
     return success(id, result);
   } catch (cause) {
     console.error("[rpc] aztec_createNote failed:", cause);
 
-    // Free the reservation so a failed tx does not count against the cap
+    // A PostSubmissionError means the transfer may already be on chain, so the
+    // amount has to stay counted. Releasing it let a caller repeat whatever
+    // caused the failure -- a slow node, most obviously -- and move funds past
+    // the daily cap without the window ever seeing them.
+    const landed = cause instanceof PostSubmissionError;
     if (ctx.limits && reservationId !== undefined) {
-      ctx.limits.release(reservationId);
+      if (landed) {
+        ctx.limits.commit(reservationId);
+      } else {
+        ctx.limits.release(reservationId);
+      }
     }
 
-    if (ctx.audit) {
-      await ctx.audit.log({
-        ...auditBase(noteParams, ctx),
-        status: "error",
-        error: cause instanceof Error ? cause.message : "Unknown error",
-      });
+    // Distinct from a clean rejection: the caller has to reconcile rather than
+    // assume nothing happened. Retrying this blindly sends a second transfer,
+    // which is why the key holds it rather than freeing it.
+    const outcome: IdempotentOutcome = landed
+      ? {
+          kind: "error",
+          code: RPC_ERRORS.SUBMITTED_UNKNOWN,
+          message: SUBMITTED_UNKNOWN_MESSAGE,
+          ...(cause.txHash !== undefined ? { data: { txHash: cause.txHash } } : {}),
+        }
+      : { kind: "error", code: RPC_ERRORS.INTERNAL_ERROR, message: "Internal error" };
+
+    if (landed) {
+      settle(outcome);
+    } else {
+      abandon();
     }
 
-    return rpcError(id, RPC_ERRORS.INTERNAL_ERROR, "Internal error");
+    await logOutcome({
+      ...auditBase(noteParams, ctx),
+      // "unknown" rather than "error": whether this moved funds is exactly
+      // what is not known, and the replay reader has to tell the two apart.
+      status: landed ? "unknown" : "error",
+      ...(landed && cause.txHash ? { txHash: cause.txHash } : {}),
+      error: cause instanceof Error ? cause.message : "Unknown error",
+    });
+
+    return replay(id, outcome);
   }
 }
 

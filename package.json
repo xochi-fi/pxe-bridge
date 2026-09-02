@@ -27,20 +27,22 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "vitest run --config vitest.config.e2e.ts",
-    "test:e2e:up": "docker compose up -d --wait && npm run test:e2e; docker compose down",
-    "bridge-fee-juice": "tsx scripts/bridge-fee-juice.ts"
+    "test:e2e:up": "docker compose up -d --wait anvil aztec-sandbox && npm run test:e2e; ec=$?; docker compose down; exit $ec",
+    "bridge-fee-juice": "tsx scripts/bridge-fee-juice.ts",
+    "top-up-fee-juice": "tsx scripts/top-up-fee-juice.ts",
+    "update-allowlist": "tsx scripts/update-allowlist.ts"
   },
   "dependencies": {
     "@aws-sdk/client-secrets-manager": "^3.1032.0",
-    "@aztec/accounts": "4.2.0",
-    "@aztec/aztec.js": "4.2.0",
-    "@aztec/noir-contracts.js": "4.2.0",
-    "@aztec/wallets": "4.2.0",
+    "@aztec/accounts": "5.1.0",
+    "@aztec/aztec.js": "5.1.0",
+    "@aztec/noir-contracts.js": "5.1.0",
+    "@aztec/wallets": "5.1.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {

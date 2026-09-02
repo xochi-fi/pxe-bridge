@@ -1,0 +1,14 @@
+// Type-checks the test suite and the operator scripts, both of which
+// tsconfig.json deliberately excludes: it sets rootDir/outDir for the build, so
+// including them there would emit them into dist/. Nothing else checks either
+// one -- vitest transpiles without checking types and tsx runs scripts the same
+// way -- which is how scripts/bridge-fee-juice.ts came to call
+// createSchnorrAccount with an argument missing.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src/**/*", "tests/**/*", "scripts/**/*.ts"]
+}
