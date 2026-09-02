@@ -38,6 +38,11 @@ jobs:
   # the previously committed artifact was broken.
   contract:
     runs-on: ubuntu-latest
+    # The one place the toolchain version is written. It has to match the
+    # aztec-nr dependency in contracts/spending_limit_account/Nargo.toml and the
+    # Aztec SDK in package.json, and it is asserted below rather than assumed.
+    env:
+      AZTEC_VERSION: "5.1.0"
     steps:
       - uses: actions/checkout@v4
       # Needed by the class ID check below, which loads the artifact through
@@ -72,18 +77,32 @@ jobs:
           # red build over something we do not use; failing on a missing
           # `aztec` or `aztec-nargo` is real and still fails below.
           set +e
-          aztec-up install 5.1.0
+          aztec-up install "$AZTEC_VERSION"
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
             echo "::warning::aztec-up exited $status; continuing only if the needed binaries are present"
           fi
+          # Searched under the pinned version directory, not all of ~/.aztec.
+          # install.aztec.network installs the latest release before `aztec-up
+          # install` pins ours, so ~/.aztec holds both. A search across the
+          # whole tree took whichever the walk reached first, and on
+          # 2026-08-26 that was 5.2.0: `aztec --version` reported 5.2.0 with
+          # nargo 1.0.0-beta.25, under which aztec-nr 5.1.0's own test helpers
+          # do not compile. The job failed with 277 errors inside
+          # macros/oracle_testing.nr and none in this contract.
+          root="$HOME/.aztec/versions/$AZTEC_VERSION"
+          if [ ! -d "$root" ]; then
+            echo "$AZTEC_VERSION is not installed (aztec-up exited $status); tree under ~/.aztec:"
+            find "$HOME/.aztec" -maxdepth 3
+            exit 1
+          fi
           # aztec-up keeps versioned binaries outside ~/.aztec/bin and only
           # updates PATH for a login shell, which workflow steps do not get.
-          bin=$(find "$HOME/.aztec" \( -type f -o -type l \) -name aztec-nargo | head -1)
+          bin=$(find "$root" \( -type f -o -type l \) -name aztec-nargo | head -1)
           if [ -z "$bin" ]; then
-            echo "aztec-nargo not found (aztec-up exited $status); tree under ~/.aztec:"
-            find "$HOME/.aztec" -maxdepth 3 -name '*nargo*'
+            echo "aztec-nargo not found under $root (aztec-up exited $status); tree:"
+            find "$root" -maxdepth 3
             exit 1
           fi
           dir=$(dirname "$bin")
@@ -93,10 +112,22 @@ jobs:
             exit 1
           fi
           echo "$dir" >> "$GITHUB_PATH"
-      - name: Toolchain versions
+      # Asserted, not printed. Printing is what let 5.2.0 through: the version
+      # was in the log the whole time and nothing read it. The contract class
+      # ID derives from this toolchain's bytecode and feeds address derivation,
+      # so a silent version change moves the account address. Fail here, where
+      # the message names the cause, rather than in the class ID check, where
+      # it looks like the contract changed.
+      - name: Assert the pinned toolchain is the one on PATH
         run: |
           aztec-nargo --version
-          aztec --version
+          found=$(aztec --version)
+          if [ "$found" != "$AZTEC_VERSION" ]; then
+            echo "::error::toolchain drifted: aztec --version reports $found, expected $AZTEC_VERSION"
+            echo "PATH resolves aztec to: $(command -v aztec)"
+            exit 1
+          fi
+          echo "aztec $found"
       - name: Contract unit tests (spending-limit guard)
         working-directory: contracts/spending_limit_account
         run: aztec-nargo test
