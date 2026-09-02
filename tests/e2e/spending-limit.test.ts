@@ -447,7 +447,9 @@ async function simulateAccount(
       at: (a: unknown, art: unknown, w: unknown) => Promise<{
         methods: Record<
           string,
-          (...a: unknown[]) => { simulate: (o: { from: unknown }) => Promise<unknown> }
+          (...a: unknown[]) => {
+            simulate: (o: { from: unknown; fee?: unknown }) => Promise<unknown>;
+          }
         >;
       }>;
     }
@@ -457,8 +459,13 @@ async function simulateAccount(
     wallet,
   );
 
+  // Headroom on a simulation too. A view pays nothing, but the node validates
+  // maxFeesPerGas against the live base fee before it runs anything, so a
+  // default point prediction made before an earlier deploy moved the fee fails
+  // here exactly as a send does.
   const out = await c.methods[method]!(...args).simulate({
     from: AztecAddress.fromStringUnsafe(caller),
+    fee: await feeWithHeadroom(wallet),
   });
   return (out as { result?: unknown })?.result ?? out;
 }
@@ -741,7 +748,10 @@ async function balanceOf(
   // of undefined (reading 'toString')" instead of the real cause.
   const bal = await contract.methods["balance_of_public"]!(
     AztecAddress.fromStringUnsafe(owner),
-  ).simulate({ from: AztecAddress.fromStringUnsafe(owner) });
+  ).simulate({
+    from: AztecAddress.fromStringUnsafe(owner),
+    fee: await feeWithHeadroom(wallet),
+  });
   const value = (bal as { result?: unknown })?.result ?? bal;
   return typeof value === "bigint" ? value : BigInt(String(value));
 }

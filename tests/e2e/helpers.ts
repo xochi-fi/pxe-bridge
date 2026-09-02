@@ -97,6 +97,13 @@ export async function waitForNode(url: string, timeoutMs = 120_000): Promise<voi
  * fee, so it failed validation with "maxFeesPerGas.feePerL2Gas must be greater
  * than or equal to gasFees.feePerL2Gas". Intermittent, and the last open flake
  * on the branch. The deploy path already solved this; the sends never got it.
+ *
+ * View simulations need it too, which the first fix missed because a view pays
+ * nothing so the fee looked irrelevant. It is not: the node validates
+ * maxFeesPerGas against the live base fee before executing, so `balanceOf` in
+ * spending-limit.test.ts failed the same way at 45909093 against 73600000 on
+ * 2026-09-02, after 20 of 21 tests had passed. Every simulate() in the suite
+ * passes this now.
  */
 export async function feeWithHeadroom(wallet: unknown): Promise<{
   paymentMethod: import("@aztec/aztec.js/fee").FeePaymentMethod;
