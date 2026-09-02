@@ -98,12 +98,7 @@ export async function waitForNode(url: string, timeoutMs = 120_000): Promise<voi
  * than or equal to gasFees.feePerL2Gas". Intermittent, and the last open flake
  * on the branch. The deploy path already solved this; the sends never got it.
  *
- * View simulations need it too, which the first fix missed because a view pays
- * nothing so the fee looked irrelevant. It is not: the node validates
- * maxFeesPerGas against the live base fee before executing, so `balanceOf` in
- * spending-limit.test.ts failed the same way at 45909093 against 73600000 on
- * 2026-09-02, after 20 of 21 tests had passed. Every simulate() in the suite
- * passes this now.
+ * Sends only. Simulations want `gasWithHeadroom` instead.
  */
 export async function feeWithHeadroom(wallet: unknown): Promise<{
   paymentMethod: import("@aztec/aztec.js/fee").FeePaymentMethod;
@@ -113,6 +108,30 @@ export async function feeWithHeadroom(wallet: unknown): Promise<{
     paymentMethod: await sponsoredFee(wallet),
     gasSettings: await headroomGasSettings(resolveNodeUrl()),
   };
+}
+
+/**
+ * The `fee` option every e2e simulate() should use: the same headroom, and no
+ * payment method.
+ *
+ * Simulations need the headroom for the reason sends do. The node validates
+ * maxFeesPerGas against the live base fee before it executes anything, so a
+ * default point prediction made before an earlier deploy moved the fee fails a
+ * view exactly as it fails a send. `balanceOf` went down that way at 45909093
+ * against 73600000 on 2026-09-02, after 20 of the suite's 21 tests had passed.
+ *
+ * What they must not take is the payment method. It contributes a call of its
+ * own, BaseWallet merges it into the same payload the interaction builds, and
+ * the simulated batch then returns values for a call set the caller is not
+ * expecting: five of these tests failed with "Not enough return values" when
+ * `feeWithHeadroom` was used here. On the spending-limit account it is worse
+ * than confusing, since the entrypoint admits exactly one call and a second one
+ * is what `PREEXISTING_FEE_JUICE` exists to avoid.
+ */
+export async function gasWithHeadroom(): Promise<{
+  gasSettings: Awaited<ReturnType<typeof headroomGasSettings>>;
+}> {
+  return { gasSettings: await headroomGasSettings(resolveNodeUrl()) };
 }
 
 /**

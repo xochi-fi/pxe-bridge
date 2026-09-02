@@ -5,6 +5,7 @@ import {
   getTestConfig,
   deployTestToken,
   feeWithHeadroom,
+  gasWithHeadroom,
   fundFeeJuice,
   mintOne,
   mintTo,
@@ -459,13 +460,12 @@ async function simulateAccount(
     wallet,
   );
 
-  // Headroom on a simulation too. A view pays nothing, but the node validates
-  // maxFeesPerGas against the live base fee before it runs anything, so a
-  // default point prediction made before an earlier deploy moved the fee fails
-  // here exactly as a send does.
+  // Headroom on a simulation too, and without a payment method: see
+  // gasWithHeadroom. A view pays nothing, but the node still validates
+  // maxFeesPerGas against the live base fee before it runs anything.
   const out = await c.methods[method]!(...args).simulate({
     from: AztecAddress.fromStringUnsafe(caller),
-    fee: await feeWithHeadroom(wallet),
+    fee: await gasWithHeadroom(),
   });
   return (out as { result?: unknown })?.result ?? out;
 }
@@ -750,7 +750,7 @@ async function balanceOf(
     AztecAddress.fromStringUnsafe(owner),
   ).simulate({
     from: AztecAddress.fromStringUnsafe(owner),
-    fee: await feeWithHeadroom(wallet),
+    fee: await gasWithHeadroom(),
   });
   const value = (bal as { result?: unknown })?.result ?? bal;
   return typeof value === "bigint" ? value : BigInt(String(value));
