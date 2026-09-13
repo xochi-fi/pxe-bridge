@@ -42,7 +42,16 @@ export async function resolveSecretKey(): Promise<SecretKeyResult> {
     throw new Error("PXE_BRIDGE_SECRET_KEY or PXE_BRIDGE_SECRET_ARN is required");
   }
 
-  const normalized = validateKey(envKey);
+  const normalized = await validateKey(envKey);
+
+  // Drop it from the environment now that it has been read. It stays visible
+  // in /proc/self/environ and `docker inspect` for as long as it is there,
+  // which is the exposure the ARN path exists to avoid; leaving it set means
+  // the dev path keeps it readable for the life of the process long after the
+  // wallet is derived. Both operator scripts already do this. Not a substitute
+  // for the ARN, and it cannot unpublish the value from whatever set it.
+  delete process.env["PXE_BRIDGE_SECRET_KEY"];
+
   return { key: normalized, source: "env" };
 }
 
@@ -65,7 +74,7 @@ async function fetchFromSecretsManager(secretId: string): Promise<string> {
 
   // Support both plain hex and JSON {"key": "hex"} formats
   const value = parseSecretValue(raw);
-  return validateKey(value);
+  return await validateKey(value);
 }
 
 function parseSecretValue(raw: string): string {
@@ -98,10 +107,32 @@ function parseSecretValue(raw: string): string {
   throw new Error('Secret value must be a 32-byte hex string or JSON with a "key" field');
 }
 
-function validateKey(raw: string): string {
+/**
+ * Checks the key is 32 bytes AND a valid BN254 field element.
+ *
+ * The range check is here rather than at connect(), where an out-of-range key
+ * surfaces as "Value 0x... is greater or equal to field modulus" thrown from
+ * inside the SDK, naming neither the variable nor the env var that supplied it.
+ * Roughly 81% of 32-byte values are out of range, so this is the common case
+ * for anyone generating a key with `openssl rand -hex 32`, not an edge case.
+ *
+ * The key is rejected, never reduced: reducing operator-supplied key material
+ * would map distinct keys onto one account and silently accept a typo.
+ */
+async function validateKey(raw: string): Promise<string> {
   const normalized = raw.replace(/^0x/, "");
   if (!/^[0-9a-fA-F]{64}$/.test(normalized)) {
     throw new Error("Secret key must be 32 bytes (64 hex chars)");
   }
+
+  const { Fr } = await import("@aztec/aztec.js/fields");
+  if (BigInt(`0x${normalized}`) >= Fr.MODULUS) {
+    throw new Error(
+      "Secret key is not a valid BN254 field element: it must be below the Fr " +
+        "modulus (0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001). " +
+        "Generate one by retrying until the value is in range.",
+    );
+  }
+
   return normalized;
 }

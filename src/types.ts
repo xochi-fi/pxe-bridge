@@ -15,7 +15,10 @@ export type JsonRpcResponse =
   | {
       jsonrpc: "2.0";
       id: number | string | null;
-      error: { code: number; message: string };
+      // `data` carries the txHash when a transfer may have landed but its
+      // result could not be read back, so the caller can reconcile instead of
+      // retrying into a second transfer.
+      error: { code: number; message: string; data?: unknown };
     };
 
 // aztec_createNote params
@@ -62,9 +65,29 @@ export const CreateNoteParamsSchema = z
 export type CreateNoteParams = z.infer<typeof CreateNoteParamsSchema>;
 
 export interface CreateNoteResult {
-  noteCommitment: string;
-  nullifierHash: string;
+  /**
+   * Every note hash the transaction emitted, in emission order. A
+   * `transfer_to_private` emits two, so a single value cannot identify "the"
+   * note without the caller deciding which one it means.
+   */
+  noteHashes: string[];
+  /**
+   * Every nullifier the transaction emitted, in emission order. Index 0 is the
+   * protocol (transaction) nullifier rather than a note's: this transfer
+   * spends the public balance and so nullifies no note.
+   */
+  nullifiers: string[];
   l2TxHash: string;
+  /**
+   * @deprecated `noteHashes[0]`. Kept so existing callers keep parsing, but the
+   * pick is arbitrary; read `noteHashes` and choose deliberately.
+   */
+  noteCommitment: string;
+  /**
+   * @deprecated `nullifiers[0]`, which is the protocol nullifier and not the
+   * nullifier of any note this transfer created. Read `nullifiers` instead.
+   */
+  nullifierHash: string;
 }
 
 // Fee Juice claim from L1->L2 bridge (one-time account deployment)
@@ -76,12 +99,64 @@ export const FeeJuiceClaimSchema = z.object({
 
 export type FeeJuiceClaim = z.infer<typeof FeeJuiceClaimSchema>;
 
+/**
+ * One allowlisted recipient and the tree position it occupies.
+ *
+ * The index is not decorative. The account stores only a root, so the bridge
+ * has to reproduce the exact tree the admin built, and a leaf at the wrong
+ * position produces a different root. It is also published in the admin's
+ * `update_recipient` call, which is why positions are assigned randomly rather
+ * than filled left to right: a first touch of position k would otherwise be
+ * visibly an addition.
+ *
+ * The upper bound is 2^ALLOWLIST_TREE_HEIGHT, which the contract also asserts.
+ */
+export const AllowlistRecipientSchema = z.object({
+  address: z.string().regex(/^0x[0-9a-fA-F]{64}$/, "Must be a 32-byte hex AztecAddress"),
+  index: z.number().int().min(0).max(1023),
+});
+
+export const AllowlistRecipientsSchema = z.array(AllowlistRecipientSchema);
+
+/**
+ * Raised when createNote fails at a point where the transfer may already be on
+ * chain: the send deadline expired, or the transfer succeeded and only reading
+ * the result back failed.
+ *
+ * The caller must not treat this as "nothing happened". `rpc.ts` counts it
+ * against the daily window instead of releasing the reservation, because
+ * releasing a transfer that landed lets the same failure be repeated past the
+ * cap.
+ *
+ * Lives here rather than in `aztec-client.ts` so `rpc.ts` can narrow on it
+ * without importing the Aztec SDK.
+ */
+export class PostSubmissionError extends Error {
+  constructor(
+    message: string,
+    readonly txHash?: string,
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
+    this.name = "PostSubmissionError";
+  }
+}
+
 // Abstraction over AztecClient for testability
 export interface IAztecClient {
   connect(): Promise<void>;
   createNote(params: CreateNoteParams): Promise<CreateNoteResult>;
   getVersion(): Promise<string>;
 }
+
+/**
+ * Answer for a transfer that may be on chain but whose result could not be
+ * read back. Shared, because `rpc.ts` produces it live and `audit.ts`
+ * reconstructs it when replaying a key after a restart, and a caller matching
+ * on the string must see the same one either way.
+ */
+export const SUBMITTED_UNKNOWN_MESSAGE =
+  "Transaction submitted, result unknown -- do not retry without reconciling";
 
 // JSON-RPC error codes
 export const RPC_ERRORS = {
@@ -90,4 +165,13 @@ export const RPC_ERRORS = {
   METHOD_NOT_FOUND: -32601,
   INVALID_PARAMS: -32602,
   INTERNAL_ERROR: -32603,
+
+  // JSON-RPC reserves -32000..-32099 for application errors. Both of these
+  // used to be INTERNAL_ERROR, which put five distinct conditions behind one
+  // code and left the two that matter indistinguishable: a caller reading the
+  // code alone could not tell "nothing happened yet, wait" from "this may
+  // have moved funds, reconcile". Only string-matching the message separated
+  // them, which is not an interface.
+  REQUEST_IN_FLIGHT: -32001,
+  SUBMITTED_UNKNOWN: -32002,
 } as const;

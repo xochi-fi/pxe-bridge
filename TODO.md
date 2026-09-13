@@ -38,23 +38,59 @@ Aztec's account abstraction is native -- every account is a contract. Move
 authorization logic on-chain so it's enforced even if the bridge is compromised.
 
 - [x] **Spending-limit account contract** -- Noir contract that extends the
-      Schnorr account with per-tx and rolling daily amount caps stored in
-      contract state. `is_valid` checks amounts against limits. Exceeding the
-      limit makes the tx unprovable.
-- [x] **Recipient allowlist** -- on-chain whitelist of approved recipient
-      addresses. Transfers to unknown addresses require a separate admin tx
-      to add them first.
-- [x] **Timelock for parameter changes** -- limit/allowlist updates take effect
-      after N blocks, giving operators time to detect unauthorized changes.
+      Schnorr account with a per-tx cap and a 25-bucket sliding daily window,
+      both `u128` and both stored in public state. Enforced by
+      `check_spending_public`, which the entrypoint enqueues. Exceeding a limit
+      does not make the tx unprovable: it is proven, included, and reverted in
+      the public phase. That is deliberate, and it is what makes revocation
+      immediate.
+- [x] **Recipient allowlist** -- one storage slot holding the root of a
+      height-10 Merkle tree whose leaves are commitments `h(recipient, salt)`.
+      Membership is proven in private; public compares only the proven root
+      against the stored one, so a transfer proven against a superseded
+      allowlist cannot be included. Replaced 8 slots of public storage, which
+      published a candidate set on every transfer and published every entry
+      through the admin's own calls (NM-1019 [Medium]). `min_anonymity_set` and
+      its floor plumbing are gone with it: a root has no candidate set to size.
+- [x] **Timelock for parameter changes** -- 24h
+      (`PARAM_TIMELOCK_SECONDS`), timestamp-based rather than block-based, with
+      a 24h window to apply before a proposal expires. Covers limit changes
+      only. `pause` and `update_recipient` are immediate: `pause` because a
+      timelock would hand a compromised signer the notice they need, and
+      `update_recipient` because addition and revocation are indistinguishable
+      by construction, so one policy has to cover both and revocation is the
+      one that cannot wait.
 
-Contract compiled (`nargo compile`), artifact at
-`contracts/spending_limit_account/target/`. TypeScript wrapper at
-`src/spending-limit-account.ts`. Wired into `aztec-client.ts` via
+Compiled with `aztec compile`, not `nargo compile` or `aztec-nargo compile`.
+The latter is a symlink to plain `nargo`, ships no transpiler, and emits
+`transpiled: false`, which `loadContractArtifact` rejects. The artifact is
+gitignored and rebuilt by the `contract` CI job. TypeScript wrapper at
+`src/spending-limit-account.ts`, wired into `aztec-client.ts` via
 `AccountManager.create()`. Enabled by setting `PXE_BRIDGE_SPENDING_LIMIT_ADMIN`
-(32-byte hex AztecAddress). Limit values validated at init and apply time
-(`daily_limit >= max_per_tx`, u64 range). Admin `reset_daily_spent()` added
-as stopgap for epoch stall (block production slowdown).
-Remaining: deploy to sandbox, e2e test on x86_64.
+(32-byte hex AztecAddress), which also requires `PXE_BRIDGE_MAX_AMOUNT` and
+`PXE_BRIDGE_DAILY_LIMIT`, since the contract rejects a zero limit. Limits are
+validated at init and apply time (`daily_limit >= max_per_tx`, both non-zero,
+`u128`). Deployed and exercised end to end against the sandbox by
+`tests/e2e/spending-limit.test.ts` in the `e2e` CI job.
+
+> **Constraint on every further contract change: the class ID.** Any edit to
+> `main.nr` that reaches the bytecode moves the contract class ID, which feeds
+> address derivation, so the account lands at a different address. Before a
+> deployment exists that is free. After one, it strands the balance at the old
+> address while the bridge deploys a fresh empty account and logs "Ready".
+>
+> Practically this means three things. Every deliberate contract change updates
+> `contracts/spending_limit_account/CLASS_ID` in the same commit, re-baselined
+> from an x86 CI artifact, because `aztec compile` does not finish on ARM.
+> `scripts/contract-class-id.js` fails the job on unexplained drift. And
+> anything on the deferred list below that touches `main.nr` (transaction
+> cancellation, for one) has to land before an address is fixed, not after.
+>
+> `aztec compile` is also not reproducible: identical sources and toolchain
+> versions have produced two different class IDs across CI runs. So a red check
+> may be that flake rather than a real change. Diff the uploaded artifact before
+> concluding either way, and archive the artifact a deployment was made against
+> rather than rebuilding it. See SECURITY.md, "Build supply chain".
 
 ## Security Hardening Pass (2026-04-20)
 
@@ -77,17 +113,48 @@ Cross-cutting fixes from security audit against 2026 threat landscape
       non-localhost, recommends reverse proxy.
 - [x] **Docker HEALTHCHECK** -- 30s interval, curl to `/status`.
 - [x] **Noir contract limit validation** -- `initialize_public_state` and
-      `apply_limits` assert `daily_limit >= max_per_tx` and u64 range.
-- [x] **Admin daily reset** -- `reset_daily_spent()` for manual epoch reset
-      when block production stalls.
+      `apply_limits` assert `daily_limit >= max_per_tx` and reject zero in
+      either slot. Range is the `u128` type itself since NM-1019 [High]; the
+      original u64 check capped every limit at 18.45 tokens at 18 decimals.
+- [ ] ~~**Admin daily reset**~~ -- `reset_daily_spent()` was REMOVED. An
+      untimelocked admin write of `daily_spent = 0` is the same impact as
+      NM-1019 [High] "Daily counter can be reset to zero", just reached
+      through the admin instead of through field arithmetic.
+- [x] **Transaction cancellation** -- FIXED. NM-1019 [Low] "cancellable
+      transactions cannot be cancelled" was correct: the entrypoint pushed a
+      cancellation nullifier and offered no path to use it. The branch is
+      deleted, which was the preferred of the two resolutions because it fails
+      safe if a future SDK flips `BaseWallet.cancellableTransactions` off its
+      hardcoded `false`. The alternative, branching on zero non-empty calls,
+      was rejected: it is a second shape through the entrypoint on which the
+      fee branch still runs. The `cancellable` ABI parameter stays, read and
+      ignored, because entrypoint arguments are positional. Landed with the
+      Merkle allowlist so the two share one class ID move. Rationale in
+      SECURITY.md, "Transaction cancellation is not supported".
 
 Known limitations (acceptable for alpha):
 
 - `Fr` objects hold key material on heap until GC (SDK limitation).
-- Epoch-based daily reset depends on block production rate; admin reset
-  is the manual fallback.
 - Rate limiter uses `socket.remoteAddress`; deploy behind reverse proxy
   for accurate client IP.
+- Transfer amounts are public. `declared_amount` is an argument to
+  `check_spending_public`, along with the token and the allowlist root.
+  Inherent to checking against public storage. The recipient is not: it is
+  proven against the root in private. See SECURITY.md, "What is public".
+- The allowlist cannot be recovered from the chain. Losing the seed or the
+  position list is terminal for allowlist management, and unlike the public
+  array it replaced there is no way to read the set back. See SECURITY.md,
+  "Losing the allowlist".
+- `aztec compile` is not reproducible, so the account address cannot be rebuilt
+  from source. Mitigated by the `CLASS_ID` pin and by archiving the artifact a
+  deployment was made against. See the class ID note under Phase 2.
+- The spending-limit account cannot pay its own fees and nothing watches its
+  fee juice balance. It drains silently and refills only when an operator runs
+  `npm run top-up-fee-juice` from an L1-funded key. Tracked in Phase 3.
+
+Resolved since this list was written: the fixed-epoch daily reset, which
+depended on block production rate and could wedge a stalled chain's counter, is
+now a timestamp-anchored 25-bucket sliding window (NM-1019 [Medium]).
 
 ## Phase 3: Hot/Cold Wallet Split
 
@@ -100,6 +167,10 @@ Bound exposure per chain by separating operational funds from reserves.
       balance drops below threshold.
 - [ ] **Balance monitoring** -- alert when hot wallet balance drops below
       configurable floor or spikes unexpectedly (possible drain).
+- [ ] **Fee juice balance monitoring** -- separate from the above and needed
+      sooner. The spending-limit account cannot claim fee juice for itself, so
+      running dry fails every transfer until an operator runs
+      `npm run top-up-fee-juice` from an L1-funded key. Nothing warns today.
 - [ ] **Auto-pause on low balance** -- stop accepting `createNote` when hot
       wallet can't cover the requested amount.
 

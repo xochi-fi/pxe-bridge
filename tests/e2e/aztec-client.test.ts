@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { AztecClient } from "../../src/aztec-client.js";
-import { getTestConfig } from "./helpers.js";
+import { getTestConfig, requireTestToken } from "./helpers.js";
 
 const config = getTestConfig();
 
@@ -34,15 +34,13 @@ describe("AztecClient (e2e)", () => {
   });
 
   describe("createNote", () => {
-    // These tests require a deployed token contract.
-    // Token deployment is non-trivial and depends on the sandbox state.
-    // Skip if no test token address is provided.
-    const tokenAddress = process.env["E2E_TOKEN_ADDRESS"];
-
-    it.skipIf(!tokenAddress)("creates a shielded note with valid receipt fields", async () => {
+    it("creates a shielded note with valid receipt fields", async () => {
+      // Self-transfer. The recipient used to be the TOKEN address, which the
+      // comment beside it already described as "the solver's own address" -- a
+      // discrepancy nothing caught, because this test never ran.
       const result = await client.createNote({
-        recipient: tokenAddress!, // use solver's own address for self-transfer
-        token: tokenAddress!,
+        recipient: client.getAddress()!,
+        token: requireTestToken(),
         amount: "1000",
         chainId: 1,
       });
@@ -50,6 +48,16 @@ describe("AztecClient (e2e)", () => {
       expect(result.l2TxHash).toBeTruthy();
       expect(result.noteCommitment).toBeTruthy();
       expect(result.nullifierHash).toBeTruthy();
+
+      // The full effects, and the alias identity types.ts declares. Exact
+      // counts are deliberately not pinned here: "two note hashes and three
+      // nullifiers" is prose in CLAUDE.md rather than anything the code
+      // asserts, and this suite has never once executed, so it is not a
+      // number to encode on the strength of a comment.
+      expect(result.noteHashes.length).toBeGreaterThan(0);
+      expect(result.nullifiers.length).toBeGreaterThan(0);
+      expect(result.noteCommitment).toBe(result.noteHashes[0]);
+      expect(result.nullifierHash).toBe(result.nullifiers[0]);
     });
 
     it("rejects a non-existent token contract", async () => {

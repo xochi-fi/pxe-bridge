@@ -4,7 +4,11 @@ WORKDIR /app
 COPY package.json package-lock.json tsconfig.json ./
 COPY src/ src/
 
-RUN npm ci && npm run build && rm -f dist/*.js.map dist/*.d.ts.map
+# Prune after building: the runtime stage copies node_modules wholesale, and
+# without this it shipped tsx, typescript and vitest into the production image.
+# tsx in particular is an arbitrary-TypeScript executor on the PATH of a
+# container holding a signing key.
+RUN npm ci && npm run build && rm -f dist/*.js.map dist/*.d.ts.map && npm prune --omit=dev
 
 FROM node:22-bookworm-slim
 
@@ -24,6 +28,20 @@ WORKDIR /app
 COPY --from=builder /app/dist dist/
 COPY --from=builder /app/node_modules node_modules/
 COPY --from=builder /app/package.json .
+
+# spending-limit-account.js resolves the compiled artifact at runtime as
+# ../contracts/... from dist/, so it must land at /app/contracts/.
+#
+# The whole directory, not just target/. target/ is gitignored and produced by
+# the CI `contract` job, so copying it directly failed the build outright on a
+# clean checkout -- including every `docker compose build`. Copying contracts/
+# always succeeds, since Nargo.toml and src/ are committed, and the artifact
+# rides along when it has been built.
+#
+# An image built without it still runs the default Schnorr configuration; only
+# PXE_BRIDGE_SPENDING_LIMIT_ADMIN needs the artifact, and that path fails at
+# startup with a module resolution error naming the missing file.
+COPY contracts/ contracts/
 
 ENV NODE_ENV=production
 EXPOSE 8547

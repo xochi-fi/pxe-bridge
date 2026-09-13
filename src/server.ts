@@ -1,20 +1,49 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { handleRpcRequest, type RpcContext } from "./rpc.js";
-import type { IAztecClient } from "./types.js";
+import { RPC_ERRORS, type IAztecClient } from "./types.js";
 import type { TransactionLimits } from "./limits.js";
+import type { IdempotencyStore } from "./idempotency.js";
 import type { AuditLogger } from "./audit.js";
 
 const MAX_BODY_BYTES = 64 * 1024; // 64 KB
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = 60;
+// Bounds RECEIVING the request. Node's server.requestTimeout covers headers
+// plus body, not the response, which is why it was never the protection the
+// docs claimed it was.
 const REQUEST_TIMEOUT_MS = 30_000;
+
+// Bounds PRODUCING the response. Above aztec-client's 120s TX_TIMEOUT_MS, so a
+// legitimate transfer is never cut off by it; a socket that outlives even that
+// is not waiting on anything the bridge is going to deliver.
+export const RESPONSE_TIMEOUT_MS = 150_000;
 
 export interface ServerOptions {
   apiKey?: string | undefined;
+  /**
+   * Separate key for `POST /admin/resume`. Deliberately not `apiKey`: whoever
+   * can move funds should not also be able to clear the circuit breaker that
+   * stopped them. Unset disables the endpoint entirely.
+   */
+  adminKey?: string | undefined;
   limits?: TransactionLimits | undefined;
   audit?: AuditLogger | undefined;
+  /** Absent disables replay: every request executes, as before. */
+  idempotency?: IdempotencyStore | undefined;
 }
+
+// Failed auth gets its own, much smaller budget, separate from the one real
+// traffic spends. One shared bucket forces a choice between two bad outcomes:
+// authenticate first and key guessing is unthrottled, or rate limit first and
+// an unauthenticated caller starves every legitimate one.
+//
+// The second is worse than it looks. Nothing here reads X-Forwarded-For, so
+// behind the reverse proxy this is documented to run behind, `remoteAddress`
+// is the PROXY for every request and all callers share a single bucket. One
+// attacker sending 60 unauthenticated requests a minute would stop the bridge
+// for everybody.
+const AUTH_FAILURE_MAX = 10;
 
 const RATE_LIMIT_CLEANUP_INTERVAL_MS = 300_000; // 5 min
 
@@ -101,6 +130,33 @@ function sendJson(res: ServerResponse, status: number, data: unknown): void {
   res.end(body);
 }
 
+// Long enough for a UUID or a "0x<32 bytes>-<index>" trade identifier, short
+// enough that keys cannot be used to grow the store or the audit log.
+const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
+/** Distinct from undefined, which means the caller simply sent no key. */
+const INVALID_KEY = Symbol("invalid-idempotency-key");
+
+/**
+ * Validates the `Idempotency-Key` header.
+ *
+ * Rejected rather than sanitised. A key that is silently altered stops
+ * matching the one the caller will retry with, which turns the protection off
+ * exactly when it is needed. Printable ASCII only, since the value is written
+ * to the audit log and read back by a parser.
+ */
+function readIdempotencyKey(
+  header: string | string[] | undefined,
+): string | undefined | typeof INVALID_KEY {
+  if (header === undefined) return undefined;
+  // Duplicate headers are ambiguous about which key the caller meant.
+  if (Array.isArray(header)) return INVALID_KEY;
+
+  const key = header.trim();
+  if (key.length === 0 || key.length > MAX_IDEMPOTENCY_KEY_LENGTH) return INVALID_KEY;
+  if (!/^[\x20-\x7e]+$/.test(key)) return INVALID_KEY;
+  return key;
+}
+
 function checkAuth(req: IncomingMessage, apiKey: string): boolean {
   const header = req.headers["authorization"];
   if (!header) return false;
@@ -120,8 +176,46 @@ function checkAuth(req: IncomingMessage, apiKey: string): boolean {
 
 export function createApp(client: IAztecClient, opts: ServerOptions = {}): Server {
   const rateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+  const authFailureLimiter = new RateLimiter(AUTH_FAILURE_MAX, RATE_LIMIT_WINDOW_MS);
+
+  /**
+   * Rejects an unauthenticated caller, charging the attempt to its own bucket.
+   *
+   * Returns true when the request was rejected and a response already sent.
+   * A caller that never proves who it is cannot spend the budget that real
+   * traffic depends on, and cannot guess keys without limit either.
+   */
+  const rejectedUnauthenticated = (
+    req: IncomingMessage,
+    res: ServerResponse,
+    key: string | undefined,
+    ip: string,
+  ): boolean => {
+    if (!key || checkAuth(req, key)) return false;
+    if (!authFailureLimiter.allow(ip)) {
+      sendJson(res, 429, { error: "Too many requests" });
+      return true;
+    }
+    sendJson(res, 401, { error: "Unauthorized" });
+    return true;
+  };
 
   const server = createServer(async (req, res) => {
+    // Nothing otherwise bounded how long a connection could stay open waiting
+    // for a reply, so a stalled node held sockets indefinitely.
+    res.setTimeout(RESPONSE_TIMEOUT_MS, () => {
+      console.error("[pxe-bridge] Response deadline exceeded, closing connection");
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      sendJson(res, 504, {
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: RPC_ERRORS.INTERNAL_ERROR, message: "Gateway timeout" },
+      });
+    });
+
     try {
       const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
 
@@ -142,13 +236,67 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
         return;
       }
 
-      // JSON-RPC endpoint
-      if (req.method === "POST" && (pathname === "/" || pathname === "/api/rpc")) {
-        // Auth check
-        if (opts.apiKey && !checkAuth(req, opts.apiKey)) {
-          sendJson(res, 401, { error: "Unauthorized" });
+      // Operator recovery after the circuit breaker trips. Without it the only
+      // way back was a process restart, which also wiped the rolling window
+      // and handed back the full daily budget.
+      if (req.method === "POST" && pathname === "/admin/resume") {
+        const adminIp = req.socket.remoteAddress ?? "unknown";
+        // 404 rather than 403 when no admin key is configured: an endpoint
+        // that cannot be used should not confirm that it exists.
+        if (!opts.adminKey) {
+          sendJson(res, 404, { error: "Not found" });
           return;
         }
+        // Charged to the auth-failure bucket for the same reason as the RPC
+        // branch, and it matters more here: this endpoint shares one limiter
+        // with the RPC path, so hammering it used to spend the budget every
+        // transfer depends on.
+        if (rejectedUnauthenticated(req, res, opts.adminKey, adminIp)) return;
+        if (!rateLimiter.allow(adminIp)) {
+          sendJson(res, 429, { error: "Too many requests" });
+          return;
+        }
+        // Same Content-Type requirement as the RPC branch. The docs state it
+        // for POST without qualifying which POST, and this one was exempt. A
+        // browser cannot forge the Authorization header above, so the CSRF
+        // risk was nil; the point is that the stated property now holds.
+        const adminContentType = req.headers["content-type"];
+        if (!adminContentType || !adminContentType.startsWith("application/json")) {
+          sendJson(res, 415, { error: "Content-Type must be application/json" });
+          return;
+        }
+        if (!opts.limits) {
+          sendJson(res, 409, { error: "No transaction limits configured" });
+          return;
+        }
+        opts.limits.resume();
+        // `paused: false` on its own was a true statement that read as a false
+        // one. Clearing the latch does not clear the window, so a resume
+        // issued while volume still fills the budget is undone by the next
+        // request, and the operator who just got a 200 has no way to know that
+        // from the response. The number that decides it goes back with it.
+        const window = opts.limits.windowStatus();
+        sendJson(res, 200, {
+          status: "resumed",
+          paused: opts.limits.isPaused(),
+          windowTotal: window.total.toString(),
+          ...(window.dailyLimit !== undefined
+            ? { dailyLimit: window.dailyLimit.toString() }
+            : {}),
+          willTripAgain: window.willTripAgain,
+        });
+        return;
+      }
+
+      // JSON-RPC endpoint
+      if (req.method === "POST" && (pathname === "/" || pathname === "/api/rpc")) {
+        const clientIp = req.socket.remoteAddress ?? "unknown";
+
+        // A failed key is charged to the auth-failure bucket, so guessing is
+        // throttled without letting an unauthenticated caller spend the budget
+        // real traffic needs. Auth used to run with no limiter at all, which
+        // left unlimited online guessing running past a constant-time compare.
+        if (rejectedUnauthenticated(req, res, opts.apiKey, clientIp)) return;
 
         // Content-Type check (CSRF defense: forces browser preflight which fails without CORS)
         const contentType = req.headers["content-type"];
@@ -159,8 +307,8 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           return;
         }
 
-        // Rate limit (per-IP)
-        const clientIp = req.socket.remoteAddress ?? "unknown";
+        // The budget real traffic spends, reached only once the caller has
+        // proved who it is.
         if (!rateLimiter.allow(clientIp)) {
           sendJson(res, 429, { error: "Too many requests" });
           return;
@@ -186,9 +334,22 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           return;
         }
 
+        // A header rather than an RPC param: it is a property of the delivery
+        // attempt, not of the note being created, and it has to work for
+        // callers that send no XIP-1 trade context.
+        const idempotencyKey = readIdempotencyKey(req.headers["idempotency-key"]);
+        if (idempotencyKey === INVALID_KEY) {
+          sendJson(res, 400, {
+            error: `Idempotency-Key must be 1-${MAX_IDEMPOTENCY_KEY_LENGTH} printable ASCII characters`,
+          });
+          return;
+        }
+
         const rpcCtx: RpcContext = {
           limits: opts.limits,
           audit: opts.audit,
+          idempotency: opts.idempotency,
+          idempotencyKey,
           clientIp: clientIp,
         };
         const result = await handleRpcRequest(parsed, client, rpcCtx);

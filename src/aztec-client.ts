@@ -3,6 +3,8 @@ import { EmbeddedWallet } from "@aztec/wallets/embedded";
 import { TokenContract } from "@aztec/noir-contracts.js/Token";
 import { SponsoredFPCContract } from "@aztec/noir-contracts.js/SponsoredFPC";
 import type { AztecAddress } from "@aztec/aztec.js/addresses";
+import type { GasFees } from "@aztec/stdlib/gas";
+import { PostSubmissionError } from "./types.js";
 import type { CreateNoteParams, CreateNoteResult, FeeJuiceClaim, IAztecClient } from "./types.js";
 import {
   SpendingLimitAccountContract,
@@ -10,12 +12,153 @@ import {
 } from "./spending-limit-account.js";
 
 const MAX_TOKEN_CACHE_SIZE = 100;
-const TX_TIMEOUT_MS = 120_000; // 2 minutes
+export const TX_TIMEOUT_MS = 120_000; // 2 minutes
+
+// Multiplier applied to the worst predicted base fee. Named for the deploy
+// because that is where it was first needed, but it is not deploy-specific:
+// the max is a ceiling rather than a charge, so this trades an unused
+// allowance for not failing during a congestion spike, and that trade is the
+// same for any send.
+const FEE_HEADROOM = 10n;
+
+/**
+ * `maxFeesPerGas` with headroom over the worst fee predicted for the inclusion
+ * window.
+ *
+ * The SDK's own estimate is a point prediction and goes stale. A single
+ * unrelated account deployment landing between the estimate and validation was
+ * enough to fail with "maxFeesPerGas.feePerL2Gas must be greater than or equal
+ * to gasFees.feePerL2Gas" at 9748636365 against a base fee of 95484800000,
+ * roughly 10x.
+ *
+ * `getPredictedMinFees` returns the current slot's fees followed by one entry
+ * per predicted slot, so taking the maximum covers the whole window rather than
+ * the instant of the estimate. The multiplier is on top of that.
+ *
+ * Overshooting is close to free: the max is a ceiling, and what is charged is
+ * the base fee at inclusion. Undershooting fails the send, so the asymmetry
+ * justifies a wide margin.
+ *
+ * Exported because the e2e suite needs the same treatment and had none. Its
+ * sends took the SDK default and flaked on exactly the failure above, right
+ * after a test deployed an account of its own. One implementation rather than
+ * two that drift, the same reason fee-juice.ts was promoted out of the helpers.
+ */
+export async function headroomGasSettings(nodeUrl: string): Promise<{ maxFeesPerGas: GasFees }> {
+  const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
+  const { GasFees, ManaUsageEstimate } = await import("@aztec/stdlib/gas");
+
+  const node = createAztecNodeClient(nodeUrl);
+  const predicted = await node.getPredictedMinFees(ManaUsageEstimate.Limit);
+
+  const worst = predicted.reduce(
+    (acc, fees) => ({
+      da: fees.feePerDaGas > acc.da ? fees.feePerDaGas : acc.da,
+      l2: fees.feePerL2Gas > acc.l2 ? fees.feePerL2Gas : acc.l2,
+    }),
+    { da: 0n, l2: 0n },
+  );
+
+  return {
+    maxFeesPerGas: new GasFees(worst.da * FEE_HEADROOM, worst.l2 * FEE_HEADROOM),
+  };
+}
+
+/**
+ * Why a fee juice claim and the spending-limit account cannot be combined.
+ *
+ * The claim is bridged to the account it names, so `buildFeePaymentMethod`
+ * hands the deploy a `FeeJuicePaymentMethodWithClaim` naming the limit account
+ * while the deploy is sent from the separate deployer. Three things then go
+ * wrong, any one of which is fatal:
+ *
+ *   1. The payment method's ExecutionPayload carries `feePayer = limit
+ *      account`, and `BaseWallet.completeFeeOptions` gives the sending account
+ *      `FEE_JUICE_WITH_CLAIM` only when `from.equals(feePayer)`. Here it does
+ *      not, so the deployer's entrypoint gets `EXTERNAL`, whose branch in
+ *      `authwit/account.nr` is a no-op.
+ *   2. `FeeJuice.claim_and_end_setup` claims and calls `end_setup()`; it never
+ *      calls `set_as_fee_payer`. With (1) nothing else does either, so the
+ *      transaction has no fee payer at all.
+ *   3. The claim credits the limit account, so even a fee payer that was set
+ *      would be the deployer, paying from a balance the claim did not create.
+ *
+ * `scripts/top-up-fee-juice.ts` is the supported path: it claims on the
+ * account's behalf from a funded payer, leaving a PREEXISTING_FEE_JUICE
+ * balance, which is the only fee branch this account can use.
+ */
+export const FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR =
+  "FEE_JUICE_CLAIM cannot be used with the spending limit account: the claim " +
+  "names the limit account while the deploy is sent from the deployer, so no " +
+  "fee payer is set. Use scripts/top-up-fee-juice.ts instead.";
+
+/** The slice of AztecNode createNote needs to read a tx effect back. */
+interface TxEffectFields {
+  noteHashes?: { toString(): string }[];
+  nullifiers?: { toString(): string }[];
+}
+interface AztecNodeLike {
+  getTxReceipt(
+    txHash: never,
+    options: { includeTxEffect: true },
+  ): Promise<{ txEffect?: (TxEffectFields & { data?: TxEffectFields }) | undefined } | undefined>;
+}
+
+/** Distinguishable so createNote can tell a deadline from a rejection. */
+class TimeoutError extends Error {}
+
+/** What the account derivation produces, named so callers cannot swap two Frs. */
+export interface AccountKeys {
+  secret: import("@aztec/aztec.js/fields").Fr;
+  salt: import("@aztec/aztec.js/fields").Fr;
+  signingKey: ReturnType<
+    typeof import("@aztec/stdlib/keys").deriveMasterMessageSigningSecretKey
+  >;
+}
+
+/**
+ * Derives the account material the bridge uses from its secret key.
+ *
+ * Exported because the operator scripts have to reach the same address, and
+ * while they derived it themselves they drifted: `scripts/bridge-fee-juice.ts`
+ * built the salt with `Fr.fromBuffer` and omitted the signing key, so it
+ * produced a claim for the wrong account when it produced one at all.
+ *
+ * The intermediate buffers are zeroed here. The returned `Fr` objects still
+ * hold key material on the JS heap until GC, and the wallet retains the signing
+ * key internally -- SDK-owned memory cannot be zeroed.
+ */
+export async function deriveAccountKeys(secretKey: string): Promise<AccountKeys> {
+  const { Fr } = await import("@aztec/aztec.js/fields");
+  const { deriveMasterMessageSigningSecretKey } = await import("@aztec/stdlib/keys");
+
+  const rawKey = Buffer.from(secretKey.replace(/^0x/, ""), "hex");
+  const keyBytes = Buffer.alloc(32);
+  rawKey.copy(keyBytes, 32 - rawKey.length);
+  rawKey.fill(0); // zero raw key buffer
+
+  const secret = Fr.fromBuffer(keyBytes);
+  const saltBytes = createHash("sha256")
+    .update(Buffer.from("pxe-bridge-account-salt-v1"))
+    .update(keyBytes)
+    .digest();
+  // Reduce, not fromBuffer. A sha256 digest is a uniform 256-bit value and
+  // the BN254 Fr modulus is ~0.189 of 2^256, so ~81% of otherwise valid keys
+  // produced a digest the field could not hold and connect() threw here
+  // before deriving or deploying anything. Reduction is the identity for a
+  // digest already in range, so no account that ever deployed moves.
+  const salt = Fr.fromBufferReduce(saltBytes);
+
+  keyBytes.fill(0);
+  saltBytes.fill(0);
+
+  return { secret, salt, signingKey: deriveMasterMessageSigningSecretKey(secret) };
+}
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error("Operation timed out")), ms);
+    timer = setTimeout(() => reject(new TimeoutError("Operation timed out")), ms);
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
@@ -41,6 +184,13 @@ export class AztecClient implements IAztecClient {
     private readonly feeJuiceClaim?: FeeJuiceClaim,
     private readonly spendingLimitConfig?: SpendingLimitConfig,
   ) {
+    // Refused here rather than in index.ts alone, so a library caller gets the
+    // same answer. Left unchecked the combination fails deep in the SDK during
+    // deployment, with a message about the fee payer that says nothing about
+    // the claim that caused it.
+    if (feeJuiceClaim && spendingLimitConfig) {
+      throw new Error(FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR);
+    }
     this.secretKey = secretKey;
   }
 
@@ -56,35 +206,21 @@ export class AztecClient implements IAztecClient {
     });
     console.log("[pxe-bridge] EmbeddedWallet created");
 
-    const { Fr } = await import("@aztec/aztec.js/fields");
-
-    const rawKey = Buffer.from(this.secretKey.replace(/^0x/, ""), "hex");
+    const secretKey = this.secretKey;
     this.secretKey = null; // clear string reference immediately
-
-    const keyBytes = Buffer.alloc(32);
-    rawKey.copy(keyBytes, 32 - rawKey.length);
-    rawKey.fill(0); // zero raw key buffer
-
-    const secret = Fr.fromBuffer(keyBytes);
-    const saltBytes = createHash("sha256")
-      .update(Buffer.from("pxe-bridge-account-salt-v1"))
-      .update(keyBytes)
-      .digest();
-    const salt = Fr.fromBuffer(saltBytes);
-
-    keyBytes.fill(0);
-    saltBytes.fill(0);
-    // Note: Fr objects (secret, salt) hold key material on the JS heap
-    // until GC'd after connect() returns. The wallet also retains the
-    // signing key internally -- we cannot zero SDK-owned memory.
+    const { secret, salt, signingKey } = await deriveAccountKeys(secretKey);
 
     const accountManager = this.spendingLimitConfig
       ? await this.createSpendingLimitAccount(secret, salt)
-      : await this.wallet.createSchnorrAccount(secret, salt);
+      : await this.wallet.createSchnorrAccount(secret, salt, signingKey);
 
     const account = await accountManager.getAccount();
     const address = account.getAddress();
     this.solverAddress = address;
+    // Logged because the operator needs it: the spending-limit account cannot
+    // obtain fee juice for itself, and topping it up means naming this address
+    // to scripts/top-up-fee-juice.ts. Public on chain either way.
+    console.log(`[pxe-bridge] Account address: ${address.toString()}`);
 
     // Deploy account contract if not already on-chain.
     // Cannot rely on wallet.getAccounts() since the local WalletDB is
@@ -97,21 +233,45 @@ export class AztecClient implements IAztecClient {
       const { NO_FROM } = await import("@aztec/aztec.js/account");
       const paymentMethod = await this.buildFeePaymentMethod(address);
 
+      // The spending-limit account cannot deploy itself. Self-deployment routes
+      // through the account's OWN entrypoint (only the account can name itself
+      // fee payer), and that call carries a fee-related payload rather than a
+      // transfer, so the single-call guard rejects it with "Transfer does not
+      // match declared spending". This is NM-1019 [Info], reproduced in e2e.
+      //
+      // Deploying from a separate funded account runs only the constructor, so
+      // the guard is never reached. DeployAccountMethod hardcodes
+      // universalDeploy, i.e. deployer = AztecAddress.ZERO in the address
+      // preimage, so which account pays does not move the address.
+      //
+      // A standard Schnorr account has no such guard and still self-deploys.
+      const deployer = this.spendingLimitConfig
+        ? await this.ensureDeployer(secret, salt)
+        : NO_FROM;
+
       const deployMethod = await accountManager.getDeployMethod();
-      // Self-deployment: NO_FROM tells EmbeddedWallet.sendTx() to use
-      // DefaultEntrypoint (bypassing account lookup in WalletDB), and
-      // DeployAccountMethod maps it to deployer=AztecAddress.ZERO which
-      // triggers the multicall self-deploy path where the contract is
-      // constructed before it pays for its own fee.
       try {
         await deployMethod.send({
-          from: NO_FROM,
-          fee: { paymentMethod },
+          from: deployer,
+          fee: { paymentMethod, gasSettings: await this.deployGasSettings() },
+          // Both default to true, which leaves the account initialized but
+          // unpublished: the node cannot resolve it and its public functions
+          // cannot execute. Publication costs more than a self-paying account
+          // could cover, which is why it only became affordable once a
+          // separately funded deployer pays.
+          skipClassPublication: false,
+          skipInstancePublication: false,
         });
         console.log("[pxe-bridge] Account deployed");
       } catch (err) {
-        // Another instance may have deployed concurrently
-        if (await this.isContractDeployed(address)) {
+        // A concurrent deploy of the same account is not an error. The init
+        // nullifier is the authoritative signal: it can only already exist if
+        // the constructor has run, and it is emitted before the instance
+        // becomes visible to the node, so checking it avoids the window where
+        // isContractDeployed still reports false.
+        const message = err instanceof Error ? err.message : String(err);
+        const alreadyInitialized = message.includes("Existing nullifier");
+        if (alreadyInitialized || (await this.isContractDeployed(address))) {
           console.log("[pxe-bridge] Account deployed by another process");
         } else {
           throw err;
@@ -147,9 +307,9 @@ export class AztecClient implements IAztecClient {
     salt: import("@aztec/aztec.js/fields").Fr,
   ): Promise<import("@aztec/aztec.js/wallet").AccountManager> {
     const { AccountManager } = await import("@aztec/aztec.js/wallet");
-    const { deriveSigningKey } = await import("@aztec/stdlib/keys");
+    const { deriveMasterMessageSigningSecretKey } = await import("@aztec/stdlib/keys");
 
-    const signingKey = deriveSigningKey(secret);
+    const signingKey = deriveMasterMessageSigningSecretKey(secret);
 
     this.spendingLimitContract = new SpendingLimitAccountContract(
       signingKey,
@@ -160,7 +320,7 @@ export class AztecClient implements IAztecClient {
       this.wallet! as unknown as Parameters<typeof AccountManager.create>[0],
       secret,
       this.spendingLimitContract,
-      salt,
+      { salt },
     );
 
     // Register the contract artifact with PXE so proving works.
@@ -170,14 +330,15 @@ export class AztecClient implements IAztecClient {
       getContractInstance: (addr: AztecAddress) => Promise<unknown>;
       getContractArtifact: (classId: unknown) => Promise<unknown>;
     };
-    const existingInstance = await pxe.getContractInstance(instance.address);
-    if (!existingInstance) {
-      const existingArtifact = await pxe.getContractArtifact(instance.currentContractClassId);
-      const artifact = existingArtifact
-        ? undefined
-        : await this.spendingLimitContract.getContractArtifact();
-      await this.wallet!.registerContract(instance, artifact, secret);
-    }
+    // Register unconditionally. This was guarded on
+    // pxe.getContractInstance(address) being empty, but AccountManager.create()
+    // has already registered the instance by this point, so the guard always
+    // skipped and our artifact was never associated with the class. The wallet
+    // then resolved the address against the default account artifact and
+    // rejected our entrypoint selector with "Function with selector ... not
+    // found in the registered artifact ... (SimulatedSchnorrAccount)".
+    const artifact = await this.spendingLimitContract.getContractArtifact();
+    await this.wallet!.registerContract(instance, artifact, secret);
 
     // Store in WalletDB as 'schnorr' so simulation can find the account.
     // The actual send uses our custom entrypoint via the patched method below.
@@ -192,13 +353,36 @@ export class AztecClient implements IAztecClient {
       signingKey: signingKey.toBuffer(),
     });
 
-    // Patch getAccountFromAddress so the real tx send path uses our
-    // custom entrypoint (with declared_amount/declared_recipient) instead
-    // of reconstructing a standard Schnorr account from WalletDB.
+    // EmbeddedWallet simulates through a STUB account: buildAccountOverrides
+    // rewrites the address's currentContractClassId to the stub class, and
+    // simulateTx builds the request with a 3-parameter DefaultAccountEntrypoint
+    // chosen from the WalletDB `type`. The SDK does this deliberately to skip
+    // the private kernel and real authorization during simulation.
+    //
+    // That is incompatible with a custom entrypoint. Ours takes six parameters,
+    // so its selector is absent from the stub artifact and simulation fails
+    // with "Function with selector ... not found in the registered artifact ...
+    // (SimulatedSchnorrAccount)". The override is also why gas was
+    // mis-estimated: under the stub class, check_spending_public is never
+    // enqueued, so the estimate omits the entire public half of the tx.
+    //
+    // Three patches, all scoped to this one address, so every other account
+    // keeps the fast stub path:
+    //   1. getAccountFromAddress  -- the send path builds our entrypoint
+    //   2. createStubAccount      -- simulation builds it too
+    //   3. buildAccountOverrides  -- simulation keeps our real contract class
+    // 2 and 3 must move together: our entrypoint against the stub class fails
+    // on the selector, and the stub entrypoint against our class omits the
+    // spending check.
     const customAccount = await accountManager.getAccount();
     const walletAny = this.wallet as unknown as {
       getAccountFromAddress: (addr: AztecAddress) => Promise<unknown>;
+      buildAccountOverrides: (addrs: AztecAddress[]) => Promise<Record<string, unknown>>;
+      accountContracts: {
+        createStubAccount: (completeAddress: unknown, type: string) => Promise<unknown>;
+      };
     };
+
     const originalGetAccount = walletAny.getAccountFromAddress.bind(this.wallet);
     walletAny.getAccountFromAddress = async (addr: AztecAddress) => {
       if (addr.equals(instance.address)) {
@@ -207,7 +391,77 @@ export class AztecClient implements IAztecClient {
       return originalGetAccount(addr);
     };
 
+    const provider = walletAny.accountContracts;
+    const originalCreateStub = provider.createStubAccount.bind(provider);
+    provider.createStubAccount = async (completeAddress: unknown, type: string) => {
+      const addr = (completeAddress as { address: AztecAddress }).address;
+      if (addr && addr.equals(instance.address)) {
+        return customAccount;
+      }
+      return originalCreateStub(completeAddress, type);
+    };
+
+    const originalOverrides = walletAny.buildAccountOverrides.bind(this.wallet);
+    walletAny.buildAccountOverrides = async (addrs: AztecAddress[]) => {
+      const overrides = await originalOverrides(addrs);
+      // Leave our class intact. Simulation then runs the real private kernel
+      // for this account, which is slower but is the only way the simulated
+      // transaction matches the one that gets sent.
+      delete overrides[instance.address.toString()];
+      return overrides;
+    };
+
     return accountManager;
+  }
+
+  /**
+   * Deploys (once) a plain Schnorr account to act as deployer for the
+   * spending-limit account, and returns its address.
+   *
+   * Derived from the same master secret under a different salt, so it needs no
+   * separate key material and is reproducible across restarts. It self-deploys
+   * via SponsoredFPC, which a standard Schnorr account can do because its
+   * entrypoint has no single-call restriction.
+   */
+  private async ensureDeployer(
+    secret: import("@aztec/aztec.js/fields").Fr,
+    baseSalt: import("@aztec/aztec.js/fields").Fr,
+  ): Promise<AztecAddress> {
+    const { NO_FROM } = await import("@aztec/aztec.js/account");
+    const { deriveMasterMessageSigningSecretKey } = await import("@aztec/stdlib/keys");
+    const { Fr } = await import("@aztec/aztec.js/fields");
+
+    const deployerSalt = new Fr(baseSalt.toBigInt() + 1n);
+    const manager = await this.wallet!.createSchnorrAccount(
+      secret,
+      deployerSalt,
+      deriveMasterMessageSigningSecretKey(secret),
+    );
+    const deployerAddress = (await manager.getAccount()).getAddress();
+
+    if (!(await this.isContractDeployed(deployerAddress))) {
+      console.log("[pxe-bridge] Deploying deployer account...");
+      const paymentMethod = await this.buildFeePaymentMethod(deployerAddress);
+      try {
+        await (await manager.getDeployMethod()).send({
+          from: NO_FROM,
+          // Same headroom as the account it exists to deploy. This one runs
+          // first, so a spike here strands the account deployment behind it.
+          fee: { paymentMethod, gasSettings: await this.deployGasSettings() },
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (!message.includes("Existing nullifier")) {
+          throw err;
+        }
+      }
+    }
+    return deployerAddress;
+  }
+
+  /** Deployed account address. Null until connect() completes. */
+  getAddress(): string | null {
+    return this.solverAddress ? this.solverAddress.toString() : null;
   }
 
   async createNote(params: CreateNoteParams): Promise<CreateNoteResult> {
@@ -217,17 +471,10 @@ export class AztecClient implements IAztecClient {
 
     const { AztecAddress } = await import("@aztec/aztec.js/addresses");
 
-    const tokenAddress = AztecAddress.fromString(params.token);
-    const recipientAddress = AztecAddress.fromString(params.recipient);
+    const tokenAddress = AztecAddress.fromStringUnsafe(params.token);
+    const recipientAddress = AztecAddress.fromStringUnsafe(params.recipient);
     const amount = BigInt(params.amount);
     const from = this.solverAddress;
-
-    // Bind declared spending to the next tx for on-chain enforcement.
-    // The entrypoint signs over (payloadHash, amount, recipient) so these
-    // values cannot be forged. Must be set before send().
-    if (this.spendingLimitContract) {
-      this.spendingLimitContract.setDeclaredSpending(amount, params.recipient);
-    }
 
     const token = await this.getToken(tokenAddress);
 
@@ -244,11 +491,60 @@ export class AztecClient implements IAztecClient {
       console.log("[pxe-bridge] Creating note for chainId:", params.chainId);
     }
 
-    const result = await withTimeout(
-      token.methods.transfer_to_private(recipientAddress, amount).send({ from }),
-      TX_TIMEOUT_MS,
-    );
+    const submit = async () => {
+      if (this.spendingLimitContract) {
+        // Reconcile before spending a fee. The bridge holds the allowlist off
+        // chain now, so a drift between its copy and the account's stored root
+        // would otherwise surface as every transfer reverting in public, with
+        // nothing on chain to say which side is stale.
+        //
+        // Cheap: one utility read, the same shape the allowlist read used to
+        // be. The tree itself is built once and cached.
+        //
+        // Neither the declared amount and recipient nor the membership witness
+        // are pushed in here. The entrypoint derives all three from the payload
+        // it is signing, so there is no per-call state for a concurrent send to
+        // overwrite and nothing to serialize around.
+        await this.assertAllowlistRootCurrent();
+      }
 
+      return withTimeout(
+        token.methods.transfer_to_private(recipientAddress, amount).send({ from }),
+        TX_TIMEOUT_MS,
+      );
+    };
+
+    let result: unknown;
+    try {
+      result = await submit();
+    } catch (err) {
+      // A deadline is the one ambiguous case: send() may already have
+      // broadcast. Everything else here failed while building, proving or
+      // simulating, before the network saw anything, or landed as a revert
+      // that moved no funds.
+      if (err instanceof TimeoutError) {
+        throw new PostSubmissionError(
+          `Transaction did not confirm within ${TX_TIMEOUT_MS}ms and may still be included`,
+          undefined,
+          { cause: err },
+        );
+      }
+      throw err;
+    }
+
+    // Past this point the transfer is on chain. Everything below reads the
+    // result back, so a failure here is a reporting failure over a transfer
+    // that already happened, and must not be reported as a clean rejection.
+    return await this.readNoteResult(result);
+  }
+
+  /**
+   * Turns a settled send into a CreateNoteResult.
+   *
+   * Split out so every throw on this path is a PostSubmissionError: the
+   * transfer has landed by the time any of it runs.
+   */
+  private async readNoteResult(result: unknown): Promise<CreateNoteResult> {
     const raw = result as unknown as Record<string, unknown>;
     const receiptInner =
       typeof raw["receipt"] === "object" && raw["receipt"] !== null
@@ -257,28 +553,45 @@ export class AztecClient implements IAztecClient {
 
     const rawTxHash = receiptInner["txHash"] ?? raw["txHash"];
     if (rawTxHash === undefined || rawTxHash === null) {
-      throw new Error("Missing txHash in transaction receipt");
+      throw new PostSubmissionError("Missing txHash in transaction receipt");
     }
     const txHash = String(rawTxHash);
 
-    const commitments = Array.isArray(receiptInner["noteCommitments"])
-      ? receiptInner["noteCommitments"]
-      : undefined;
-    const nullifiers = Array.isArray(receiptInner["nullifierHashes"])
-      ? receiptInner["nullifierHashes"]
-      : undefined;
-    const noteCommitment =
-      commitments !== undefined && commitments.length > 0 ? String(commitments[0]) : undefined;
-    const nullifierHash =
-      nullifiers !== undefined && nullifiers.length > 0 ? String(nullifiers[0]) : undefined;
+    // v5 dropped noteCommitments/nullifierHashes from the receipt. The note
+    // hashes and nullifiers live on the tx effect, which send() does not
+    // attach, so it has to be fetched. Reading the old fields silently yielded
+    // undefined and every successful transfer reported "Incomplete transaction
+    // receipt".
+    const node = (this.wallet as unknown as { aztecNode: AztecNodeLike }).aztecNode;
+    let detailed;
+    try {
+      detailed = await node.getTxReceipt(rawTxHash as never, { includeTxEffect: true });
+    } catch (err) {
+      throw new PostSubmissionError(
+        "Transfer landed but its effects could not be read back",
+        txHash,
+        { cause: err },
+      );
+    }
+    const effect = detailed?.txEffect?.data ?? detailed?.txEffect;
 
+    // A transfer_to_private emits 2 note hashes and 3 nullifiers, so no single
+    // value identifies the note. Return both sets and let the caller choose,
+    // rather than picking an index here and calling it "the" note.
+    const noteHashes = (effect?.noteHashes ?? []).map((h) => h.toString());
+    const nullifiers = (effect?.nullifiers ?? []).map((n) => n.toString());
+
+    const noteCommitment = noteHashes[0];
+    const nullifierHash = nullifiers[0];
     if (!noteCommitment || !nullifierHash) {
-      throw new Error("Incomplete transaction receipt");
+      // The node has the transaction but not yet its effects. The transfer
+      // happened; only this read is early.
+      throw new PostSubmissionError("Incomplete transaction receipt", txHash);
     }
 
     console.log("[pxe-bridge] Note created, txHash:", txHash);
 
-    return { noteCommitment, nullifierHash, l2TxHash: txHash };
+    return { noteHashes, nullifiers, l2TxHash: txHash, noteCommitment, nullifierHash };
   }
 
   async getVersion(): Promise<string> {
@@ -295,25 +608,95 @@ export class AztecClient implements IAztecClient {
     return "unknown";
   }
 
+  /**
+   * Checks the configured allowlist against the account's stored root.
+   *
+   * Replaces the old readAllowlist. There is no set on chain to read any more,
+   * so this reconciles in the other direction: the bridge asserts that the tree
+   * it holds is the one the account is enforcing.
+   *
+   * This is checkable rather than trusted, which matters for monitoring. A
+   * compromised admin cannot publish one set and commit another, because the
+   * root commits to exactly the set that produces it.
+   */
+  private async assertAllowlistRootCurrent(): Promise<void> {
+    if (!this.wallet || !this.solverAddress || !this.spendingLimitContract) {
+      throw new Error("Spending limit account not initialized");
+    }
+    const { Contract } = await import("@aztec/aztec.js/contracts");
+    const artifact = await this.spendingLimitContract.getContractArtifact();
+    const account = await Contract.at(
+      this.solverAddress as Parameters<typeof Contract.at>[0],
+      artifact as Parameters<typeof Contract.at>[1],
+      this.wallet as unknown as Parameters<typeof Contract.at>[2],
+    );
+    // `from` scopes the utility execution. Without it PXE throws, and its own
+    // error formatter then crashes on undefined args, masking the cause.
+    const raw = (await account.methods["get_allowlist_root"]!().simulate({
+      from: this.solverAddress,
+    })) as unknown;
+
+    // simulate() resolves to { result, offchainEffects, offchainMessages };
+    // the utility's Field return value is under `result`.
+    const value = (raw as { result?: unknown })?.result ?? raw;
+    if (value === undefined || value === null) {
+      throw new Error("get_allowlist_root returned nothing");
+    }
+    const onChain =
+      typeof value === "bigint" ? value : BigInt((value as { toString(): string }).toString());
+
+    const tree = await this.spendingLimitContract.allowlistTree();
+    const local = tree.root.toBigInt();
+    if (onChain !== local) {
+      throw new Error(
+        `Allowlist root mismatch: the account is enforcing ` +
+          `0x${onChain.toString(16).padStart(64, "0")} but the configured allowlist produces ` +
+          `0x${local.toString(16).padStart(64, "0")}. Either an admin changed the allowlist ` +
+          `and this bridge's configuration was not updated, or the configuration is for a ` +
+          `different account. Reconcile before sending; no transfer can succeed until the ` +
+          `two agree.`,
+      );
+    }
+  }
+
+  /**
+   * Whether the account exists ON CHAIN.
+   *
+   * This must ask the node, not the PXE. AccountManager.create() registers the
+   * instance with the local PXE before anything is deployed, so a PXE-side
+   * lookup always answers "yes": connect() would log "Account recovered", skip
+   * the constructor, and leave the signing-key note uncreated. Every later
+   * transaction then fails inside is_valid_impl with "Failed to get a note".
+   * That went unnoticed because no test ever sent a transaction from an
+   * account this client had deployed.
+   */
   private async isContractDeployed(address: AztecAddress): Promise<boolean> {
-    const w = this.wallet as unknown as Record<string, unknown>;
-    if (!w["pxe"] || typeof w["pxe"] !== "object") {
-      throw new Error("Wallet missing PXE interface");
-    }
-    const pxe = w["pxe"] as {
-      getContractInstance: (addr: AztecAddress) => Promise<unknown>;
-    };
-    if (typeof pxe.getContractInstance !== "function") {
-      throw new Error("PXE missing getContractInstance method");
-    }
-    const instance = await pxe.getContractInstance(address);
+    const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
+    const node = createAztecNodeClient(this.nodeUrl);
+    const instance = await node.getContract(address);
     return instance !== undefined;
+    // NOTE: this reflects PUBLICATION. We do not force publication on deploy
+    // (it raised the fee beyond what SponsoredFPC covers), so a deployed but
+    // unpublished account reads as absent here. That is why the concurrent
+    // deploy path also treats "Existing nullifier" as success -- the init
+    // nullifier is the signal that survives either way.
+  }
+
+  private async deployGasSettings(): Promise<{ maxFeesPerGas: GasFees }> {
+    return headroomGasSettings(this.nodeUrl);
   }
 
   private async buildFeePaymentMethod(
     accountAddress: AztecAddress,
   ): Promise<import("@aztec/aztec.js/fee").FeePaymentMethod> {
-    if (this.feeJuiceClaim) {
+    // A claim commits to its L2 recipient in the message hash, so it can only
+    // pay for the account it was bridged to. The deployer is a different
+    // account; handing it the solver's claim fails the message lookup with
+    // "No L1 to L2 message found for message hash".
+    const claimIsForThisAccount =
+      this.solverAddress !== null && this.solverAddress.equals(accountAddress);
+
+    if (this.feeJuiceClaim && claimIsForThisAccount) {
       console.log("[pxe-bridge] Using Fee Juice claim for deployment fee");
       const { FeeJuicePaymentMethodWithClaim } = await import("@aztec/aztec.js/fee");
       const { Fr } = await import("@aztec/aztec.js/fields");

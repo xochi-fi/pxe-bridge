@@ -5,11 +5,17 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
-    branches: [main]
+    # `fix/**` so a PR stacked on another feature branch still gets CI. Without
+    # it a stacked PR reports no checks at all and is unverifiable until it
+    # retargets to main, which is exactly when review is least useful.
+    branches: [main, "fix/**"]
 
+# Read-only by default. `packages: write` is granted to the `docker` job alone:
+# at workflow scope it also applied to `check`, `contract` and `e2e`, so every
+# pull_request build ran with a token that could push to the registry --
+# including the `contract` job, which pipes a remote installer into bash.
 permissions:
   contents: read
-  packages: write
 
 jobs:
   check:
@@ -25,25 +31,142 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  # Builds the contract artifact, which is no longer committed to git.
+  # aztec-nargo, not plain nargo: public functions must be transpiled to AVM
+  # bytecode or loadContractArtifact() rejects the result at runtime with
+  # "Contract's public bytecode has not been transpiled". That is exactly how
+  # the previously committed artifact was broken.
   contract:
     runs-on: ubuntu-latest
+    # The one place the toolchain version is written. It has to match the
+    # aztec-nr dependency in contracts/spending_limit_account/Nargo.toml and the
+    # Aztec SDK in package.json, and it is asserted below rather than assumed.
+    env:
+      AZTEC_VERSION: "5.1.0"
     steps:
       - uses: actions/checkout@v4
-      - name: Install Noir toolchain
+      # Needed by the class ID check below, which loads the artifact through
+      # @aztec/stdlib rather than reading JSON fields.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install Aztec toolchain
         run: |
-          curl -L https://raw.githubusercontent.com/noir-lang/noirup/main/install | bash
-          echo "$HOME/.nargo/bin" >> "$GITHUB_PATH"
-      - name: Select pinned toolchain
-        run: noirup --version 1.0.0-beta.20
+          curl -fsSL https://install.aztec.network | bash
+          echo "$HOME/.aztec/bin" >> "$GITHUB_PATH"
+      - name: Pin toolchain and expose it on PATH
+        run: |
+          # The installer's exit code is not the question. `aztec-up` finishes
+          # with install_native_symlinks, which fails the whole install if any
+          # bundled binary is missing, and as of 2026-08-26 `forge` is missing
+          # from the 5.1.0 bundle:
+          #
+          #   Error: expected bundled binary 'forge' missing from
+          #          ~/.aztec/versions/5.1.0/internal-bin
+          #
+          # This job compiles a Noir contract. It never touches Foundry. The
+          # same commit that passed on 19 Aug fails this way now, from a
+          # version we pin, because `aztec-up install 5.1.0` pins the toolchain
+          # and not the installer that fetches it. That is the build supply
+          # chain risk in SECURITY.md arriving in practice.
+          #
+          # So record the installer's verdict and then check for the two
+          # binaries this job actually runs. Failing on a missing `forge` is a
+          # red build over something we do not use; failing on a missing
+          # `aztec` or `aztec-nargo` is real and still fails below.
+          set +e
+          aztec-up install "$AZTEC_VERSION"
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "::warning::aztec-up exited $status; continuing only if the needed binaries are present"
+          fi
+          # Searched under the pinned version directory, not all of ~/.aztec.
+          # install.aztec.network installs the latest release before `aztec-up
+          # install` pins ours, so ~/.aztec holds both. A search across the
+          # whole tree took whichever the walk reached first, and on
+          # 2026-08-26 that was 5.2.0: `aztec --version` reported 5.2.0 with
+          # nargo 1.0.0-beta.25, under which aztec-nr 5.1.0's own test helpers
+          # do not compile. The job failed with 277 errors inside
+          # macros/oracle_testing.nr and none in this contract.
+          root="$HOME/.aztec/versions/$AZTEC_VERSION"
+          if [ ! -d "$root" ]; then
+            echo "$AZTEC_VERSION is not installed (aztec-up exited $status); tree under ~/.aztec:"
+            find "$HOME/.aztec" -maxdepth 3
+            exit 1
+          fi
+          # aztec-up keeps versioned binaries outside ~/.aztec/bin and only
+          # updates PATH for a login shell, which workflow steps do not get.
+          bin=$(find "$root" \( -type f -o -type l \) -name aztec-nargo | head -1)
+          if [ -z "$bin" ]; then
+            echo "aztec-nargo not found under $root (aztec-up exited $status); tree:"
+            find "$root" -maxdepth 3
+            exit 1
+          fi
+          dir=$(dirname "$bin")
+          if [ ! -x "$dir/aztec" ]; then
+            echo "aztec not found beside aztec-nargo (aztec-up exited $status); contents of $dir:"
+            ls -la "$dir"
+            exit 1
+          fi
+          echo "$dir" >> "$GITHUB_PATH"
+      # Asserted, not printed. Printing is what let 5.2.0 through: the version
+      # was in the log the whole time and nothing read it. The contract class
+      # ID derives from this toolchain's bytecode and feeds address derivation,
+      # so a silent version change moves the account address. Fail here, where
+      # the message names the cause, rather than in the class ID check, where
+      # it looks like the contract changed.
+      - name: Assert the pinned toolchain is the one on PATH
+        run: |
+          aztec-nargo --version
+          found=$(aztec --version)
+          if [ "$found" != "$AZTEC_VERSION" ]; then
+            echo "::error::toolchain drifted: aztec --version reports $found, expected $AZTEC_VERSION"
+            echo "PATH resolves aztec to: $(command -v aztec)"
+            exit 1
+          fi
+          echo "aztec $found"
       - name: Contract unit tests (spending-limit guard)
         working-directory: contracts/spending_limit_account
-        run: nargo test
-      - name: Contract compiles
+        run: aztec-nargo test
+      # `aztec compile`, not `aztec-nargo compile`. aztec-nargo is a symlink to
+      # plain nargo and emits an artifact with transpiled=false, which
+      # loadContractArtifact rejects with "public bytecode has not been
+      # transpiled". `aztec compile` runs nargo then postprocesses to transpile
+      # public functions to AVM bytecode and generate verification keys.
+      - name: Compile and transpile contract
         working-directory: contracts/spending_limit_account
-        run: nargo compile
+        run: aztec compile
+      # Uploaded BEFORE the class ID check, deliberately. `aztec compile` has
+      # been observed to produce a different class ID from identical sources
+      # (see below), and with the check first the drifted artifact was
+      # discarded, leaving nothing to diff against a good one. Preserving it is
+      # the only way that gets diagnosed.
+      - name: Upload contract artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-artifact
+          path: contracts/spending_limit_account/target/*.json
+          if-no-files-found: error
+      # The artifact is gitignored and rebuilt here every run, from a toolchain
+      # fetched by piping a remote installer into bash. The class ID derives
+      # from that bytecode and feeds address derivation, so drift silently moves
+      # the account address: the bridge finds no contract there, deploys a fresh
+      # empty account, logs "Ready", and strands the balance at the old address.
+      #
+      # KNOWN FLAKE: one of four observed runs on this branch produced
+      # 0x2ff3ed37... where the other three produced 0x0df61951..., from the
+      # same commit and the same reported toolchain versions. Re-running the
+      # job passed. So `aztec compile` is not reproducible, and a red here may
+      # be that rather than a real change. Compare the uploaded artifact
+      # against a known-good one before assuming either.
+      - name: Assert artifact is loadable and the class ID has not drifted
+        run: node scripts/contract-class-id.js --check contracts/spending_limit_account/CLASS_ID
 
   e2e:
-    needs: check
+    needs: [check, contract]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -52,17 +175,35 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Fetch contract artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: contract-artifact
+          path: contracts/spending_limit_account/target
+      # No PXE_BRIDGE_SECRET_KEY override: tests/e2e/helpers.ts supplies a valid
+      # BN254 field element. This used to pass the Anvil secp256k1 test key,
+      # which exceeds the BN254 modulus and cannot be an Aztec secret at all.
       - run: npm run test:e2e:up
-        env:
-          # Well-known Hardhat/Anvil test key #0 -- never use with real funds
-          PXE_BRIDGE_SECRET_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 
   docker:
-    needs: check
+    # e2e too, not just [check, contract]. With the same dependencies as the
+    # e2e job the two ran in parallel, so a v* tag published to ghcr regardless
+    # of whether the on-chain behaviour passed. Contract class ID drift was
+    # gated and nothing the e2e job proves was.
+    needs: [check, contract, e2e]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
+      # The image COPYs this in; it is no longer committed to git.
+      - name: Fetch contract artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: contract-artifact
+          path: contracts/spending_limit_account/target
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
