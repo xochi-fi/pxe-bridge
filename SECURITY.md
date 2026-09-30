@@ -36,24 +36,33 @@ cost that lands during an incident.
 
 ### An attacker holding the admin key
 
-This is **not** recoverable, and the 24h notice was never the defence it looked
-like. `pause` and `update_recipient` are both immediate, and the entrypoint only
-pays an allowlisted recipient, so an attacker with the admin key stops the
-account or strips the allowlist before any notice period could elapse. The owner
-has nowhere to withdraw to and no lever to reach for.
+This is **not** recoverable on chain, and the 24h notice was never the defence
+it looked like. The owner's only way to move funds is a transfer to an
+allowlisted recipient, and the admin can stop that immediately with `pause`,
+which no other key can undo. The admin is fixed at construction with no
+rotation, so a compromised admin can close any escape window before a notice
+period could elapse, and keep it closed for good.
 
-What does bound the damage is that **the tree is a second factor**.
+What the admin key alone buys an attacker is a **freeze, not theft**:
+
+| Attacker holds | Can do | Cannot do |
+| --- | --- | --- |
+| Admin key only | Pause indefinitely (freeze, ransom). Propose limits, which take effect after 24h | Change the allowlist. Spend |
+| Admin key + allowlist seed and recipient list | Also add, revoke or substitute payees immediately | Spend |
+| Admin key + seed and recipient list + signing key | Add a payee of their own and drain to it, within whatever limits are live | Exceed the per-tx cap or daily window before a `propose_limits` matures |
+
+The allowlist is protected because **the tree is a second factor**.
 `update_recipient` must supply a sibling path that verifies against the current
-root, and the salts that make the leaves are derived from a seed the admin holds
-off chain. An attacker who takes the admin key without also taking the seed and
-the recipient list cannot produce a valid path, so they cannot add a payee of
-their own. They can still pause, and they can still propose limits.
+root, and the salts that make the leaves are derived from a seed held off chain.
+Without the seed and the recipient list an attacker cannot produce a valid path,
+so they can neither add a payee nor strip existing ones. Spending needs the
+signing key, which is a different party under this model.
 
-They also cannot spend. Paying a newly added recipient needs the signing key,
-which is a different party under this model.
-
-Practically: admin key custody is the control, and the allowlist seed must be
-archived and protected separately from it. See "Losing the allowlist" below.
+Practically: admin key custody is the control against a freeze, and the
+allowlist seed must be archived and protected separately from the admin key so
+that one compromise does not become the second row of the table. See "Losing
+the allowlist" below. A design that keeps an emergency pause without giving a
+single key a permanent freeze is tracked in #27.
 
 ## Declared-vs-actual amount binding
 
