@@ -92,6 +92,46 @@ export const FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR =
   "names the limit account while the deploy is sent from the deployer, so no " +
   "fee payer is set. Use scripts/top-up-fee-juice.ts instead.";
 
+/** Opts a production bridge into the SponsoredFPC deployment fee fallback. */
+export const ALLOW_SPONSORED_FPC_ENV = "PXE_BRIDGE_ALLOW_SPONSORED_FPC";
+
+/**
+ * Whether an undeployed account may pay its deployment fee via SponsoredFPC.
+ *
+ * SponsoredFPC is a testing contract (`@aztec/aztec.js/fee/testing`) that
+ * exists only on sandbox and testnet. It is what an account falls back to when
+ * no FEE_JUICE_CLAIM covers it, and what the spending-limit deployer always
+ * uses. On any other network there is nothing at its address, and the deploy
+ * fails inside the SDK with a message that names neither the fee path nor the
+ * configuration that chose it.
+ *
+ * Permitted outside production, which is where the sandbox and the e2e suite
+ * run. In production only on explicit opt-in: the image sets
+ * NODE_ENV=production for every deployment, testnet included, so NODE_ENV
+ * alone cannot tell a testnet from a network that charges.
+ *
+ * Only "true" and "false" are accepted, so a typo fails at startup rather than
+ * silently meaning either one.
+ */
+export function sponsoredFpcPermitted(env: Record<string, string | undefined>): boolean {
+  const raw = env[ALLOW_SPONSORED_FPC_ENV];
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  if (raw !== undefined && raw !== "") {
+    throw new Error(`${ALLOW_SPONSORED_FPC_ENV} must be "true" or "false", got ${JSON.stringify(raw)}`);
+  }
+  return env["NODE_ENV"] !== "production";
+}
+
+export const SPONSORED_FPC_REFUSED_ERROR =
+  "Refusing to pay its deployment fee via SponsoredFPC, a testing contract that exists " +
+  "only on sandbox and testnet. It is refused when NODE_ENV=production unless " +
+  `${ALLOW_SPONSORED_FPC_ENV}=true, and whenever ${ALLOW_SPONSORED_FPC_ENV}=false. For the ` +
+  "plain Schnorr account, set FEE_JUICE_CLAIM " +
+  "(npm run bridge-fee-juice). The spending-limit account and its deployer have no other " +
+  "deployment fee path, so they cannot be deployed by the bridge on a network without " +
+  `SponsoredFPC. Set ${ALLOW_SPONSORED_FPC_ENV}=true only if this node is a sandbox or testnet.`;
+
 /** The slice of AztecNode createNote needs to read a tx effect back. */
 interface TxEffectFields {
   noteHashes?: { toString(): string }[];
@@ -177,6 +217,9 @@ export class AztecClient implements IAztecClient {
   private tokenCache = new Map<string, TokenContract>();
   private secretKey: string | null;
   private spendingLimitContract: SpendingLimitAccountContract | null = null;
+  // Read at construction, like the claim check below, so a library caller is
+  // gated the same as index.ts and a malformed value fails before connecting.
+  private readonly allowSponsoredFpc = sponsoredFpcPermitted(process.env);
 
   constructor(
     private readonly nodeUrl: string,
@@ -418,10 +461,14 @@ export class AztecClient implements IAztecClient {
    * Deploys (once) a plain Schnorr account to act as deployer for the
    * spending-limit account, and returns its address.
    *
-   * Derived from the same master secret under a different salt, so it needs no
-   * separate key material and is reproducible across restarts. It self-deploys
-   * via SponsoredFPC, which a standard Schnorr account can do because its
-   * entrypoint has no single-call restriction.
+   * Derived from the same master secret as the solver, under salt
+   * `baseSalt + 1`, so it needs no separate key material and is reproducible
+   * across restarts. It self-deploys via SponsoredFPC, which a standard Schnorr
+   * account can do because its entrypoint has no single-call restriction, and
+   * then pays the spending-limit account's deployment the same way. A claim
+   * cannot pay for it: claims are bridged to the solver's address. So the
+   * spending-limit account can only be deployed where SponsoredFPC is
+   * permitted; see `sponsoredFpcPermitted`.
    */
   private async ensureDeployer(
     secret: import("@aztec/aztec.js/fields").Fr,
@@ -440,7 +487,7 @@ export class AztecClient implements IAztecClient {
     const deployerAddress = (await manager.getAccount()).getAddress();
 
     if (!(await this.isContractDeployed(deployerAddress))) {
-      console.log("[pxe-bridge] Deploying deployer account...");
+      console.log(`[pxe-bridge] Deploying deployer account ${deployerAddress.toString()}...`);
       const paymentMethod = await this.buildFeePaymentMethod(deployerAddress);
       try {
         await (await manager.getDeployMethod()).send({
@@ -707,7 +754,22 @@ export class AztecClient implements IAztecClient {
       });
     }
 
-    console.log("[pxe-bridge] Using SponsoredFPC for deployment fee");
+    // Checked before anything is registered or sent. In connect() this runs
+    // for the solver account before ensureDeployer, so a refused spending-limit
+    // deployment stops before deploying its deployer.
+    if (!this.allowSponsoredFpc) {
+      throw new Error(
+        `Account ${accountAddress.toString()} is not deployed. ${SPONSORED_FPC_REFUSED_ERROR}`,
+      );
+    }
+    const why =
+      process.env[ALLOW_SPONSORED_FPC_ENV] === "true"
+        ? `${ALLOW_SPONSORED_FPC_ENV}=true`
+        : `NODE_ENV=${process.env["NODE_ENV"] ?? "(unset)"}`;
+    console.warn(
+      `[pxe-bridge] Paying deployment of ${accountAddress.toString()} via SponsoredFPC ` +
+        `(sandbox and testnet only; permitted by ${why})`,
+    );
     const { SponsoredFeePaymentMethod } = await import("@aztec/aztec.js/fee/testing");
     const { getContractInstanceFromInstantiationParams } = await import("@aztec/stdlib/contract");
     const { Fr } = await import("@aztec/aztec.js/fields");

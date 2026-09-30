@@ -11,6 +11,7 @@ import {
   AztecClient,
   FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR,
   deriveAccountKeys,
+  sponsoredFpcPermitted,
 } from "../src/aztec-client.js";
 import type { FeeJuiceClaim } from "../src/types.js";
 import type { SpendingLimitConfig } from "../src/spending-limit-account.js";
@@ -194,5 +195,38 @@ describe("fee juice claim against the spending limit account", () => {
     expect(
       () => new AztecClient("http://localhost:8080", KEY, undefined, SPENDING_LIMITS),
     ).not.toThrow();
+  });
+});
+
+describe("SponsoredFPC deployment fee fallback", () => {
+  // SponsoredFPC exists only on sandbox and testnet. The image sets
+  // NODE_ENV=production everywhere, so production needs an explicit opt-in
+  // rather than the fallback being taken on any network by default.
+  it("is refused in production by default", () => {
+    expect(sponsoredFpcPermitted({ NODE_ENV: "production" })).toBe(false);
+  });
+
+  it("is permitted in production on explicit opt-in", () => {
+    expect(
+      sponsoredFpcPermitted({ NODE_ENV: "production", PXE_BRIDGE_ALLOW_SPONSORED_FPC: "true" }),
+    ).toBe(true);
+  });
+
+  it("is permitted outside production, where the sandbox runs", () => {
+    expect(sponsoredFpcPermitted({})).toBe(true);
+    expect(sponsoredFpcPermitted({ NODE_ENV: "development" })).toBe(true);
+  });
+
+  it("can be switched off outside production", () => {
+    expect(
+      sponsoredFpcPermitted({ NODE_ENV: "development", PXE_BRIDGE_ALLOW_SPONSORED_FPC: "false" }),
+    ).toBe(false);
+  });
+
+  // "1" or "yes" meaning neither would be a silent choice either way.
+  it("rejects any value other than true or false", () => {
+    expect(() =>
+      sponsoredFpcPermitted({ NODE_ENV: "production", PXE_BRIDGE_ALLOW_SPONSORED_FPC: "1" }),
+    ).toThrow(/PXE_BRIDGE_ALLOW_SPONSORED_FPC must be "true" or "false"/);
   });
 });
