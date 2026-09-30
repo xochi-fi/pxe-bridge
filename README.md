@@ -104,10 +104,10 @@ Every transaction the bridge sends is paid for in fee juice, which is bridged
 in from L1 and cannot be bought, transferred or withdrawn on L2. How the bridge
 gets it depends on which account it runs:
 
-| Account | How it pays | How you fund it |
-| --- | --- | --- |
-| Plain Schnorr (default) | Claims during deployment | `npm run bridge-fee-juice`, then set `FEE_JUICE_CLAIM` |
-| Spending limit (`PXE_BRIDGE_SPENDING_LIMIT_ADMIN`) | Pre-existing balance only | `npm run top-up-fee-juice` |
+| Account | Deployment fee | Later transactions | How you fund it |
+| --- | --- | --- | --- |
+| Plain Schnorr (default) | `FEE_JUICE_CLAIM`, else SponsoredFPC | Own balance | `npm run bridge-fee-juice`, then set `FEE_JUICE_CLAIM` |
+| Spending limit (`PXE_BRIDGE_SPENDING_LIMIT_ADMIN`) | SponsoredFPC, via the deployer | Pre-existing balance only | `npm run top-up-fee-juice` |
 
 The spending-limit account cannot claim for itself. Its entrypoint admits
 exactly one call and requires it to be `transfer_to_private` on the pinned
@@ -115,6 +115,34 @@ token, and every way of paying a fee adds a second call to the same payload, so
 each of them is rejected by the account's own guard. Setting `FEE_JUICE_CLAIM`
 alongside `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` is refused at startup rather than
 failing during deployment.
+
+### Deployment fee and SponsoredFPC
+
+An account the node does not know yet is deployed on first start, and that
+deployment needs a fee. A plain Schnorr account pays it from `FEE_JUICE_CLAIM`
+when one is set. Otherwise the bridge falls back to SponsoredFPC, a testing
+contract that pays anyone's fee and exists only on sandbox and testnet.
+
+The spending-limit account cannot deploy itself (its guard rejects the
+deployment payload), so the bridge first deploys a plain Schnorr **deployer**
+account and sends the deployment from it. The deployer is derived from the same
+secret key under the account salt plus one, so it needs no key material of its
+own and lands at the same address on every restart. It pays for its own
+deployment and for the spending-limit account's via SponsoredFPC; a claim cannot
+pay for either, since a claim is bridged to the plain account's address. Its
+address is logged as `Deploying deployer account 0x...` when it is deployed.
+
+The fallback is refused when `NODE_ENV=production`, which the image sets,
+unless `PXE_BRIDGE_ALLOW_SPONSORED_FPC=true`. `false` refuses it in any
+environment, and any other value is rejected at startup. Startup logs which way
+it is set. When refused, an undeployed account stops the bridge during startup
+with an error naming the account and this variable, before anything is sent,
+rather than failing inside the deployment. An account that is already deployed
+needs no deployment fee and starts either way.
+
+On a network without SponsoredFPC the spending-limit account therefore cannot be
+deployed by the bridge. Set `PXE_BRIDGE_ALLOW_SPONSORED_FPC=true` only when the
+node is a sandbox or testnet.
 
 ### Topping up the spending-limit account
 
