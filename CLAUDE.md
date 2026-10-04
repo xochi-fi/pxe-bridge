@@ -38,7 +38,7 @@ E2e tests (`tests/e2e/`) run against a real Aztec sandbox node via `docker-compo
 
 Anvil runs with `--block-base-fee-per-gas 0`, which it holds constant. With a nonzero base fee the L2 min fee steps down 3-15x at each L1 fee oracle refresh, and a send priced off `getPredictedMinFees` right after a checkpoint is simulated against the previous, higher fee and rejected. CI starts compose itself and dumps `docker compose logs` on e2e failure.
 
-The Aztec sandbox requires native x86_64 -- barretenberg's ZK prover crashes under ARM emulation (SIGILL). E2e tests work on CI (ubuntu x86_64) but not on Apple Silicon Macs.
+The compose default runs the `linux/amd64` Aztec image, which fails under ARM emulation (barretenberg SIGILLs, or the node times out connecting to its bb socket). E2e tests are authoritative on CI (ubuntu x86_64). On Apple Silicon, overriding the image to `platform: linux/arm64` (`aztecprotocol/aztec:5.1.0` ships an arm64 variant) has started locally and run `tests/e2e/deployer-claim.test.ts` to a pass, but it is flaky: startup has also timed out on the bb socket while the host was heavily loaded. Treat local arm64 runs as best effort.
 
 ## Required Environment
 
