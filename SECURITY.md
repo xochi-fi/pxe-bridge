@@ -188,17 +188,28 @@ failures above applies, and nothing runs through the spending-limit account's
 entrypoint. The deployer is derived from the bridge's own key, so this adds no
 key material and no trusted party; a deployer key compromise is a bridge key
 compromise already. What it holds afterwards is unspent fee juice, which cannot
-be transferred. Production runbook:
+be transferred but can pay for top-up claims. Production runbook:
 
-1. `npm run bridge-fee-juice -- --deployer --address-only` prints the deployer
-   address without touching L1.
-2. The same without `--address-only` bridges to it and prints the claim. The
-   message commits to the deployer, so a claim cannot pay for anything else.
-3. Start the bridge with the claim and the spending-limit configuration. The
-   logged `Deployer address` must match step 1. It reaches `Ready` with
-   SponsoredFPC refused.
-4. Top up the spending-limit account with `scripts/top-up-fee-juice.ts`, as
-   above, before its first transfer.
+1. Start the bridge once with the spending-limit configuration and no claim.
+   It logs `Deployer address` and `Account address`, then stops at the
+   SponsoredFPC refusal before sending anything. Neither address is secret.
+2. `npm run bridge-fee-juice -- --deployer --recipient <Deployer address>`
+   bridges to it and prints the claim and its message hash. No bridge key is
+   involved: the L1 deposit needs only the address, and the message commits to
+   it, so the claim cannot pay for anything else. If the wait times out,
+   `--wait <messageHash>` resumes it; rerunning the bridge step deposits twice.
+3. Start the bridge with the claim. It deploys the deployer, then the account,
+   and reaches `Ready` with SponsoredFPC refused. If the deployer is already
+   deployed and its balance cannot cover the account deploy, bridge a fresh
+   claim to the deployer (step 2) and restart with it.
+4. Top up the spending-limit account before its first transfer with
+   `FEE_JUICE_PAYER_DEPLOYER=true npm run top-up-fee-juice`, which sends the
+   claim from the deployer and pays from what the deployer claim left. This
+   loads the bridge key into the operator's process, resolved from
+   `PXE_BRIDGE_SECRET_ARN` as the bridge does; the wallet is ephemeral, so it
+   is not written to disk. A separate payer (`FEE_JUICE_PAYER_KEY`) keeps the
+   bridge key off the operator's machine, at the cost of bootstrapping that
+   payer as a plain Schnorr bridge with its own `FEE_JUICE_CLAIM`.
 
 ## What is public
 

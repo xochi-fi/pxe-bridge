@@ -106,8 +106,8 @@ gets it depends on which account it runs:
 
 | Account | Deployment fee | Later transactions | How you fund it |
 | --- | --- | --- | --- |
-| Plain Schnorr (default) | `FEE_JUICE_CLAIM`, else SponsoredFPC | Own balance | `npm run bridge-fee-juice`, then set `FEE_JUICE_CLAIM` |
-| Spending limit (`PXE_BRIDGE_SPENDING_LIMIT_ADMIN`) | `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM`, via the deployer, else SponsoredFPC | Pre-existing balance only | `npm run bridge-fee-juice -- --deployer` to deploy, `npm run top-up-fee-juice` to run |
+| Plain Schnorr (default) | `FEE_JUICE_CLAIM`, else SponsoredFPC | Own balance | `npm run bridge-fee-juice -- --recipient <Account address>`, then set `FEE_JUICE_CLAIM` |
+| Spending limit (`PXE_BRIDGE_SPENDING_LIMIT_ADMIN`) | `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM`, via the deployer, else SponsoredFPC | Pre-existing balance only | `npm run bridge-fee-juice -- --deployer --recipient <Deployer address>` to deploy, `npm run top-up-fee-juice` to run |
 
 The spending-limit account cannot claim for itself. Its entrypoint admits
 exactly one call and requires it to be `transfer_to_private` on the pinned
@@ -135,8 +135,9 @@ with that claim and then pays for the spending-limit account's deployment out
 of what is left: the deployment is sent from the deployer with no fee payment
 method, so the deployer pays from its own fee juice balance. The claim has to be
 bridged to the deployer, not to the account (`npm run bridge-fee-juice --
---deployer`), and is refused without `PXE_BRIDGE_SPENDING_LIMIT_ADMIN`. Without
-it, both deployments fall back to SponsoredFPC.
+--deployer --recipient <Deployer address>`), and is refused without
+`PXE_BRIDGE_SPENDING_LIMIT_ADMIN`. Without it, both deployments fall back to
+SponsoredFPC.
 
 The fallback is refused when `NODE_ENV=production`, which the image sets,
 unless `PXE_BRIDGE_ALLOW_SPONSORED_FPC=true`. `false` refuses it in any
@@ -152,49 +153,71 @@ testnet.
 
 ### Deploying the spending-limit account in production
 
-1. **Derive the deployer address.** With the bridge's key and node:
+1. **Get the deployer address.** Start the bridge once with the
+   spending-limit configuration and no claim. It logs
+   `[pxe-bridge] Account address: 0x...` and `[pxe-bridge] Deployer address: 0x...`,
+   then stops at the SponsoredFPC refusal before sending anything. Both
+   addresses are public; the key stays in Secrets Manager.
+
+2. **Bridge fee juice to it.**
 
    ```bash
-   PXE_BRIDGE_SECRET_KEY=0x... AZTEC_NODE_URL=https://... \
-     npm run bridge-fee-juice -- --deployer --address-only
+   L1_PRIVATE_KEY=0x... L1_RPC_URL=https://... L1_CHAIN_ID=1 \
+   AZTEC_NODE_URL=https://... BRIDGE_AMOUNT=... \
+     npm run bridge-fee-juice -- --deployer --recipient <Deployer address>
    ```
 
-   This prints `Deployer address: 0x...` and touches nothing on L1.
+   As soon as the L1 deposit lands it prints
+   `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM='{...}'` and the L1 to L2 message
+   hash, then waits until the message has synced and says so. Start the bridge
+   only after that, or its first deployment fails with "No L1 to L2 message
+   found". If the wait times out, **do not run this step again**: the deposit is
+   done and a second run deposits again. Resume the wait instead:
 
-2. **Bridge fee juice to it.** The same command without `--address-only`, plus
-   `L1_PRIVATE_KEY`, `L1_RPC_URL`, `L1_CHAIN_ID` and `BRIDGE_AMOUNT`. It prints
-   `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM='{...}'`, then waits until the L1 to L2
-   message has synced and says so. Start the bridge only after that, or its
-   first deployment fails with "No L1 to L2 message found". If the wait times
-   out, the printed claim is still valid; retry once L2 has built more blocks.
-   One claim pays for both deployments, so size it for both (see below).
+   ```bash
+   AZTEC_NODE_URL=https://... npm run bridge-fee-juice -- --wait <messageHash>
+   ```
+
+   One claim pays for both deployments and for top-up claims sent from the
+   deployer (step 4), so size it for all of them (see below).
 
 3. **Start the bridge** with the spending-limit configuration and
-   `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM`. Check that the `Deployer address` it
-   logs matches step 1. It deploys the deployer, then the account, and logs
-   `Ready` without touching SponsoredFPC. Once the account is deployed the claim
-   is spent and the variable can be removed; a restart finds the account on
-   chain and needs no deployment fee.
+   `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM`. It deploys the deployer, then the
+   account, and logs `Ready` without touching SponsoredFPC. Once the account is
+   deployed the claim is spent and the variable can be removed; a restart finds
+   the account on chain and needs no deployment fee. If the deployer is already
+   deployed but its balance cannot cover the account deployment, bridge a fresh
+   claim to the deployer (step 2) and restart with that one.
 
-4. **Top up the spending-limit account** at the logged `Account address` with
-   `npm run top-up-fee-juice` (next section). Its transfers pay from that
-   balance, not the deployer's.
+4. **Top up the spending-limit account** at the logged `Account address`, paying
+   from the deployer:
+
+   ```bash
+   FEE_JUICE_RECIPIENT=<Account address> FEE_JUICE_PAYER_DEPLOYER=true \
+   PXE_BRIDGE_SECRET_ARN=... NODE_ENV=production \
+   L1_PRIVATE_KEY=0x... L1_RPC_URL=https://... L1_CHAIN_ID=1 \
+   AZTEC_NODE_URL=https://... BRIDGE_AMOUNT=... \
+     npm run top-up-fee-juice
+   ```
+
+   The account's transfers pay from that balance, not the deployer's. The
+   deployer's key is the bridge's, so this step reads it from Secrets Manager
+   into the script's memory (not its environment, and not disk). To keep it
+   off the operator's machine, use a separate payer instead (next section).
 
 The node admits a transaction only if its fee payer's balance covers the fee
 limit, `gasLimits x maxFeesPerGas`, while what is charged is the gas actually
 used at the base fee of inclusion. The bridge sets `maxFeesPerGas` to 10x the
-worst predicted base fee, so the claim must cover the deployer's own fee plus
-the full fee limit of the account deployment, which publishes the account's
-contract class and is the expensive one. The unspent remainder stays with the
-deployer, which cannot transfer it.
+worst predicted base fee, so the deployer claim must cover the deployer's own
+fee, plus the full fee limit of the account deployment, which publishes the
+account's contract class and is the expensive one, plus the fee limit of every
+top-up claim the deployer is to send. The unspent remainder stays with the
+deployer, which cannot transfer it; it is spendable only on the deployer's own
+transactions, i.e. top-up claims.
 
-Funding the deployer with `npm run top-up-fee-juice` (`FEE_JUICE_RECIPIENT` =
-the deployer address) is an alternative for an operator who already has a
-funded L2 payer: the SDK lets an undeployed Schnorr account pay its own
-deployment from a balance already at its address. The bridge does not take
-that path today, since it uses SponsoredFPC whenever no deployer claim is set,
-and on a network without SponsoredFPC the payer itself would first have to be
-bootstrapped with a claim.
+When the deployer runs low, it can be refilled like any other account:
+`npm run top-up-fee-juice` with `FEE_JUICE_RECIPIENT` set to the deployer
+address, paid by a payer that still has balance.
 
 ### Topping up the spending-limit account
 
@@ -209,10 +232,27 @@ The bridge logs the address to fund on startup:
 [pxe-bridge] Account address: 0x...
 ```
 
-The payer must already be deployed and able to pay for one transaction. Running
-the bridge once with the payer's key and **without**
-`PXE_BRIDGE_SPENDING_LIMIT_ADMIN` deploys a plain Schnorr account at the address
-the script derives from that key.
+The payer sends the claim and pays its fee from its own balance, so it must
+already be deployed. Set exactly one of:
+
+- `FEE_JUICE_PAYER_DEPLOYER=true`: the spending-limit account's deployer, as
+  in step 4 above. Its key is the bridge's, resolved the way the bridge
+  resolves it (`PXE_BRIDGE_SECRET_ARN`; `PXE_BRIDGE_SECRET_KEY` outside
+  production).
+- `FEE_JUICE_PAYER_KEY`: a separate plain Schnorr account at the address the
+  bridge derives from that key. To deploy it on a network without
+  SponsoredFPC, start the bridge once with the payer's key and **without**
+  `PXE_BRIDGE_SPENDING_LIMIT_ADMIN`; it logs `Account address` and stops.
+  Bridge to that address with `npm run bridge-fee-juice -- --recipient
+  <Account address>`, then start it again with the printed `FEE_JUICE_CLAIM`.
+  It deploys itself and keeps the remainder as its balance.
+
+The wallet is ephemeral: neither key is written to `./aztec-wallet-data`.
+
+As soon as the L1 deposit lands, the script prints
+`FEE_JUICE_RESUME_CLAIM='{...}'`. If the wait or the claim transaction fails
+after that, rerun with that variable set: it skips the deposit, waits for the
+message and sends the claim. Rerunning without it deposits again.
 
 ```bash
 FEE_JUICE_RECIPIENT=0x...   \
@@ -227,8 +267,10 @@ npm run top-up-fee-juice
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
 | `FEE_JUICE_RECIPIENT` | Yes | -- | Aztec address to credit |
-| `FEE_JUICE_PAYER_KEY` | Yes | -- | Secret key of the account that sends the claim |
-| `L1_PRIVATE_KEY` | Yes | -- | Ethereum key holding at least `BRIDGE_AMOUNT` of the Fee Juice ERC20; checked before any L1 write |
+| `FEE_JUICE_PAYER_KEY` | One of these two | -- | Secret key of a separate payer account |
+| `FEE_JUICE_PAYER_DEPLOYER` | One of these two | -- | `true` pays from the spending-limit account's deployer, using the bridge's key |
+| `FEE_JUICE_RESUME_CLAIM` | No | -- | JSON printed by an earlier run; skips the L1 deposit |
+| `L1_PRIVATE_KEY` | Yes, unless resuming | -- | Ethereum key holding at least `BRIDGE_AMOUNT` of the Fee Juice ERC20; checked before any L1 write |
 | `AZTEC_NODE_URL` | No | `http://localhost:8080` | Aztec node |
 | `L1_RPC_URL` | No | `http://localhost:8545` | Ethereum RPC |
 | `L1_CHAIN_ID` | No | Anvil's | Required for any L1 other than the sandbox |
