@@ -60,6 +60,9 @@ if (!API_KEY) {
  */
 function parseFeeJuiceClaim(name: string): FeeJuiceClaim | undefined {
   const raw = process.env[name];
+  // The claim secret spends the bridged fee juice; keep it out of the
+  // environment child processes and crash dumps inherit.
+  delete process.env[name];
   if (!raw) return undefined;
   let json: unknown;
   try {
