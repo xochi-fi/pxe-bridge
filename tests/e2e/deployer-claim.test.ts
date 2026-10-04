@@ -3,9 +3,14 @@ import type { EmbeddedWallet } from "@aztec/wallets/embedded";
 import {
   ALLOW_SPONSORED_FPC_ENV,
   AztecClient,
+  SPONSORED_FPC_REFUSED_ERROR,
+  deriveAccountKeys,
   deriveDeployerKeys,
 } from "../../src/aztec-client.js";
-import type { SpendingLimitConfig } from "../../src/spending-limit-account.js";
+import {
+  SpendingLimitAccountContract,
+  type SpendingLimitConfig,
+} from "../../src/spending-limit-account.js";
 import type { FeeJuiceClaim } from "../../src/types.js";
 import {
   bridgeClaim,
@@ -28,13 +33,45 @@ import {
 
 const config = getTestConfig();
 
-// Fresh key, so both the deployer and the limit account start undeployed
-// whichever other suites ran first.
+// Fresh keys, so each deployer and limit account starts undeployed whichever
+// other suites ran first.
 const DEPLOYER_PATH_KEY = "0x000000000000000000000000000000000000000000000000000000000000feed";
+const REFUSED_PATH_KEY = "0x000000000000000000000000000000000000000000000000000000000000fade";
 
-// Covers the deployer's self-deploy and the limit account's deploy, which
-// publishes its class and instance.
+// Pinned by the L1 faucet: bridgeClaim mints, and a mint must equal the
+// faucet's fixed amount.
 const DEPLOYER_FEE_JUICE = 1_000_000_000_000_000_000_000n;
+
+/** Constructs the client with SponsoredFPC switched off, scoped to it alone. */
+function withoutSponsoredFpc(make: () => AztecClient): AztecClient {
+  // Read at construction, so restoring right after scopes the gate to this
+  // client and leaves every other suite's sandbox fallback alone.
+  const previous = process.env[ALLOW_SPONSORED_FPC_ENV];
+  process.env[ALLOW_SPONSORED_FPC_ENV] = "false";
+  try {
+    return make();
+  } finally {
+    if (previous === undefined) delete process.env[ALLOW_SPONSORED_FPC_ENV];
+    else process.env[ALLOW_SPONSORED_FPC_ENV] = previous;
+  }
+}
+
+/** Address the bridge derives for the limit account under `key`, without deploying. */
+async function limitAccountAddress(
+  wallet: unknown,
+  key: string,
+  limits: SpendingLimitConfig,
+): Promise<string> {
+  const { AccountManager } = await import("@aztec/aztec.js/wallet");
+  const { secret, salt, signingKey } = await deriveAccountKeys(key);
+  const manager = await AccountManager.create(
+    wallet as Parameters<typeof AccountManager.create>[0],
+    secret,
+    new SpendingLimitAccountContract(signingKey, limits),
+    { salt },
+  );
+  return manager.getInstance().address.toString();
+}
 
 describe("spending limit account deployed from a funded deployer (e2e)", () => {
   let funderWallet: unknown;
@@ -42,6 +79,7 @@ describe("spending limit account deployed from a funded deployer (e2e)", () => {
   let tokenAddress: string;
   let deployerAddress: string;
   let claim: FeeJuiceClaim;
+  let limits: SpendingLimitConfig;
 
   beforeAll(async () => {
     const funder = new AztecClient(config.nodeUrl, FUNDER_KEY);
@@ -49,6 +87,14 @@ describe("spending limit account deployed from a funded deployer (e2e)", () => {
     funderWallet = (funder as unknown as { wallet: unknown }).wallet;
     adminAddress = funder.getAddress()!;
     tokenAddress = await deployTestToken(funderWallet, adminAddress);
+    limits = {
+      maxAmountPerTx: 1_000n,
+      dailyLimit: 10_000n,
+      admin: adminAddress,
+      token: tokenAddress,
+      allowlistSeed: "0x" + "09".repeat(32),
+      allowlistRecipients: [{ address: "0x" + "11".repeat(32), index: 512 }],
+    };
 
     // The same derivation the operator script uses to print the address it
     // bridges to.
@@ -70,39 +116,28 @@ describe("spending limit account deployed from a funded deployer (e2e)", () => {
     async () => {
       const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
       const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+      const { ContractInitializationStatus } = await import("@aztec/aztec.js/wallet");
       const { getFeeJuiceBalance } = await import("@aztec/aztec.js/utils");
       const node = createAztecNodeClient(config.nodeUrl);
 
-      const spendingLimitConfig: SpendingLimitConfig = {
-        maxAmountPerTx: 1_000n,
-        dailyLimit: 10_000n,
-        admin: adminAddress,
-        token: tokenAddress,
-        allowlistSeed: "0x" + "09".repeat(32),
-        allowlistRecipients: [{ address: "0x" + "11".repeat(32), index: 512 }],
-      };
+      // Precondition: a deployer or account left by an earlier run would take
+      // a different fee path and prove nothing about this one.
+      const { initializationStatus } = await (funderWallet as EmbeddedWallet).getContractMetadata(
+        AztecAddress.fromStringUnsafe(deployerAddress),
+      );
+      expect(initializationStatus).toBe(ContractInitializationStatus.UNINITIALIZED);
+      const expectedAccount = AztecAddress.fromStringUnsafe(
+        await limitAccountAddress(funderWallet, DEPLOYER_PATH_KEY, limits),
+      );
+      expect(await node.getContract(expectedAccount)).toBeUndefined();
 
-      // Read at construction, so restoring right after scopes the gate to this
-      // client and leaves every other suite's sandbox fallback alone.
-      const previous = process.env[ALLOW_SPONSORED_FPC_ENV];
-      process.env[ALLOW_SPONSORED_FPC_ENV] = "false";
-      let client: AztecClient;
-      try {
-        client = new AztecClient(
-          config.nodeUrl,
-          DEPLOYER_PATH_KEY,
-          undefined,
-          spendingLimitConfig,
-          claim,
-        );
-      } finally {
-        if (previous === undefined) delete process.env[ALLOW_SPONSORED_FPC_ENV];
-        else process.env[ALLOW_SPONSORED_FPC_ENV] = previous;
-      }
-
+      const client = withoutSponsoredFpc(
+        () => new AztecClient(config.nodeUrl, DEPLOYER_PATH_KEY, undefined, limits, claim),
+      );
       await client.connect();
 
       const accountAddress = AztecAddress.fromStringUnsafe(client.getAddress()!);
+      expect(accountAddress.equals(expectedAccount)).toBe(true);
       expect(await node.getContract(accountAddress)).toBeDefined();
 
       // Both deploys came out of the claim: the balance is what the claim
@@ -113,6 +148,26 @@ describe("spending limit account deployed from a funded deployer (e2e)", () => {
       );
       expect(remaining).toBeGreaterThan(0n);
       expect(remaining).toBeLessThan(BigInt(claim.claimAmount));
+    },
+    600_000,
+  );
+
+  it(
+    "refuses to deploy without a deployer claim when SponsoredFPC is off",
+    async () => {
+      const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
+      const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+      const node = createAztecNodeClient(config.nodeUrl);
+
+      const client = withoutSponsoredFpc(
+        () => new AztecClient(config.nodeUrl, REFUSED_PATH_KEY, undefined, limits),
+      );
+      await expect(client.connect()).rejects.toThrow(SPONSORED_FPC_REFUSED_ERROR);
+
+      const account = AztecAddress.fromStringUnsafe(
+        await limitAccountAddress(funderWallet, REFUSED_PATH_KEY, limits),
+      );
+      expect(await node.getContract(account)).toBeUndefined();
     },
     600_000,
   );
