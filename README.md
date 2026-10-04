@@ -107,7 +107,7 @@ gets it depends on which account it runs:
 | Account | Deployment fee | Later transactions | How you fund it |
 | --- | --- | --- | --- |
 | Plain Schnorr (default) | `FEE_JUICE_CLAIM`, else SponsoredFPC | Own balance | `npm run bridge-fee-juice`, then set `FEE_JUICE_CLAIM` |
-| Spending limit (`PXE_BRIDGE_SPENDING_LIMIT_ADMIN`) | SponsoredFPC, via the deployer | Pre-existing balance only | `npm run top-up-fee-juice` |
+| Spending limit (`PXE_BRIDGE_SPENDING_LIMIT_ADMIN`) | `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM`, via the deployer, else SponsoredFPC | Pre-existing balance only | `npm run bridge-fee-juice -- --deployer` to deploy, `npm run top-up-fee-juice` to run |
 
 The spending-limit account cannot claim for itself. Its entrypoint admits
 exactly one call and requires it to be `transfer_to_private` on the pinned
@@ -127,10 +127,16 @@ The spending-limit account cannot deploy itself (its guard rejects the
 deployment payload), so the bridge first deploys a plain Schnorr **deployer**
 account and sends the deployment from it. The deployer is derived from the same
 secret key under the account salt plus one, so it needs no key material of its
-own and lands at the same address on every restart. It pays for its own
-deployment and for the spending-limit account's via SponsoredFPC; a claim cannot
-pay for either, since a claim is bridged to the plain account's address. Its
-address is logged as `Deploying deployer account 0x...` when it is deployed.
+own and lands at the same address on every restart. Its address is logged as
+`Deployer address: 0x...` whenever the account still needs deploying.
+
+With `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM` set, the deployer deploys itself
+with that claim and then pays for the spending-limit account's deployment out
+of what is left: the deployment is sent from the deployer with no fee payment
+method, so the deployer pays from its own fee juice balance. The claim has to be
+bridged to the deployer, not to the account (`npm run bridge-fee-juice --
+--deployer`), and is refused without `PXE_BRIDGE_SPENDING_LIMIT_ADMIN`. Without
+it, both deployments fall back to SponsoredFPC.
 
 The fallback is refused when `NODE_ENV=production`, which the image sets,
 unless `PXE_BRIDGE_ALLOW_SPONSORED_FPC=true`. `false` refuses it in any
@@ -141,9 +147,51 @@ rather than failing inside the deployment. An account that is already deployed
 (initialized on chain, published or not, as v0.1.2 left it) needs no deployment
 fee and starts either way.
 
-On a network without SponsoredFPC the spending-limit account therefore cannot be
-deployed by the bridge. Set `PXE_BRIDGE_ALLOW_SPONSORED_FPC=true` only when the
-node is a sandbox or testnet.
+Set `PXE_BRIDGE_ALLOW_SPONSORED_FPC=true` only when the node is a sandbox or
+testnet.
+
+### Deploying the spending-limit account in production
+
+1. **Derive the deployer address.** With the bridge's key and node:
+
+   ```bash
+   PXE_BRIDGE_SECRET_KEY=0x... AZTEC_NODE_URL=https://... \
+     npm run bridge-fee-juice -- --deployer --address-only
+   ```
+
+   This prints `Deployer address: 0x...` and touches nothing on L1.
+
+2. **Bridge fee juice to it.** The same command without `--address-only`, plus
+   `L1_PRIVATE_KEY`, `L1_RPC_URL`, `L1_CHAIN_ID` and `BRIDGE_AMOUNT`. It prints
+   `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM='{...}'`. One claim pays for both
+   deployments, so size it for both (see below).
+
+3. **Start the bridge** with the spending-limit configuration and
+   `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM`. Check that the `Deployer address` it
+   logs matches step 1. It deploys the deployer, then the account, and logs
+   `Ready` without touching SponsoredFPC. Once the account is deployed the claim
+   is spent and the variable can be removed; a restart finds the account on
+   chain and needs no deployment fee.
+
+4. **Top up the spending-limit account** at the logged `Account address` with
+   `npm run top-up-fee-juice` (next section). Its transfers pay from that
+   balance, not the deployer's.
+
+The node admits a transaction only if its fee payer's balance covers the fee
+limit, `gasLimits x maxFeesPerGas`, while what is charged is the gas actually
+used at the base fee of inclusion. The bridge sets `maxFeesPerGas` to 10x the
+worst predicted base fee, so the claim must cover the deployer's own fee plus
+the full fee limit of the account deployment, which publishes the account's
+contract class and is the expensive one. The unspent remainder stays with the
+deployer, which cannot transfer it.
+
+Funding the deployer with `npm run top-up-fee-juice` (`FEE_JUICE_RECIPIENT` =
+the deployer address) is an alternative for an operator who already has a
+funded L2 payer: the SDK lets an undeployed Schnorr account pay its own
+deployment from a balance already at its address. The bridge does not take
+that path today, since it uses SponsoredFPC whenever no deployer claim is set,
+and on a network without SponsoredFPC the payer itself would first have to be
+bootstrapped with a claim.
 
 ### Topping up the spending-limit account
 

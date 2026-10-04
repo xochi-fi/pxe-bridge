@@ -177,6 +177,29 @@ sender's entrypoint gets `EXTERNAL` and sets no fee payer at all. Since
 would have none. Failing at startup with the reason beats failing during
 deployment with a message about fee payers.
 
+The deployment is paid differently. `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM` is a
+claim bridged to the deployer, the plain Schnorr account at the account salt
+plus one that sends the spending-limit account's deployment. The deployer
+self-deploys with `FeeJuicePaymentMethodWithClaim`, the path a plain account
+already uses, and then sends the account's deployment with no payment method,
+so `completeFeeOptions` gives it `PREEXISTING_FEE_JUICE` and it pays from the
+balance its claim created. The sender is the fee payer, so none of the three
+failures above applies, and nothing runs through the spending-limit account's
+entrypoint. The deployer is derived from the bridge's own key, so this adds no
+key material and no trusted party; a deployer key compromise is a bridge key
+compromise already. What it holds afterwards is unspent fee juice, which cannot
+be transferred. Production runbook:
+
+1. `npm run bridge-fee-juice -- --deployer --address-only` prints the deployer
+   address without touching L1.
+2. The same without `--address-only` bridges to it and prints the claim. The
+   message commits to the deployer, so a claim cannot pay for anything else.
+3. Start the bridge with the claim and the spending-limit configuration. The
+   logged `Deployer address` must match step 1. It reaches `Ready` with
+   SponsoredFPC refused.
+4. Top up the spending-limit account with `scripts/top-up-fee-juice.ts`, as
+   above, before its first transfer.
+
 ## What is public
 
 The contract enforces its limits against public state, and a public function's
