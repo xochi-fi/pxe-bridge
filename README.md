@@ -228,12 +228,13 @@ npm run top-up-fee-juice
 | --- | --- | --- | --- |
 | `FEE_JUICE_RECIPIENT` | Yes | -- | Aztec address to credit |
 | `FEE_JUICE_PAYER_KEY` | Yes | -- | Secret key of the account that sends the claim |
-| `L1_PRIVATE_KEY` | Yes | -- | Ethereum key holding the Fee Juice ERC20 |
+| `L1_PRIVATE_KEY` | Yes | -- | Ethereum key holding at least `BRIDGE_AMOUNT` of the Fee Juice ERC20; checked before any L1 write |
 | `AZTEC_NODE_URL` | No | `http://localhost:8080` | Aztec node |
 | `L1_RPC_URL` | No | `http://localhost:8545` | Ethereum RPC |
 | `L1_CHAIN_ID` | No | Anvil's | Required for any L1 other than the sandbox |
 | `BRIDGE_AMOUNT` | No | `1e18` | Fee juice in wei |
 | `FEE_JUICE_PAYER_SPONSORED` | No | -- | `true` pays via SponsoredFPC; sandbox and testnet only |
+| `FEE_JUICE_MINT` | No | -- | `true` mints from the L1 faucet first; sandbox only, and `BRIDGE_AMOUNT` must equal the faucet's fixed mint amount |
 
 There is nothing to set on the bridge afterwards. The balance is on chain, and
 the account finds it on its next transaction.

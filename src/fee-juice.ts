@@ -57,6 +57,14 @@ export interface BridgeFeeJuiceOptions {
   recipient: string;
   amount: bigint;
   /**
+   * Mint the bridged amount from the L1 faucet first. Sandbox only: the faucet
+   * handler exists only on test deployments and mints one fixed amount, so the
+   * SDK throws unless `amount` equals it. Off by default, which bridges from
+   * the Fee Juice ERC20 balance `l1PrivateKey` already holds -- the only thing
+   * a real network offers.
+   */
+  mint?: boolean;
+  /**
    * Run once per waiting round while the message is not yet in the tree. An
    * idle sandbox builds no blocks on its own, so the e2e suite passes a cheap
    * transaction; against a live sequencer the default sleep is enough.
@@ -172,11 +180,23 @@ export async function bridgeFeeJuice(opts: BridgeFeeJuiceOptions): Promise<FeeJu
     createLogger("pxe-bridge:fee-juice"),
   );
 
+  if (!opts.mint) {
+    // Checked here, before the approve, so a short balance fails with its cause
+    // rather than as an L1 revert inside the portal deposit.
+    const balance = await manager.getTokenManager().getL1TokenBalance(l1Client.account.address);
+    if (balance < opts.amount) {
+      throw new Error(
+        `L1 account ${l1Client.account.address} holds ${balance} Fee Juice, ` +
+          `needs ${opts.amount} to bridge`,
+      );
+    }
+  }
+
   log(`Bridging ${opts.amount} fee juice to ${opts.recipient}`);
   const claim = await manager.bridgeTokensPublic(
     AztecAddress.fromStringUnsafe(opts.recipient),
     opts.amount,
-    true,
+    opts.mint ?? false,
   );
 
   // The message is only spendable once the sequencer has pulled it off L1 and

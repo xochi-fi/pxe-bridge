@@ -172,9 +172,10 @@ const SANDBOX_WAIT_ATTEMPTS = 12;
  *
  * The mechanism and the reason it has to work this way live in
  * `src/fee-juice.ts`, which the bridge's own top-up script also uses. What is
- * specific here is the sandbox: Anvil's key funds the L1 side, blocks are
- * driven rather than waited for, and the payer pays via SponsoredFPC because a
- * sandbox account has no fee juice until somebody bridges it some.
+ * specific here is the sandbox: Anvil's key funds the L1 side by minting from
+ * the faucet, blocks are driven rather than waited for, and the payer pays via
+ * SponsoredFPC because a sandbox account has no fee juice until somebody
+ * bridges it some.
  */
 export async function fundFeeJuice(
   nodeUrl: string,
@@ -190,6 +191,7 @@ export async function fundFeeJuice(
     l1PrivateKey: ANVIL_KEY,
     recipient,
     amount,
+    mint: true,
     onBlockNeeded,
     attempts: SANDBOX_WAIT_ATTEMPTS,
     wallet: wallet as ClaimingWallet,
@@ -216,6 +218,7 @@ export async function bridgeClaim(
     l1PrivateKey: ANVIL_KEY,
     recipient,
     amount,
+    mint: true,
     onBlockNeeded,
     attempts: SANDBOX_WAIT_ATTEMPTS,
   });

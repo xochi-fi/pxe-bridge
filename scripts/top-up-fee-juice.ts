@@ -20,7 +20,8 @@
  *                             as "[pxe-bridge] Account address:")
  *   FEE_JUICE_PAYER_KEY    -- 32-byte hex secret key of the account that sends
  *                             the claim; needs its own fee juice
- *   L1_PRIVATE_KEY         -- Ethereum private key with a Fee Juice ERC20 balance
+ *   L1_PRIVATE_KEY         -- Ethereum private key holding at least BRIDGE_AMOUNT
+ *                             of the Fee Juice ERC20 (checked before any L1 write)
  *
  * Optional env:
  *   AZTEC_NODE_URL             -- Aztec node (default: http://localhost:8080)
@@ -29,6 +30,9 @@
  *   BRIDGE_AMOUNT              -- fee juice in wei (default: 1e18)
  *   FEE_JUICE_PAYER_SPONSORED  -- "true" to pay via SponsoredFPC instead of the
  *                                 payer's own balance; sandbox and testnet only
+ *   FEE_JUICE_MINT             -- "true" to mint BRIDGE_AMOUNT from the L1 faucet
+ *                                 first; sandbox only, and BRIDGE_AMOUNT must equal
+ *                                 the faucet's fixed mint amount
  */
 
 import { deriveAccountKeys } from "../src/aztec-client.js";
@@ -71,6 +75,7 @@ async function main(): Promise<void> {
   const AZTEC_NODE_URL = process.env["AZTEC_NODE_URL"] ?? "http://localhost:8080";
   const L1_RPC_URL = process.env["L1_RPC_URL"] ?? "http://localhost:8545";
   const SPONSORED = process.env["FEE_JUICE_PAYER_SPONSORED"] === "true";
+  const MINT = process.env["FEE_JUICE_MINT"] === "true";
 
   const AMOUNT = parseBigInt("BRIDGE_AMOUNT", process.env["BRIDGE_AMOUNT"] ?? "1000000000000000000");
 
@@ -123,6 +128,7 @@ async function main(): Promise<void> {
     ...(L1_CHAIN_ID ? { l1ChainId: Number(L1_CHAIN_ID) } : {}),
     recipient: RECIPIENT,
     amount: AMOUNT,
+    mint: MINT,
     wallet: wallet as unknown as ClaimingWallet,
     payer: payer.toString(),
     ...(SPONSORED ? { paymentMethod: await sponsoredFee(wallet) } : {}),
