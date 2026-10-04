@@ -229,7 +229,11 @@ export async function claimFeeJuiceFor(opts: ClaimFeeJuiceOptions): Promise<void
     });
 }
 
-async function waitForL1ToL2Message(
+/**
+ * Resolves once `messageHash` is in the L1 to L2 message tree, i.e. once a
+ * claim built from it can be consumed. Throws after `attempts` rounds.
+ */
+export async function waitForL1ToL2Message(
   node: Pick<AztecNode, "getL1ToL2MessageMembershipWitness">,
   messageHash: string,
   opts: Pick<BridgeFeeJuiceOptions, "onBlockNeeded" | "attempts">,

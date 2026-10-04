@@ -163,8 +163,11 @@ testnet.
 
 2. **Bridge fee juice to it.** The same command without `--address-only`, plus
    `L1_PRIVATE_KEY`, `L1_RPC_URL`, `L1_CHAIN_ID` and `BRIDGE_AMOUNT`. It prints
-   `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM='{...}'`. One claim pays for both
-   deployments, so size it for both (see below).
+   `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM='{...}'`, then waits until the L1 to L2
+   message has synced and says so. Start the bridge only after that, or its
+   first deployment fails with "No L1 to L2 message found". If the wait times
+   out, the printed claim is still valid; retry once L2 has built more blocks.
+   One claim pays for both deployments, so size it for both (see below).
 
 3. **Start the bridge** with the spending-limit configuration and
    `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM`. Check that the `Deployer address` it

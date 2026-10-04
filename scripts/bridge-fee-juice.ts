@@ -40,6 +40,7 @@ import {
   deriveAccountKeys,
   deriveDeployerKeys,
 } from "../src/aztec-client.js";
+import { waitForL1ToL2Message } from "../src/fee-juice.js";
 
 async function main() {
   const args = process.argv.slice(2);
@@ -192,14 +193,36 @@ async function main() {
     messageLeafIndex: claim.messageLeafIndex.toString(),
   };
 
+  // Printed before the wait, not after it: the L1 write has already happened,
+  // and a wait that times out must not take the only copy of the claim with it.
   const envName = toDeployer ? DEPLOYER_FEE_JUICE_CLAIM_ENV : "FEE_JUICE_CLAIM";
   console.log("\nBridge successful! Set this env var on the sidecar:\n");
   console.log(`${envName}='${JSON.stringify(claimJson)}'`);
+
+  // The claim is only consumable once the sequencer has pulled the message off
+  // L1 into the tree. Starting the sidecar earlier fails its first deploy with
+  // "No L1 to L2 message found for message hash".
+  console.log("\nWaiting for the L1 to L2 message to sync...");
+  const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
+  try {
+    await waitForL1ToL2Message(
+      createAztecNodeClient(AZTEC_NODE_URL),
+      claim.messageHash.toString(),
+      {},
+    );
+  } catch (err) {
+    console.error(
+      `\n${err instanceof Error ? err.message : String(err)}. The claim above is still ` +
+        "valid: start the sidecar once L2 has built a few more blocks.",
+    );
+    await wallet.stop();
+    process.exit(1);
+  }
   console.log(
     toDeployer
-      ? "\nThe claim will be consumed on first sidecar startup, when the deployer " +
-          "deploys itself and then the spending-limit account."
-      : "\nThe claim will be consumed on first sidecar startup (account deployment).",
+      ? "Message synced. The claim will be consumed on first sidecar startup, when the " +
+          "deployer deploys itself and then the spending-limit account."
+      : "Message synced. The claim will be consumed on first sidecar startup (account deployment).",
   );
 
   await wallet.stop();
