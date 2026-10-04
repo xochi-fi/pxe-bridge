@@ -25,7 +25,7 @@
 import { FeeJuiceContract } from "@aztec/noir-contracts.js/FeeJuice";
 import type { FeePaymentMethod } from "@aztec/aztec.js/fee";
 import type { AztecNode } from "@aztec/aztec.js/node";
-import type { FeeJuiceClaim } from "./types.js";
+import type { BridgedFeeJuiceClaim, FeeJuiceClaim } from "./types.js";
 
 /** The wallet slice needed to send a claim. Matches what `Contract.at` takes. */
 export type ClaimingWallet = Parameters<typeof FeeJuiceContract.at>[1];
@@ -64,6 +64,12 @@ export interface BridgeFeeJuiceOptions {
    * a real network offers.
    */
   mint?: boolean;
+  /**
+   * Called once the L1 deposit has gone through, before the wait. The deposit
+   * cannot be undone, and a wait that times out throws without returning the
+   * claim, so this is where a caller records it.
+   */
+  onClaim?: (claim: BridgedFeeJuiceClaim) => void;
   /**
    * Run once per waiting round while the message is not yet in the tree. An
    * idle sandbox builds no blocks on its own, so the e2e suite passes a cheap
@@ -127,8 +133,8 @@ export function assertBridgeAmount(amount: bigint): void {
 
 /**
  * The full path: bridge from L1, wait for the message, claim on the recipient's
- * behalf. Returns the claim it consumed, so a failure after the L1 write leaves
- * the operator something to retry the second half with.
+ * behalf. Returns the claim it consumed. A failure after the L1 write reaches
+ * the caller only through `onClaim`.
  */
 export async function topUpFeeJuice(opts: TopUpFeeJuiceOptions): Promise<FeeJuiceClaim> {
   assertAztecAddress("payer", opts.payer);
@@ -147,7 +153,10 @@ export async function topUpFeeJuice(opts: TopUpFeeJuiceOptions): Promise<FeeJuic
   return claim;
 }
 
-/** Bridges fee juice from L1 to `recipient` and returns the unclaimed claim. */
+/**
+ * Bridges fee juice from L1 to `recipient`, waits for the message, and returns
+ * the unclaimed claim. `onClaim` receives it before the wait.
+ */
 export async function bridgeFeeJuice(opts: BridgeFeeJuiceOptions): Promise<FeeJuiceClaim> {
   assertAztecAddress("recipient", opts.recipient);
   assertBridgeAmount(opts.amount);
@@ -199,16 +208,24 @@ export async function bridgeFeeJuice(opts: BridgeFeeJuiceOptions): Promise<FeeJu
     opts.mint ?? false,
   );
 
+  const bridged: BridgedFeeJuiceClaim = {
+    claimAmount: claim.claimAmount.toString(),
+    claimSecret: claim.claimSecret.toString(),
+    messageLeafIndex: claim.messageLeafIndex.toString(),
+    messageHash: claim.messageHash.toString(),
+  };
+  opts.onClaim?.(bridged);
+
   // The message is only spendable once the sequencer has pulled it off L1 and
   // built it into the tree, which needs L2 blocks. Claiming earlier fails with
   // "No L1 to L2 message found for message hash".
   log("Waiting for the L1 to L2 message");
-  await waitForL1ToL2Message(node, claim.messageHash, opts);
+  await waitForL1ToL2Message(node, bridged.messageHash, opts);
 
   return {
-    claimAmount: claim.claimAmount.toString(),
-    claimSecret: claim.claimSecret.toString(),
-    messageLeafIndex: claim.messageLeafIndex.toString(),
+    claimAmount: bridged.claimAmount,
+    claimSecret: bridged.claimSecret,
+    messageLeafIndex: bridged.messageLeafIndex,
   };
 }
 
