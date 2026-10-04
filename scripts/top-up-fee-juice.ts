@@ -8,9 +8,25 @@
  * during deployment -- is rejected at startup when spending limits are on. See
  * FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR in src/aztec-client.ts.
  *
- * The payer must already be deployed and able to pay for one transaction. Run
- * the bridge once with its key and without PXE_BRIDGE_SPENDING_LIMIT_ADMIN to
- * get a plain Schnorr account deployed at the address this script derives.
+ * The payer sends the claim transaction and pays its fee from its own balance.
+ * It must already be initialized on chain. Two payers, exactly one of which is
+ * set:
+ *
+ *   FEE_JUICE_PAYER_DEPLOYER=true  The spending-limit account's deployer, which
+ *       holds whatever its deployer claim left after both deploys. Its key is
+ *       the bridge's key, resolved as the bridge resolves it
+ *       (PXE_BRIDGE_SECRET_ARN; PXE_BRIDGE_SECRET_KEY outside production). The
+ *       key stays in this process's memory; the wallet is ephemeral, so nothing
+ *       is written to ./aztec-wallet-data.
+ *   FEE_JUICE_PAYER_KEY            A separate plain Schnorr account at the
+ *       address the bridge derives from this key. Deploy it by running the
+ *       bridge once with this key, without PXE_BRIDGE_SPENDING_LIMIT_ADMIN, and
+ *       with FEE_JUICE_CLAIM bridged to the "Account address" it logs.
+ *
+ * The claim and its message hash are printed as FEE_JUICE_RESUME_CLAIM as soon
+ * as the L1 deposit lands. If the wait or the claim transaction fails after
+ * that, rerun with FEE_JUICE_RESUME_CLAIM set: it skips the deposit, waits for
+ * the message and sends the claim. Rerunning without it deposits again.
  *
  * Usage:
  *   npx tsx scripts/top-up-fee-juice.ts
@@ -18,16 +34,17 @@
  * Required env:
  *   FEE_JUICE_RECIPIENT    -- AztecAddress to credit (the bridge logs its own
  *                             as "[pxe-bridge] Account address:")
- *   FEE_JUICE_PAYER_KEY    -- 32-byte hex secret key of the account that sends
- *                             the claim; needs its own fee juice
+ *   FEE_JUICE_PAYER_KEY or FEE_JUICE_PAYER_DEPLOYER=true -- see above
  *   L1_PRIVATE_KEY         -- Ethereum private key holding at least BRIDGE_AMOUNT
- *                             of the Fee Juice ERC20 (checked before any L1 write)
+ *                             of the Fee Juice ERC20 (checked before any L1 write);
+ *                             unused with FEE_JUICE_RESUME_CLAIM
  *
  * Optional env:
  *   AZTEC_NODE_URL             -- Aztec node (default: http://localhost:8080)
  *   L1_RPC_URL                 -- Ethereum RPC (default: http://localhost:8545)
  *   L1_CHAIN_ID                -- L1 chain id (default: Anvil's, per the SDK)
  *   BRIDGE_AMOUNT              -- fee juice in wei (default: 1e18)
+ *   FEE_JUICE_RESUME_CLAIM     -- JSON printed by an earlier run; skips the L1 deposit
  *   FEE_JUICE_PAYER_SPONSORED  -- "true" to pay via SponsoredFPC instead of the
  *                                 payer's own balance; sandbox and testnet only
  *   FEE_JUICE_MINT             -- "true" to mint BRIDGE_AMOUNT from the L1 faucet
@@ -35,20 +52,34 @@
  *                                 the faucet's fixed mint amount
  */
 
-import { deriveAccountKeys } from "../src/aztec-client.js";
-import { assertAztecAddress, assertBridgeAmount, topUpFeeJuice } from "../src/fee-juice.js";
+import { deriveAccountKeys, deriveDeployerKeys } from "../src/aztec-client.js";
+import type { AccountKeys } from "../src/aztec-client.js";
+import {
+  assertAztecAddress,
+  assertBridgeAmount,
+  claimFeeJuiceFor,
+  topUpFeeJuice,
+  waitForL1ToL2Message,
+} from "../src/fee-juice.js";
 import type { ClaimingWallet } from "../src/fee-juice.js";
+import { resolveSecretKey } from "../src/secrets.js";
+import { BridgedFeeJuiceClaimSchema } from "../src/types.js";
+import type { BridgedFeeJuiceClaim, FeeJuiceClaim } from "../src/types.js";
 
 /** Whatever EmbeddedWallet.create hands back, without naming the node variant. */
 type PayerWallet = Awaited<
   ReturnType<typeof import("@aztec/wallets/embedded").EmbeddedWallet.create>
 >;
 
+function fail(message: string): never {
+  console.error(message);
+  process.exit(1);
+}
+
 function required(name: string): string {
   const value = process.env[name];
   if (!value) {
-    console.error(`${name} is required`);
-    process.exit(1);
+    fail(`${name} is required`);
   }
   return value;
 }
@@ -58,19 +89,39 @@ function parseBigInt(name: string, raw: string): bigint {
   try {
     return BigInt(raw);
   } catch {
-    console.error(`${name} must be an integer, got ${JSON.stringify(raw)}`);
-    process.exit(1);
+    fail(`${name} must be an integer, got ${JSON.stringify(raw)}`);
   }
+}
+
+function parseResumeClaim(raw: string): BridgedFeeJuiceClaim {
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    fail("FEE_JUICE_RESUME_CLAIM is not valid JSON");
+  }
+  const parsed = BridgedFeeJuiceClaimSchema.safeParse(json);
+  if (!parsed.success) {
+    fail(`FEE_JUICE_RESUME_CLAIM: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
+  }
+  return parsed.data;
 }
 
 async function main(): Promise<void> {
   const RECIPIENT = required("FEE_JUICE_RECIPIENT");
-  const PAYER_KEY = required("FEE_JUICE_PAYER_KEY");
-  const L1_PRIVATE_KEY = required("L1_PRIVATE_KEY");
-  // Cleared for the same reason AztecClient nulls its own reference: neither
-  // key has any further use once the account and the L1 client exist.
+  const PAYER_DEPLOYER = process.env["FEE_JUICE_PAYER_DEPLOYER"] === "true";
+  const PAYER_KEY = process.env["FEE_JUICE_PAYER_KEY"];
+  const L1_PRIVATE_KEY = process.env["L1_PRIVATE_KEY"];
+  const RESUME = process.env["FEE_JUICE_RESUME_CLAIM"];
+  // Cleared for the same reason AztecClient nulls its own reference: none of
+  // these has any further use once read.
   delete process.env["FEE_JUICE_PAYER_KEY"];
   delete process.env["L1_PRIVATE_KEY"];
+  delete process.env["FEE_JUICE_RESUME_CLAIM"];
+
+  if (PAYER_DEPLOYER === Boolean(PAYER_KEY)) {
+    fail("Set exactly one of FEE_JUICE_PAYER_KEY or FEE_JUICE_PAYER_DEPLOYER=true");
+  }
 
   const AZTEC_NODE_URL = process.env["AZTEC_NODE_URL"] ?? "http://localhost:8080";
   const L1_RPC_URL = process.env["L1_RPC_URL"] ?? "http://localhost:8545";
@@ -86,54 +137,107 @@ async function main(): Promise<void> {
     assertAztecAddress("FEE_JUICE_RECIPIENT", RECIPIENT);
     assertBridgeAmount(AMOUNT);
   } catch (err) {
-    console.error((err as Error).message);
-    process.exit(1);
+    fail((err as Error).message);
+  }
+
+  const resume = RESUME ? parseResumeClaim(RESUME) : undefined;
+  if (!resume && !L1_PRIVATE_KEY) {
+    fail("L1_PRIVATE_KEY is required");
   }
 
   const L1_CHAIN_ID = process.env["L1_CHAIN_ID"];
   if (L1_CHAIN_ID !== undefined && !/^\d+$/.test(L1_CHAIN_ID)) {
-    console.error("L1_CHAIN_ID must be a decimal integer");
-    process.exit(1);
+    fail("L1_CHAIN_ID must be a decimal integer");
+  }
+
+  let payerKeys: AccountKeys;
+  try {
+    payerKeys = PAYER_DEPLOYER
+      ? await deriveDeployerKeys((await resolveSecretKey()).key)
+      : await deriveAccountKeys(PAYER_KEY!);
+  } catch (err) {
+    fail((err as Error).message);
   }
 
   const { EmbeddedWallet } = await import("@aztec/wallets/embedded");
-  const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
+  const { ContractInitializationStatus } = await import("@aztec/aztec.js/wallet");
 
   console.log(`Connecting to Aztec node at ${AZTEC_NODE_URL}`);
-  const wallet = await EmbeddedWallet.create(AZTEC_NODE_URL);
+  // Ephemeral: createSchnorrAccount stores the secret and signing key in the
+  // wallet DB, which otherwise persists under ./aztec-wallet-data. Proving on,
+  // as in AztecClient: a network that verifies proofs rejects the claim
+  // without it.
+  const wallet = await EmbeddedWallet.create(AZTEC_NODE_URL, {
+    ephemeral: true,
+    pxe: { proverEnabled: true },
+  });
 
-  const { secret, salt, signingKey } = await deriveAccountKeys(PAYER_KEY);
-  const manager = await wallet.createSchnorrAccount(secret, salt, signingKey);
+  const manager = await wallet.createSchnorrAccount(
+    payerKeys.secret,
+    payerKeys.salt,
+    payerKeys.signingKey,
+  );
   const payer = (await manager.getAccount()).getAddress();
-  console.log(`Payer account: ${payer.toString()}`);
+  console.log(`${PAYER_DEPLOYER ? "Payer (deployer)" : "Payer account"}: ${payer.toString()}`);
 
-  // Asked of the node, not the PXE. createSchnorrAccount registers the instance
-  // locally whether or not anything was ever deployed, so a PXE-side lookup
-  // always answers yes and the claim would fail much later with a message about
-  // the entrypoint rather than about the account not existing.
-  const node = createAztecNodeClient(AZTEC_NODE_URL);
-  if ((await node.getContract(payer)) === undefined) {
-    console.error(
-      `Payer ${payer.toString()} is not deployed on ${AZTEC_NODE_URL}. ` +
-        "Start the bridge once with this key and without " +
-        "PXE_BRIDGE_SPENDING_LIMIT_ADMIN to deploy it.",
+  // Initialization, not publication. The deployer self-deploys unpublished, so
+  // node.getContract misses it; the init nullifier exists either way.
+  // createSchnorrAccount registered the instance, so the status is definitive.
+  const { initializationStatus } = await wallet.getContractMetadata(payer);
+  if (initializationStatus !== ContractInitializationStatus.INITIALIZED) {
+    fail(
+      PAYER_DEPLOYER
+        ? `Deployer ${payer.toString()} is not deployed on ${AZTEC_NODE_URL}. The bridge ` +
+            "deploys it on first start with PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM."
+        : `Payer ${payer.toString()} is not deployed on ${AZTEC_NODE_URL}. Run the bridge ` +
+            "once with this key, without PXE_BRIDGE_SPENDING_LIMIT_ADMIN, and with " +
+            "FEE_JUICE_CLAIM bridged to the Account address it logs.",
     );
-    process.exit(1);
   }
 
-  const claim = await topUpFeeJuice({
-    nodeUrl: AZTEC_NODE_URL,
-    l1RpcUrl: L1_RPC_URL,
-    l1PrivateKey: L1_PRIVATE_KEY,
-    ...(L1_CHAIN_ID ? { l1ChainId: Number(L1_CHAIN_ID) } : {}),
-    recipient: RECIPIENT,
-    amount: AMOUNT,
-    mint: MINT,
+  const paymentMethod = SPONSORED ? await sponsoredFee(wallet) : undefined;
+  const claimOpts = {
     wallet: wallet as unknown as ClaimingWallet,
     payer: payer.toString(),
-    ...(SPONSORED ? { paymentMethod: await sponsoredFee(wallet) } : {}),
+    recipient: RECIPIENT,
+    ...(paymentMethod ? { paymentMethod } : {}),
     log: console.log,
-  });
+  };
+
+  let claim: FeeJuiceClaim;
+  if (resume) {
+    const { messageHash, ...resumed } = resume;
+    console.log("Resuming: no L1 deposit");
+    const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
+    await waitForL1ToL2Message(createAztecNodeClient(AZTEC_NODE_URL), messageHash, {});
+    await claimFeeJuiceFor({ ...claimOpts, claim: resumed });
+    claim = resumed;
+  } else {
+    let bridged: BridgedFeeJuiceClaim | undefined;
+    try {
+      claim = await topUpFeeJuice({
+        ...claimOpts,
+        nodeUrl: AZTEC_NODE_URL,
+        l1RpcUrl: L1_RPC_URL,
+        l1PrivateKey: L1_PRIVATE_KEY!,
+        ...(L1_CHAIN_ID ? { l1ChainId: Number(L1_CHAIN_ID) } : {}),
+        amount: AMOUNT,
+        mint: MINT,
+        onClaim: (c) => {
+          bridged = c;
+          console.log(`\nDeposited on L1. To resume if what follows fails:\n`);
+          console.log(`FEE_JUICE_RESUME_CLAIM='${JSON.stringify(c)}'\n`);
+        },
+      });
+    } catch (err) {
+      if (bridged === undefined) throw err;
+      console.error("Fatal:", err);
+      fail(
+        "\nThe deposit is on L1. Rerun with FEE_JUICE_RESUME_CLAIM set to the value printed " +
+          "above; rerunning without it deposits again.",
+      );
+    }
+  }
 
   console.log(`\nCredited ${claim.claimAmount} fee juice to ${RECIPIENT}.`);
   console.log("No FEE_JUICE_CLAIM to set: the balance is already on chain.");
