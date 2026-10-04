@@ -1,14 +1,30 @@
 /**
- * Bridges Fee Juice from Ethereum L1 to an Aztec L2 account.
- * Outputs the claim JSON needed by PXE_BRIDGE via FEE_JUICE_CLAIM env var.
+ * Bridges Fee Juice from Ethereum L1 to an Aztec L2 account and prints the
+ * claim JSON the bridge consumes when it deploys that account.
  *
- * PLAIN SCHNORR ACCOUNTS ONLY. The sidecar consumes FEE_JUICE_CLAIM through
- * FeeJuicePaymentMethodWithClaim, which the spending-limit account cannot use;
- * with PXE_BRIDGE_SPENDING_LIMIT_ADMIN set the bridge refuses the combination
- * at startup. Use scripts/top-up-fee-juice.ts for that account.
+ * Two targets:
+ *
+ *   default     The solver account, for a plain Schnorr bridge. Prints
+ *               FEE_JUICE_CLAIM. The spending-limit account cannot use this
+ *               (see FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR) and the bridge refuses
+ *               the combination at startup.
+ *   --deployer  The spending-limit account's deployer, a plain Schnorr account
+ *               at the account salt + 1. Prints
+ *               PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM. The deployer self-deploys
+ *               with the claim and pays the spending-limit account's deployment
+ *               out of what is left, so bridge enough for both. The account's
+ *               transfers are funded separately, by scripts/top-up-fee-juice.ts.
+ *
+ * The address printed must match the "Account address" or "Deployer address"
+ * the bridge logs on connect: a claim commits to its recipient, and juice
+ * bridged to the wrong address cannot be moved.
+ *
+ * --address-only prints the target address and exits before anything touches
+ * L1, so the address can be checked (or funded some other way) first. It needs
+ * no L1_PRIVATE_KEY.
  *
  * Usage:
- *   npx tsx scripts/bridge-fee-juice.ts
+ *   npx tsx scripts/bridge-fee-juice.ts [--deployer] [--address-only]
  *
  * Required env:
  *   PXE_BRIDGE_SECRET_KEY  -- same key the sidecar uses (derives the Aztec account address)
@@ -19,9 +35,23 @@
  *   BRIDGE_AMOUNT          -- Fee Juice amount in wei (default: 1000000000000000000 = 1e18)
  */
 
-import { deriveAccountKeys } from "../src/aztec-client.js";
+import {
+  DEPLOYER_FEE_JUICE_CLAIM_ENV,
+  deriveAccountKeys,
+  deriveDeployerKeys,
+} from "../src/aztec-client.js";
 
 async function main() {
+  const args = process.argv.slice(2);
+  const unknown = args.filter((a) => a !== "--deployer" && a !== "--address-only");
+  if (unknown.length > 0) {
+    console.error(
+      `Unknown argument(s): ${unknown.join(" ")}. Usage: bridge-fee-juice [--deployer] [--address-only]`,
+    );
+    process.exit(1);
+  }
+  const toDeployer = args.includes("--deployer");
+  const addressOnly = args.includes("--address-only");
   const SECRET_KEY = process.env["PXE_BRIDGE_SECRET_KEY"];
   const L1_PRIVATE_KEY = process.env["L1_PRIVATE_KEY"];
   // Clear sensitive env vars from process memory
@@ -47,7 +77,7 @@ async function main() {
     console.error("PXE_BRIDGE_SECRET_KEY is required");
     process.exit(1);
   }
-  if (!L1_PRIVATE_KEY) {
+  if (!L1_PRIVATE_KEY && !addressOnly) {
     console.error("L1_PRIVATE_KEY is required (Ethereum key with Fee Juice)");
     process.exit(1);
   }
@@ -56,7 +86,9 @@ async function main() {
   // live here built the salt with Fr.fromBuffer and omitted the signing key, so
   // it threw for most keys and derived a different address for the rest.
   const { EmbeddedWallet } = await import("@aztec/wallets/embedded");
-  const { secret, salt, signingKey } = await deriveAccountKeys(SECRET_KEY);
+  const { secret, salt, signingKey } = toDeployer
+    ? await deriveDeployerKeys(SECRET_KEY)
+    : await deriveAccountKeys(SECRET_KEY);
 
   console.log(`Connecting to Aztec node at ${AZTEC_NODE_URL}...`);
   const wallet = await EmbeddedWallet.create(AZTEC_NODE_URL);
@@ -64,7 +96,13 @@ async function main() {
   const accountManager = await wallet.createSchnorrAccount(secret, salt, signingKey);
   const account = await accountManager.getAccount();
   const aztecAddress = account.getAddress();
-  console.log(`Aztec account address: ${aztecAddress.toString()}`);
+  console.log(
+    `${toDeployer ? "Deployer address" : "Aztec account address"}: ${aztecAddress.toString()}`,
+  );
+  if (addressOnly || !L1_PRIVATE_KEY) {
+    await wallet.stop();
+    process.exit(0);
+  }
 
   // Get L1 contract addresses from the node via JSON-RPC
   const nodeInfoRes = await fetch(AZTEC_NODE_URL, {
@@ -155,10 +193,14 @@ async function main() {
     messageLeafIndex: claim.messageLeafIndex.toString(),
   };
 
+  const envName = toDeployer ? DEPLOYER_FEE_JUICE_CLAIM_ENV : "FEE_JUICE_CLAIM";
   console.log("\nBridge successful! Set this env var on the sidecar:\n");
-  console.log(`FEE_JUICE_CLAIM='${JSON.stringify(claimJson)}'`);
+  console.log(`${envName}='${JSON.stringify(claimJson)}'`);
   console.log(
-    "\nThe claim will be consumed on first sidecar startup (account deployment).",
+    toDeployer
+      ? "\nThe claim will be consumed on first sidecar startup, when the deployer " +
+          "deploys itself and then the spending-limit account."
+      : "\nThe claim will be consumed on first sidecar startup (account deployment).",
   );
 
   await wallet.stop();
