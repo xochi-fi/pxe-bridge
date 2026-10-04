@@ -13,6 +13,7 @@ import {
   FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR,
   deriveAccountKeys,
   deriveDeployerKeys,
+  limitAccountFeePath,
   sponsoredFpcSetting,
 } from "../src/aztec-client.js";
 import type { FeeJuiceClaim } from "../src/types.js";
@@ -274,5 +275,21 @@ describe("SponsoredFPC deployment fee fallback", () => {
     expect(() =>
       sponsoredFpcSetting({ NODE_ENV: "development", PXE_BRIDGE_ALLOW_SPONSORED_FPC: "" }),
     ).toThrow(/PXE_BRIDGE_ALLOW_SPONSORED_FPC must be "true" or "false", got ""/);
+  });
+});
+
+describe("spending-limit account deployment fee", () => {
+  it("falls back to SponsoredFPC without a deployer claim", () => {
+    expect(limitAccountFeePath("absent")).toBe("sponsored");
+  });
+
+  // Deployer initialized by other means: the claim is still the funding, so the
+  // account deploy has to consume it rather than read an empty balance.
+  it("consumes an unspent deployer claim", () => {
+    expect(limitAccountFeePath("unspent")).toBe("claim");
+  });
+
+  it("pays from the deployer's balance once the claim is spent", () => {
+    expect(limitAccountFeePath("spent")).toBe("preexisting");
   });
 });
