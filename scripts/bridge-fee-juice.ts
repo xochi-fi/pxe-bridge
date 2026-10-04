@@ -154,19 +154,18 @@ async function main() {
   // Bridge Fee Juice
   const { L1FeeJuicePortalManager } = await import("@aztec/aztec.js/ethereum");
   const { EthAddress } = await import("@aztec/foundation/eth-address");
+  const { createLogger } = await import("@aztec/aztec.js/log");
 
   const portalManager = new L1FeeJuicePortalManager(
     EthAddress.fromString(feeJuicePortalAddress),
     EthAddress.fromString(feeJuiceAddress),
     undefined, // no mint handler on mainnet
     l1Client,
-    {
-      info: console.log,
-      verbose: console.log,
-      debug: () => {},
-      warn: console.warn,
-      error: console.error,
-    } as never,
+    // The SDK's own logger, as src/fee-juice.ts uses. A hand-rolled object
+    // cast to the type lacked `trace`, which L1TxUtils.estimateGas calls, so
+    // the approve threw "this.logger?.trace is not a function" before
+    // anything was bridged.
+    createLogger("pxe-bridge:bridge-fee-juice"),
   );
 
   // Check L1 token balance
