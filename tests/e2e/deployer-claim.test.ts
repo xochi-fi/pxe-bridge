@@ -79,7 +79,7 @@ describe("spending limit account deployed from a funded deployer (e2e)", () => {
         admin: adminAddress,
         token: tokenAddress,
         allowlistSeed: "0x" + "09".repeat(32),
-        allowlistRecipients: [{ address: "0x" + "33".repeat(32), index: 512 }],
+        allowlistRecipients: [{ address: "0x" + "11".repeat(32), index: 512 }],
       };
 
       // Read at construction, so restoring right after scopes the gate to this
