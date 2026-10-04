@@ -95,7 +95,7 @@ export const FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR =
   "FEE_JUICE_CLAIM cannot be used with the spending limit account: the claim " +
   "names the limit account while the deploy is sent from the deployer, so no " +
   "fee payer is set. Bridge to the deployer instead (npm run bridge-fee-juice -- " +
-  "--deployer) and set PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM; fund the account's " +
+  "--deployer --recipient <Deployer address>) and set PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM; fund the account's " +
   "transfers with scripts/top-up-fee-juice.ts.";
 
 /** A fee juice claim bridged to the spending-limit account's deployer. */
@@ -161,9 +161,10 @@ export const SPONSORED_FPC_REFUSED_ERROR =
   "Refusing to pay its deployment fee via SponsoredFPC, a testing contract that exists " +
   "only on sandbox and testnet. It is refused when NODE_ENV=production unless " +
   `${ALLOW_SPONSORED_FPC_ENV}=true, and whenever ${ALLOW_SPONSORED_FPC_ENV}=false. For the ` +
-  "plain Schnorr account, set FEE_JUICE_CLAIM (npm run bridge-fee-juice). For the " +
-  `spending-limit account, set ${DEPLOYER_FEE_JUICE_CLAIM_ENV} (npm run bridge-fee-juice -- ` +
-  "--deployer), which pays for both the deployer and the account. Set " +
+  "plain Schnorr account, set FEE_JUICE_CLAIM (npm run bridge-fee-juice -- --recipient " +
+  `<Account address>). For the spending-limit account, set ${DEPLOYER_FEE_JUICE_CLAIM_ENV} ` +
+  "(npm run bridge-fee-juice -- --deployer --recipient <Deployer address>), which pays for " +
+  "both the deployer and the account. Set " +
   `${ALLOW_SPONSORED_FPC_ENV}=true only if this node is a sandbox or testnet.`;
 
 /** State of the configured deployer claim's L1 to L2 message. */
@@ -599,8 +600,7 @@ export class AztecClient implements IAztecClient {
     );
     const deployerAddress = (await manager.getAccount()).getAddress();
     // Logged for the same reason as the account address: it is the address an
-    // operator bridges the deployer claim to, so it must be checkable against
-    // what `npm run bridge-fee-juice -- --deployer` printed.
+    // operator passes to `npm run bridge-fee-juice -- --deployer --recipient`.
     console.log(`[pxe-bridge] Deployer address: ${deployerAddress.toString()}`);
 
     // Initialization, not publication. A self-deploy leaves the instance
