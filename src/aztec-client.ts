@@ -3,6 +3,8 @@ import { EmbeddedWallet } from "@aztec/wallets/embedded";
 import { TokenContract } from "@aztec/noir-contracts.js/Token";
 import { SponsoredFPCContract } from "@aztec/noir-contracts.js/SponsoredFPC";
 import type { AztecAddress } from "@aztec/aztec.js/addresses";
+import type { FeePaymentMethod } from "@aztec/aztec.js/fee";
+import type { Fr } from "@aztec/aztec.js/fields";
 import type { GasFees } from "@aztec/stdlib/gas";
 import { PostSubmissionError } from "./types.js";
 import type { CreateNoteParams, CreateNoteResult, FeeJuiceClaim, IAztecClient } from "./types.js";
@@ -83,14 +85,35 @@ export async function headroomGasSettings(nodeUrl: string): Promise<{ maxFeesPer
  *   3. The claim credits the limit account, so even a fee payer that was set
  *      would be the deployer, paying from a balance the claim did not create.
  *
- * `scripts/top-up-fee-juice.ts` is the supported path: it claims on the
- * account's behalf from a funded payer, leaving a PREEXISTING_FEE_JUICE
- * balance, which is the only fee branch this account can use.
+ * The supported paths are a claim bridged to the DEPLOYER, which pays for both
+ * deploys (`DEPLOYER_FEE_JUICE_CLAIM_ENV`), and `scripts/top-up-fee-juice.ts`
+ * for the account's running costs: it claims on the account's behalf from a
+ * funded payer, leaving a PREEXISTING_FEE_JUICE balance, which is the only fee
+ * branch this account can use.
  */
 export const FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR =
   "FEE_JUICE_CLAIM cannot be used with the spending limit account: the claim " +
   "names the limit account while the deploy is sent from the deployer, so no " +
-  "fee payer is set. Use scripts/top-up-fee-juice.ts instead.";
+  "fee payer is set. Bridge to the deployer instead (npm run bridge-fee-juice -- " +
+  "--deployer) and set PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM; fund the account's " +
+  "transfers with scripts/top-up-fee-juice.ts.";
+
+/** A fee juice claim bridged to the spending-limit account's deployer. */
+export const DEPLOYER_FEE_JUICE_CLAIM_ENV = "PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM";
+
+/**
+ * Why a deployer claim without the spending-limit account is refused.
+ *
+ * The deployer exists only to deploy the limit account. A plain Schnorr bridge
+ * never derives it, so the claim would sit unconsumed while the operator
+ * believed the deploy was paid for, and the bridge would fall through to
+ * FEE_JUICE_CLAIM or SponsoredFPC instead.
+ */
+export const DEPLOYER_CLAIM_WITHOUT_SPENDING_LIMIT_ERROR =
+  `${DEPLOYER_FEE_JUICE_CLAIM_ENV} is only used by the spending limit account, whose ` +
+  "separate deployer it pays for; the plain Schnorr account never derives a deployer, so " +
+  "the claim would go unused. Set PXE_BRIDGE_SPENDING_LIMIT_ADMIN, or bridge to the " +
+  "account itself and use FEE_JUICE_CLAIM.";
 
 /** Opts a production bridge into the SponsoredFPC deployment fee fallback. */
 export const ALLOW_SPONSORED_FPC_ENV = "PXE_BRIDGE_ALLOW_SPONSORED_FPC";
@@ -138,10 +161,10 @@ export const SPONSORED_FPC_REFUSED_ERROR =
   "Refusing to pay its deployment fee via SponsoredFPC, a testing contract that exists " +
   "only on sandbox and testnet. It is refused when NODE_ENV=production unless " +
   `${ALLOW_SPONSORED_FPC_ENV}=true, and whenever ${ALLOW_SPONSORED_FPC_ENV}=false. For the ` +
-  "plain Schnorr account, set FEE_JUICE_CLAIM " +
-  "(npm run bridge-fee-juice). The spending-limit account and its deployer have no other " +
-  "deployment fee path, so they cannot be deployed by the bridge on a network without " +
-  `SponsoredFPC. Set ${ALLOW_SPONSORED_FPC_ENV}=true only if this node is a sandbox or testnet.`;
+  "plain Schnorr account, set FEE_JUICE_CLAIM (npm run bridge-fee-juice). For the " +
+  `spending-limit account, set ${DEPLOYER_FEE_JUICE_CLAIM_ENV} (npm run bridge-fee-juice -- ` +
+  "--deployer), which pays for both the deployer and the account. Set " +
+  `${ALLOW_SPONSORED_FPC_ENV}=true only if this node is a sandbox or testnet.`;
 
 /** The slice of AztecNode createNote needs to read a tx effect back. */
 interface TxEffectFields {
@@ -206,6 +229,29 @@ export async function deriveAccountKeys(secretKey: string): Promise<AccountKeys>
   return { secret, salt, signingKey: deriveMasterMessageSigningSecretKey(secret) };
 }
 
+/**
+ * The salt of the spending-limit account's deployer: the account salt plus one.
+ *
+ * One definition, because the deployer's address is something an operator
+ * bridges fee juice to before the bridge has ever run, and a claim commits to
+ * the address it was bridged to. A script that derived it independently and
+ * drifted would strand the bridged amount at an address nothing controls.
+ */
+async function deployerSalt(accountSalt: Fr): Promise<Fr> {
+  const fields = await import("@aztec/aztec.js/fields");
+  return new fields.Fr(accountSalt.toBigInt() + 1n);
+}
+
+/**
+ * `deriveAccountKeys` for the deployer: the same secret and signing key, under
+ * `deployerSalt`. A plain Schnorr account, so `createSchnorrAccount` on these
+ * keys yields the address the bridge deploys from.
+ */
+export async function deriveDeployerKeys(secretKey: string): Promise<AccountKeys> {
+  const keys = await deriveAccountKeys(secretKey);
+  return { ...keys, salt: await deployerSalt(keys.salt) };
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
   const timeout = new Promise<never>((_, reject) => {
@@ -237,6 +283,7 @@ export class AztecClient implements IAztecClient {
     secretKey: string,
     private readonly feeJuiceClaim?: FeeJuiceClaim,
     private readonly spendingLimitConfig?: SpendingLimitConfig,
+    private readonly deployerFeeJuiceClaim?: FeeJuiceClaim,
     options: { allowSponsoredFpc?: boolean } = {},
   ) {
     // Refused here rather than in index.ts alone, so a library caller gets the
@@ -245,6 +292,9 @@ export class AztecClient implements IAztecClient {
     // the claim that caused it.
     if (feeJuiceClaim && spendingLimitConfig) {
       throw new Error(FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR);
+    }
+    if (deployerFeeJuiceClaim && !spendingLimitConfig) {
+      throw new Error(DEPLOYER_CLAIM_WITHOUT_SPENDING_LIMIT_ERROR);
     }
     // Defaults to the env, read at construction, so index.ts and a library
     // caller are gated alike, the log names the variable that decided, and a
@@ -303,7 +353,6 @@ export class AztecClient implements IAztecClient {
       console.log("[pxe-bridge] Deploying solver account...");
 
       const { NO_FROM } = await import("@aztec/aztec.js/account");
-      const paymentMethod = await this.buildFeePaymentMethod(address);
 
       // The spending-limit account cannot deploy itself. Self-deployment routes
       // through the account's OWN entrypoint (only the account can name itself
@@ -320,12 +369,20 @@ export class AztecClient implements IAztecClient {
       const deployer = this.spendingLimitConfig
         ? await this.ensureDeployer(secret, salt)
         : NO_FROM;
+      const paymentMethod = this.spendingLimitConfig
+        ? await this.limitAccountPaymentMethod(address)
+        : await this.buildFeePaymentMethod(address, this.feeJuiceClaim);
 
       const deployMethod = await accountManager.getDeployMethod();
       try {
         await deployMethod.send({
           from: deployer,
-          fee: { paymentMethod, gasSettings: await this.deployGasSettings() },
+          // No paymentMethod means the sender pays from its own balance; see
+          // limitAccountPaymentMethod.
+          fee: {
+            ...(paymentMethod ? { paymentMethod } : {}),
+            gasSettings: await this.deployGasSettings(),
+          },
           // Both default to true, which leaves the account initialized but
           // unpublished: the node cannot resolve it and its public functions
           // cannot execute. Publication costs more than a self-paying account
@@ -494,34 +551,41 @@ export class AztecClient implements IAztecClient {
    * Deploys (once) a plain Schnorr account to act as deployer for the
    * spending-limit account, and returns its address.
    *
-   * Derived from the same master secret as the solver, under salt
-   * `baseSalt + 1`, so it needs no separate key material and is reproducible
-   * across restarts. It self-deploys via SponsoredFPC, which a standard Schnorr
-   * account can do because its entrypoint has no single-call restriction, and
-   * then pays the spending-limit account's deployment the same way. A claim
-   * cannot pay for it: claims are bridged to the solver's address. So the
-   * spending-limit account can only be deployed where SponsoredFPC is
-   * permitted; see `sponsoredFpcSetting`.
+   * Derived from the same master secret as the solver, under `deployerSalt`,
+   * so it needs no separate key material and is reproducible across restarts.
+   * A standard Schnorr account can self-deploy because its entrypoint has no
+   * single-call restriction. It pays with the deployer claim when one is
+   * configured, and the same claim's balance then pays for the spending-limit
+   * account (`limitAccountPaymentMethod`). Without one both fall back to
+   * SponsoredFPC, subject to `sponsoredFpcSetting`.
    */
-  private async ensureDeployer(
-    secret: import("@aztec/aztec.js/fields").Fr,
-    baseSalt: import("@aztec/aztec.js/fields").Fr,
-  ): Promise<AztecAddress> {
+  private async ensureDeployer(secret: Fr, baseSalt: Fr): Promise<AztecAddress> {
     const { NO_FROM } = await import("@aztec/aztec.js/account");
     const { deriveMasterMessageSigningSecretKey } = await import("@aztec/stdlib/keys");
-    const { Fr } = await import("@aztec/aztec.js/fields");
 
-    const deployerSalt = new Fr(baseSalt.toBigInt() + 1n);
     const manager = await this.wallet!.createSchnorrAccount(
       secret,
-      deployerSalt,
+      await deployerSalt(baseSalt),
       deriveMasterMessageSigningSecretKey(secret),
     );
     const deployerAddress = (await manager.getAccount()).getAddress();
+    // Logged for the same reason as the account address: it is the address an
+    // operator bridges the deployer claim to, so it must be checkable against
+    // what `npm run bridge-fee-juice -- --deployer` printed.
+    console.log(`[pxe-bridge] Deployer address: ${deployerAddress.toString()}`);
 
+    // Initialization, not publication. A self-deploy leaves the instance
+    // unpublished (DeployAccountMethod defaults skipInstancePublication), so
+    // isContractDeployed reads false for a deployer that exists, and a retry
+    // after a failed account deploy would resend the deployer's deployment,
+    // including a claim that was already consumed. createSchnorrAccount has
+    // registered the instance, so the status is definitive.
     if (!(await this.isInitialized(deployerAddress))) {
       console.log(`[pxe-bridge] Deploying deployer account ${deployerAddress.toString()}...`);
-      const paymentMethod = await this.buildFeePaymentMethod(deployerAddress);
+      const paymentMethod = await this.buildFeePaymentMethod(
+        deployerAddress,
+        this.deployerFeeJuiceClaim,
+      );
       try {
         await (await manager.getDeployMethod()).send({
           from: NO_FROM,
@@ -529,6 +593,7 @@ export class AztecClient implements IAztecClient {
           // first, so a spike here strands the account deployment behind it.
           fee: { paymentMethod, gasSettings: await this.deployGasSettings() },
         });
+        console.log("[pxe-bridge] Deployer deployed");
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (!message.includes("Existing nullifier")) {
@@ -537,6 +602,30 @@ export class AztecClient implements IAztecClient {
       }
     }
     return deployerAddress;
+  }
+
+  /**
+   * How the spending-limit account's own deployment is paid for.
+   *
+   * With a deployer claim: no payment method at all. The deploy is sent from
+   * the deployer, and BaseWallet.completeFeeOptions gives a sender whose
+   * payload carries no fee payer PREEXISTING_FEE_JUICE, so the deployer's
+   * entrypoint names itself fee payer and pays from the balance its own claim
+   * just created. v5 has no FeeJuicePaymentMethod to name explicitly; omitting
+   * the method is the SDK's way of asking for exactly this.
+   *
+   * Without one: SponsoredFPC, subject to `sponsoredFpcSetting`.
+   */
+  private async limitAccountPaymentMethod(
+    accountAddress: AztecAddress,
+  ): Promise<FeePaymentMethod | undefined> {
+    if (this.deployerFeeJuiceClaim) {
+      console.log(
+        `[pxe-bridge] Paying deployment of ${accountAddress.toString()} from the deployer's fee juice balance`,
+      );
+      return undefined;
+    }
+    return this.buildFeePaymentMethod(accountAddress, undefined);
   }
 
   /** Deployed account address. Null until connect() completes. */
@@ -759,30 +848,36 @@ export class AztecClient implements IAztecClient {
     return headroomGasSettings(this.nodeUrl);
   }
 
+  /**
+   * The fee payment for an account's deployment: `claim` if given, else
+   * SponsoredFPC where permitted.
+   *
+   * The caller picks the claim because a claim commits to its L2 recipient in
+   * the message hash, so it can only pay for the account it was bridged to:
+   * FEE_JUICE_CLAIM for the plain Schnorr solver, the deployer claim for the
+   * deployer. Handing one to the other fails the message lookup with "No L1 to
+   * L2 message found for message hash".
+   */
   private async buildFeePaymentMethod(
     accountAddress: AztecAddress,
-  ): Promise<import("@aztec/aztec.js/fee").FeePaymentMethod> {
-    // A claim commits to its L2 recipient in the message hash, so it can only
-    // pay for the account it was bridged to. The deployer is a different
-    // account; handing it the solver's claim fails the message lookup with
-    // "No L1 to L2 message found for message hash".
-    const claimIsForThisAccount =
-      this.solverAddress !== null && this.solverAddress.equals(accountAddress);
-
-    if (this.feeJuiceClaim && claimIsForThisAccount) {
-      console.log("[pxe-bridge] Using Fee Juice claim for deployment fee");
+    claim: FeeJuiceClaim | undefined,
+  ): Promise<FeePaymentMethod> {
+    if (claim) {
+      console.log(
+        `[pxe-bridge] Using Fee Juice claim for deployment fee of ${accountAddress.toString()}`,
+      );
       const { FeeJuicePaymentMethodWithClaim } = await import("@aztec/aztec.js/fee");
-      const { Fr } = await import("@aztec/aztec.js/fields");
+      const fields = await import("@aztec/aztec.js/fields");
       return new FeeJuicePaymentMethodWithClaim(accountAddress, {
-        claimAmount: BigInt(this.feeJuiceClaim.claimAmount),
-        claimSecret: Fr.fromString(this.feeJuiceClaim.claimSecret),
-        messageLeafIndex: BigInt(this.feeJuiceClaim.messageLeafIndex),
+        claimAmount: BigInt(claim.claimAmount),
+        claimSecret: fields.Fr.fromString(claim.claimSecret),
+        messageLeafIndex: BigInt(claim.messageLeafIndex),
       });
     }
 
-    // Checked before anything is registered or sent. In connect() this runs
-    // for the solver account before ensureDeployer, so a refused spending-limit
-    // deployment stops before deploying its deployer.
+    // Checked before anything is registered or sent. Without a deployer claim
+    // this runs for the deployer before it is deployed, so a refused
+    // spending-limit deployment stops before sending anything.
     if (!this.allowSponsoredFpc) {
       throw new Error(
         `Account ${accountAddress.toString()} is not deployed. ${SPONSORED_FPC_REFUSED_ERROR}`,

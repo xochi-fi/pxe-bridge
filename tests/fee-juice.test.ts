@@ -9,8 +9,10 @@ import {
 } from "../src/fee-juice.js";
 import {
   AztecClient,
+  DEPLOYER_CLAIM_WITHOUT_SPENDING_LIMIT_ERROR,
   FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR,
   deriveAccountKeys,
+  deriveDeployerKeys,
   sponsoredFpcSetting,
 } from "../src/aztec-client.js";
 import type { FeeJuiceClaim } from "../src/types.js";
@@ -194,6 +196,33 @@ describe("fee juice claim against the spending limit account", () => {
   it("allows the spending limit account without a claim", () => {
     expect(
       () => new AztecClient("http://localhost:8080", KEY, undefined, SPENDING_LIMITS),
+    ).not.toThrow();
+  });
+});
+
+describe("deployer fee juice claim", () => {
+  // The deployer is an address an operator bridges to before the bridge ever
+  // runs, and a claim commits to that address. Any drift in this derivation
+  // strands what was bridged, and moves the deployer of every existing bridge.
+  it("derives the deployer at the account salt plus one, same secret", async () => {
+    const account = await deriveAccountKeys(OVERFLOWING_SALT_KEY);
+    const deployer = await deriveDeployerKeys(OVERFLOWING_SALT_KEY);
+    expect(deployer.salt.toBigInt()).toBe(account.salt.toBigInt() + 1n);
+    expect(deployer.secret.toString()).toBe(account.secret.toString());
+    expect(deployer.signingKey.toString()).toBe(account.signingKey.toString());
+  });
+
+  // A plain Schnorr bridge never derives a deployer, so the claim would sit
+  // unconsumed while the operator believed the deploy was paid for.
+  it("is refused without the spending limit account", () => {
+    expect(
+      () => new AztecClient("http://localhost:8080", KEY, undefined, undefined, CLAIM),
+    ).toThrow(DEPLOYER_CLAIM_WITHOUT_SPENDING_LIMIT_ERROR);
+  });
+
+  it("is accepted with the spending limit account", () => {
+    expect(
+      () => new AztecClient("http://localhost:8080", KEY, undefined, SPENDING_LIMITS, CLAIM),
     ).not.toThrow();
   });
 });
