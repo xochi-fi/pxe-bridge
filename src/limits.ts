@@ -115,9 +115,9 @@ export class TransactionLimits {
       // read a stale total and collectively exceed the cap. Rejected alone,
       // without tripping: an oversized request, or one blocked only by
       // in-flight volume, is not evidence of a drain.
-      const windowTotal = committed + this.reservedTotal();
-      if (windowTotal + amount > this.config.dailyLimit) {
-        const remaining = this.config.dailyLimit - windowTotal;
+      const budgetUsed = committed + this.reservedTotal();
+      if (budgetUsed + amount > this.config.dailyLimit) {
+        const remaining = this.config.dailyLimit - budgetUsed;
         return {
           allowed: false,
           reason:
