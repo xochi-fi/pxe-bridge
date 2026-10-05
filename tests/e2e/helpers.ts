@@ -1,4 +1,4 @@
-import type { FeeJuiceClaim } from "../../src/types.js";
+import type { BridgedFeeJuiceClaim, FeeJuiceClaim } from "../../src/types.js";
 import { FeeJuiceClaimSchema } from "../../src/types.js";
 import { bridgeFeeJuice, topUpFeeJuice, type ClaimingWallet } from "../../src/fee-juice.js";
 import { headroomGasSettings } from "../../src/aztec-client.js";
@@ -204,15 +204,16 @@ export async function fundFeeJuice(
  * Bridges fee juice from L1 to `recipient` and returns the claim UNCONSUMED,
  * synced into the L2 tree so it is spendable. What `npm run bridge-fee-juice`
  * hands an operator, for a test that passes it to the bridge rather than
- * claiming it here.
+ * claiming it here. `messageHash` is the leaf the L1 Inbox reported.
  */
 export async function bridgeClaim(
   nodeUrl: string,
   recipient: string,
   amount: bigint,
   onBlockNeeded: () => Promise<void>,
-): Promise<FeeJuiceClaim> {
-  return bridgeFeeJuice({
+): Promise<BridgedFeeJuiceClaim> {
+  let bridged: BridgedFeeJuiceClaim | undefined;
+  await bridgeFeeJuice({
     nodeUrl,
     l1RpcUrl: L1_RPC,
     l1PrivateKey: ANVIL_KEY,
@@ -221,7 +222,12 @@ export async function bridgeClaim(
     mint: true,
     onBlockNeeded,
     attempts: SANDBOX_WAIT_ATTEMPTS,
+    onClaim: (claim) => {
+      bridged = claim;
+    },
   });
+  if (!bridged) throw new Error("bridgeFeeJuice returned without reporting its claim");
+  return bridged;
 }
 
 /**

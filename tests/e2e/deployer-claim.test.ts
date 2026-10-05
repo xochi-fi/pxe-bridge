@@ -6,12 +6,13 @@ import {
   SPONSORED_FPC_REFUSED_ERROR,
   deriveAccountKeys,
   deriveDeployerKeys,
+  feeJuiceMessageHash,
 } from "../../src/aztec-client.js";
 import {
   SpendingLimitAccountContract,
   type SpendingLimitConfig,
 } from "../../src/spending-limit-account.js";
-import type { FeeJuiceClaim } from "../../src/types.js";
+import type { BridgedFeeJuiceClaim } from "../../src/types.js";
 import {
   bridgeClaim,
   deployTestToken,
@@ -78,7 +79,7 @@ describe("spending limit account deployed from a funded deployer (e2e)", () => {
   let adminAddress: string;
   let tokenAddress: string;
   let deployerAddress: string;
-  let claim: FeeJuiceClaim;
+  let claim: BridgedFeeJuiceClaim;
   let limits: SpendingLimitConfig;
 
   beforeAll(async () => {
@@ -110,6 +111,14 @@ describe("spending limit account deployed from a funded deployer (e2e)", () => {
       mintOne(funderWallet, tokenAddress, adminAddress),
     );
   }, 600_000);
+
+  it("rebuilds the message hash the L1 Inbox reported for the deployer claim", async () => {
+    const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
+    const info = await createAztecNodeClient(config.nodeUrl).getNodeInfo();
+    expect(
+      await feeJuiceMessageHash(deployerAddress, claim, info.l1ChainId, info.rollupVersion),
+    ).toBe(claim.messageHash);
+  });
 
   it(
     "deploys both accounts from the deployer claim without SponsoredFPC",
@@ -148,6 +157,46 @@ describe("spending limit account deployed from a funded deployer (e2e)", () => {
       );
       expect(remaining).toBeGreaterThan(0n);
       expect(remaining).toBeLessThan(BigInt(claim.claimAmount));
+    },
+    600_000,
+  );
+
+  // Runs after the test above, which initialized the deployer and spent the
+  // claim. Same key and claim, different limits: a new account address behind
+  // an initialized deployer, so connect() finds the claim spent and the deploy
+  // pays from the deployer's remaining balance. The claim path would hit the
+  // spent claim's nullifier and SponsoredFPC is off, so a deployed account
+  // means the preexisting path ran.
+  it(
+    "deploys another account from the deployer's balance once the claim is spent",
+    async () => {
+      const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
+      const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+      const { ContractInitializationStatus } = await import("@aztec/aztec.js/wallet");
+      const { getFeeJuiceBalance } = await import("@aztec/aztec.js/utils");
+      const node = createAztecNodeClient(config.nodeUrl);
+      const deployer = AztecAddress.fromStringUnsafe(deployerAddress);
+
+      const { initializationStatus } = await (funderWallet as EmbeddedWallet).getContractMetadata(
+        deployer,
+      );
+      expect(initializationStatus).toBe(ContractInitializationStatus.INITIALIZED);
+      const relimited: SpendingLimitConfig = { ...limits, maxAmountPerTx: 2_000n };
+      const expectedAccount = AztecAddress.fromStringUnsafe(
+        await limitAccountAddress(funderWallet, DEPLOYER_PATH_KEY, relimited),
+      );
+      expect(await node.getContract(expectedAccount)).toBeUndefined();
+      const before = await getFeeJuiceBalance(deployer, node);
+
+      const client = withoutSponsoredFpc(
+        () => new AztecClient(config.nodeUrl, DEPLOYER_PATH_KEY, undefined, relimited, claim),
+      );
+      await client.connect();
+
+      const accountAddress = AztecAddress.fromStringUnsafe(client.getAddress()!);
+      expect(accountAddress.equals(expectedAccount)).toBe(true);
+      expect(await node.getContract(accountAddress)).toBeDefined();
+      expect(await getFeeJuiceBalance(deployer, node)).toBeLessThan(before);
     },
     600_000,
   );
