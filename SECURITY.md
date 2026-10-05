@@ -364,7 +364,9 @@ The circuit breaker trips when committed volume reaches the daily cap, not when
 a single request would overshoot it. A request larger than the remaining budget
 is rejected on its own; tripping there meant one oversized request, needing no
 prior volume when `PXE_BRIDGE_MAX_AMOUNT` was unset, stopped the bridge for a
-full window.
+full window. In-flight reservations count toward the remaining budget but not
+toward the trip: a reservation that releases moved nothing. `windowTotal` from
+`POST /admin/resume` is committed volume only.
 
 The rolling window is rebuilt from `PXE_BRIDGE_AUDIT_LOG` at startup. Without
 that path set it is in-memory only and a restart hands back the full daily

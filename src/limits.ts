@@ -89,18 +89,20 @@ export class TransactionLimits {
     }
 
     if (this.config.dailyLimit !== undefined) {
-      const windowTotal = this.rollingTotal();
+      const committed = this.committedTotal();
 
-      // Volume actually consumed the window. This is the drain signal the
+      // Committed volume consumed the window. This is the drain signal the
       // breaker exists for, so it stops everything until an operator resumes
       // or the window elapses. There are three ways out, not one: the operator
       // endpoint, the auto-resume above, and a restart, and none of them hands
       // budget back -- the window is rebuilt from the audit log either way.
-      if (windowTotal >= this.config.dailyLimit) {
+      // In-flight reservations are excluded: a reservation that later releases
+      // moved nothing, and must not pause the bridge for a full window.
+      if (committed >= this.config.dailyLimit) {
         this.paused = true;
         this.pausedAt = Date.now();
         console.error(
-          `[pxe-bridge] CIRCUIT BREAKER: 24h volume ${windowTotal} reached the daily limit ` +
+          `[pxe-bridge] CIRCUIT BREAKER: 24h volume ${committed} reached the daily limit ` +
             `${this.config.dailyLimit}. Bridge paused.`,
         );
         return {
@@ -109,16 +111,18 @@ export class TransactionLimits {
         };
       }
 
-      // One request larger than what is left. Reject it alone and keep
-      // serving: tripping the breaker here let a single oversized request --
-      // which needs no prior volume at all when maxAmount is unset -- stop the
-      // bridge for the full window.
+      // Budget counts reservations too, so concurrent requests cannot each
+      // read a stale total and collectively exceed the cap. Rejected alone,
+      // without tripping: an oversized request, or one blocked only by
+      // in-flight volume, is not evidence of a drain.
+      const windowTotal = committed + this.reservedTotal();
       if (windowTotal + amount > this.config.dailyLimit) {
+        const remaining = this.config.dailyLimit - windowTotal;
         return {
           allowed: false,
           reason:
             `Amount ${amount} exceeds the remaining daily budget ` +
-            `${this.config.dailyLimit - windowTotal}`,
+            `${remaining > 0n ? remaining : 0n}`,
         };
       }
     }
@@ -159,7 +163,7 @@ export class TransactionLimits {
    * now instead of being left for them to infer.
    */
   windowStatus(): { total: bigint; dailyLimit: bigint | undefined; willTripAgain: boolean } {
-    const total = this.rollingTotal();
+    const total = this.committedTotal();
     const dailyLimit = this.config.dailyLimit;
     return {
       total,
@@ -187,7 +191,7 @@ export class TransactionLimits {
     return this.paused;
   }
 
-  private rollingTotal(): bigint {
+  private committedTotal(): bigint {
     const cutoff = Date.now() - WINDOW_MS;
     let total = 0n;
     for (const entry of this.spendLog) {
@@ -195,8 +199,12 @@ export class TransactionLimits {
         total += entry.amount;
       }
     }
-    // In-flight reservations count toward the cap so concurrent requests
-    // cannot each read a stale total and collectively exceed the limit.
+    return total;
+  }
+
+  private reservedTotal(): bigint {
+    const cutoff = Date.now() - WINDOW_MS;
+    let total = 0n;
     for (const reservation of this.pending.values()) {
       if (reservation.timestamp >= cutoff) {
         total += reservation.amount;

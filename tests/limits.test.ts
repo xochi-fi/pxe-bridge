@@ -298,5 +298,29 @@ describe("TransactionLimits", () => {
       const r = limits.reserve(5000n);
       expect(r.allowed).toBe(true);
     });
+
+    // A reservation that fills the window and then releases moved nothing.
+    // Tripping on it paused the bridge for 24h over a failed send.
+    it("does not trip the breaker on in-flight volume", () => {
+      const limits = new TransactionLimits({ dailyLimit: 5000n });
+      const r = limits.reserve(5000n);
+      expect(r.allowed).toBe(true);
+
+      const blocked = limits.reserve(1n);
+      expect(blocked.allowed).toBe(false);
+      expect(limits.isPaused()).toBe(false);
+
+      if (r.allowed) limits.release(r.reservationId);
+      expect(limits.reserve(5000n).allowed).toBe(true);
+    });
+
+    it("trips the breaker once the reservation commits", () => {
+      const limits = new TransactionLimits({ dailyLimit: 5000n });
+      const r = limits.reserve(5000n);
+      if (r.allowed) limits.commit(r.reservationId);
+
+      expect(limits.check(1n).allowed).toBe(false);
+      expect(limits.isPaused()).toBe(true);
+    });
   });
 });
