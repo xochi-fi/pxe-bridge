@@ -56,6 +56,27 @@ export const TRANSFER_TO_PRIVATE_SELECTOR = "0x89758b40";
 const ARTIFACT_PATH =
   "../contracts/spending_limit_account/target/spending_limit_account_contract-SpendingLimitAccount.json";
 
+/**
+ * The compiled account artifact. Standalone so the operator scripts can address
+ * the account without the signing key and limits the class needs.
+ */
+export async function loadSpendingLimitArtifact(): Promise<ContractArtifact> {
+  // Must go through loadContractArtifact. The file on disk is raw nargo
+  // output -- functions are named __aztec_nr_internals__* with their ABI
+  // nested under `abi` -- and casting it straight to ContractArtifact left
+  // consumers reading fields that do not exist, failing with "Cannot read
+  // properties of undefined (reading 'map')" during deployment.
+  //
+  // loadContractArtifact also rejects an untranspiled artifact outright,
+  // which is the check that catches a build done with plain nargo instead of
+  // `aztec compile`.
+  const { loadContractArtifact } = await import("@aztec/stdlib/abi");
+  const artifact = await import(ARTIFACT_PATH, {
+    with: { type: "json" },
+  });
+  return loadContractArtifact(artifact.default as Parameters<typeof loadContractArtifact>[0]);
+}
+
 export interface SpendingLimitConfig {
   maxAmountPerTx: bigint;
   dailyLimit: bigint;
@@ -134,21 +155,8 @@ export class SpendingLimitAccountContract implements AccountContract {
     return undefined;
   }
 
-  async getContractArtifact(): Promise<ContractArtifact> {
-    // Must go through loadContractArtifact. The file on disk is raw nargo
-    // output -- functions are named __aztec_nr_internals__* with their ABI
-    // nested under `abi` -- and casting it straight to ContractArtifact left
-    // consumers reading fields that do not exist, failing with "Cannot read
-    // properties of undefined (reading 'map')" during deployment.
-    //
-    // loadContractArtifact also rejects an untranspiled artifact outright,
-    // which is the check that catches a build done with plain nargo instead of
-    // `aztec compile`.
-    const { loadContractArtifact } = await import("@aztec/stdlib/abi");
-    const artifact = await import(ARTIFACT_PATH, {
-      with: { type: "json" },
-    });
-    return loadContractArtifact(artifact.default as Parameters<typeof loadContractArtifact>[0]);
+  getContractArtifact(): Promise<ContractArtifact> {
+    return loadSpendingLimitArtifact();
   }
 
   async getInitializationFunctionAndArgs(): Promise<{

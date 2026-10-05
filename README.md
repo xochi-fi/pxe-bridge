@@ -346,6 +346,47 @@ juice credited to the wrong address stays there. The script checks the address
 shape before it writes to L1, which catches a truncated paste but not a
 well-formed wrong address.
 
+## Account administration
+
+Admin calls on the spending-limit account. The admin is a deployed Schnorr
+account, derived from its key the way the bridge derives its own, and pays its
+own fees.
+
+```bash
+npm run admin -- status
+npm run admin -- pause
+npm run admin -- unpause
+npm run admin -- propose-limits --max-per-tx <n> --daily <n>
+npm run admin -- apply-limits
+npm run admin -- cancel-limits
+npm run update-allowlist -- --add 0x<addr> --index <n>
+npm run update-allowlist -- --revoke 0x<addr>
+```
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `SPENDING_LIMIT_ACCOUNT` | Yes | -- | Address of the spending-limit account |
+| `SPENDING_LIMIT_ADMIN_KEY` | All but `status` | -- | Secret key of the admin |
+| `AZTEC_NODE_URL` | No | `http://localhost:8080` | Aztec node |
+
+Limits are in token base units, decimal, and must satisfy the contract:
+both non-zero, daily >= per-tx, each within u128. A proposal becomes
+applicable 24h after it lands and stays applicable for 24h; after that,
+`cancel-limits` and propose again. Sends print the tx hash, wait for the
+receipt, and exit 1 unless it executed successfully.
+
+`status` reads public storage and needs no key. Exit codes, for cron:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Not paused, no proposal |
+| 1 | Error, including an unreachable node or no account at the address |
+| 2 | Paused |
+| 4 | Limit proposal pending, expired included, until applied or cancelled |
+| 6 | Paused and proposal pending |
+
+See `SECURITY.md` for the incident runbook.
+
 ## API Reference
 
 All methods use JSON-RPC 2.0 over HTTP POST to `/` or `/api/rpc`. Requests require `Content-Type: application/json`. When `PXE_BRIDGE_API_KEY` is set, include `Authorization: Bearer <key>`.

@@ -25,6 +25,10 @@ The admin is a separate party from the signing key holder.
 it already is. A timelock on it would hand an attacker exactly the notice
 period they need.
 
+`pause` is checked only in `check_spending_public`, never in the private
+entrypoint, so a compromised signing key can still submit against a paused
+account and burn its fee juice on each public revert.
+
 `update_recipient` is untimelocked, and that is a change from the array design,
 where additions waited 24h and removals were immediate. Under a Merkle
 allowlist the contract cannot tell the two apart: leaves are commitments, so
@@ -79,6 +83,34 @@ an IAM principal, or an operator session: together they can drain to an
 attacker-built leaf within the live limits, with no seed required. Making `update_recipient` private is tracked in #32. A design
 that keeps an emergency pause without giving a single key a permanent freeze is
 tracked in #27.
+
+## Incident runbook
+
+Commands are in `README.md` under "Account administration". Every admin
+command except `status` needs `SPENDING_LIMIT_ADMIN_KEY`.
+
+### Signing key compromised
+
+1. `npm run admin -- pause`. Every transfer included after it reverts.
+2. Stop the bridge.
+3. `npm run admin -- status` and confirm `paused: true`.
+
+The signing key is set once at construction, so the account keeps it. `unpause`
+re-enables whoever holds it, within the on-chain limits and allowlist.
+
+### Monitoring
+
+Run `npm run admin -- status` from cron and alert on any non-zero exit. It
+needs no key.
+
+- `2`: paused. Expected only during an incident.
+- `4`: a limit proposal is pending. If the operator did not make it, the admin
+  key is compromised; see above. `cancel-limits` withdraws it, and an attacker
+  holding the key can propose again.
+- `1`: the account could not be read. Treat as unmonitored.
+
+A proposal sits 24h before `apply-limits` can take it, and that window is the
+notice `status` exists to read.
 
 ## Declared-vs-actual amount binding
 

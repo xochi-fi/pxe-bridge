@@ -26,7 +26,7 @@
  * Required env:
  *   PXE_BRIDGE_ALLOWLIST_SEED        -- the seed every leaf salt derives from
  *   PXE_BRIDGE_ALLOWLIST_RECIPIENTS  -- the CURRENT set, as the bridge has it
- *   ALLOWLIST_ADMIN_KEY              -- 32-byte hex secret key of the admin
+ *   SPENDING_LIMIT_ADMIN_KEY         -- 32-byte hex secret key of the admin
  *   SPENDING_LIMIT_ACCOUNT           -- AztecAddress of the account to update
  *
  * Optional env:
@@ -40,17 +40,14 @@
 import { AllowlistTree, allowlistLeaf } from "../src/allowlist-tree.js";
 import { AllowlistRecipientsSchema } from "../src/types.js";
 import type { AllowlistRecipient } from "../src/allowlist-tree.js";
+import {
+  accountContract,
+  connectAdmin,
+  requiredEnv,
+  sendAndWait,
+} from "./spending-limit-admin.js";
 
 const NODE_URL = process.env["AZTEC_NODE_URL"] ?? "http://localhost:8080";
-
-function required(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    console.error(`[update-allowlist] ${name} is required`);
-    process.exit(1);
-  }
-  return value;
-}
 
 function fail(message: string): never {
   console.error(`[update-allowlist] ${message}`);
@@ -105,12 +102,12 @@ function parseArgs(argv: readonly string[], current: readonly AllowlistRecipient
 }
 
 async function main(): Promise<void> {
-  const seed = required("PXE_BRIDGE_ALLOWLIST_SEED");
-  const account = required("SPENDING_LIMIT_ACCOUNT");
-  const adminKey = required("ALLOWLIST_ADMIN_KEY");
+  const seed = requiredEnv("PXE_BRIDGE_ALLOWLIST_SEED");
+  const account = requiredEnv("SPENDING_LIMIT_ACCOUNT");
+  const adminKey = requiredEnv("SPENDING_LIMIT_ADMIN_KEY");
 
   const parsed = AllowlistRecipientsSchema.safeParse(
-    JSON.parse(required("PXE_BRIDGE_ALLOWLIST_RECIPIENTS")),
+    JSON.parse(requiredEnv("PXE_BRIDGE_ALLOWLIST_RECIPIENTS")),
   );
   if (!parsed.success) {
     fail(
@@ -122,11 +119,7 @@ async function main(): Promise<void> {
   const plan = parseArgs(process.argv.slice(2), current);
 
   const { Fr } = await import("@aztec/foundation/curves/bn254");
-  const { AztecAddress } = await import("@aztec/aztec.js/addresses");
-  const { EmbeddedWallet } = await import("@aztec/wallets/embedded");
-  const { Contract } = await import("@aztec/aztec.js/contracts");
-  const { SpendingLimitAccountContract } = await import("../src/spending-limit-account.js");
-  const { deriveAccountKeys } = await import("../src/aztec-client.js");
+  const { TxExecutionResult } = await import("@aztec/stdlib/tx");
 
   // The tree as it stands. The witness for the position being changed is what
   // proves to the contract that nothing else moved.
@@ -161,41 +154,19 @@ async function main(): Promise<void> {
       "already in flight",
   );
 
-  // The admin is an ordinary Schnorr account, derived exactly the way the
-  // bridge derives its own, so this script and the bridge cannot disagree about
-  // which address a key produces.
-  const wallet = await EmbeddedWallet.create(NODE_URL);
-  const { secret, salt: accountSalt, signingKey } = await deriveAccountKeys(adminKey);
-  const manager = await wallet.createSchnorrAccount(secret, accountSalt, signingKey);
-  const adminAddress = (await manager.getAccount()).getAddress();
-  console.log(`[update-allowlist] admin:    ${adminAddress.toString()}`);
-
-  // Only the artifact is wanted here. update_recipient is a public function the
-  // admin calls directly, not through the spending-limit entrypoint, so the
-  // limits below are never read by anything.
-  const artifact = await new SpendingLimitAccountContract(signingKey, {
-    maxAmountPerTx: 1n,
-    dailyLimit: 1n,
-    admin: adminAddress.toString(),
-    token: "0x" + "0".repeat(63) + "1",
-    allowlistSeed: seed,
-    allowlistRecipients: current,
-  }).getContractArtifact();
-
-  const contract = await Contract.at(
-    AztecAddress.fromStringUnsafe(account) as Parameters<typeof Contract.at>[0],
-    artifact as Parameters<typeof Contract.at>[1],
-    wallet as unknown as Parameters<typeof Contract.at>[2],
-  );
+  const { wallet, admin } = await connectAdmin(NODE_URL, adminKey);
+  console.log(`[update-allowlist] admin:    ${admin.toString()}`);
+  const contract = await accountContract(wallet, account);
 
   // The contract verifies the path against its CURRENT root before recomputing,
   // so a stale configured set fails here rather than committing a wrong root.
-  await contract.methods["update_recipient"]!(
-    plan.index,
-    oldLeaf,
-    newLeaf,
-    witness.siblingPath,
-  ).send({ from: adminAddress });
+  const receipt = await sendAndWait(
+    NODE_URL,
+    contract.methods["update_recipient"]!(plan.index, oldLeaf, newLeaf, witness.siblingPath),
+    admin,
+    (line) => console.log(`[update-allowlist] ${line}`),
+  );
+  if (receipt.executionResult !== TxExecutionResult.SUCCESS) fail("update_recipient did not succeed");
 
   const nextConfig =
     plan.mode === "add"
