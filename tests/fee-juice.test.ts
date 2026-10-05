@@ -13,7 +13,7 @@ import {
   FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR,
   deriveAccountKeys,
   deriveDeployerKeys,
-  limitAccountFeePath,
+  feeJuiceMessageHash,
   sponsoredFpcSetting,
 } from "../src/aztec-client.js";
 import type { FeeJuiceClaim } from "../src/types.js";
@@ -278,18 +278,46 @@ describe("SponsoredFPC deployment fee fallback", () => {
   });
 });
 
-describe("spending-limit account deployment fee", () => {
-  it("falls back to SponsoredFPC without a deployer claim", () => {
-    expect(limitAccountFeePath("absent")).toBe("sponsored");
-  });
+// The bridge rebuilds this hash to tell a spent deployer claim from an unspent
+// one; the bridge-fee-juice path reads it off the Inbox's MessageSent event
+// instead. This mirrors the Solidity that emits that event, so a sender or
+// encoding drift fails here rather than as a startup throw on a live node.
+describe("deployer claim message hash", () => {
+  const sha256ToField = (data: Buffer): Buffer =>
+    Buffer.concat([Buffer.alloc(1), createHash("sha256").update(data).digest().subarray(0, 31)]);
+  const word = (value: bigint): Buffer => Buffer.from(value.toString(16).padStart(64, "0"), "hex");
 
-  // Deployer initialized by other means: the claim is still the funding, so the
-  // account deploy has to consume it rather than read an empty balance.
-  it("consumes an unspent deployer claim", () => {
-    expect(limitAccountFeePath("unspent")).toBe("claim");
-  });
+  it("matches the leaf Inbox.sendL2Message inserts for a FeeJuicePortal deposit", async () => {
+    const { Fr } = await import("@aztec/aztec.js/fields");
+    const { computeSecretHash } = await import("@aztec/stdlib/hash");
+    const l1ChainId = 31337;
+    const rollupVersion = 1234567;
+    const claim: FeeJuiceClaim = { ...CLAIM, claimSecret: "0x" + "0c".repeat(32), messageLeafIndex: "77" };
 
-  it("pays from the deployer's balance once the claim is spent", () => {
-    expect(limitAccountFeePath("spent")).toBe("preexisting");
+    // FeeJuicePortal.depositToAztecPublic: abi.encodeWithSignature("claim(bytes32,uint256)", to, amount).
+    const content = sha256ToField(
+      Buffer.concat([
+        Buffer.from("63f44968", "hex"),
+        Buffer.from(RECIPIENT.slice(2), "hex"),
+        word(BigInt(claim.claimAmount)),
+      ]),
+    );
+    // Inbox.sendL2Message: sender rewritten to address(FEE_JUICE_ADDRESS) = 3,
+    // recipient L2Actor(FEE_JUICE_ADDRESS, VERSION), then Hash.sha256ToField(abi.encode(...)).
+    const leaf = sha256ToField(
+      Buffer.concat([
+        word(3n),
+        word(BigInt(l1ChainId)),
+        word(3n),
+        word(BigInt(rollupVersion)),
+        content,
+        (await computeSecretHash(Fr.fromString(claim.claimSecret))).toBuffer(),
+        word(77n),
+      ]),
+    );
+
+    expect(await feeJuiceMessageHash(RECIPIENT, claim, l1ChainId, rollupVersion)).toBe(
+      "0x" + leaf.toString("hex"),
+    );
   });
 });

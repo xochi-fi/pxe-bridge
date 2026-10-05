@@ -181,7 +181,7 @@ export type DeployerClaimState = "absent" | "unspent" | "spent";
  * - `preexisting`: the claim is spent, normally by the deployer's own deploy
  *   on this or an earlier run. The deployer pays from its balance.
  */
-export function limitAccountFeePath(claim: DeployerClaimState): "sponsored" | "claim" | "preexisting" {
+function limitAccountFeePath(claim: DeployerClaimState): "sponsored" | "claim" | "preexisting" {
   switch (claim) {
     case "absent":
       return "sponsored";
@@ -190,6 +190,62 @@ export function limitAccountFeePath(claim: DeployerClaimState): "sponsored" | "c
     case "spent":
       return "preexisting";
   }
+}
+
+/**
+ * Whether a send failed because its fee payer could not cover the fee: the
+ * node's admission check (stdlib TX_ERROR_INSUFFICIENT_FEE_PAYER_BALANCE) or
+ * the public simulator's assert, which EmbeddedWallet.sendTx's estimating
+ * simulation hits first. Neither names the fee payer.
+ */
+function deployerUnderfunded(message: string): boolean {
+  return (
+    message.includes("Insufficient fee payer balance") ||
+    message.includes("Not enough balance for fee payer")
+  );
+}
+
+/**
+ * Hash of the L1 to L2 message FeeJuicePortal.depositToAztecPublic emits for
+ * `claim` bridged to `beneficiary`: the leaf FeeJuice.claim consumes.
+ *
+ * The sender is FEE_JUICE_ADDRESS, not the portal's L1 address: Inbox.sol
+ * rewrites a message from FEE_ASSET_PORTAL to that magic address, and the
+ * FeeJuice contract consumes it with portal_address = FEE_JUICE_ADDRESS.
+ */
+export async function feeJuiceMessageHash(
+  beneficiary: string,
+  claim: FeeJuiceClaim,
+  l1ChainId: number,
+  rollupVersion: number,
+): Promise<string> {
+  const { AztecAddress, EthAddress } = await import("@aztec/aztec.js/addresses");
+  const { Fr } = await import("@aztec/aztec.js/fields");
+  const { FEE_JUICE_ADDRESS } = await import("@aztec/constants");
+  const { keccak256String } = await import("@aztec/foundation/crypto/keccak");
+  const { sha256ToField } = await import("@aztec/foundation/crypto/sha256");
+  const { toBufferBE } = await import("@aztec/foundation/bigint-buffer");
+  const { ProtocolContractAddress } = await import("@aztec/protocol-contracts");
+  const { computeSecretHash } = await import("@aztec/stdlib/hash");
+  const { L1Actor, L1ToL2Message, L2Actor } = await import("@aztec/stdlib/messaging");
+
+  // FeeJuicePortal.depositToAztecPublic:
+  // sha256ToField(abi.encodeWithSignature("claim(bytes32,uint256)", to, amount)).
+  const selector = Buffer.from(keccak256String("claim(bytes32,uint256)").replace(/^0x/, ""), "hex").subarray(0, 4);
+  const content = sha256ToField([
+    selector,
+    AztecAddress.fromStringUnsafe(beneficiary).toBuffer(),
+    toBufferBE(BigInt(claim.claimAmount), 32),
+  ]);
+  return new L1ToL2Message(
+    new L1Actor(EthAddress.fromNumber(FEE_JUICE_ADDRESS), l1ChainId),
+    new L2Actor(ProtocolContractAddress.FeeJuice, rollupVersion),
+    content,
+    await computeSecretHash(Fr.fromString(claim.claimSecret)),
+    new Fr(BigInt(claim.messageLeafIndex)),
+  )
+    .hash()
+    .toString();
 }
 
 /** The slice of AztecNode createNote needs to read a tx effect back. */
@@ -397,7 +453,7 @@ export class AztecClient implements IAztecClient {
         : undefined;
       const gasSettings = await this.deployGasSettings();
       const paymentMethod = deployer
-        ? await this.limitAccountPaymentMethod(address, deployer.address, deployer.claim, gasSettings)
+        ? await this.limitAccountPaymentMethod(address, deployer.address, deployer.claim)
         : await this.buildFeePaymentMethod(address, this.feeJuiceClaim);
 
       const deployMethod = await accountManager.getDeployMethod();
@@ -429,6 +485,15 @@ export class AztecClient implements IAztecClient {
         const alreadyInitialized = message.includes("Existing nullifier");
         if (alreadyInitialized || (await this.isInitialized(address))) {
           console.log("[pxe-bridge] Account deployed by another process");
+        } else if (deployer && deployer.claim !== "absent" && deployerUnderfunded(message)) {
+          throw new Error(
+            `Deployer ${deployer.address.toString()} cannot pay the fee for deploying ` +
+              `${address.toString()}. Top it up: FEE_JUICE_RECIPIENT=${deployer.address.toString()} ` +
+              "FEE_JUICE_PAYER_KEY=<funded payer key> npm run top-up-fee-juice, or bridge a new " +
+              `claim to it (npm run bridge-fee-juice -- --deployer --recipient ${deployer.address.toString()}). ` +
+              `Cause: ${message}`,
+            { cause: err },
+          );
         } else {
           throw err;
         }
@@ -664,30 +729,17 @@ export class AztecClient implements IAztecClient {
   private async deployerClaimSpent(beneficiary: AztecAddress, claim: FeeJuiceClaim): Promise<boolean> {
     const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
     const { Fr } = await import("@aztec/aztec.js/fields");
-    const { keccak256String } = await import("@aztec/foundation/crypto/keccak");
-    const { sha256ToField } = await import("@aztec/foundation/crypto/sha256");
-    const { toBufferBE } = await import("@aztec/foundation/bigint-buffer");
     const { ProtocolContractAddress } = await import("@aztec/protocol-contracts");
-    const { computeSecretHash, siloNullifier } = await import("@aztec/stdlib/hash");
-    const { L1Actor, L1ToL2Message, L2Actor, computeFeeJuiceMessageNullifier } = await import(
-      "@aztec/stdlib/messaging"
-    );
+    const { siloNullifier } = await import("@aztec/stdlib/hash");
+    const { computeFeeJuiceMessageNullifier } = await import("@aztec/stdlib/messaging");
     const { MerkleTreeId } = await import("@aztec/stdlib/trees");
 
     const node = createAztecNodeClient(this.nodeUrl);
     const info = await node.getNodeInfo();
     const secret = Fr.fromString(claim.claimSecret);
-    // FeeJuicePortal.depositToAztecPublic:
-    // sha256ToField(abi.encodeWithSignature("claim(bytes32,uint256)", to, amount)).
-    const selector = Buffer.from(keccak256String("claim(bytes32,uint256)").replace(/^0x/, ""), "hex").subarray(0, 4);
-    const content = sha256ToField([selector, beneficiary.toBuffer(), toBufferBE(BigInt(claim.claimAmount), 32)]);
-    const messageHash = new L1ToL2Message(
-      new L1Actor(info.l1ContractAddresses.feeJuicePortalAddress, info.l1ChainId),
-      new L2Actor(ProtocolContractAddress.FeeJuice, info.rollupVersion),
-      content,
-      await computeSecretHash(secret),
-      new Fr(BigInt(claim.messageLeafIndex)),
-    ).hash();
+    const messageHash = Fr.fromString(
+      await feeJuiceMessageHash(beneficiary.toString(), claim, info.l1ChainId, info.rollupVersion),
+    );
 
     if (!(await node.getL1ToL2MessageMembershipWitness("latest", messageHash))) {
       throw new Error(
@@ -714,51 +766,26 @@ export class AztecClient implements IAztecClient {
    *
    * `preexisting`: no payment method. completeFeeOptions then selects
    * PREEXISTING_FEE_JUICE and the deployer pays from its balance. v5 has no
-   * FeeJuicePaymentMethod to name explicitly. The balance is checked against
-   * the fee limit first, since the node rejects an underfunded fee payer with
-   * a message that names neither account.
+   * FeeJuicePaymentMethod to name explicitly. No balance precheck: the fee
+   * limit the deploy declares comes from EmbeddedWallet.sendTx's own gas
+   * estimate, which only exists inside the send, so an underfunded deployer
+   * is reported by wrapping the rejection instead (`deployerUnderfunded`).
    */
   private async limitAccountPaymentMethod(
     accountAddress: AztecAddress,
     deployer: AztecAddress,
     claim: DeployerClaimState,
-    gasSettings: { maxFeesPerGas: GasFees },
   ): Promise<FeePaymentMethod | undefined> {
     switch (limitAccountFeePath(claim)) {
       case "sponsored":
         return this.buildFeePaymentMethod(accountAddress, undefined);
       case "claim":
         return this.buildFeePaymentMethod(deployer, this.deployerFeeJuiceClaim);
-      case "preexisting": {
-        const { getFeeJuiceBalance } = await import("@aztec/aztec.js/utils");
-        const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
-        const wallet = this.wallet as unknown as {
-          completeFeeOptions(config: {
-            from: AztecAddress;
-            feePayer: undefined;
-            gasSettings: { maxFeesPerGas: GasFees };
-          }): Promise<{ gasSettings: { getFeeLimit(): Fr } }>;
-        };
-        const { gasSettings: full } = await wallet.completeFeeOptions({
-          from: deployer,
-          feePayer: undefined,
-          gasSettings,
-        });
-        const limit = full.getFeeLimit().toBigInt();
-        const balance = await getFeeJuiceBalance(deployer, createAztecNodeClient(this.nodeUrl));
-        if (balance < limit) {
-          throw new Error(
-            `Deployer ${deployer.toString()} holds ${balance} fee juice, below the ${limit} fee ` +
-              `limit for deploying ${accountAddress.toString()}, and ${DEPLOYER_FEE_JUICE_CLAIM_ENV} ` +
-              `is spent. Top it up: FEE_JUICE_RECIPIENT=${deployer.toString()} npm run ` +
-              `top-up-fee-juice, or bridge a new claim to it (npm run bridge-fee-juice -- --deployer --recipient ${deployer.toString()}).`,
-          );
-        }
+      case "preexisting":
         console.log(
           `[pxe-bridge] Paying deployment of ${accountAddress.toString()} from the deployer's fee juice balance`,
         );
         return undefined;
-      }
     }
   }
 
