@@ -202,7 +202,9 @@ testnet.
 
    The account's transfers pay from that balance, not the deployer's. The
    deployer's key is the bridge's, so this step reads it from Secrets Manager
-   into the script's memory (not its environment, and not disk). To keep it
+   into the script's memory, not its environment. The wallet stores holding it
+   are created under `os.tmpdir()` and deleted on exit, SIGINT and SIGTERM;
+   SIGKILL or a crash leaves them. To keep it
    off the operator's machine, use a separate payer instead (next section).
 
 The node admits a transaction only if its fee payer's balance covers the fee
@@ -247,7 +249,9 @@ already be deployed. Set exactly one of:
   <Account address>`, then start it again with the printed `FEE_JUICE_CLAIM`.
   It deploys itself and keeps the remainder as its balance.
 
-The wallet is ephemeral: neither key is written to `./aztec-wallet-data`.
+Neither key is written to `./aztec-wallet-data`. The wallet stores are created
+under `os.tmpdir()` and deleted on exit, SIGINT and SIGTERM; SIGKILL or a
+crash leaves them.
 
 As soon as the L1 deposit lands, the script prints
 `FEE_JUICE_RESUME_CLAIM='{...}'`. If the wait or the claim transaction fails

@@ -15,9 +15,9 @@
  *   FEE_JUICE_PAYER_DEPLOYER=true  The spending-limit account's deployer, which
  *       holds whatever its deployer claim left after both deploys. Its key is
  *       the bridge's key, resolved as the bridge resolves it
- *       (PXE_BRIDGE_SECRET_ARN; PXE_BRIDGE_SECRET_KEY outside production). The
- *       key stays in this process's memory; the wallet is ephemeral, so nothing
- *       is written to ./aztec-wallet-data.
+ *       (PXE_BRIDGE_SECRET_ARN; PXE_BRIDGE_SECRET_KEY outside production).
+ *       The wallet stores holding it live under os.tmpdir() and are deleted
+ *       on exit, SIGINT and SIGTERM; SIGKILL or a crash leaves them.
  *   FEE_JUICE_PAYER_KEY            A separate plain Schnorr account at the
  *       address the bridge derives from this key. Deploy it by running the
  *       bridge once with this key, without PXE_BRIDGE_SPENDING_LIMIT_ADMIN, and
@@ -52,6 +52,8 @@
  *                                 the faucet's fixed mint amount
  */
 
+import { rm } from "node:fs/promises";
+import type { AztecLMDBStoreV2 } from "@aztec/kv-store/lmdb-v2";
 import { deriveAccountKeys, deriveDeployerKeys } from "../src/aztec-client.js";
 import type { AccountKeys } from "../src/aztec-client.js";
 import {
@@ -71,9 +73,37 @@ type PayerWallet = Awaited<
   ReturnType<typeof import("@aztec/wallets/embedded").EmbeddedWallet.create>
 >;
 
+/** Ends the run with `message`; the runner prints it, deletes the stores and exits 1. */
+class ScriptFailure extends Error {}
+
 function fail(message: string): never {
-  console.error(message);
-  process.exit(1);
+  throw new ScriptFailure(message);
+}
+
+// Run LIFO on exit. `graceful` is false on a signal, where wallet.stop() may
+// wait on a proof in flight; stores are deleted either way.
+type Disposer = (graceful: boolean) => Promise<void>;
+const disposers: Disposer[] = [];
+
+async function disposeAll(graceful: boolean): Promise<void> {
+  for (let d = disposers.pop(); d; d = disposers.pop()) {
+    try {
+      await d(graceful);
+    } catch (err) {
+      console.error("cleanup:", err instanceof Error ? err.message : err);
+    }
+  }
+}
+
+function adoptStore(store: AztecLMDBStoreV2): void {
+  disposers.push(async () => {
+    try {
+      await store.delete();
+    } finally {
+      // delete() closes first and skips the rm if closing throws.
+      await rm(store.dataDirectory, { recursive: true, force: true });
+    }
+  });
 }
 
 function required(name: string): string {
@@ -160,16 +190,26 @@ async function main(): Promise<void> {
   }
 
   const { EmbeddedWallet } = await import("@aztec/wallets/embedded");
+  const { openEphemeralStore } = await import("@aztec/kv-store/lmdb-v2");
   const { ContractInitializationStatus } = await import("@aztec/aztec.js/wallet");
 
   console.log(`Connecting to Aztec node at ${AZTEC_NODE_URL}`);
-  // Ephemeral: createSchnorrAccount stores the secret and signing key in the
-  // wallet DB, which otherwise persists under ./aztec-wallet-data. Proving on,
-  // as in AztecClient: a network that verifies proofs rejects the claim
-  // without it.
+  // createSchnorrAccount writes the secret and signing key to the wallet DB,
+  // and the PXE stores keys derived from them. `ephemeral: true` alone still
+  // puts both stores on disk under os.tmpdir() and never deletes them, so the
+  // stores are opened here and deleted on exit. Proving on, as in
+  // AztecClient: a network that verifies proofs rejects the claim without it.
+  const walletStore = await openEphemeralStore("wallet_data");
+  adoptStore(walletStore);
+  const pxeStore = await openEphemeralStore("pxe_data");
+  adoptStore(pxeStore);
   const wallet = await EmbeddedWallet.create(AZTEC_NODE_URL, {
     ephemeral: true,
-    pxe: { proverEnabled: true },
+    walletDb: { store: walletStore },
+    pxe: { store: pxeStore, proverEnabled: true },
+  });
+  disposers.push(async (graceful) => {
+    if (graceful) await wallet.stop();
   });
 
   const manager = await wallet.createSchnorrAccount(
@@ -241,8 +281,6 @@ async function main(): Promise<void> {
 
   console.log(`\nCredited ${claim.claimAmount} fee juice to ${RECIPIENT}.`);
   console.log("No FEE_JUICE_CLAIM to set: the balance is already on chain.");
-
-  await wallet.stop();
 }
 
 /**
@@ -265,9 +303,27 @@ async function sponsoredFee(
   return new SponsoredFeePaymentMethod(instance.address);
 }
 
+let signalled = false;
+for (const [signal, code] of [
+  ["SIGINT", 130],
+  ["SIGTERM", 143],
+] as const) {
+  process.on(signal, () => {
+    if (signalled) return;
+    signalled = true;
+    console.error(`${signal}: deleting wallet stores`);
+    void disposeAll(false).finally(() => process.exit(code));
+  });
+}
+
 main()
-  .then(() => process.exit(0))
-  .catch((err) => {
-    console.error("Fatal:", err);
-    process.exit(1);
+  .then(() => 0)
+  .catch((err: unknown) => {
+    if (err instanceof ScriptFailure) console.error(err.message);
+    else console.error("Fatal:", err);
+    return 1;
+  })
+  .then(async (code) => {
+    await disposeAll(true);
+    if (!signalled) process.exit(code);
   });

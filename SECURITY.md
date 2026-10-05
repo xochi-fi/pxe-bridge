@@ -206,8 +206,9 @@ be transferred but can pay for top-up claims. Production runbook:
    `FEE_JUICE_PAYER_DEPLOYER=true npm run top-up-fee-juice`, which sends the
    claim from the deployer and pays from what the deployer claim left. This
    loads the bridge key into the operator's process, resolved from
-   `PXE_BRIDGE_SECRET_ARN` as the bridge does; the wallet is ephemeral, so it
-   is not written to disk. A separate payer (`FEE_JUICE_PAYER_KEY`) keeps the
+   `PXE_BRIDGE_SECRET_ARN` as the bridge does. The wallet stores holding it are
+   created under `os.tmpdir()` and deleted on exit, SIGINT and SIGTERM;
+   SIGKILL or a crash leaves them. A separate payer (`FEE_JUICE_PAYER_KEY`) keeps the
    bridge key off the operator's machine, at the cost of bootstrapping that
    payer as a plain Schnorr bridge with its own `FEE_JUICE_CLAIM`.
 
