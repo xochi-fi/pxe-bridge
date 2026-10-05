@@ -46,6 +46,31 @@ describe("parseAdminCommand", () => {
 
   it("rejects limit flags on other commands", () => {
     expect(() => parseAdminCommand(["pause", "--daily", "5"])).toThrow("takes no flags");
+    expect(() => parseAdminCommand(["status", "--daily", "5"])).toThrow("status takes only");
+  });
+
+  it("rejects status flags on other commands", () => {
+    expect(() => parseAdminCommand(["unpause", "--expect-paused"])).toThrow("takes no flags");
+    expect(() => parseAdminCommand(["propose-limits", "--max-per-tx=1", "--daily=1", "--min-fee-juice=1"])).toThrow(
+      "takes only --max-per-tx",
+    );
+  });
+
+  it("parses status expectations, defaulting to unpaused and unchecked", () => {
+    expect(parseAdminCommand(["status"])).toEqual({
+      kind: "status",
+      expect: { paused: false, allowlistRoot: undefined, minFeeJuice: undefined },
+    });
+    expect(
+      parseAdminCommand(["status", "--expect-paused", `--expect-root=0x${"AB".repeat(32)}`, "--min-fee-juice=7"]),
+    ).toEqual({
+      kind: "status",
+      expect: { paused: true, allowlistRoot: `0x${"ab".repeat(32)}`, minFeeJuice: 7n },
+    });
+  });
+
+  it("rejects a malformed expected root", () => {
+    expect(() => parseAdminCommand(["status", "--expect-root", "0xabc"])).toThrow("32-byte hex");
   });
 
   it("rejects unknown options, commands and extra positionals", () => {
@@ -114,5 +139,34 @@ describe("statusExitCode", () => {
     [{ paused: 1n, pending_change_time: 5n }, 6],
   ])("%o exits %i", (overrides, code) => {
     expect(statusExitCode(decodeAccountState({ ...RAW, ...overrides }))).toBe(code);
+  });
+
+  // An attacker's unpause during an incident must alert.
+  it("alerts on unpaused when paused is expected, and not on paused", () => {
+    const expectPaused = { paused: true };
+    expect(statusExitCode(decodeAccountState(RAW), expectPaused)).toBe(2);
+    expect(statusExitCode(decodeAccountState({ ...RAW, paused: 1n }), expectPaused)).toBe(0);
+  });
+
+  it("sets 8 when the root is not the expected one", () => {
+    const state = decodeAccountState(RAW);
+    expect(statusExitCode(state, { paused: false, allowlistRoot: state.allowlistRoot })).toBe(0);
+    expect(statusExitCode(state, { paused: false, allowlistRoot: "0x" + "0".repeat(64) })).toBe(8);
+  });
+
+  it("sets 16 below the fee juice minimum, or when the balance was not read", () => {
+    const state = decodeAccountState(RAW);
+    const expect16 = { paused: false, minFeeJuice: 100n };
+    expect(statusExitCode(state, expect16, 100n)).toBe(0);
+    expect(statusExitCode(state, expect16, 99n)).toBe(16);
+    expect(statusExitCode(state, expect16)).toBe(16);
+    expect(statusExitCode(state, { paused: false }, 0n)).toBe(0);
+  });
+
+  it("ORs every bit", () => {
+    const state = decodeAccountState({ ...RAW, pending_change_time: 5n });
+    expect(
+      statusExitCode(state, { paused: true, allowlistRoot: "0x" + "0".repeat(64), minFeeJuice: 1n }, 0n),
+    ).toBe(2 | 4 | 8 | 16);
   });
 });

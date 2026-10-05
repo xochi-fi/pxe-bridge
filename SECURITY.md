@@ -89,28 +89,49 @@ tracked in #27.
 Commands are in `README.md` under "Account administration". Every admin
 command except `status` needs `SPENDING_LIMIT_ADMIN_KEY`.
 
+Prerequisite: the admin account is deployed and funded, and stays funded. It
+pays for `pause` from its own fee juice; an admin that cannot cover the
+declared fee limit cannot pause. Monitor it with `--min-fee-juice`.
+
 ### Signing key compromised
 
 1. `npm run admin -- pause`. Every transfer included after it reverts.
 2. Stop the bridge.
 3. `npm run admin -- status` and confirm `paused: true`.
+4. Switch cron to `status --expect-paused`, so an unpause alerts.
 
 The signing key is set once at construction, so the account keeps it. `unpause`
 re-enables whoever holds it, within the on-chain limits and allowlist.
 
 ### Monitoring
 
-Run `npm run admin -- status` from cron and alert on any non-zero exit. It
-needs no key.
+Run `npm run admin -- status --min-fee-juice <n>` from cron and alert on any
+non-zero exit. It needs no key. Give it the expected root, as `--expect-root`
+or by setting `PXE_BRIDGE_ALLOWLIST_SEED` and `PXE_BRIDGE_ALLOWLIST_RECIPIENTS`;
+without one, the immediate `update_recipient` goes unseen. `--expect-root`
+keeps the seed off the monitoring host. The exit code is a bitmask:
 
-- `2`: paused. Expected only during an incident.
+- `2`: pause state is not the expected one. Paused outside an incident, or
+  unpaused under `--expect-paused`: an attacker holding the admin key undoing
+  an incident pause.
 - `4`: a limit proposal is pending. If the operator did not make it, the admin
   key is compromised; see above. `cancel-limits` withdraws it, and an attacker
   holding the key can propose again.
-- `1`: the account could not be read. Treat as unmonitored.
+- `8`: `allowlist_root` is not the expected root. `update_recipient` is
+  immediate, so this is the only notice of an allowlist rewrite. Unless the
+  operator just ran `update-allowlist`, the admin key is compromised: pause.
+- `16`: admin fee juice is below `--min-fee-juice`. Top it up before it is
+  needed for `pause`.
+- `1`: the account could not be read, or its class ID is not the artifact's.
+  Treat as unmonitored.
 
 A proposal sits 24h before `apply-limits` can take it, and that window is the
-notice `status` exists to read.
+notice `status` exists to read. `pause`, `unpause` and `update_recipient` give
+none: `status` sees them only after inclusion, at the next run.
+
+`status` reads public storage from one node without a public-data witness. A
+compromised or lying node can report a clean account. Run it against a node
+you operate, over https, independent of the bridge's.
 
 ## Declared-vs-actual amount binding
 

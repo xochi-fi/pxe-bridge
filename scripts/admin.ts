@@ -2,7 +2,7 @@
  * Admin operations on the spending-limit account.
  *
  * Usage:
- *   npm run admin -- status
+ *   npm run admin -- status [--expect-root <hex>] [--expect-paused] [--min-fee-juice <n>]
  *   npm run admin -- pause
  *   npm run admin -- unpause
  *   npm run admin -- propose-limits --max-per-tx <n> --daily <n>
@@ -10,14 +10,18 @@
  *   npm run admin -- cancel-limits
  *
  * Env:
- *   SPENDING_LIMIT_ACCOUNT    -- AztecAddress of the account (all commands)
- *   SPENDING_LIMIT_ADMIN_KEY  -- 32-byte hex secret key of the admin (all but status)
- *   AZTEC_NODE_URL            -- Aztec node (default: http://localhost:8080)
+ *   SPENDING_LIMIT_ACCOUNT           -- AztecAddress of the account (all commands)
+ *   SPENDING_LIMIT_ADMIN_KEY         -- 32-byte hex secret key of the admin (all but status)
+ *   PXE_BRIDGE_ALLOWLIST_SEED        -- status: with RECIPIENTS, the expected root
+ *   PXE_BRIDGE_ALLOWLIST_RECIPIENTS     when --expect-root is not given
+ *   AZTEC_NODE_URL                   -- Aztec node (default: http://localhost:8080)
  *
- * `status` reads public storage directly and needs no key. Exit codes:
- *   0 clean, 1 error, 2 paused, 4 limit proposal pending, 6 both.
- * A proposal counts as pending until apply-limits or cancel-limits clears it,
- * expired ones included.
+ * `status` reads public storage and needs no key. Exit code bits, ORed:
+ *   2  pause state is not the expected one (unpaused, or paused with --expect-paused)
+ *   4  limit proposal pending, expired included, until applied or cancelled
+ *   8  allowlist_root is not the expected root
+ *   16 admin fee juice below --min-fee-juice
+ * 1 alone is an error, including a contract class that is not the artifact's.
  *
  * pause and unpause take effect at the inclusion of the next transfer. pause is
  * checked only in check_spending_public, so a compromised signing key can
@@ -26,6 +30,7 @@
  * Every send is paid by the admin from its own fee juice.
  */
 
+import { AllowlistTree } from "../src/allowlist-tree.js";
 import {
   ADMIN_USAGE,
   PARAM_TIMELOCK_SECONDS,
@@ -33,11 +38,16 @@ import {
   connectAdmin,
   formatStatus,
   parseAdminCommand,
+  parseAllowlistEnv,
   proposalWindow,
   readAccountState,
+  readFeeJuiceBalance,
   requiredEnv,
+  runScript,
   sendAndWait,
   statusExitCode,
+  takeSecretEnv,
+  validateSecret,
 } from "./spending-limit-admin.js";
 import type { AccountState, AdminCommand } from "./spending-limit-admin.js";
 
@@ -115,6 +125,10 @@ function describe(command: AdminCommand, state: AccountState, now: bigint): stri
 }
 
 async function main(): Promise<number> {
+  // Before anything that could spawn a prover.
+  const adminKeyEnv = takeSecretEnv("SPENDING_LIMIT_ADMIN_KEY");
+  const seedEnv = takeSecretEnv("PXE_BRIDGE_ALLOWLIST_SEED");
+
   let command: AdminCommand;
   try {
     command = parseAdminCommand(process.argv.slice(2));
@@ -123,21 +137,30 @@ async function main(): Promise<number> {
   }
   const account = requiredEnv("SPENDING_LIMIT_ACCOUNT");
 
-  const { state, now } = await readAccountState(NODE_URL, account);
   if (command.kind === "status") {
-    for (const line of formatStatus(account, state, now)) console.log(line);
-    return statusExitCode(state);
+    const allowlist =
+      command.expect.allowlistRoot === undefined ? await parseAllowlistEnv(seedEnv) : undefined;
+    const expect = {
+      ...command.expect,
+      allowlistRoot:
+        command.expect.allowlistRoot ??
+        (allowlist
+          ? (await AllowlistTree.build(allowlist.seed, allowlist.recipients)).root.toString()
+          : undefined),
+    };
+    const { state, now } = await readAccountState(NODE_URL, account);
+    const adminFeeJuice = await readFeeJuiceBalance(NODE_URL, state.admin);
+    for (const line of formatStatus(account, state, now, { expect, adminFeeJuice })) {
+      console.log(line);
+    }
+    return statusExitCode(state, expect, adminFeeJuice);
   }
 
-  const adminKey = requiredEnv("SPENDING_LIMIT_ADMIN_KEY");
+  const adminKey = await validateSecret("SPENDING_LIMIT_ADMIN_KEY", adminKeyEnv);
+  const { state, now } = await readAccountState(NODE_URL, account);
   refuseKnownReverts(command, state, now);
 
-  const { wallet, admin } = await connectAdmin(NODE_URL, adminKey);
-  if (admin.toString() !== state.admin) {
-    throw new Error(
-      `SPENDING_LIMIT_ADMIN_KEY derives ${admin.toString()}, but the account's admin is ${state.admin}`,
-    );
-  }
+  const { wallet, admin } = await connectAdmin(NODE_URL, adminKey, state.admin);
 
   log(`account: ${account}`);
   log(`admin:   ${admin.toString()}`);
@@ -159,10 +182,4 @@ async function main(): Promise<number> {
   return 0;
 }
 
-main().then(
-  (code) => process.exit(code),
-  (err) => {
-    console.error("[admin]", err instanceof Error ? err.message : err);
-    process.exit(1);
-  },
-);
+runScript("[admin]", main);
