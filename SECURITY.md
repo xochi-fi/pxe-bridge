@@ -52,14 +52,18 @@ allowlist position whose path has already been published:
 | Admin key + signing key | Once any update is published: write `h(attacker, salt)` with a self-chosen salt into such a position and drain to it, within whatever limits are live. Seed not needed | Exceed the per-tx cap or daily window before a `propose_limits` matures |
 | Admin key + seed and recipient list | Add, revoke or substitute payees at any position | Spend without the signing key |
 
-`update_recipient` is public (`main.nr:655`), so every call publishes `index`,
-`old_leaf`, `new_leaf` and the full sibling path. `apply_leaf_update` checks only
-that the path verifies against the current root. Until another update changes
-the root above it, position `index` is rewritable with the published path and
-`new_leaf` as the old leaf, and position `index ^ 1` with leaf
-`sibling_path[0]` and path `[new_leaf, sibling_path[1..]]`. The entrypoint's
-`leaf_salt`, `leaf_index` and `sibling_path` are unsigned, so a leaf the
-attacker built with their own salt is spendable by the signing key.
+`update_recipient` in the account contract is public, so every call publishes
+`index`, `old_leaf`, `new_leaf` and the full sibling path. `apply_leaf_update`
+checks only that the path verifies against the current root. Position `index`
+is rewritable with the published path and `new_leaf` as the old leaf, and
+position `index ^ 1` with leaf `sibling_path[0]` and path
+`[new_leaf, sibling_path[1..]]`. Later updates are public too, so the current
+path of any position ever touched, and of its sibling, stays computable from
+the update history: a later update does not close the window. The exposure is
+permanent and grows with each update; only making `update_recipient` private
+(#32) stops it. The entrypoint's `leaf_salt`, `leaf_index` and `sibling_path`
+are unsigned, so a leaf the attacker built with their own salt is spendable by
+the signing key.
 
 The seed and recipient list protect only positions whose path has never
 appeared on chain. Spending still needs the signing key.
