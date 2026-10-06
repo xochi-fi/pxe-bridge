@@ -18,9 +18,7 @@ const DEFAULT_SECRET_KEY = "0x00000000000000000000000000000000000000000000000000
  *
  * Distinct from the bridge key so the two accounts do not collide, and shared
  * between global-setup and the spending-limit suite so the second one to
- * connect recovers the account rather than deploying a second funder. An extra
- * deployment is not free here: it raises the sandbox base fee, which is what
- * `headroomGasSettings` exists to absorb.
+ * connect recovers the account rather than deploying a second funder.
  */
 export const FUNDER_KEY = "0x000000000000000000000000000000000000000000000000000000000000cafe";
 
