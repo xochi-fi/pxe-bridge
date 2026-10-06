@@ -180,6 +180,48 @@ sender's entrypoint gets `EXTERNAL` and sets no fee payer at all. Since
 would have none. Failing at startup with the reason beats failing during
 deployment with a message about fee payers.
 
+The deployment is paid differently. `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM` is a
+claim bridged to the deployer, the plain Schnorr account at the account salt
+plus one that sends the spending-limit account's deployment. The deployer
+self-deploys with `FeeJuicePaymentMethodWithClaim`, the path a plain account
+already uses, and then sends the account's deployment with no payment method,
+so `completeFeeOptions` gives it `PREEXISTING_FEE_JUICE` and it pays from the
+balance its claim created. The sender is the fee payer, so none of the three
+failures above applies, and nothing runs through the spending-limit account's
+entrypoint. The deployer is derived from the bridge's own key, so this adds no
+key material and no trusted party; a deployer key compromise is a bridge key
+compromise already. What it holds afterwards is unspent fee juice, which cannot
+be transferred but can pay for top-up claims. Production runbook:
+
+1. Start the bridge once with the spending-limit configuration and no claim.
+   It logs `Deployer address` and `Account address`, then stops at the
+   SponsoredFPC refusal before sending anything. Neither address is secret.
+2. `npm run bridge-fee-juice -- --deployer --recipient <Deployer address>`
+   bridges to it and prints the claim and its message hash. No bridge key is
+   involved: the L1 deposit needs only the address, and the message commits to
+   it, so the claim cannot pay for anything else. If the wait times out,
+   `--wait <messageHash>` resumes it; rerunning the bridge step deposits twice.
+   The claim secret is written to an owner-only file in the working directory
+   before the L1 write, so a run that dies after broadcasting is recovered
+   with `--recover <file>`, not rerun. Once the deposit lands the claim is
+   added to the file, which is deleted only after the message has synced.
+   Anyone who reads it before the claim is consumed can consume it, though
+   only to credit the deployer.
+3. Start the bridge with the claim. It deploys the deployer, then the account,
+   and reaches `Ready` with SponsoredFPC refused. If the deployer is already
+   deployed and its balance cannot cover the account deploy, bridge a fresh
+   claim to the deployer (step 2) and restart with it.
+4. Top up the spending-limit account before its first transfer with
+   `npm run top-up-fee-juice`, paid by a separate payer (`FEE_JUICE_PAYER_KEY`)
+   bootstrapped as a plain Schnorr bridge with its own `FEE_JUICE_CLAIM`. That
+   key can pay fees and nothing else on the bridge's behalf. Paying from the
+   deployer instead (`FEE_JUICE_PAYER_DEPLOYER=true`) is refused under
+   `NODE_ENV=production`: the deployer's key is the bridge's signing key, and
+   using it would copy the key that authorizes every transfer onto the
+   operator's machine. Outside production it is allowed; the wallet stores
+   holding it are created under `os.tmpdir()` and deleted on exit, SIGINT,
+   SIGTERM and SIGHUP, and SIGKILL or a crash leaves them.
+
 ## What is public
 
 The contract enforces its limits against public state, and a public function's

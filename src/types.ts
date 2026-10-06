@@ -100,6 +100,17 @@ export const FeeJuiceClaimSchema = z.object({
 export type FeeJuiceClaim = z.infer<typeof FeeJuiceClaimSchema>;
 
 /**
+ * A claim plus the hash of the L1 to L2 message behind it: what resuming a
+ * top-up needs once the L1 deposit is done. The hash is what the wait polls
+ * for, and the claim alone does not carry it.
+ */
+export const BridgedFeeJuiceClaimSchema = FeeJuiceClaimSchema.extend({
+  messageHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/, "Must be 32-byte hex"),
+});
+
+export type BridgedFeeJuiceClaim = z.infer<typeof BridgedFeeJuiceClaimSchema>;
+
+/**
  * One allowlisted recipient and the tree position it occupies.
  *
  * The index is not decorative. The account stores only a root, so the bridge
