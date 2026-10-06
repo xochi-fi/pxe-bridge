@@ -55,6 +55,31 @@ describe("allowlist leaf and node hashing", () => {
     );
   });
 
+  /**
+   * CROSS-CHECK of path orientation, the half the leaf and node vectors above
+   * leave open. The circuit's root_from_sibling_path reads bit `level` of the
+   * index to decide which side the running node sits on. Reading the bits in
+   * the other order, or the sides the other way round, reproduces a different
+   * root at every non-trivial index while still passing any test that builds
+   * and verifies a witness on this side alone.
+   *
+   * Full production height, ten distinct siblings, and an index whose bit
+   * pattern is not a palindrome, so reversing it changes the answer. Pinned
+   * identically in main.nr's `sibling_path_orientation_matches_typescript`.
+   */
+  it("orients a sibling path the way main.nr does", async () => {
+    // 0x1001 ..= 0x100a, sibling at level 0 first.
+    const path = Array.from(
+      { length: ALLOWLIST_TREE_HEIGHT },
+      (_, i) => new Fr(0x1001n + BigInt(i)),
+    );
+    const index = 0b1011010011;
+    const root = await rootFromSiblingPath(new Fr(0xaaaan), new Fr(0x1111n), index, path);
+    expect(root.toString()).toBe(
+      "0x293ca1082ef45e1af6ebccd4c0e737a4baac36d55aaf72599404667ba1e173a4",
+    );
+  });
+
   // Pins the constants themselves, so a typo is a failing test rather than a
   // tree that silently disagrees with the contract.
   it("pins the domain separators and the height", () => {

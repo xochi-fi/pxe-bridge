@@ -111,8 +111,11 @@ Aztec v5.1.0. It is validated three ways:
   rejects a declared/actual mismatch, a hidden second call, and an empty
   payload; `stale_witness_is_rejected` and `update_with_a_forged_old_leaf_is_rejected`
   cover the allowlist binding and the single-leaf constraint on admin updates;
-  `leaf_and_node_hashes_match_typescript` pins the hashes against
-  `tests/allowlist-tree.test.ts`. The `contract` CI job runs these
+  `leaf_and_node_hashes_match_typescript` and
+  `sibling_path_orientation_matches_typescript` pin the hashes and the path
+  orientation against `tests/allowlist-tree.test.ts`, and
+  `signed_hash_matches_typescript` pins the signed hash against
+  `tests/spending-limit-account.test.ts`. The `contract` CI job runs these
   and `aztec compile`.
 - e2e tests in `tests/e2e/spending-limit.test.ts` reach what `aztec-nargo test`
   cannot. The guard itself is private, so it runs in ACIR either way; what only
