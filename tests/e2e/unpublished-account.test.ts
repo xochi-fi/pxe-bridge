@@ -60,16 +60,18 @@ describe("account deployed unpublished by v0.1.2 (e2e)", () => {
       expect(metadata.initializationStatus).toBe(ContractInitializationStatus.INITIALIZED);
       expect(metadata.isContractPublished).toBe(false);
 
-      const log = vi.spyOn(console, "log");
       const client = new AztecClient(config.nodeUrl, UNPUBLISHED_KEY, undefined, undefined, {
         allowSponsoredFpc: false,
       });
+      const log = vi.spyOn(console, "log");
+      let lines: string[];
       try {
         await client.connect();
       } finally {
+        // Read before mockRestore, which clears the recorded calls.
+        lines = log.mock.calls.map((args) => args.join(" "));
         log.mockRestore();
       }
-      const lines = log.mock.calls.map((args) => args.join(" "));
       expect(lines).toContain("[pxe-bridge] Account recovered (initialized, not published)");
       expect(lines).not.toContain("[pxe-bridge] Deploying solver account...");
       expect(client.getAddress()).toBe(accountAddress);
