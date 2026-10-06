@@ -147,6 +147,13 @@ export interface IAztecClient {
   connect(): Promise<void>;
   createNote(params: CreateNoteParams): Promise<CreateNoteResult>;
   getVersion(): Promise<string>;
+  /**
+   * The only token the account can move, or undefined when it is not pinned.
+   * Checked in rpc.ts before any budget is reserved: the contract enforces
+   * the token only in public, and the send proves without simulating public,
+   * so a mismatched token is otherwise proven, sent, reverted, and paid for.
+   */
+  pinnedToken(): string | undefined;
 }
 
 /**

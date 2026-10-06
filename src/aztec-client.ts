@@ -594,6 +594,10 @@ export class AztecClient implements IAztecClient {
     return { noteHashes, nullifiers, l2TxHash: txHash, noteCommitment, nullifierHash };
   }
 
+  pinnedToken(): string | undefined {
+    return this.spendingLimitConfig?.token;
+  }
+
   async getVersion(): Promise<string> {
     if (!this.wallet) {
       throw new Error("Client not connected");
