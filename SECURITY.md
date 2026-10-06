@@ -49,7 +49,7 @@ allowlist position whose path has already been published:
 
 | Attacker holds | Can do | Cannot do |
 | --- | --- | --- |
-| Admin key only | Pause indefinitely (freeze, ransom). Propose limits, which take effect after 24h. Rewrite any position touched by a published `update_recipient`, and its sibling | Change never-touched positions. Spend |
+| Admin key only | Pause indefinitely (freeze, ransom). Propose limits, which take effect after 24h. Rewrite any position touched by a published `update_recipient`, and that position's sibling (`index ^ 1`) | Change a position that is neither touched by a published update nor the sibling (`index ^ 1`) of one. Spend |
 | Admin key + signing key | Once any update is published: write `h(attacker, salt)` with a self-chosen salt into such a position and drain to it, within whatever limits are live. Seed not needed | Exceed the per-tx cap or daily window before a `propose_limits` matures |
 | Admin key + seed and recipient list | Add, revoke or substitute payees at any position | Spend without the signing key |
 
@@ -66,13 +66,17 @@ permanent and grows with each update; only making `update_recipient` private
 are unsigned, so a leaf the attacker built with their own salt is spendable by
 the signing key.
 
-The seed and recipient list protect only positions whose path has never
-appeared on chain. Spending still needs the signing key.
+The admin key alone can rewrite any position touched by a published
+`update_recipient`, and that position's sibling (`index ^ 1`); the seed
+protects only positions that are neither (#32). Spending still needs the
+signing key.
 
 Practically: admin key custody is the control against a freeze, and against
 allowlist rewrites once any update has been published. The seed must still be
 archived and protected separately from the admin key; see "Losing the
-allowlist" below. Making `update_recipient` private is tracked in #32. A design
+allowlist" below. The signing secret and the admin key must never share a host,
+an IAM principal, or an operator session: together they can drain to an
+attacker-built leaf within the live limits, with no seed required. Making `update_recipient` private is tracked in #32. A design
 that keeps an emergency pause without giving a single key a permanent freeze is
 tracked in #27.
 
@@ -277,9 +281,9 @@ per position, and both addition and revocation pass through the same empty leaf
 `h(0, salt_i)`. After two updates at a position the observer has seen that
 leaf, so every later update there classifies as an addition or a revocation,
 and the position's occupancy is known. Re-adding a recipient at the same
-position republishes its old leaf, linking the two periods. Tracked in #32. The published path does let the admin key
-rewrite that position and its sibling without the seed; see "An attacker
-holding the admin key" and #32.
+position republishes its old leaf, linking the two periods. The published path
+also lets the admin key rewrite that position and its sibling (`index ^ 1`)
+without the seed; see "An attacker holding the admin key". Tracked in #32.
 
 Anonymity is still bounded by how many recipients are actually allowlisted. A
 tree removes the mechanism's ceiling; it does not supply recipients. Run with
