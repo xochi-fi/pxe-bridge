@@ -299,7 +299,7 @@ describe("TransactionLimits", () => {
       expect(r.allowed).toBe(true);
     });
 
-    // A reservation that fills the window and then releases moved nothing.
+    // A reservation that fills the window and then releases moved no tokens.
     // Tripping on it paused the bridge for 24h over a failed send.
     it("does not trip the breaker on in-flight volume", () => {
       const limits = new TransactionLimits({ dailyLimit: 5000n });

@@ -98,7 +98,9 @@ export class TransactionLimits {
       // endpoint, the auto-resume above, and a restart, and none of them hands
       // budget back -- the window is rebuilt from the audit log either way.
       // In-flight reservations are excluded: a reservation that later releases
-      // moved nothing, and must not pause the bridge for a full window.
+      // moved no tokens, and must not pause the bridge for a full window. It
+      // is not "moved nothing": a send that reverts on chain still burns its
+      // fee, but the daily limit counts token volume, not fees.
       if (committed >= this.config.dailyLimit) {
         this.paused = true;
         this.pausedAt = Date.now();
