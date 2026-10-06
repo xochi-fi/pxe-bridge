@@ -185,35 +185,44 @@ export class TransactionLimits {
    * `resume()` clears the latch and not the window, which is the correct
    * semantics: volume genuinely consumed the budget, and resuming must not
    * hand it back. The consequence is that a resume issued while the window is
-   * still full is undone by the very next request. The endpoint used to answer
-   * `paused: false` and stop there, which reads as "service restored" during
-   * exactly the incident where it is not, so an operator could believe they
-   * had recovered the bridge and walk away. The deciding number is reported
-   * now instead of being left for them to infer. `total` is committed volume,
-   * the breaker's input; `reserved` is in flight, and `remaining` is what a new
-   * request can still spend after both.
+   * still drained is undone by the next request that does not fit. The
+   * endpoint used to answer `paused: false` and stop there, which reads as
+   * "service restored" during exactly the incident where it is not, so an
+   * operator could believe they had recovered the bridge and walk away. The
+   * deciding numbers are reported now instead of being left for them to infer.
+   *
+   * `committed` is the breaker's input. `reserved` is in flight: it counts
+   * against the budget and not the breaker, but it becomes committed if those
+   * sends land. `remaining` is what a new request can still spend after both.
+   * `mayTripAgain` is whether the window is drained, or will be if every
+   * in-flight reservation commits. It is "may" rather than "will" on both
+   * counts: reservations can release, and a drained window still serves a
+   * request that fits its residual. It used to be `willTripAgain`, computed
+   * from committed volume alone, which answered false while in-flight sends
+   * were about to fill the window.
    */
   windowStatus(): {
-    total: bigint;
+    committed: bigint;
     reserved: bigint;
     remaining: bigint | undefined;
     dailyLimit: bigint | undefined;
-    willTripAgain: boolean;
+    mayTripAgain: boolean;
   } {
-    const total = this.committedTotal();
+    const committed = this.committedTotal();
     const reserved = this.reservedTotal();
+    const budgetUsed = committed + reserved;
     const dailyLimit = this.config.dailyLimit;
     let remaining: bigint | undefined;
     if (dailyLimit !== undefined) {
-      const left = dailyLimit - total - reserved;
+      const left = dailyLimit - budgetUsed;
       remaining = left > 0n ? left : 0n;
     }
     return {
-      total,
+      committed,
       reserved,
       remaining,
       dailyLimit,
-      willTripAgain: dailyLimit !== undefined && total >= dailyLimit,
+      mayTripAgain: dailyLimit !== undefined && drained(budgetUsed, dailyLimit),
     };
   }
 

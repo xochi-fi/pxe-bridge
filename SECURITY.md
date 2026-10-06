@@ -385,12 +385,25 @@ remaining budget is rejected on its own; tripping there meant one oversized
 request, needing no prior volume when `PXE_BRIDGE_MAX_AMOUNT` was unset, stopped
 the bridge for a full window, and a busy legitimate day at 80% of the cap would
 pause over one transfer too large for what was left.
-In-flight reservations count toward the remaining budget but not
-toward the trip: a reservation that releases moved no tokens. Not nothing, since
-a send that reverts on chain still burns its fee, but the daily limit counts
-token volume and not fees. `POST /admin/resume` reports `windowTotal` (committed
-volume, the breaker's input), `windowReserved` (in flight), and `remaining`
-(`dailyLimit` minus both, floored at 0).
+In-flight reservations count toward the remaining budget but not toward the
+trip: a reservation that releases moved no tokens. Not nothing, since a send
+that reverts on chain still burns its fee, but the daily limit counts token
+volume and not fees.
+
+`POST /admin/resume` clears the latch and not the window, so it answers with the
+numbers that decide whether the next request re-trips:
+
+- `committed`: committed volume in the window, the breaker's input.
+- `reserved`: in-flight volume, counted against the budget and not the breaker.
+- `dailyLimit` and `remaining` (`dailyLimit` minus both, floored at 0), present
+  when `PXE_BRIDGE_DAILY_LIMIT` is set.
+- `mayTripAgain`: the window is drained, or will be if every in-flight
+  reservation commits. "May" because reservations can release and a drained
+  window still serves a request that fits its residual.
+
+These replace `windowTotal`, `windowReserved` and `willTripAgain`. The last was
+computed from committed volume alone, so it answered false mid-drain while
+in-flight sends were about to fill the window.
 
 The rolling window is rebuilt from `PXE_BRIDGE_AUDIT_LOG` at startup. Without
 that path set it is in-memory only and a restart hands back the full daily
