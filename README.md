@@ -359,10 +359,10 @@ Prerequisites:
      `admin: <address>`, then stops with "SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM is required" if
      the account is not deployed yet. Nothing is sent, and the wallet it opens
      lives in `os.tmpdir()` and is deleted on exit.
-  2. `npm run bridge-fee-juice -- --recipient <admin address>`. This needs the
-     `--recipient` flag from PR #31; until that lands, `bridge-fee-juice` can
-     only bridge to the account derived from `PXE_BRIDGE_SECRET_KEY`, and there
-     is no supported way to bridge to the admin.
+  2. `npm run bridge-fee-juice -- --recipient <admin address>`, with
+     `L1_PRIVATE_KEY` set and no `PXE_BRIDGE_SECRET_KEY`. It prints the claim
+     as `FEE_JUICE_CLAIM`; the deposit file, `--wait` and `--recover` work as
+     in "Deploying the spending-limit account in production" above.
   3. `npm run admin -- deploy` again, with `SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM` set to the
      printed claim JSON. This is not `FEE_JUICE_CLAIM`, the bridge's own claim.
      `deploy` sends nothing if the admin is already deployed.
