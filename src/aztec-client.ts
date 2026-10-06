@@ -267,8 +267,14 @@ export class AztecClient implements IAztecClient {
 
     // Deploy account contract if not already on-chain.
     // Cannot rely on wallet.getAccounts() since the local WalletDB is
-    // ephemeral (Docker restarts clear it). Query the node instead.
-    const alreadyDeployed = await this.isContractDeployed(address);
+    // ephemeral (Docker restarts clear it). The initialization nullifier is
+    // checked against the node. Publication is not the test: v0.1.2 deployed
+    // accounts unpublished, and treating those as absent sent upgrades into
+    // the deploy path, where production refuses SponsoredFPC.
+    const metadata = await this.wallet.getContractMetadata(address);
+    const { ContractInitializationStatus } = await import("@aztec/aztec.js/wallet");
+    const alreadyDeployed =
+      metadata.initializationStatus === ContractInitializationStatus.INITIALIZED;
 
     if (!alreadyDeployed) {
       console.log("[pxe-bridge] Deploying solver account...");
@@ -311,15 +317,19 @@ export class AztecClient implements IAztecClient {
         // nullifier is the authoritative signal: it can only already exist if
         // the constructor has run, and it is emitted before the instance
         // becomes visible to the node, so checking it avoids the window where
-        // isContractDeployed still reports false.
+        // the initialization status still reads as uninitialized.
         const message = err instanceof Error ? err.message : String(err);
         const alreadyInitialized = message.includes("Existing nullifier");
-        if (alreadyInitialized || (await this.isContractDeployed(address))) {
+        if (alreadyInitialized || (await this.isInitialized(address))) {
           console.log("[pxe-bridge] Account deployed by another process");
         } else {
           throw err;
         }
       }
+    } else if (!metadata.isContractPublished) {
+      // Initialized but unpublished (v0.1.2 deployments). Not redeployed: the
+      // constructor already ran and cannot run again.
+      console.log("[pxe-bridge] Account recovered (initialized, not published)");
     } else {
       console.log("[pxe-bridge] Account recovered");
     }
@@ -486,7 +496,7 @@ export class AztecClient implements IAztecClient {
     );
     const deployerAddress = (await manager.getAccount()).getAddress();
 
-    if (!(await this.isContractDeployed(deployerAddress))) {
+    if (!(await this.isInitialized(deployerAddress))) {
       console.log(`[pxe-bridge] Deploying deployer account ${deployerAddress.toString()}...`);
       const paymentMethod = await this.buildFeePaymentMethod(deployerAddress);
       try {
@@ -707,26 +717,19 @@ export class AztecClient implements IAztecClient {
   }
 
   /**
-   * Whether the account exists ON CHAIN.
+   * Whether the account's constructor has run ON CHAIN.
    *
-   * This must ask the node, not the PXE. AccountManager.create() registers the
-   * instance with the local PXE before anything is deployed, so a PXE-side
-   * lookup always answers "yes": connect() would log "Account recovered", skip
-   * the constructor, and leave the signing-key note uncreated. Every later
-   * transaction then fails inside is_valid_impl with "Failed to get a note".
-   * That went unnoticed because no test ever sent a transaction from an
-   * account this client had deployed.
+   * Reads the initialization nullifier from the node, not PXE registration.
+   * AccountManager.create() registers the instance with the local PXE before
+   * anything is deployed, so a registration lookup always answers "yes":
+   * connect() would log "Account recovered", skip the constructor, and leave
+   * the signing-key note uncreated. Publication is not the test either: the
+   * deployer and v0.1.2 accounts are initialized but unpublished.
    */
-  private async isContractDeployed(address: AztecAddress): Promise<boolean> {
-    const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
-    const node = createAztecNodeClient(this.nodeUrl);
-    const instance = await node.getContract(address);
-    return instance !== undefined;
-    // NOTE: this reflects PUBLICATION. We do not force publication on deploy
-    // (it raised the fee beyond what SponsoredFPC covers), so a deployed but
-    // unpublished account reads as absent here. That is why the concurrent
-    // deploy path also treats "Existing nullifier" as success -- the init
-    // nullifier is the signal that survives either way.
+  private async isInitialized(address: AztecAddress): Promise<boolean> {
+    const { ContractInitializationStatus } = await import("@aztec/aztec.js/wallet");
+    const { initializationStatus } = await this.wallet!.getContractMetadata(address);
+    return initializationStatus === ContractInitializationStatus.INITIALIZED;
   }
 
   private async deployGasSettings(): Promise<{ maxFeesPerGas: GasFees }> {

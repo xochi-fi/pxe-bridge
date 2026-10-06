@@ -138,7 +138,8 @@ environment, and any other value is rejected at startup. Startup logs which way
 it is set. When refused, an undeployed account stops the bridge during startup
 with an error naming the account and this variable, before anything is sent,
 rather than failing inside the deployment. An account that is already deployed
-needs no deployment fee and starts either way.
+(initialized on chain, published or not, as v0.1.2 left it) needs no deployment
+fee and starts either way.
 
 On a network without SponsoredFPC the spending-limit account therefore cannot be
 deployed by the bridge. Set `PXE_BRIDGE_ALLOW_SPONSORED_FPC=true` only when the
