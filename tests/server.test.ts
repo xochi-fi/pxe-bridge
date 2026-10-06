@@ -36,6 +36,10 @@ class FakeAztecClient implements IAztecClient {
     if (this.versionError) throw this.versionError;
     return this.versionResult;
   }
+
+  pinnedToken(): string | undefined {
+    return undefined;
+  }
 }
 
 let server: Server;

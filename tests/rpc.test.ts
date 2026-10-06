@@ -44,6 +44,11 @@ class FakeAztecClient implements IAztecClient {
     if (this.versionError) throw this.versionError;
     return this.versionResult;
   }
+
+  pinned: string | undefined = undefined;
+  pinnedToken(): string | undefined {
+    return this.pinned;
+  }
 }
 
 function rpcRequest(method: string, params: unknown[] = []) {
@@ -269,6 +274,49 @@ describe("handleRpcRequest", () => {
         client,
       );
       expect(res.id).toBe("req-123");
+    });
+  });
+
+  describe("pinned token", () => {
+    const PINNED = "0x" + "B".repeat(64);
+    const params = (token: string) => ({ recipient: VALID_ADDR, token, amount: "3000", chainId: 1 });
+
+    it("refuses another token before sending or reserving budget", async () => {
+      client.pinned = PINNED;
+      const limits = new TransactionLimits({ dailyLimit: 5000n });
+
+      const res = await handleRpcRequest(
+        rpcRequest("aztec_createNote", [params(VALID_ADDR)]),
+        client,
+        { limits },
+      );
+
+      expect("error" in res && res.error.code).toBe(-32602);
+      expect(client.createNoteCalls).toBe(0);
+      expect(limits.check(5000n).allowed).toBe(true);
+    });
+
+    it("accepts the pinned token in any case", async () => {
+      client.pinned = PINNED;
+
+      const res = await handleRpcRequest(
+        rpcRequest("aztec_createNote", [params(PINNED.toLowerCase())]),
+        client,
+      );
+
+      expect(res).toHaveProperty("result");
+      expect(client.createNoteCalls).toBe(1);
+    });
+
+    it("frees the idempotency key so a corrected retry runs", async () => {
+      client.pinned = PINNED;
+      const idempotency = new IdempotencyStore();
+      const ctx: RpcContext = { idempotency, idempotencyKey: "k1" };
+
+      await handleRpcRequest(rpcRequest("aztec_createNote", [params(VALID_ADDR)]), client, ctx);
+      const res = await handleRpcRequest(rpcRequest("aztec_createNote", [params(PINNED)]), client, ctx);
+
+      expect(res).toHaveProperty("result");
     });
   });
 
