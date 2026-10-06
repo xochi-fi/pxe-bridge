@@ -24,6 +24,7 @@
  *   8  allowlist_root is not the expected root
  *   16 admin fee juice below --min-fee-juice
  * 1 alone is an error, including a contract class that is not the artifact's.
+ * Codes >= 128 are interrupts (129 SIGHUP, 130 SIGINT, 143 SIGTERM), not bits.
  *
  * pause and unpause take effect at the inclusion of the next transfer. pause is
  * checked only in check_spending_public, so a compromised signing key can

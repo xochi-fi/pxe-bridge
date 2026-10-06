@@ -393,7 +393,7 @@ npm run update-allowlist -- --revoke 0x<addr>
 Keys, the seed and the claim are checked without echoing them and deleted from the
 process environment on read. The admin wallet's stores, which hold the admin
 key, live in `os.tmpdir()` (`wallet_data-*`, `pxe_data-*`) and are deleted on
-exit, on error and on SIGINT/SIGTERM. SIGKILL or a crash leaves them.
+exit, on error and on SIGHUP/SIGINT/SIGTERM. SIGKILL or a crash leaves them.
 
 Limits are in token base units, decimal, and must satisfy the contract:
 both non-zero, daily >= per-tx, each within u128. A proposal becomes
@@ -412,6 +412,9 @@ admin and the configured set reproduces the account's `allowlist_root`.
 | 4 | Limit proposal pending, expired included, until applied or cancelled |
 | 8 | `allowlist_root` is not the expected root: `--expect-root`, else the root of `PXE_BRIDGE_ALLOWLIST_SEED` and `PXE_BRIDGE_ALLOWLIST_RECIPIENTS` when set, else unchecked |
 | 16 | Admin fee juice below `--min-fee-juice`; unchecked without it |
+
+Codes >= 128 are interrupts, not bits: 129 SIGHUP, 130 SIGINT, 143 SIGTERM.
+Status bits stay below 32.
 
 A send is admitted only if the admin holds its declared fee limit: estimated
 gas plus 10%, at 10x the worst predicted base fee. That is about 11x the `fee`

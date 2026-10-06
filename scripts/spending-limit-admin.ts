@@ -120,12 +120,14 @@ function adoptStore(store: AztecLMDBStoreV2): void {
 
 /**
  * Runs `main`, then deletes every wallet store and exits with its code; 1 on a
- * throw. SIGINT and SIGTERM delete the stores too, without waiting for the
- * wallet to stop.
+ * throw. SIGHUP, SIGINT and SIGTERM delete the stores too, without waiting for
+ * the wallet to stop, and exit 128 + signal number. Codes >= 128 are
+ * interrupts, not status bits; statusExitCode stays below 32.
  */
 export function runScript(tag: string, main: () => Promise<number>): void {
   let signalled = false;
   for (const [signal, code] of [
+    ["SIGHUP", 129],
     ["SIGINT", 130],
     ["SIGTERM", 143],
   ] as const) {
@@ -332,7 +334,8 @@ export function proposalWindow(pendingChangeTime: bigint, now: bigint): Proposal
  * Bits, ORed: 2 pause state is not the expected one; 4 limit proposal pending
  * (expired included, until cancel-limits clears it); 8 allowlist_root is not
  * the expected root; 16 admin fee juice below the minimum, or unread. 1 alone
- * is an error.
+ * is an error. New bits must stay below 32: runScript's signal exits (129,
+ * 130, 143) would otherwise read as bit combinations.
  */
 export function statusExitCode(
   state: AccountState,

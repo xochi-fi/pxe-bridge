@@ -124,6 +124,8 @@ keeps the seed off the monitoring host. The exit code is a bitmask:
   needed for `pause`.
 - `1`: the account could not be read, or its class ID is not the artifact's.
   Treat as unmonitored.
+- `>= 128`: interrupted by a signal (129 SIGHUP, 130 SIGINT, 143 SIGTERM), not
+  bits. Treat as unmonitored.
 
 A proposal sits 24h before `apply-limits` can take it, and that window is the
 notice `status` exists to read. `pause`, `unpause` and `update_recipient` give
