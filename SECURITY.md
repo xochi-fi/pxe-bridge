@@ -103,6 +103,24 @@ declared fee limit cannot pause. Monitor it with `--min-fee-juice`.
 The signing key is set once at construction, so the account keeps it. `unpause`
 re-enables whoever holds it, within the on-chain limits and allowlist.
 
+### Admin key compromised
+
+`pause` does not help here: the attacker holds the same key and can `unpause`,
+or pause the account themselves to hold it hostage. Nothing on chain outranks
+the admin, and the admin key cannot be rotated.
+
+1. Stop the bridge, so it signs nothing against an allowlist the attacker may
+   be rewriting.
+2. Consider moving the balance out while it can still move: one
+   `aztec_createNote` to a recipient you control and know is allowlisted,
+   with the bridge brought back up for that call only, before the attacker
+   pauses the account or rewrites that position. Run
+   `npm run admin -- status --expect-root <root>` first: if the root has
+   changed, the bridge refuses to send and the transfer would revert anyway.
+3. Escalate. There is no on-chain recovery path for this account (see
+   "An attacker holding the admin key" above and the recovery work tracked in
+   issues #27 and #32); treat the account as lost once funds are out or frozen.
+
 ### Monitoring
 
 Run `npm run admin -- status --min-fee-juice <n>` from cron and alert on any
@@ -115,11 +133,13 @@ keeps the seed off the monitoring host. The exit code is a bitmask:
   unpaused under `--expect-paused`: an attacker holding the admin key undoing
   an incident pause.
 - `4`: a limit proposal is pending. If the operator did not make it, the admin
-  key is compromised; see above. `cancel-limits` withdraws it, and an attacker
-  holding the key can propose again.
+  key is compromised; see "Admin key compromised". `cancel-limits` withdraws
+  it, and an attacker holding the key can propose again.
 - `8`: `allowlist_root` is not the expected root. `update_recipient` is
   immediate, so this is the only notice of an allowlist rewrite. Unless the
-  operator just ran `update-allowlist`, the admin key is compromised: pause.
+  operator just ran `update-allowlist`, the admin key is compromised; see
+  "Admin key compromised". If an `update-allowlist` run stopped before its
+  receipt, this bit is how to tell whether it landed.
 - `16`: admin fee juice is below `--min-fee-juice`. Top it up before it is
   needed for `pause`.
 - `1`: the account could not be read, or its class ID is not the artifact's.
