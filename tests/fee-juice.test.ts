@@ -229,7 +229,7 @@ describe("SponsoredFPC deployment fee fallback", () => {
     expect(
       sponsoredFpcSetting({ NODE_ENV: "production", PXE_BRIDGE_ALLOW_SPONSORED_FPC: "true" }).reason,
     ).toBe("PXE_BRIDGE_ALLOW_SPONSORED_FPC=true");
-    expect(sponsoredFpcSetting({ PXE_BRIDGE_ALLOW_SPONSORED_FPC: "" }).reason).toBe("NODE_ENV=(unset)");
+    expect(sponsoredFpcSetting({}).reason).toBe("NODE_ENV=(unset)");
     expect(sponsoredFpcSetting({ NODE_ENV: "development" }).reason).toBe("NODE_ENV=development");
   });
 
@@ -238,5 +238,12 @@ describe("SponsoredFPC deployment fee fallback", () => {
     expect(() =>
       sponsoredFpcSetting({ NODE_ENV: "production", PXE_BRIDGE_ALLOW_SPONSORED_FPC: "1" }),
     ).toThrow(/PXE_BRIDGE_ALLOW_SPONSORED_FPC must be "true" or "false"/);
+  });
+
+  // `VAR=` in an env file is a setting someone wrote, not an absence.
+  it("rejects an empty value", () => {
+    expect(() =>
+      sponsoredFpcSetting({ NODE_ENV: "development", PXE_BRIDGE_ALLOW_SPONSORED_FPC: "" }),
+    ).toThrow(/PXE_BRIDGE_ALLOW_SPONSORED_FPC must be "true" or "false", got ""/);
   });
 });

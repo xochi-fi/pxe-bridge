@@ -117,14 +117,15 @@ export interface SponsoredFpcSetting {
  * alone cannot tell a testnet from a network that charges.
  *
  * Only "true" and "false" are accepted, so a typo fails at startup rather than
- * silently meaning either one. `reason` names the variable that decided.
+ * silently meaning either one. An empty value is rejected too: `VAR=` reads as
+ * a deliberate setting, not as unset. `reason` names the variable that decided.
  */
 export function sponsoredFpcSetting(env: Record<string, string | undefined>): SponsoredFpcSetting {
   const raw = env[ALLOW_SPONSORED_FPC_ENV];
   if (raw === "true" || raw === "false") {
     return { allowed: raw === "true", reason: `${ALLOW_SPONSORED_FPC_ENV}=${raw}` };
   }
-  if (raw !== undefined && raw !== "") {
+  if (raw !== undefined) {
     throw new Error(`${ALLOW_SPONSORED_FPC_ENV} must be "true" or "false", got ${JSON.stringify(raw)}`);
   }
   return {
