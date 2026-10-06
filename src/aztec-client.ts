@@ -649,7 +649,8 @@ export class AztecClient implements IAztecClient {
    * so it needs no separate key material and is reproducible across restarts.
    * A standard Schnorr account can self-deploy because its entrypoint has no
    * single-call restriction. It pays with the deployer claim when one is
-   * configured, else SponsoredFPC, subject to `sponsoredFpcSetting`.
+   * configured and unspent, from its own balance when the claim is spent but
+   * left one, else SponsoredFPC, subject to `sponsoredFpcSetting`.
    */
   private async ensureDeployer(
     secret: Fr,
@@ -681,31 +682,68 @@ export class AztecClient implements IAztecClient {
       return { address: deployerAddress, claim: spent ? "spent" : "unspent" };
     }
 
+    const claim = this.deployerFeeJuiceClaim;
+    // Checked before sending. A claim with no message would fail the deploy
+    // with "No L1 to L2 message found", which deployerClaimSpent names; a
+    // spent one with an existing nullifier, though the balance it credited
+    // may still pay for the deploy.
+    const spent = claim ? await this.deployerClaimSpent(deployerAddress, claim) : false;
+    let fromBalance = false;
+    if (spent) {
+      const balance = await this.feeJuiceBalance(deployerAddress);
+      if (balance === 0n) {
+        throw new Error(
+          `Deployer ${deployerAddress.toString()} is not initialized, ${DEPLOYER_FEE_JUICE_CLAIM_ENV} ` +
+            "is already spent and the deployer holds no fee juice. Bridge a new claim to the " +
+            `deployer (npm run bridge-fee-juice -- --deployer --recipient ${deployerAddress.toString()}).`,
+        );
+      }
+      fromBalance = true;
+      console.log(
+        `[pxe-bridge] ${DEPLOYER_FEE_JUICE_CLAIM_ENV} is spent; paying the deployer's deployment ` +
+          `from its fee juice balance (${balance})`,
+      );
+    }
+
     console.log(`[pxe-bridge] Deploying deployer account ${deployerAddress.toString()}...`);
-    const paymentMethod = await this.buildFeePaymentMethod(
-      deployerAddress,
-      this.deployerFeeJuiceClaim,
-    );
+    // No payment method from NO_FROM: AccountEntrypointMetaPaymentMethod wraps
+    // an empty fee payload as PREEXISTING_FEE_JUICE, the deployer paying from
+    // its own balance.
+    const paymentMethod = fromBalance
+      ? undefined
+      : await this.buildFeePaymentMethod(deployerAddress, claim);
     try {
       await (await manager.getDeployMethod()).send({
         from: NO_FROM,
         // Same headroom as the account it exists to deploy. This one runs
         // first, so a spike here strands the account deployment behind it.
-        fee: { paymentMethod, gasSettings: await this.deployGasSettings() },
+        fee: {
+          ...(paymentMethod ? { paymentMethod } : {}),
+          gasSettings: await this.deployGasSettings(),
+        },
       });
       console.log("[pxe-bridge] Deployer deployed");
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      if (fromBalance && deployerUnderfunded(message)) {
+        throw new Error(
+          `Deployer ${deployerAddress.toString()} cannot pay the fee for its own deployment. Bridge ` +
+            `a new claim to it (npm run bridge-fee-juice -- --deployer --recipient ${deployerAddress.toString()}). ` +
+            `Cause: ${message}`,
+          { cause: err },
+        );
+      }
       if (!message.includes("Existing nullifier")) throw err;
       // Either the deployer's init nullifier (a concurrent deploy won) or the
-      // claim's message nullifier (claim spent elsewhere, deployer still
-      // uninitialized). Only the first is success.
+      // claim's message nullifier (claim spent between the check above and
+      // the send, deployer still uninitialized). Only the first is success.
       if (!(await this.isInitialized(deployerAddress))) {
-        if (!this.deployerFeeJuiceClaim) throw err;
+        if (!claim || fromBalance) throw err;
         throw new Error(
           `Deployer ${deployerAddress.toString()} is not initialized and its deploy hit an ` +
-            `existing nullifier: ${DEPLOYER_FEE_JUICE_CLAIM_ENV} is already spent. Bridge a new ` +
-            `claim to the deployer (npm run bridge-fee-juice -- --deployer --recipient ${deployerAddress.toString()}). Cause: ${message}`,
+            `existing nullifier: ${DEPLOYER_FEE_JUICE_CLAIM_ENV} is already spent. Restart to ` +
+            `pay from the balance it credited, or bridge a new claim to the deployer (npm run ` +
+            `bridge-fee-juice -- --deployer --recipient ${deployerAddress.toString()}). Cause: ${message}`,
           { cause: err },
         );
       }
@@ -713,8 +751,15 @@ export class AztecClient implements IAztecClient {
     }
     return {
       address: deployerAddress,
-      claim: this.deployerFeeJuiceClaim ? "spent" : "absent",
+      claim: claim ? "spent" : "absent",
     };
+  }
+
+  /** Public fee juice balance of `address`, read from FeeJuice storage on the node. */
+  private async feeJuiceBalance(address: AztecAddress): Promise<bigint> {
+    const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
+    const { getFeeJuiceBalance } = await import("@aztec/aztec.js/utils");
+    return getFeeJuiceBalance(address, createAztecNodeClient(this.nodeUrl));
   }
 
   /**
