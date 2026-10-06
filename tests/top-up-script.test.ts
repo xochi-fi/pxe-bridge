@@ -18,6 +18,15 @@ function run(env: Record<string, string>, args: string[] = []): { status: number
 
 // Spawning tsx loads the Aztec SDK, which takes seconds.
 describe("top-up-fee-juice refusals", { timeout: 60_000 }, () => {
+  // `npm run top-up-fee-juice -- --recover <file>` used to be dropped
+  // silently, and the run deposited again.
+  it("refuses arguments, naming the env equivalent", () => {
+    const r = run({ FEE_JUICE_RECIPIENT: RECIPIENT }, ["--recover", "x.json"]);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("takes no arguments");
+    expect(r.out).toContain("--recover is FEE_JUICE_RECOVER");
+  });
+
   it.each(["FEE_JUICE_PAYER_DEPLOYER", "FEE_JUICE_MINT", "FEE_JUICE_PAYER_SPONSORED"])(
     "rejects a %s that is not true or false",
     (name) => {

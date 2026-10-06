@@ -39,6 +39,10 @@
  * Usage:
  *   npx tsx scripts/top-up-fee-juice.ts
  *
+ * Takes no arguments; every option is an env variable. Arguments are refused
+ * rather than ignored, since `-- --recover <file>` silently dropped would
+ * deposit again.
+ *
  * Required env:
  *   FEE_JUICE_RECIPIENT    -- AztecAddress to credit (the bridge logs its own
  *                             as "[pxe-bridge] Account address:")
@@ -157,6 +161,13 @@ function parseResumeClaim(raw: string): BridgedFeeJuiceClaim {
   return parsed.data;
 }
 
+/** Env equivalents of bridge-fee-juice's flags, for the refusal below. */
+const FLAG_ENV: Record<string, string> = {
+  "--recover": "FEE_JUICE_RECOVER",
+  "--recipient": "FEE_JUICE_RECIPIENT",
+  "--deployer": "FEE_JUICE_PAYER_DEPLOYER=true",
+};
+
 function flag(name: string): boolean {
   try {
     return booleanEnv(process.env, name) ?? false;
@@ -166,6 +177,18 @@ function flag(name: string): boolean {
 }
 
 async function main(): Promise<void> {
+  const args = process.argv.slice(2);
+  if (args.length > 0) {
+    const hints = args.flatMap((a) => {
+      const env = FLAG_ENV[a.split("=")[0]!];
+      return env ? [`${a.split("=")[0]} is ${env}`] : [];
+    });
+    fail(
+      `top-up-fee-juice takes no arguments, got ${JSON.stringify(args)}; set env variables instead` +
+        (hints.length > 0 ? ` (${hints.join(", ")})` : "") +
+        ". See the header of scripts/top-up-fee-juice.ts.",
+    );
+  }
   const RECIPIENT = required("FEE_JUICE_RECIPIENT");
   const PAYER_DEPLOYER = flag("FEE_JUICE_PAYER_DEPLOYER");
   const PAYER_KEY = process.env["FEE_JUICE_PAYER_KEY"];
