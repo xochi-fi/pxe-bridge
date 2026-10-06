@@ -685,11 +685,11 @@ export class AztecClient implements IAztecClient {
     console.log(`[pxe-bridge] Deployer address: ${deployerAddress.toString()}`);
 
     // Initialization, not publication. A self-deploy leaves the instance
-    // unpublished (DeployAccountMethod defaults skipInstancePublication), so
-    // isContractDeployed reads false for a deployer that exists, and a retry
-    // after a failed account deploy would resend the deployer's deployment,
-    // including a claim that was already consumed. createSchnorrAccount has
-    // registered the instance, so the status is definitive.
+    // unpublished (DeployAccountMethod defaults skipInstancePublication), and
+    // a retry after a failed account deploy would otherwise resend the
+    // deployer's deployment, including a claim that was already consumed.
+    // createSchnorrAccount has registered the instance, so the status is
+    // definitive.
     const claim = this.deployerFeeJuiceClaim;
     if (await this.isInitialized(deployerAddress)) {
       if (!claim) {

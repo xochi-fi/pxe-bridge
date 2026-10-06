@@ -14,7 +14,6 @@ import { getFeeJuiceBalance } from "@aztec/aztec.js/utils";
 import { ContractInitializationStatus } from "@aztec/aztec.js/wallet";
 import { createPublicClient, http } from "viem";
 import {
-  ALLOW_SPONSORED_FPC_ENV,
   AztecClient,
   DEPLOYER_FEE_JUICE_CLAIM_ENV,
   SPONSORED_FPC_REFUSED_ERROR,
@@ -78,20 +77,6 @@ const execFileAsync = promisify(execFile);
 // Pinned by the L1 faucet: bridgeClaim mints, and a mint must equal the
 // faucet's fixed amount.
 const DEPLOYER_FEE_JUICE = 1_000_000_000_000_000_000_000n;
-
-/** Constructs the client with SponsoredFPC switched off, scoped to it alone. */
-function withoutSponsoredFpc(make: () => AztecClient): AztecClient {
-  // Read at construction, so restoring right after scopes the gate to this
-  // client and leaves every other suite's sandbox fallback alone.
-  const previous = process.env[ALLOW_SPONSORED_FPC_ENV];
-  process.env[ALLOW_SPONSORED_FPC_ENV] = "false";
-  try {
-    return make();
-  } finally {
-    if (previous === undefined) delete process.env[ALLOW_SPONSORED_FPC_ENV];
-    else process.env[ALLOW_SPONSORED_FPC_ENV] = previous;
-  }
-}
 
 /** Address the bridge derives for the limit account under `key`, without deploying. */
 async function limitAccountAddress(
@@ -227,9 +212,9 @@ describe("spending limit account deployed from a funded deployer (e2e)", () => {
       );
       expect(await node.getContract(expectedAccount)).toBeUndefined();
 
-      const client = withoutSponsoredFpc(
-        () => new AztecClient(config.nodeUrl, DEPLOYER_PATH_KEY, undefined, limits, claim),
-      );
+      const client = new AztecClient(config.nodeUrl, DEPLOYER_PATH_KEY, undefined, limits, claim, {
+        allowSponsoredFpc: false,
+      });
       await client.connect();
 
       const accountAddress = AztecAddress.fromStringUnsafe(client.getAddress()!);
@@ -275,9 +260,9 @@ describe("spending limit account deployed from a funded deployer (e2e)", () => {
       expect(await node.getContract(expectedAccount)).toBeUndefined();
       const before = await getFeeJuiceBalance(deployer, node);
 
-      const client = withoutSponsoredFpc(
-        () => new AztecClient(config.nodeUrl, DEPLOYER_PATH_KEY, undefined, relimited, claim),
-      );
+      const client = new AztecClient(config.nodeUrl, DEPLOYER_PATH_KEY, undefined, relimited, claim, {
+        allowSponsoredFpc: false,
+      });
       await client.connect();
 
       const accountAddress = AztecAddress.fromStringUnsafe(client.getAddress()!);
@@ -295,9 +280,9 @@ describe("spending limit account deployed from a funded deployer (e2e)", () => {
       const { AztecAddress } = await import("@aztec/aztec.js/addresses");
       const node = createAztecNodeClient(config.nodeUrl);
 
-      const client = withoutSponsoredFpc(
-        () => new AztecClient(config.nodeUrl, REFUSED_PATH_KEY, undefined, limits),
-      );
+      const client = new AztecClient(config.nodeUrl, REFUSED_PATH_KEY, undefined, limits, undefined, {
+        allowSponsoredFpc: false,
+      });
       await expect(client.connect()).rejects.toThrow(SPONSORED_FPC_REFUSED_ERROR);
 
       const account = AztecAddress.fromStringUnsafe(
