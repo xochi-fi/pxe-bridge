@@ -167,6 +167,22 @@ testnet.
      npm run bridge-fee-juice -- --deployer --recipient <Deployer address>
    ```
 
+   Before any L1 write it prints the claim secret, its hash and the starting
+   L1 block as a `--recover` command. If the run dies before the claim is
+   printed (timeout, signal, crash), the deposit may still land: run that
+   command, with the same `AZTEC_NODE_URL` and `L1_RPC_URL`, instead of this
+   step. It finds the deposit on L1, prints the claim and waits, without
+   depositing:
+
+   ```bash
+   FEE_JUICE_CLAIM_SECRET=0x... FEE_JUICE_RECOVER_FROM_BLOCK=<block> BRIDGE_AMOUNT=... \
+   L1_RPC_URL=https://... AZTEC_NODE_URL=https://... \
+     npm run bridge-fee-juice -- --deployer --recipient <Deployer address> --recover <secretHash>
+   ```
+
+   "No DepositToAztecPublic" means not mined: never sent, or still pending.
+   Rerun `--recover` before bridging anew, since a pending deposit can land.
+
    As soon as the L1 deposit lands it prints
    `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM='{...}'` and the L1 to L2 message
    hash, then waits until the message has synced and says so. Start the bridge
@@ -253,10 +269,15 @@ Neither key is written to `./aztec-wallet-data`. The wallet stores are created
 under `os.tmpdir()` and deleted on exit, SIGINT and SIGTERM; SIGKILL or a
 crash leaves them.
 
+Before any L1 write, the script prints `FEE_JUICE_RECOVER`,
+`FEE_JUICE_CLAIM_SECRET`, `FEE_JUICE_RECOVER_FROM_BLOCK` and `BRIDGE_AMOUNT`.
+If the run dies before the next step, rerun with those set: it finds the
+deposit on L1, waits for the message and sends the claim, without depositing.
+
 As soon as the L1 deposit lands, the script prints
 `FEE_JUICE_RESUME_CLAIM='{...}'`. If the wait or the claim transaction fails
 after that, rerun with that variable set: it skips the deposit, waits for the
-message and sends the claim. Rerunning without it deposits again.
+message and sends the claim. Rerunning with neither deposits again.
 
 ```bash
 FEE_JUICE_RECIPIENT=0x...   \
@@ -274,7 +295,10 @@ npm run top-up-fee-juice
 | `FEE_JUICE_PAYER_KEY` | One of these two | -- | Secret key of a separate payer account |
 | `FEE_JUICE_PAYER_DEPLOYER` | One of these two | -- | `true` pays from the spending-limit account's deployer, using the bridge's key |
 | `FEE_JUICE_RESUME_CLAIM` | No | -- | JSON printed by an earlier run; skips the L1 deposit |
-| `L1_PRIVATE_KEY` | Yes, unless resuming | -- | Ethereum key holding at least `BRIDGE_AMOUNT` of the Fee Juice ERC20; checked before any L1 write |
+| `FEE_JUICE_RECOVER` | No | -- | Secret hash printed by an earlier run before its deposit; finds that deposit on L1 instead of making one |
+| `FEE_JUICE_CLAIM_SECRET` | With `FEE_JUICE_RECOVER` | -- | Claim secret printed with it |
+| `FEE_JUICE_RECOVER_FROM_BLOCK` | With `FEE_JUICE_RECOVER` | -- | L1 block printed with it; the scan starts there |
+| `L1_PRIVATE_KEY` | Yes, unless resuming or recovering | -- | Ethereum key holding at least `BRIDGE_AMOUNT` of the Fee Juice ERC20; checked before any L1 write |
 | `AZTEC_NODE_URL` | No | `http://localhost:8080` | Aztec node |
 | `L1_RPC_URL` | No | `http://localhost:8545` | Ethereum RPC |
 | `L1_CHAIN_ID` | No | Anvil's | Required for any L1 other than the sandbox |

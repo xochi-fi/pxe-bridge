@@ -4,6 +4,8 @@ import {
   assertAztecAddress,
   assertBridgeAmount,
   claimFeeJuiceFor,
+  isDepositOf,
+  recoverFeeJuiceClaim,
   topUpFeeJuice,
   type ClaimingWallet,
 } from "../src/fee-juice.js";
@@ -132,6 +134,46 @@ describe("fee juice top-up ordering", () => {
         claim: CLAIM,
       }),
     ).rejects.toThrow("recipient must be a 32-byte hex Aztec address");
+  });
+});
+
+describe("fee juice deposit recovery", () => {
+  const UNREACHABLE = "http://127.0.0.1:1";
+  const SECRET_HASH = "0x" + "0a".repeat(32);
+  const deposit = { recipient: "0x" + "AB".repeat(32), claimAmount: "1000", secretHash: SECRET_HASH };
+
+  // The event decodes bytes32 lowercase. A case-sensitive compare would read
+  // a mined deposit as missing, and the operator would bridge a second time.
+  it("matches the deposit regardless of hex case", () => {
+    expect(
+      isDepositOf({ to: "0x" + "ab".repeat(32), amount: 1000n, secretHash: "0x" + "0A".repeat(32) }, deposit),
+    ).toBe(true);
+  });
+
+  // Anyone can deposit to the recipient, and the secret hash is public once
+  // the first deposit is mined. Only the exact deposit is recovered.
+  it("rejects a deposit with another amount or secret hash", () => {
+    const to = deposit.recipient;
+    expect(isDepositOf({ to, amount: 999n, secretHash: SECRET_HASH }, deposit)).toBe(false);
+    expect(isDepositOf({ to, amount: 1000n, secretHash: "0x" + "0b".repeat(32) }, deposit)).toBe(false);
+    expect(isDepositOf({ to: "0x" + "cd".repeat(32), amount: 1000n, secretHash: SECRET_HASH }, deposit)).toBe(false);
+    expect(isDepositOf({}, deposit)).toBe(false);
+  });
+
+  // A secret that does not produce the hash can claim nothing the scan finds,
+  // and the scan would report the deposit as unmined.
+  it("rejects a secret that does not hash to the secret hash before any lookup", async () => {
+    await expect(
+      recoverFeeJuiceClaim({
+        nodeUrl: UNREACHABLE,
+        l1RpcUrl: UNREACHABLE,
+        recipient: RECIPIENT,
+        amount: 1n,
+        claimSecret: "0x" + "01".repeat(32),
+        secretHash: SECRET_HASH,
+        fromBlock: 0n,
+      }),
+    ).rejects.toThrow(`hashes to`);
   });
 });
 

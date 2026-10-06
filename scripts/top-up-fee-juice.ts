@@ -23,10 +23,16 @@
  *       bridge once with this key, without PXE_BRIDGE_SPENDING_LIMIT_ADMIN, and
  *       with FEE_JUICE_CLAIM bridged to the "Account address" it logs.
  *
+ * The claim secret, its hash and the starting L1 block are printed as
+ * FEE_JUICE_RECOVER / FEE_JUICE_CLAIM_SECRET / FEE_JUICE_RECOVER_FROM_BLOCK
+ * before any L1 write. If the run dies before printing FEE_JUICE_RESUME_CLAIM,
+ * rerun with those three set: it finds the deposit on L1, waits for the
+ * message and sends the claim, without depositing.
+ *
  * The claim and its message hash are printed as FEE_JUICE_RESUME_CLAIM as soon
  * as the L1 deposit lands. If the wait or the claim transaction fails after
  * that, rerun with FEE_JUICE_RESUME_CLAIM set: it skips the deposit, waits for
- * the message and sends the claim. Rerunning without it deposits again.
+ * the message and sends the claim. Rerunning with neither deposits again.
  *
  * Usage:
  *   npx tsx scripts/top-up-fee-juice.ts
@@ -37,14 +43,20 @@
  *   FEE_JUICE_PAYER_KEY or FEE_JUICE_PAYER_DEPLOYER=true -- see above
  *   L1_PRIVATE_KEY         -- Ethereum private key holding at least BRIDGE_AMOUNT
  *                             of the Fee Juice ERC20 (checked before any L1 write);
- *                             unused with FEE_JUICE_RESUME_CLAIM
+ *                             unused with FEE_JUICE_RESUME_CLAIM or FEE_JUICE_RECOVER
  *
  * Optional env:
  *   AZTEC_NODE_URL             -- Aztec node (default: http://localhost:8080)
  *   L1_RPC_URL                 -- Ethereum RPC (default: http://localhost:8545)
- *   L1_CHAIN_ID                -- L1 chain id (default: Anvil's, per the SDK)
- *   BRIDGE_AMOUNT              -- fee juice in wei (default: 1e18)
+ *   L1_CHAIN_ID                -- L1 chain id (default: Anvil's, per the SDK; with
+ *                                 FEE_JUICE_RECOVER, the node's)
+ *   BRIDGE_AMOUNT              -- fee juice in wei (default: 1e18); with
+ *                                 FEE_JUICE_RECOVER, the amount the lost run bridged
  *   FEE_JUICE_RESUME_CLAIM     -- JSON printed by an earlier run; skips the L1 deposit
+ *   FEE_JUICE_RECOVER          -- secret hash printed by an earlier run before its
+ *                                 deposit; finds that deposit on L1 instead of making one.
+ *                                 Needs FEE_JUICE_CLAIM_SECRET and
+ *                                 FEE_JUICE_RECOVER_FROM_BLOCK, printed with it
  *   FEE_JUICE_PAYER_SPONSORED  -- "true" to pay via SponsoredFPC instead of the
  *                                 payer's own balance; sandbox and testnet only
  *   FEE_JUICE_MINT             -- "true" to mint BRIDGE_AMOUNT from the L1 faucet
@@ -60,10 +72,11 @@ import {
   assertAztecAddress,
   assertBridgeAmount,
   claimFeeJuiceFor,
+  recoverFeeJuiceClaim,
   topUpFeeJuice,
   waitForL1ToL2Message,
 } from "../src/fee-juice.js";
-import type { ClaimingWallet } from "../src/fee-juice.js";
+import type { ClaimingWallet, PendingFeeJuiceDeposit } from "../src/fee-juice.js";
 import { resolveSecretKey } from "../src/secrets.js";
 import { BridgedFeeJuiceClaimSchema } from "../src/types.js";
 import type { BridgedFeeJuiceClaim, FeeJuiceClaim } from "../src/types.js";
@@ -143,11 +156,14 @@ async function main(): Promise<void> {
   const PAYER_KEY = process.env["FEE_JUICE_PAYER_KEY"];
   const L1_PRIVATE_KEY = process.env["L1_PRIVATE_KEY"];
   const RESUME = process.env["FEE_JUICE_RESUME_CLAIM"];
+  const RECOVER = process.env["FEE_JUICE_RECOVER"];
+  const CLAIM_SECRET = process.env["FEE_JUICE_CLAIM_SECRET"];
   // Cleared for the same reason AztecClient nulls its own reference: none of
   // these has any further use once read.
   delete process.env["FEE_JUICE_PAYER_KEY"];
   delete process.env["L1_PRIVATE_KEY"];
   delete process.env["FEE_JUICE_RESUME_CLAIM"];
+  delete process.env["FEE_JUICE_CLAIM_SECRET"];
 
   if (PAYER_DEPLOYER === Boolean(PAYER_KEY)) {
     fail("Set exactly one of FEE_JUICE_PAYER_KEY or FEE_JUICE_PAYER_DEPLOYER=true");
@@ -170,8 +186,23 @@ async function main(): Promise<void> {
     fail((err as Error).message);
   }
 
+  if (RESUME && RECOVER) {
+    fail("Set FEE_JUICE_RESUME_CLAIM or FEE_JUICE_RECOVER, not both");
+  }
   const resume = RESUME ? parseResumeClaim(RESUME) : undefined;
-  if (!resume && !L1_PRIVATE_KEY) {
+  let recoverFrom: bigint | undefined;
+  if (RECOVER) {
+    if (!/^0x[0-9a-fA-F]{64}$/.test(RECOVER)) {
+      fail(`FEE_JUICE_RECOVER must be a 32-byte hex secret hash, got ${JSON.stringify(RECOVER)}`);
+    }
+    if (!CLAIM_SECRET) fail("FEE_JUICE_RECOVER needs FEE_JUICE_CLAIM_SECRET, printed with it");
+    const raw = process.env["FEE_JUICE_RECOVER_FROM_BLOCK"];
+    if (raw === undefined || !/^\d+$/.test(raw)) {
+      fail("FEE_JUICE_RECOVER needs FEE_JUICE_RECOVER_FROM_BLOCK, the decimal L1 block printed with it");
+    }
+    recoverFrom = BigInt(raw);
+  }
+  if (!resume && !RECOVER && !L1_PRIVATE_KEY) {
     fail("L1_PRIVATE_KEY is required");
   }
 
@@ -252,7 +283,33 @@ async function main(): Promise<void> {
     await waitForL1ToL2Message(createAztecNodeClient(AZTEC_NODE_URL), messageHash, {});
     await claimFeeJuiceFor({ ...claimOpts, claim: resumed });
     claim = resumed;
+  } else if (RECOVER) {
+    console.log("Recovering: no L1 deposit");
+    let recovered: BridgedFeeJuiceClaim;
+    try {
+      recovered = await recoverFeeJuiceClaim({
+        nodeUrl: AZTEC_NODE_URL,
+        l1RpcUrl: L1_RPC_URL,
+        ...(L1_CHAIN_ID ? { l1ChainId: Number(L1_CHAIN_ID) } : {}),
+        recipient: RECIPIENT,
+        amount: AMOUNT,
+        claimSecret: CLAIM_SECRET!,
+        secretHash: RECOVER,
+        fromBlock: recoverFrom!,
+        log: console.log,
+      });
+    } catch (err) {
+      fail((err as Error).message);
+    }
+    console.log(`\nFound the deposit. To resume if what follows fails:\n`);
+    console.log(`FEE_JUICE_RESUME_CLAIM='${JSON.stringify(recovered)}'\n`);
+    const { messageHash, ...found } = recovered;
+    const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
+    await waitForL1ToL2Message(createAztecNodeClient(AZTEC_NODE_URL), messageHash, {});
+    await claimFeeJuiceFor({ ...claimOpts, claim: found });
+    claim = found;
   } else {
+    let pending: PendingFeeJuiceDeposit | undefined;
     let bridged: BridgedFeeJuiceClaim | undefined;
     try {
       claim = await topUpFeeJuice({
@@ -263,6 +320,12 @@ async function main(): Promise<void> {
         ...(L1_CHAIN_ID ? { l1ChainId: Number(L1_CHAIN_ID) } : {}),
         amount: AMOUNT,
         mint: MINT,
+        onSecret: (d) => {
+          pending = d;
+          console.log("\nClaim secret, before the deposit. If this run dies before");
+          console.log("FEE_JUICE_RESUME_CLAIM is printed, rerun with these set:\n");
+          console.log(recoverEnv(d));
+        },
         onClaim: (c) => {
           bridged = c;
           console.log(`\nDeposited on L1. To resume if what follows fails:\n`);
@@ -270,17 +333,33 @@ async function main(): Promise<void> {
         },
       });
     } catch (err) {
-      if (bridged === undefined) throw err;
-      console.error("Fatal:", err);
-      fail(
-        "\nThe deposit is on L1. Rerun with FEE_JUICE_RESUME_CLAIM set to the value printed " +
-          "above; rerunning without it deposits again.",
-      );
+      if (bridged !== undefined) {
+        console.error("Fatal:", err);
+        fail(
+          "\nThe deposit is on L1. Rerun with FEE_JUICE_RESUME_CLAIM set to the value printed " +
+            "above; rerunning without it deposits again.",
+        );
+      }
+      if (pending !== undefined) {
+        console.error("Fatal:", err);
+        fail(
+          "\nThe deposit may be on L1. Rerun with these set; rerunning without them may " +
+            `deposit twice:\n${recoverEnv(pending)}`,
+        );
+      }
+      throw err;
     }
   }
 
   console.log(`\nCredited ${claim.claimAmount} fee juice to ${RECIPIENT}.`);
   console.log("No FEE_JUICE_CLAIM to set: the balance is already on chain.");
+}
+
+function recoverEnv(d: PendingFeeJuiceDeposit): string {
+  return (
+    `FEE_JUICE_RECOVER=${d.secretHash}\nFEE_JUICE_CLAIM_SECRET=${d.claimSecret}\n` +
+    `FEE_JUICE_RECOVER_FROM_BLOCK=${d.l1FromBlock}\nBRIDGE_AMOUNT=${d.claimAmount}\n`
+  );
 }
 
 /**

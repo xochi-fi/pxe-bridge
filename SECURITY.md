@@ -198,6 +198,8 @@ be transferred but can pay for top-up claims. Production runbook:
    involved: the L1 deposit needs only the address, and the message commits to
    it, so the claim cannot pay for anything else. If the wait times out,
    `--wait <messageHash>` resumes it; rerunning the bridge step deposits twice.
+   The claim secret is printed before the L1 write, so a run that dies after
+   broadcasting is recovered with `--recover <secretHash>`, not rerun.
 3. Start the bridge with the claim. It deploys the deployer, then the account,
    and reaches `Ready` with SponsoredFPC refused. If the deployer is already
    deployed and its balance cannot cover the account deploy, bridge a fresh
