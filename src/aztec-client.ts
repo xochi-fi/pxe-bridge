@@ -92,6 +92,57 @@ export const FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR =
   "names the limit account while the deploy is sent from the deployer, so no " +
   "fee payer is set. Use scripts/top-up-fee-juice.ts instead.";
 
+/** Opts a production bridge into the SponsoredFPC deployment fee fallback. */
+export const ALLOW_SPONSORED_FPC_ENV = "PXE_BRIDGE_ALLOW_SPONSORED_FPC";
+
+export interface SponsoredFpcSetting {
+  allowed: boolean;
+  /** The setting that decided, as `NAME=value`, for the log. */
+  reason: string;
+}
+
+/**
+ * Whether an undeployed account may pay its deployment fee via SponsoredFPC.
+ *
+ * SponsoredFPC is a testing contract (`@aztec/aztec.js/fee/testing`) that
+ * exists only on sandbox and testnet. It is what an account falls back to when
+ * no FEE_JUICE_CLAIM covers it, and what the spending-limit deployer always
+ * uses. On any other network there is nothing at its address, and the deploy
+ * fails inside the SDK with a message that names neither the fee path nor the
+ * configuration that chose it.
+ *
+ * Permitted outside production, which is where the sandbox and the e2e suite
+ * run. In production only on explicit opt-in: the image sets
+ * NODE_ENV=production for every deployment, testnet included, so NODE_ENV
+ * alone cannot tell a testnet from a network that charges.
+ *
+ * Only "true" and "false" are accepted, so a typo fails at startup rather than
+ * silently meaning either one. An empty value is rejected too: `VAR=` reads as
+ * a deliberate setting, not as unset. `reason` names the variable that decided.
+ */
+export function sponsoredFpcSetting(env: Record<string, string | undefined>): SponsoredFpcSetting {
+  const raw = env[ALLOW_SPONSORED_FPC_ENV];
+  if (raw === "true" || raw === "false") {
+    return { allowed: raw === "true", reason: `${ALLOW_SPONSORED_FPC_ENV}=${raw}` };
+  }
+  if (raw !== undefined) {
+    throw new Error(`${ALLOW_SPONSORED_FPC_ENV} must be "true" or "false", got ${JSON.stringify(raw)}`);
+  }
+  return {
+    allowed: env["NODE_ENV"] !== "production",
+    reason: `NODE_ENV=${env["NODE_ENV"] ?? "(unset)"}`,
+  };
+}
+
+export const SPONSORED_FPC_REFUSED_ERROR =
+  "Refusing to pay its deployment fee via SponsoredFPC, a testing contract that exists " +
+  "only on sandbox and testnet. It is refused when NODE_ENV=production unless " +
+  `${ALLOW_SPONSORED_FPC_ENV}=true, and whenever ${ALLOW_SPONSORED_FPC_ENV}=false. For the ` +
+  "plain Schnorr account, set FEE_JUICE_CLAIM " +
+  "(npm run bridge-fee-juice). The spending-limit account and its deployer have no other " +
+  "deployment fee path, so they cannot be deployed by the bridge on a network without " +
+  `SponsoredFPC. Set ${ALLOW_SPONSORED_FPC_ENV}=true only if this node is a sandbox or testnet.`;
+
 /** The slice of AztecNode createNote needs to read a tx effect back. */
 interface TxEffectFields {
   noteHashes?: { toString(): string }[];
@@ -177,12 +228,16 @@ export class AztecClient implements IAztecClient {
   private tokenCache = new Map<string, TokenContract>();
   private secretKey: string | null;
   private spendingLimitContract: SpendingLimitAccountContract | null = null;
+  private readonly allowSponsoredFpc: boolean;
+  // Captured with the value, so the log names what actually permitted it.
+  private readonly sponsoredFpcReason: string;
 
   constructor(
     private readonly nodeUrl: string,
     secretKey: string,
     private readonly feeJuiceClaim?: FeeJuiceClaim,
     private readonly spendingLimitConfig?: SpendingLimitConfig,
+    options: { allowSponsoredFpc?: boolean } = {},
   ) {
     // Refused here rather than in index.ts alone, so a library caller gets the
     // same answer. Left unchecked the combination fails deep in the SDK during
@@ -190,6 +245,17 @@ export class AztecClient implements IAztecClient {
     // the claim that caused it.
     if (feeJuiceClaim && spendingLimitConfig) {
       throw new Error(FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR);
+    }
+    // Defaults to the env, read at construction, so index.ts and a library
+    // caller are gated alike, the log names the variable that decided, and a
+    // malformed value fails before connecting.
+    if (options.allowSponsoredFpc !== undefined) {
+      this.allowSponsoredFpc = options.allowSponsoredFpc;
+      this.sponsoredFpcReason = `allowSponsoredFpc=${options.allowSponsoredFpc}`;
+    } else {
+      const setting = sponsoredFpcSetting(process.env);
+      this.allowSponsoredFpc = setting.allowed;
+      this.sponsoredFpcReason = setting.reason;
     }
     this.secretKey = secretKey;
   }
@@ -224,8 +290,14 @@ export class AztecClient implements IAztecClient {
 
     // Deploy account contract if not already on-chain.
     // Cannot rely on wallet.getAccounts() since the local WalletDB is
-    // ephemeral (Docker restarts clear it). Query the node instead.
-    const alreadyDeployed = await this.isContractDeployed(address);
+    // ephemeral (Docker restarts clear it). The initialization nullifier is
+    // checked against the node. Publication is not the test: v0.1.2 deployed
+    // accounts unpublished, and treating those as absent sent upgrades into
+    // the deploy path, where production refuses SponsoredFPC.
+    const metadata = await this.wallet.getContractMetadata(address);
+    const { ContractInitializationStatus } = await import("@aztec/aztec.js/wallet");
+    const alreadyDeployed =
+      metadata.initializationStatus === ContractInitializationStatus.INITIALIZED;
 
     if (!alreadyDeployed) {
       console.log("[pxe-bridge] Deploying solver account...");
@@ -268,15 +340,19 @@ export class AztecClient implements IAztecClient {
         // nullifier is the authoritative signal: it can only already exist if
         // the constructor has run, and it is emitted before the instance
         // becomes visible to the node, so checking it avoids the window where
-        // isContractDeployed still reports false.
+        // the initialization status still reads as uninitialized.
         const message = err instanceof Error ? err.message : String(err);
         const alreadyInitialized = message.includes("Existing nullifier");
-        if (alreadyInitialized || (await this.isContractDeployed(address))) {
+        if (alreadyInitialized || (await this.isInitialized(address))) {
           console.log("[pxe-bridge] Account deployed by another process");
         } else {
           throw err;
         }
       }
+    } else if (!metadata.isContractPublished) {
+      // Initialized but unpublished (v0.1.2 deployments). Not redeployed: the
+      // constructor already ran and cannot run again.
+      console.log("[pxe-bridge] Account recovered (initialized, not published)");
     } else {
       console.log("[pxe-bridge] Account recovered");
     }
@@ -418,10 +494,14 @@ export class AztecClient implements IAztecClient {
    * Deploys (once) a plain Schnorr account to act as deployer for the
    * spending-limit account, and returns its address.
    *
-   * Derived from the same master secret under a different salt, so it needs no
-   * separate key material and is reproducible across restarts. It self-deploys
-   * via SponsoredFPC, which a standard Schnorr account can do because its
-   * entrypoint has no single-call restriction.
+   * Derived from the same master secret as the solver, under salt
+   * `baseSalt + 1`, so it needs no separate key material and is reproducible
+   * across restarts. It self-deploys via SponsoredFPC, which a standard Schnorr
+   * account can do because its entrypoint has no single-call restriction, and
+   * then pays the spending-limit account's deployment the same way. A claim
+   * cannot pay for it: claims are bridged to the solver's address. So the
+   * spending-limit account can only be deployed where SponsoredFPC is
+   * permitted; see `sponsoredFpcSetting`.
    */
   private async ensureDeployer(
     secret: import("@aztec/aztec.js/fields").Fr,
@@ -439,8 +519,8 @@ export class AztecClient implements IAztecClient {
     );
     const deployerAddress = (await manager.getAccount()).getAddress();
 
-    if (!(await this.isContractDeployed(deployerAddress))) {
-      console.log("[pxe-bridge] Deploying deployer account...");
+    if (!(await this.isInitialized(deployerAddress))) {
+      console.log(`[pxe-bridge] Deploying deployer account ${deployerAddress.toString()}...`);
       const paymentMethod = await this.buildFeePaymentMethod(deployerAddress);
       try {
         await (await manager.getDeployMethod()).send({
@@ -660,26 +740,19 @@ export class AztecClient implements IAztecClient {
   }
 
   /**
-   * Whether the account exists ON CHAIN.
+   * Whether the account's constructor has run ON CHAIN.
    *
-   * This must ask the node, not the PXE. AccountManager.create() registers the
-   * instance with the local PXE before anything is deployed, so a PXE-side
-   * lookup always answers "yes": connect() would log "Account recovered", skip
-   * the constructor, and leave the signing-key note uncreated. Every later
-   * transaction then fails inside is_valid_impl with "Failed to get a note".
-   * That went unnoticed because no test ever sent a transaction from an
-   * account this client had deployed.
+   * Reads the initialization nullifier from the node, not PXE registration.
+   * AccountManager.create() registers the instance with the local PXE before
+   * anything is deployed, so a registration lookup always answers "yes":
+   * connect() would log "Account recovered", skip the constructor, and leave
+   * the signing-key note uncreated. Publication is not the test either: the
+   * deployer and v0.1.2 accounts are initialized but unpublished.
    */
-  private async isContractDeployed(address: AztecAddress): Promise<boolean> {
-    const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
-    const node = createAztecNodeClient(this.nodeUrl);
-    const instance = await node.getContract(address);
-    return instance !== undefined;
-    // NOTE: this reflects PUBLICATION. We do not force publication on deploy
-    // (it raised the fee beyond what SponsoredFPC covers), so a deployed but
-    // unpublished account reads as absent here. That is why the concurrent
-    // deploy path also treats "Existing nullifier" as success -- the init
-    // nullifier is the signal that survives either way.
+  private async isInitialized(address: AztecAddress): Promise<boolean> {
+    const { ContractInitializationStatus } = await import("@aztec/aztec.js/wallet");
+    const { initializationStatus } = await this.wallet!.getContractMetadata(address);
+    return initializationStatus === ContractInitializationStatus.INITIALIZED;
   }
 
   private async deployGasSettings(): Promise<{ maxFeesPerGas: GasFees }> {
@@ -707,7 +780,18 @@ export class AztecClient implements IAztecClient {
       });
     }
 
-    console.log("[pxe-bridge] Using SponsoredFPC for deployment fee");
+    // Checked before anything is registered or sent. In connect() this runs
+    // for the solver account before ensureDeployer, so a refused spending-limit
+    // deployment stops before deploying its deployer.
+    if (!this.allowSponsoredFpc) {
+      throw new Error(
+        `Account ${accountAddress.toString()} is not deployed. ${SPONSORED_FPC_REFUSED_ERROR}`,
+      );
+    }
+    console.warn(
+      `[pxe-bridge] Paying deployment of ${accountAddress.toString()} via SponsoredFPC ` +
+        `(sandbox and testnet only; permitted by ${this.sponsoredFpcReason})`,
+    );
     const { SponsoredFeePaymentMethod } = await import("@aztec/aztec.js/fee/testing");
     const { getContractInstanceFromInstantiationParams } = await import("@aztec/stdlib/contract");
     const { Fr } = await import("@aztec/aztec.js/fields");
