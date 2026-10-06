@@ -35,6 +35,12 @@
  * After a successful update, change PXE_BRIDGE_ALLOWLIST_RECIPIENTS to the set
  * this prints and restart the bridge. Until you do, the bridge refuses to send:
  * it checks its root against the account's before every transfer.
+ *
+ * Leave PXE_BRIDGE_ACCOUNT_DEPLOYMENT as it is. It records the root the account
+ * was deployed with, which is what pins the address; the new root is checked
+ * against the chain, not against the record. A bridge restarted without the
+ * record derives its address from the new set, finds nothing there, and would
+ * deploy an empty account in place of this one.
  */
 
 import { AllowlistTree, allowlistLeaf } from "../src/allowlist-tree.js";
@@ -205,6 +211,10 @@ async function main(): Promise<void> {
   console.log("[update-allowlist] done");
   console.log("[update-allowlist] set PXE_BRIDGE_ALLOWLIST_RECIPIENTS to this and restart:");
   console.log(JSON.stringify(nextConfig));
+  console.log(
+    "[update-allowlist] keep PXE_BRIDGE_ACCOUNT_DEPLOYMENT unchanged: it pins the account's " +
+      "address, and restarting without it moves the bridge off this account",
+  );
 }
 
 main().catch((err) => {

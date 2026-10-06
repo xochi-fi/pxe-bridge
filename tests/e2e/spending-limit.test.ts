@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeAll } from "vitest";
-import { AztecClient } from "../../src/aztec-client.js";
-import type { SpendingLimitConfig } from "../../src/spending-limit-account.js";
+import { AztecClient, deriveAccountKeys } from "../../src/aztec-client.js";
+import {
+  SpendingLimitAccountContract,
+  type SpendingLimitConfig,
+} from "../../src/spending-limit-account.js";
+import { AllowlistTree } from "../../src/allowlist-tree.js";
+import type { AccountDeployment } from "../../src/types.js";
 import {
   getTestConfig,
   deployTestToken,
@@ -50,6 +55,10 @@ const config = getTestConfig();
 // that reduction. The two keys above happen to land in range and would pass
 // either way.
 const OUTSIDER_KEY = "0x000000000000000000000000000000000000000000000000000000000000d00d";
+
+// Never deployed. Used for a deployment record that derives correctly but
+// names an address with nothing at it.
+const UNDEPLOYED_KEY = "0x000000000000000000000000000000000000000000000000000000000000f00d";
 
 const MAX_PER_TX = 1_000_000_000_000_000_000_000n; // 1000 tokens at 18 decimals
 const DAILY_LIMIT = 5_000_000_000_000_000_000_000n; // 5000 tokens
@@ -138,6 +147,85 @@ describe("spending limit account (e2e)", () => {
     }
     expect(accountAddress).toMatch(/^0x[0-9a-f]{64}$/i);
   });
+
+  // The restart the allowlist runbook prescribes. The address used to derive
+  // from live configuration, so this client, with a different set and
+  // different limits, came up at a new address with nothing there and
+  // deployed an empty account over the funded one. Under the deployment
+  // record it must land on the same account and deploy nothing.
+  it("restarts at the recorded address after the allowlist and limits change", async (ctx) => {
+    if (deployFailure) return ctx.skip();
+
+    const restarted = new AztecClient(config.nodeUrl, config.secretKey, undefined, {
+      ...changedConfig(),
+      deployment: await deployedRecord(),
+    });
+    await restarted.connect();
+    expect(restarted.getAddress()).toBe(accountAddress);
+  }, 600_000);
+
+  it("refuses a deployment record that does not derive its address", async (ctx) => {
+    if (deployFailure) return ctx.skip();
+
+    const record = await deployedRecord();
+    const drifted = new AztecClient(config.nodeUrl, config.secretKey, undefined, {
+      ...changedConfig(),
+      deployment: { ...record, dailyLimit: (DAILY_LIMIT + 1n).toString() },
+    });
+    await expect(drifted.connect()).rejects.toThrow(
+      `Deployment record names account ${accountAddress}`,
+    );
+  }, 600_000);
+
+  // A record that derives correctly but names an account nobody deployed. The
+  // bridge must refuse rather than deploy it: with a record set, an empty
+  // address means the record or the node is wrong, never "first run".
+  it("refuses to deploy over a recorded address", async (ctx) => {
+    if (deployFailure) return ctx.skip();
+
+    const base: SpendingLimitConfig = {
+      ...changedConfig(),
+      maxAmountPerTx: MAX_PER_TX,
+      dailyLimit: DAILY_LIMIT,
+    };
+    const { secret, salt, signingKey } = await deriveAccountKeys(UNDEPLOYED_KEY);
+    const contract = new SpendingLimitAccountContract(signingKey, base);
+    const manager = await contract.accountManager(undefined as never, secret, salt);
+    const address = manager.address.toString();
+
+    const recorded = new AztecClient(config.nodeUrl, UNDEPLOYED_KEY, undefined, {
+      ...base,
+      deployment: await contract.deploymentRecord(address),
+    });
+    await expect(recorded.connect()).rejects.toThrow("no initialized contract exists there");
+  }, 600_000);
+
+  /** The record an operator would have persisted from the deployment above. */
+  async function deployedRecord(): Promise<AccountDeployment> {
+    const tree = await AllowlistTree.build(ALLOWLIST_SEED, [
+      { address: SEED_RECIPIENT, index: SEED_RECIPIENT_INDEX },
+    ]);
+    return {
+      address: accountAddress,
+      maxAmountPerTx: MAX_PER_TX.toString(),
+      dailyLimit: DAILY_LIMIT.toString(),
+      admin: adminAddress,
+      token: tokenAddress,
+      allowlistRoot: tree.root.toString(),
+    };
+  }
+
+  /** Everything an operator legitimately changes after deployment. */
+  function changedConfig(): SpendingLimitConfig {
+    return {
+      maxAmountPerTx: MAX_PER_TX / 2n,
+      dailyLimit: DAILY_LIMIT * 2n,
+      admin: adminAddress,
+      token: tokenAddress,
+      allowlistSeed: ALLOWLIST_SEED,
+      allowlistRecipients: [{ address: UNLISTED_RECIPIENT, index: 511 }],
+    };
+  }
 
   it("transfers within the per-tx limit", async (ctx) => {
     if (deployFailure) return ctx.skip();

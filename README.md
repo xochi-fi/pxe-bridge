@@ -98,6 +98,45 @@ npm run build
 PXE_BRIDGE_SECRET_KEY=0x... PXE_BRIDGE_API_KEY=your-key npm start
 ```
 
+## Spending-limit account deployment record
+
+The spending-limit account's address derives from its constructor arguments:
+the per-tx cap, the daily limit, the admin, the token and the allowlist root.
+The cap, the limit and the root are all meant to change after deployment, so
+the bridge does not derive the address from live configuration once the account
+exists. It derives it from a deployment record instead:
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `PXE_BRIDGE_ACCOUNT_DEPLOYMENT` | Prod, after first deploy | -- | JSON record of what the account was deployed with |
+| `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY` | Prod, first deploy only | -- | `1` lets a production bridge deploy without a record |
+
+1. First deployment: start with no record (in production, with
+   `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1`). The bridge deploys and logs the
+   record:
+
+   ```
+   [pxe-bridge] ACCOUNT DEPLOYMENT RECORD. Persist this as PXE_BRIDGE_ACCOUNT_DEPLOYMENT ...
+   {"address":"0x...","maxAmountPerTx":"...","dailyLimit":"...","admin":"0x...","token":"0x...","allowlistRoot":"0x..."}
+   ```
+
+2. Store that JSON as `PXE_BRIDGE_ACCOUNT_DEPLOYMENT`, remove
+   `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY`, and archive the record with the
+   allowlist seed. Do not edit it afterwards.
+3. After `npm run update-allowlist`, change only
+   `PXE_BRIDGE_ALLOWLIST_RECIPIENTS` and restart. After `apply_limits`, change
+   `PXE_BRIDGE_MAX_AMOUNT` / `PXE_BRIDGE_DAILY_LIMIT` if you want the
+   application-level limits to follow. Neither moves the address.
+
+With a record set the bridge never deploys. It refuses to start if the record
+does not derive the recorded address from the secret key (wrong key, edited
+record, or a moved contract class), if no initialized account exists at that
+address on `AZTEC_NODE_URL`, or if `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` /
+`PXE_BRIDGE_SPENDING_LIMIT_TOKEN` differ from the record. In production it also
+refuses to start without a record unless `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1`.
+Outside production it deploys without asking, and logs the record on every
+start that lacks one.
+
 ## Fee juice
 
 Every transaction the bridge sends is paid for in fee juice, which is bridged

@@ -1,6 +1,11 @@
 import { AztecClient, FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR, TX_TIMEOUT_MS } from "./aztec-client.js";
 import { createApp, RESPONSE_TIMEOUT_MS } from "./server.js";
-import { AllowlistRecipientsSchema, FeeJuiceClaimSchema } from "./types.js";
+import {
+  AccountDeploymentSchema,
+  AllowlistRecipientsSchema,
+  FeeJuiceClaimSchema,
+  type AccountDeployment,
+} from "./types.js";
 import { TransactionLimits, type LimitsConfig } from "./limits.js";
 import { AuditLogger, replayAuditLog } from "./audit.js";
 import { IdempotencyStore } from "./idempotency.js";
@@ -157,12 +162,25 @@ if (limits && !ADMIN_KEY) {
 // On-chain spending limit account (Phase 2).
 // When PXE_BRIDGE_SPENDING_LIMIT_ADMIN is set, deploys a custom Noir account
 // contract that enforces per-tx caps, daily volume limits, and a recipient
-// allowlist on-chain. Uses the same limit values as application-level limits.
+// allowlist on-chain. A first deployment takes its limits from the
+// application-level ones; after that PXE_BRIDGE_ACCOUNT_DEPLOYMENT pins what it
+// was deployed with, and the two are free to diverge.
 let spendingLimitConfig: SpendingLimitConfig | undefined;
 const SPENDING_LIMIT_ADMIN = process.env["PXE_BRIDGE_SPENDING_LIMIT_ADMIN"];
 const SPENDING_LIMIT_TOKEN = process.env["PXE_BRIDGE_SPENDING_LIMIT_TOKEN"];
 const ALLOWLIST_SEED = process.env["PXE_BRIDGE_ALLOWLIST_SEED"];
 const ALLOWLIST_RECIPIENTS_RAW = process.env["PXE_BRIDGE_ALLOWLIST_RECIPIENTS"];
+const ACCOUNT_DEPLOYMENT_RAW = process.env["PXE_BRIDGE_ACCOUNT_DEPLOYMENT"];
+const ALLOW_ACCOUNT_DEPLOY = process.env["PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY"] === "1";
+// A record with nothing to apply it to would otherwise be ignored, and the
+// bridge would come up as a plain Schnorr account at a different address.
+if (ACCOUNT_DEPLOYMENT_RAW && !SPENDING_LIMIT_ADMIN) {
+  console.error(
+    "[pxe-bridge] PXE_BRIDGE_ACCOUNT_DEPLOYMENT is set but PXE_BRIDGE_SPENDING_LIMIT_ADMIN " +
+      "is not. The record only applies to the spending limit account.",
+  );
+  process.exit(1);
+}
 // `0x00...0` satisfies the 32-byte hex pattern, so every address below is
 // checked against it separately. The contract asserts all three are non-zero,
 // and without this the mistake surfaces as an in-circuit assert part-way
@@ -294,6 +312,42 @@ if (SPENDING_LIMIT_ADMIN) {
     console.error(`[pxe-bridge] ${FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR}`);
     process.exit(1);
   }
+  // The deployment record. Parsed here, checked against the derivation in
+  // connect(): only that can say whether it describes this key's account.
+  let deployment: AccountDeployment | undefined;
+  if (ACCOUNT_DEPLOYMENT_RAW) {
+    let deploymentJson: unknown;
+    try {
+      deploymentJson = JSON.parse(ACCOUNT_DEPLOYMENT_RAW);
+    } catch {
+      console.error("[pxe-bridge] PXE_BRIDGE_ACCOUNT_DEPLOYMENT is not valid JSON");
+      process.exit(1);
+    }
+    const deploymentParsed = AccountDeploymentSchema.safeParse(deploymentJson);
+    if (!deploymentParsed.success) {
+      console.error(
+        "[pxe-bridge] PXE_BRIDGE_ACCOUNT_DEPLOYMENT must be the record the bridge printed " +
+          "after deploying, {address, maxAmountPerTx, dailyLimit, admin, token, " +
+          "allowlistRoot}: " +
+          deploymentParsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
+      );
+      process.exit(1);
+    }
+    deployment = deploymentParsed.data;
+  } else if (process.env["NODE_ENV"] === "production" && !ALLOW_ACCOUNT_DEPLOY) {
+    // Refused rather than warned. Without a record the address derives from
+    // the live limits and allowlist, so a production restart after an
+    // allowlist update or a limit change deploys an empty account at a new
+    // address and serves from it, while the funds sit at the old one. A first
+    // deployment is the one legitimate reason to start without a record, and
+    // it is rare enough to ask for by name.
+    console.error(
+      "[pxe-bridge] PXE_BRIDGE_ACCOUNT_DEPLOYMENT is required when NODE_ENV=production. " +
+        "For a first deployment set PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1, then persist the " +
+        "record the bridge prints and remove the flag.",
+    );
+    process.exit(1);
+  }
   spendingLimitConfig = {
     maxAmountPerTx: limitsConfig.maxAmount,
     dailyLimit: limitsConfig.dailyLimit,
@@ -301,6 +355,7 @@ if (SPENDING_LIMIT_ADMIN) {
     token: SPENDING_LIMIT_TOKEN,
     allowlistSeed: ALLOWLIST_SEED,
     allowlistRecipients: allowlistParsed.data,
+    ...(deployment ? { deployment } : {}),
   };
 }
 

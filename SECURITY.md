@@ -222,9 +222,10 @@ terminal for allowlist management: no witness can be built, so no transfer can
 be sent, and no `update_recipient` can be constructed, so nothing can be
 repaired on chain.
 
-Archive both with the same discipline as the contract artifact. This account
-already has permanent-brick modes -- `permitted_token` has no setter, and a zero
-admin is unrecoverable -- and this is one more.
+Archive both with the same discipline as the contract artifact, together with
+the deployment record (`PXE_BRIDGE_ACCOUNT_DEPLOYMENT`). This account already
+has permanent-brick modes -- `permitted_token` has no setter, and a zero admin
+is unrecoverable -- and this is one more.
 
 The seed is a secret, but a weaker one than the signing key: holding it lets
 someone test a candidate address against a leaf, which costs recipient privacy
@@ -236,6 +237,34 @@ The bridge checks its copy against the chain before every send, via
 a secret set monitorable: the root commits to exactly the set that produces it,
 so an operator can verify a published set against the chain and a compromised
 admin cannot publish one set while committing another.
+
+## The account address is pinned by a deployment record
+
+The account's address derives from its constructor arguments, and those include
+the per-tx cap, the daily limit and the allowlist root. All three are meant to
+change after deployment: `update_recipient` moves the root, `apply_limits`
+moves the caps. The bridge used to rebuild the constructor arguments from live
+configuration on every start, so following the runbook after an allowlist
+update (set the new recipients, restart) derived a different address. Nothing
+was deployed there, so the bridge deployed a fresh, empty account, logged
+"Ready", and left the funded one orphaned.
+
+The constructor arguments now come from `PXE_BRIDGE_ACCOUNT_DEPLOYMENT`, a
+record of what the account was deployed with and the address that produced.
+Live configuration keeps its other jobs: recipients and seed build the witness
+tree, which is checked against the chain's current root before every send, and
+the limit variables drive `src/limits.ts`. With a record set the bridge never
+deploys, and it refuses to start when the record does not reproduce its own
+address, when nothing is initialized at that address, or when the configured
+admin or token differ from it. Each of those is a configuration for some other
+account, and the safe response to that is to stop.
+
+A first deployment has no record, and has to derive from live configuration.
+Production refuses to do that unless `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1` is
+set, so a lost or unset record fails startup instead of quietly deploying a new
+account. Outside production the bridge deploys and prints the record on every
+start that lacks one. The trade is one more value to archive, and one more
+operator step on the first deployment.
 
 ## Transaction cancellation is not supported
 
