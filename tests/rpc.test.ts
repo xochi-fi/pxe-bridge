@@ -44,6 +44,10 @@ class FakeAztecClient implements IAztecClient {
     if (this.versionError) throw this.versionError;
     return this.versionResult;
   }
+
+  async getFeeJuiceBalance(): Promise<bigint> {
+    return 0n;
+  }
 }
 
 function rpcRequest(method: string, params: unknown[] = []) {

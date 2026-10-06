@@ -147,6 +147,8 @@ export interface IAztecClient {
   connect(): Promise<void>;
   createNote(params: CreateNoteParams): Promise<CreateNoteResult>;
   getVersion(): Promise<string>;
+  /** Fee juice held by the solver account, which pays every transfer. */
+  getFeeJuiceBalance(): Promise<bigint>;
 }
 
 /**

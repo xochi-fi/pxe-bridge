@@ -31,7 +31,18 @@ export interface ServerOptions {
   audit?: AuditLogger | undefined;
   /** Absent disables replay: every request executes, as before. */
   idempotency?: IdempotencyStore | undefined;
+  /**
+   * Fee juice floor. Below it `/status` reports `degraded` and a warning is
+   * logged on each refresh. Unset reports the balance without judging it.
+   */
+  minFeeJuice?: bigint | undefined;
+  /** How long a fee juice reading is served before the node is asked again. */
+  feeJuiceCacheMs?: number | undefined;
 }
+
+// /status is unauthenticated, so without a cache anyone could turn its rate
+// limit into node reads on the bridge's behalf.
+const FEE_JUICE_CACHE_MS = 30_000;
 
 // Failed auth gets its own, much smaller budget, separate from the one real
 // traffic spends. One shared bucket forces a choice between two bad outcomes:
@@ -200,6 +211,37 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
     return true;
   };
 
+  const feeJuiceCacheMs = opts.feeJuiceCacheMs ?? FEE_JUICE_CACHE_MS;
+  let feeJuice: { balance: bigint | null; at: number } | undefined;
+  let feeJuiceRead: Promise<bigint | null> | undefined;
+
+  /**
+   * The cached balance, refreshed at most once per `feeJuiceCacheMs` and
+   * shared by concurrent callers. A failed read is cached as null for the same
+   * interval: a node that cannot answer should not be asked once per request.
+   */
+  const readFeeJuice = async (): Promise<bigint | null> => {
+    if (feeJuice && Date.now() - feeJuice.at < feeJuiceCacheMs) return feeJuice.balance;
+    feeJuiceRead ??= client
+      .getFeeJuiceBalance()
+      .catch((err: unknown) => {
+        console.error("[pxe-bridge] Fee juice balance read failed:", err);
+        return null;
+      })
+      .then((balance) => {
+        feeJuice = { balance, at: Date.now() };
+        feeJuiceRead = undefined;
+        if (balance !== null && opts.minFeeJuice !== undefined && balance < opts.minFeeJuice) {
+          console.warn(
+            `[pxe-bridge] Fee juice low: ${balance} below PXE_BRIDGE_MIN_FEE_JUICE ` +
+              `${opts.minFeeJuice}. Top up with npm run top-up-fee-juice.`,
+          );
+        }
+        return balance;
+      });
+    return feeJuiceRead;
+  };
+
   const server = createServer(async (req, res) => {
     // Nothing otherwise bounded how long a connection could stay open waiting
     // for a reply, so a stalled node held sockets indefinitely.
@@ -228,7 +270,17 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
         }
         try {
           const version = await client.getVersion();
-          sendJson(res, 200, { status: "ok", version });
+          const balance = await readFeeJuice();
+          const low =
+            opts.minFeeJuice !== undefined && balance !== null && balance < opts.minFeeJuice;
+          sendJson(res, 200, {
+            status: low ? "degraded" : "ok",
+            version,
+            feeJuice: {
+              balance: balance === null ? null : balance.toString(),
+              ...(opts.minFeeJuice !== undefined && balance !== null ? { low } : {}),
+            },
+          });
         } catch (err) {
           console.error("[pxe-bridge] Health check failed:", err);
           sendJson(res, 503, { status: "starting" });

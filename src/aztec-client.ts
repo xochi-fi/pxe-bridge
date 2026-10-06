@@ -659,6 +659,16 @@ export class AztecClient implements IAztecClient {
     }
   }
 
+  /** The account's fee juice, read from the node's public FeeJuice balance. */
+  async getFeeJuiceBalance(): Promise<bigint> {
+    if (!this.solverAddress) {
+      throw new Error("Client not connected");
+    }
+    const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
+    const { getFeeJuiceBalance } = await import("@aztec/aztec.js/utils");
+    return getFeeJuiceBalance(this.solverAddress, createAztecNodeClient(this.nodeUrl));
+  }
+
   /**
    * Whether the account exists ON CHAIN.
    *

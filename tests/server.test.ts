@@ -36,6 +36,15 @@ class FakeAztecClient implements IAztecClient {
     if (this.versionError) throw this.versionError;
     return this.versionResult;
   }
+
+  feeJuiceBalance = 1000n;
+  feeJuiceError: Error | null = null;
+  feeJuiceReads = 0;
+  async getFeeJuiceBalance(): Promise<bigint> {
+    this.feeJuiceReads++;
+    if (this.feeJuiceError) throw this.feeJuiceError;
+    return this.feeJuiceBalance;
+  }
 }
 
 let server: Server;
@@ -78,7 +87,7 @@ describe("HTTP server", () => {
       const res = await fetch(`${baseUrl}/status`);
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body).toEqual({ status: "ok", version: "4.1.3" });
+      expect(body).toEqual({ status: "ok", version: "4.1.3", feeJuice: { balance: "1000" } });
     });
 
     it("returns 503 when client errors", async () => {
@@ -369,6 +378,75 @@ describe("auth failures are throttled separately from real traffic", () => {
       Authorization: `Bearer ${RL_API_KEY}`,
     });
     expect(authorized.status).toBe(200);
+  });
+});
+
+describe("GET /status fee juice", () => {
+  async function boot(opts: ServerOptions): Promise<{
+    url: string;
+    client: FakeAztecClient;
+    close: () => Promise<void>;
+  }> {
+    const c = new FakeAztecClient();
+    const srv = createApp(c, opts);
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const port = addr && typeof addr === "object" ? addr.port : 0;
+    return {
+      url: `http://127.0.0.1:${port}`,
+      client: c,
+      close: () => new Promise<void>((resolve) => srv.close(() => resolve())),
+    };
+  }
+
+  const status = async (url: string) => (await fetch(`${url}/status`)).json();
+
+  it("reports degraded below the minimum and ok at it", async () => {
+    const { url, client: c, close } = await boot({ minFeeJuice: 1000n, feeJuiceCacheMs: 0 });
+    try {
+      c.feeJuiceBalance = 999n;
+      expect(await status(url)).toEqual({
+        status: "degraded",
+        version: "4.1.3",
+        feeJuice: { balance: "999", low: true },
+      });
+
+      c.feeJuiceBalance = 1000n;
+      expect(await status(url)).toMatchObject({ status: "ok", feeJuice: { low: false } });
+    } finally {
+      await close();
+    }
+  });
+
+  it("serves a cached reading instead of asking the node per request", async () => {
+    const { url, client: c, close } = await boot({ minFeeJuice: 1000n, feeJuiceCacheMs: 60_000 });
+    try {
+      await status(url);
+      c.feeJuiceBalance = 1n;
+      const body = await status(url);
+
+      expect(c.feeJuiceReads).toBe(1);
+      expect(body).toMatchObject({ status: "ok", feeJuice: { balance: "1000" } });
+    } finally {
+      await close();
+    }
+  });
+
+  it("stays up with a null balance when the read fails", async () => {
+    const { url, client: c, close } = await boot({ minFeeJuice: 1000n, feeJuiceCacheMs: 0 });
+    try {
+      c.feeJuiceError = new Error("node down");
+      const res = await fetch(`${url}/status`);
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        status: "ok",
+        version: "4.1.3",
+        feeJuice: { balance: null },
+      });
+    } finally {
+      await close();
+    }
   });
 });
 
