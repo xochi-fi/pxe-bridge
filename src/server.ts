@@ -280,8 +280,12 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           status: "resumed",
           paused: opts.limits.isPaused(),
           windowTotal: window.total.toString(),
+          windowReserved: window.reserved.toString(),
           ...(window.dailyLimit !== undefined
             ? { dailyLimit: window.dailyLimit.toString() }
+            : {}),
+          ...(window.remaining !== undefined
+            ? { remaining: window.remaining.toString() }
             : {}),
           willTripAgain: window.willTripAgain,
         });

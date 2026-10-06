@@ -495,10 +495,35 @@ describe("POST /admin/resume", () => {
         status: "resumed",
         paused: false,
         windowTotal: "0",
+        windowReserved: "0",
         dailyLimit: "5000",
+        remaining: "5000",
         willTripAgain: false,
       });
       expect(limits.check(1n).allowed).toBe(true);
+    } finally {
+      await close();
+    }
+  });
+
+  it("reports in-flight volume against the budget, not the breaker", async () => {
+    const limits = new TransactionLimits({ dailyLimit: 5000n });
+    limits.recordSpend(1000n);
+    expect(limits.reserve(3000n).allowed).toBe(true);
+    const { url, close } = await boot({ adminKey: ADMIN_KEY, limits });
+    try {
+      const res = await resume(url, ADMIN_KEY);
+      expect(await res.json()).toEqual({
+        status: "resumed",
+        paused: false,
+        windowTotal: "1000",
+        windowReserved: "3000",
+        dailyLimit: "5000",
+        remaining: "1000",
+        willTripAgain: false,
+      });
+      expect(limits.check(1001n).allowed).toBe(false);
+      expect(limits.check(1000n).allowed).toBe(true);
     } finally {
       await close();
     }
@@ -535,7 +560,9 @@ describe("POST /admin/resume", () => {
         status: "resumed",
         paused: false,
         windowTotal: "5000",
+        windowReserved: "0",
         dailyLimit: "5000",
+        remaining: "0",
         willTripAgain: true,
       });
       expect(limits.isPaused()).toBe(false);

@@ -160,13 +160,29 @@ export class TransactionLimits {
    * `paused: false` and stop there, which reads as "service restored" during
    * exactly the incident where it is not, so an operator could believe they
    * had recovered the bridge and walk away. The deciding number is reported
-   * now instead of being left for them to infer.
+   * now instead of being left for them to infer. `total` is committed volume,
+   * the breaker's input; `reserved` is in flight, and `remaining` is what a new
+   * request can still spend after both.
    */
-  windowStatus(): { total: bigint; dailyLimit: bigint | undefined; willTripAgain: boolean } {
+  windowStatus(): {
+    total: bigint;
+    reserved: bigint;
+    remaining: bigint | undefined;
+    dailyLimit: bigint | undefined;
+    willTripAgain: boolean;
+  } {
     const total = this.committedTotal();
+    const reserved = this.reservedTotal();
     const dailyLimit = this.config.dailyLimit;
+    let remaining: bigint | undefined;
+    if (dailyLimit !== undefined) {
+      const left = dailyLimit - total - reserved;
+      remaining = left > 0n ? left : 0n;
+    }
     return {
       total,
+      reserved,
+      remaining,
       dailyLimit,
       willTripAgain: dailyLimit !== undefined && total >= dailyLimit,
     };
