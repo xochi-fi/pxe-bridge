@@ -346,6 +346,101 @@ juice credited to the wrong address stays there. The script checks the address
 shape before it writes to L1, which catches a truncated paste but not a
 well-formed wrong address.
 
+## Account administration
+
+Admin calls on the spending-limit account. The admin is a deployed Schnorr
+account, derived from its key the way the bridge derives its own, and pays its
+own fees.
+
+Prerequisites:
+
+- The admin account is deployed and holds fee juice. To deploy it:
+  1. `npm run admin -- deploy` with `SPENDING_LIMIT_ADMIN_KEY` set. It prints
+     `admin: <address>`, then stops with "SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM is required" if
+     the account is not deployed yet. Nothing is sent, and the wallet it opens
+     lives in `os.tmpdir()` and is deleted on exit.
+  2. `npm run bridge-fee-juice -- --recipient <admin address>`, with
+     `L1_PRIVATE_KEY` set and no `PXE_BRIDGE_SECRET_KEY`. It prints the claim
+     as `FEE_JUICE_CLAIM`; the deposit file, `--wait` and `--recover` work as
+     in "Deploying the spending-limit account in production" above.
+  3. `npm run admin -- deploy` again, with `SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM` set to the
+     printed claim JSON. This is not `FEE_JUICE_CLAIM`, the bridge's own claim.
+     `deploy` sends nothing if the admin is already deployed.
+
+  Never put the admin key in `PXE_BRIDGE_SECRET_KEY`, for any script or for
+  the bridge: `bridge-fee-juice` and the bridge both open a persistent wallet
+  that writes the key to `./aztec-wallet-data`, and the admin key cannot be
+  rotated. Keep the admin funded with `npm run top-up-fee-juice` and
+  `FEE_JUICE_RECIPIENT` set to the admin address: `pause` cannot be sent
+  without it.
+- The contract artifact is in `contracts/spending_limit_account/target/`, for
+  every command including `status`, which takes storage slots from it. It is
+  gitignored: download `contract-artifact` from CI or build it with
+  `aztec compile`. Commands refuse when its class ID differs from the
+  account's, except `pause` and `unpause`, which read no storage: they warn
+  and send, since `aztec compile` is not reproducible (see `SECURITY.md`).
+
+```bash
+npm run admin -- deploy
+npm run admin -- status [--expect-root <hex>] [--expect-paused] [--min-fee-juice <n>]
+npm run admin -- pause
+npm run admin -- unpause
+npm run admin -- propose-limits --max-per-tx <n> --daily <n>
+npm run admin -- apply-limits
+npm run admin -- cancel-limits
+npm run update-allowlist -- --add 0x<addr> --index <n>
+npm run update-allowlist -- --revoke 0x<addr>
+```
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `SPENDING_LIMIT_ACCOUNT` | All but `deploy` | -- | Address of the spending-limit account |
+| `SPENDING_LIMIT_ADMIN_KEY` | All but `status` | -- | Secret key of the admin |
+| `SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM` | `deploy` | -- | Claim JSON from `npm run bridge-fee-juice -- --recipient <admin address>`. Not needed if already deployed |
+| `PXE_BRIDGE_ALLOWLIST_SEED` | `update-allowlist` | -- | The bridge's allowlist seed. Optional for `status`, see below |
+| `PXE_BRIDGE_ALLOWLIST_RECIPIENTS` | `update-allowlist` | -- | The current set, as the bridge has it. Optional for `status` |
+| `AZTEC_NODE_URL` | No | `http://localhost:8080` | Aztec node |
+
+Keys, the seed and the claim are checked without echoing them and deleted from the
+process environment on read. The admin wallet's stores, which hold the admin
+key, live in `os.tmpdir()` (`wallet_data-*`, `pxe_data-*`) and are deleted on
+exit, on error and on SIGHUP/SIGINT/SIGTERM. SIGKILL or a crash leaves them.
+
+Limits are in token base units, decimal, and must satisfy the contract:
+both non-zero, daily >= per-tx, each within u128. A proposal becomes
+applicable 24h after it lands and stays applicable for 24h; after that,
+`cancel-limits` and propose again. Sends print the tx hash, wait for the
+receipt, print the fee paid, and exit 1 unless it executed successfully.
+`update-allowlist` refuses before sending unless the key derives the account's
+admin and the configured set reproduces the account's `allowlist_root`.
+
+`status` reads public storage and needs no key. Exit code bits, ORed, for cron:
+
+| Bit | Meaning |
+| --- | --- |
+| 1 | Error, alone: unreachable node, no account at the address, class ID not the artifact's |
+| 2 | Pause state is not the expected one: paused, or with `--expect-paused` unpaused |
+| 4 | Limit proposal pending, expired included, until applied or cancelled |
+| 8 | `allowlist_root` is not the expected root: `--expect-root`, else the root of `PXE_BRIDGE_ALLOWLIST_SEED` and `PXE_BRIDGE_ALLOWLIST_RECIPIENTS` when set, else unchecked |
+| 16 | Admin fee juice below `--min-fee-juice`; unchecked without it |
+
+Codes >= 128 are interrupts, not bits: 129 SIGHUP, 130 SIGINT, 143 SIGTERM.
+Status bits stay below 32.
+
+A send is admitted only if the admin holds its declared fee limit: estimated
+gas plus 10%, at 10x the worst predicted base fee. That is about 11x the `fee`
+a send prints at unchanged base fees. Set `--min-fee-juice` above that for the
+costliest command, with room for base fees to rise.
+
+`status` sees state at the latest block only. It cannot detect a send not yet
+included, a change undone between two runs (unpause, drain, pause), transfers a
+compromised signing key makes within the live limits and allowlist, or an
+allowlist change when no expected root is configured. Values are read without
+a public-data witness, so the node is trusted: point it at a node you run, over
+https, independent of the one the bridge uses.
+
+See `SECURITY.md` for the incident runbook.
+
 ## API Reference
 
 All methods use JSON-RPC 2.0 over HTTP POST to `/` or `/api/rpc`. Requests require `Content-Type: application/json`. When `PXE_BRIDGE_API_KEY` is set, include `Authorization: Bearer <key>`.
