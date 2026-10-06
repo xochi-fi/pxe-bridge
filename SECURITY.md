@@ -151,6 +151,17 @@ folds into the same `AppPayload` the entrypoint receives. `PREEXISTING_FEE_JUICE
 is the only branch left, and it is also the only one that calls `end_setup()`,
 which is the phase boundary the limit checks depend on.
 
+The entrypoint asserts `fee_payment_method == PREEXISTING_FEE_JUICE`
+and then calls `set_as_fee_payer()` and `end_setup()` unconditionally. The byte
+is not in the signed hash, so before the assert whoever built the request chose
+whether `end_setup()` ran, and any other value left the transfer and the
+`check_spending_public` enqueue in the non-revertible setup phase. Every path
+the Aztec SDK v5.1.0 takes through this entrypoint already encodes
+`PREEXISTING_FEE_JUICE` (sends and their simulations name no fee payer, so
+`completeFeeOptions` picks it), and the other two values only arise alongside a
+merged fee call that the single-call guard rejects, so the assert removes no
+working path.
+
 Somebody else therefore has to put a balance there. `scripts/top-up-fee-juice.ts`
 bridges from L1 naming the bridge as recipient and then sends
 `FeeJuice.claim(to = bridge, ...)` from a separate payer account, which works

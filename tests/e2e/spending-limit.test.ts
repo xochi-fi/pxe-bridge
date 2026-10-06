@@ -23,9 +23,12 @@ import {
  * Three of them are load-bearing for the audit response and are marked so:
  *
  *   PHASE ORDERING -- an over-limit transfer must revert AND leave no note.
- *   If end_setup() ever moves below execute_calls the transfer lands in the
- *   non-revertible phase, every limit silently becomes advisory, and all 54
- *   Noir tests still pass. Nothing but this test can catch that.
+ *   If end_setup() ever moves below execute_calls, or stops running
+ *   unconditionally (the entrypoint asserts fee_payment_method ==
+ *   PREEXISTING_FEE_JUICE because that unsigned byte used to decide whether it
+ *   ran at all), the transfer lands in the non-revertible phase, every limit
+ *   silently becomes advisory, and every Noir test still passes. Nothing but
+ *   this test can catch that.
  *
  *   L2 REVOCATION -- an immediate removal must stop further transfers to that
  *   recipient, and must also invalidate a transaction that was already PROVEN.
