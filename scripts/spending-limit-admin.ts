@@ -355,13 +355,32 @@ export function statusExitCode(
   return code;
 }
 
+/**
+ * Admin fee juice for status, read only under --min-fee-juice. A failed read
+ * is logged and returned as undefined, which statusExitCode reports as bit 16
+ * rather than exiting 1: the account itself was read.
+ */
+export async function readAdminFeeJuice(
+  expect: StatusExpectations,
+  read: () => Promise<bigint>,
+  log: (line: string) => void,
+): Promise<bigint | undefined> {
+  if (expect.minFeeJuice === undefined) return undefined;
+  try {
+    return await read();
+  } catch (err) {
+    log(`warning: ${err instanceof Error ? err.message : String(err)}`);
+    return undefined;
+  }
+}
+
 const isoSeconds = (seconds: bigint): string => new Date(Number(seconds) * 1000).toISOString();
 
 export function formatStatus(
   account: string,
   state: AccountState,
   now: bigint,
-  checked?: { expect: StatusExpectations; adminFeeJuice: bigint },
+  checked?: { expect: StatusExpectations; adminFeeJuice: bigint | undefined },
 ): string[] {
   const window = proposalWindow(state.pendingChangeTime, now);
   const rows: [string, string][] = [
@@ -391,7 +410,14 @@ export function formatStatus(
     rows.push(
       ["expected paused", String(expect.paused)],
       ["expected root", expect.allowlistRoot ?? "not checked"],
-      ["admin fee juice", String(adminFeeJuice)],
+      [
+        "admin fee juice",
+        adminFeeJuice !== undefined
+          ? String(adminFeeJuice)
+          : expect.minFeeJuice === undefined
+            ? "not read"
+            : "unread",
+      ],
       ["min fee juice", expect.minFeeJuice === undefined ? "not checked" : String(expect.minFeeJuice)],
     );
   }

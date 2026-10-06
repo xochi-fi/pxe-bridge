@@ -22,7 +22,7 @@
  *   2  pause state is not the expected one (unpaused, or paused with --expect-paused)
  *   4  limit proposal pending, expired included, until applied or cancelled
  *   8  allowlist_root is not the expected root
- *   16 admin fee juice below --min-fee-juice
+ *   16 admin fee juice below --min-fee-juice, or unread (read only under that flag)
  * 1 alone is an error, including a contract class that is not the artifact's.
  * pause and unpause warn on that mismatch and send anyway; other commands refuse.
  * Codes >= 128 are interrupts (129 SIGHUP, 130 SIGINT, 143 SIGTERM), not bits.
@@ -48,6 +48,7 @@ import {
   parseAllowlistEnv,
   proposalWindow,
   readAccountState,
+  readAdminFeeJuice,
   readFeeJuiceBalance,
   requiredEnv,
   runScript,
@@ -166,7 +167,11 @@ async function main(): Promise<number> {
           : undefined),
     };
     const { state, now } = await readAccountState(NODE_URL, account);
-    const adminFeeJuice = await readFeeJuiceBalance(NODE_URL, state.admin);
+    const adminFeeJuice = await readAdminFeeJuice(
+      expect,
+      () => readFeeJuiceBalance(NODE_URL, state.admin),
+      log,
+    );
     for (const line of formatStatus(account, state, now, { expect, adminFeeJuice })) {
       console.log(line);
     }

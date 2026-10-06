@@ -7,6 +7,7 @@ import {
   decodeAccountState,
   parseAdminCommand,
   proposalWindow,
+  readAdminFeeJuice,
   statusExitCode,
 } from "../scripts/spending-limit-admin.js";
 import type { StatusField } from "../scripts/spending-limit-admin.js";
@@ -170,6 +171,36 @@ describe("statusExitCode", () => {
     expect(
       statusExitCode(state, { paused: true, allowlistRoot: "0x" + "0".repeat(64), minFeeJuice: 1n }, 0n),
     ).toBe(2 | 4 | 8 | 16);
+  });
+});
+
+describe("readAdminFeeJuice", () => {
+  it("does not read without --min-fee-juice", async () => {
+    let reads = 0;
+    const balance = await readAdminFeeJuice(
+      { paused: false },
+      async () => {
+        reads++;
+        return 5n;
+      },
+      () => {},
+    );
+    expect(balance).toBeUndefined();
+    expect(reads).toBe(0);
+  });
+
+  // A failed read is bit 16, not exit 1: the account itself was read.
+  it("turns a failed read into bit 16", async () => {
+    const logged: string[] = [];
+    const expect16 = { paused: false, minFeeJuice: 1n };
+    const balance = await readAdminFeeJuice(
+      expect16,
+      () => Promise.reject(new Error("node down")),
+      (line) => logged.push(line),
+    );
+    expect(balance).toBeUndefined();
+    expect(logged).toEqual(["warning: node down"]);
+    expect(statusExitCode(decodeAccountState(RAW), expect16, balance)).toBe(16);
   });
 });
 
