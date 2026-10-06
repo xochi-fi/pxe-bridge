@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { describe, it, expect } from "vitest";
 import {
   PARAM_APPLY_WINDOW_SECONDS,
@@ -172,11 +173,20 @@ describe("statusExitCode", () => {
   });
 });
 
-// Pins the copies of main.nr's `global PARAM_TIMELOCK_SECONDS` and
-// `global PARAM_APPLY_WINDOW_SECONDS`. Changing either here means main.nr
-// changed, which moves the class ID.
+// The contract class the copies of main.nr's `global PARAM_TIMELOCK_SECONDS`
+// and `global PARAM_APPLY_WINDOW_SECONDS` were last checked against. Any change
+// to main.nr moves CLASS_ID and fails this until the constants are re-checked
+// and this is updated to match.
+const TIMELOCK_CHECKED_AT_CLASS_ID =
+  "0x049106c3c78f32b6650cc50521f43876f00fc97e5d0394541b370a6334235ad8";
+
 describe("timelock constants", () => {
-  it("match main.nr", () => {
+  it("were checked against the pinned contract class", async () => {
+    const classId = await readFile(
+      new URL("../contracts/spending_limit_account/CLASS_ID", import.meta.url),
+      "utf8",
+    );
+    expect(classId.trim()).toBe(TIMELOCK_CHECKED_AT_CLASS_ID);
     expect(PARAM_TIMELOCK_SECONDS).toBe(86_400n);
     expect(PARAM_APPLY_WINDOW_SECONDS).toBe(86_400n);
   });
