@@ -34,6 +34,7 @@ import type {
 import type { DefaultAccountEntrypointOptions } from "@aztec/entrypoints/account";
 import type { GasSettings } from "@aztec/stdlib/gas";
 import type { CompleteAddress } from "@aztec/stdlib/contract";
+import type { AztecAddress } from "@aztec/stdlib/aztec-address";
 import { BaseAccount, type Account, type AccountContract } from "@aztec/aztec.js/account";
 import {
   ALLOWLIST_TREE_HEIGHT,
@@ -43,6 +44,29 @@ import {
 
 // Must match DOM_SEP__SPENDING_LIMIT in the Noir contract (main.nr)
 export const DOM_SEP_SPENDING_LIMIT = 10042;
+
+/**
+ * The hash the account signs in place of the bare payload hash. Mirrors
+ * `combined_hash` in main.nr's entrypoint: the declared amount and recipient
+ * are bound in so they cannot be swapped under a valid signature.
+ *
+ * Exported so the vector pinned in tests/spending-limit-account.test.ts and in
+ * main.nr's `signed_hash_matches_typescript` exercises this code rather than a
+ * copy of it. Argument order and the separator are the drift that matters: a
+ * mismatch is a signature the circuit rejects, with nothing naming the cause.
+ */
+export async function spendingLimitSignedHash(
+  payloadHash: FrType,
+  amount: bigint,
+  recipient: AztecAddress,
+): Promise<FrType> {
+  const { Fr } = await import("@aztec/foundation/curves/bn254");
+  const { poseidon2HashWithSeparator } = await import("@aztec/foundation/crypto/poseidon");
+  return poseidon2HashWithSeparator(
+    [payloadHash, new Fr(amount), recipient.toField()],
+    DOM_SEP_SPENDING_LIMIT,
+  );
+}
 
 // The only call this account may make. The entrypoint reads the declared
 // amount and recipient out of this call's args, and main.nr pins the same
@@ -379,7 +403,6 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
     const { FunctionSelector, encodeArguments } = await import("@aztec/stdlib/abi");
     const { computeOuterAuthWitHash } = await import("@aztec/stdlib/auth-witness");
     const { EncodedAppEntrypointCalls } = await import("@aztec/entrypoints/encoding");
-    const { poseidon2HashWithSeparator } = await import("@aztec/foundation/crypto/poseidon");
 
     const { cancellable, txNonce, feePaymentMethodOptions } = options;
 
@@ -405,9 +428,10 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
 
     // Sign over payload + declared spending, not the payload alone, so the
     // declaration cannot be swapped under a valid signature.
-    const combinedHash = await poseidon2HashWithSeparator(
-      [await encodedCalls.hash(), new Fr(amount), recipient.toField()],
-      DOM_SEP_SPENDING_LIMIT,
+    const combinedHash = await spendingLimitSignedHash(
+      await encodedCalls.hash(),
+      amount,
+      recipient,
     );
     const messageHash = await computeOuterAuthWitHash(
       this.address,

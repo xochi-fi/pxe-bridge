@@ -13,6 +13,7 @@ import {
   type SpendingLimitConfig,
 } from "../src/spending-limit-account.js";
 import { ALLOWLIST_TREE_HEIGHT, rootFromSiblingPath } from "../src/allowlist-tree.js";
+import { spendingLimitSignedHash } from "../src/spending-limit-account.js";
 
 /**
  * The entrypoint must declare what the payload actually transfers, and must
@@ -136,6 +137,29 @@ async function wrappedArgs(
   expect(call).toBeDefined();
   return call!.args;
 }
+
+/**
+ * CROSS-CHECK against the Noir contract.
+ *
+ * The account signs poseidon2([payload_hash, declared_amount,
+ * declared_recipient], DOM_SEP_SPENDING_LIMIT) and the circuit recomputes it
+ * independently in main.nr's entrypoint. The two never meet before a send, so
+ * a swapped argument or a changed separator is a signature the circuit rejects
+ * with nothing naming the cause. The identical value is pinned in main.nr's
+ * `signed_hash_matches_typescript`.
+ */
+describe("signed hash", () => {
+  it("matches the value pinned in main.nr", async () => {
+    const hash = await spendingLimitSignedHash(
+      new Fr(0x1234n),
+      1000n,
+      AztecAddress.fromStringUnsafe("0x" + "aaaa".padStart(64, "0")),
+    );
+    expect(hash.toString()).toBe(
+      "0x29633e282b0896a088906eac71a351befc3db5bfa33b01905c7cfee374e879bd",
+    );
+  });
+});
 
 describe("SpendingLimitAccountContract declaration binding", () => {
   const signingKey = GrumpkinScalar.fromString("0x" + "0".repeat(63) + "7");

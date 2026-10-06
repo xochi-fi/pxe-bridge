@@ -1183,6 +1183,30 @@ pub contract SpendingLimitAccount {
         );
     }
 
+    // CROSS-CHECK of the signed hash against spendingLimitSignedHash in
+    // src/spending-limit-account.ts. The account signs this in place of the
+    // bare payload hash and the entrypoint recomputes it, so a swapped argument
+    // or a changed separator on either side is a signature that never
+    // verifies. The expression mirrors `combined_hash` in the entrypoint; the
+    // value is pinned identically in tests/spending-limit-account.test.ts.
+    #[test]
+    fn signed_hash_matches_typescript() {
+        let payload_hash: Field = 0x1234;
+        let declared_amount: u128 = 1000;
+        let declared_recipient = AztecAddress::from_field(0xaaaa);
+        assert_eq(
+            poseidon2_hash_with_separator(
+                [
+                    payload_hash,
+                    declared_amount as Field,
+                    declared_recipient.to_field(),
+                ],
+                DOM_SEP__SPENDING_LIMIT,
+            ),
+            0x29633e282b0896a088906eac71a351befc3db5bfa33b01905c7cfee374e879bd,
+        );
+    }
+
     // Leaves and internal nodes must not share a hash. Without the domain
     // split, an internal node is a well-formed leaf and a path one level short
     // proves membership of something that is not a recipient.
