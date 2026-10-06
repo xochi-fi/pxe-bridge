@@ -1,6 +1,11 @@
 import type { BridgedFeeJuiceClaim, FeeJuiceClaim } from "../../src/types.js";
 import { FeeJuiceClaimSchema } from "../../src/types.js";
-import { bridgeFeeJuice, topUpFeeJuice, type ClaimingWallet } from "../../src/fee-juice.js";
+import {
+  bridgeFeeJuice,
+  topUpFeeJuice,
+  type ClaimingWallet,
+  type PendingFeeJuiceDeposit,
+} from "../../src/fee-juice.js";
 import { headroomGasSettings } from "../../src/aztec-client.js";
 
 export interface E2EConfig {
@@ -159,7 +164,7 @@ export async function sponsoredFee(
 // Anvil's first default account. docker-compose starts anvil with the stock
 // mnemonic, so this key is funded on L1 and is test-only by construction.
 const ANVIL_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-const L1_RPC = process.env["L1_RPC_URL"] ?? "http://localhost:8545";
+export const L1_RPC = process.env["L1_RPC_URL"] ?? "http://localhost:8545";
 
 // An idle sandbox may not build a block on its own, so every wait here drives
 // one instead of sleeping. Twelve is plenty for a healthy node and keeps a
@@ -228,6 +233,34 @@ export async function bridgeClaim(
   });
   if (!bridged) throw new Error("bridgeFeeJuice returned without reporting its claim");
   return bridged;
+}
+
+/**
+ * Bridges fee juice to `recipient` and returns only what `onSecret` recorded:
+ * a run that died after broadcasting, before the receipt was read.
+ */
+export async function bridgeLosingReceipt(
+  nodeUrl: string,
+  recipient: string,
+  amount: bigint,
+  onBlockNeeded: () => Promise<void>,
+): Promise<PendingFeeJuiceDeposit> {
+  let pending: PendingFeeJuiceDeposit | undefined;
+  await bridgeFeeJuice({
+    nodeUrl,
+    l1RpcUrl: L1_RPC,
+    l1PrivateKey: ANVIL_KEY,
+    recipient,
+    amount,
+    mint: true,
+    onBlockNeeded,
+    attempts: SANDBOX_WAIT_ATTEMPTS,
+    onSecret: (deposit) => {
+      pending = deposit;
+    },
+  });
+  if (!pending) throw new Error("bridgeFeeJuice returned without reporting its secret");
+  return pending;
 }
 
 /**

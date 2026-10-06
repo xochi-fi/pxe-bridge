@@ -1,8 +1,17 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, vi } from "vitest";
+import { execFile } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import type { EmbeddedWallet } from "@aztec/wallets/embedded";
+import { NO_FROM } from "@aztec/aztec.js/account";
+import { AztecAddress } from "@aztec/aztec.js/addresses";
+import { createAztecNodeClient } from "@aztec/aztec.js/node";
+import { getFeeJuiceBalance } from "@aztec/aztec.js/utils";
+import { ContractInitializationStatus } from "@aztec/aztec.js/wallet";
 import {
   ALLOW_SPONSORED_FPC_ENV,
   AztecClient,
+  DEPLOYER_FEE_JUICE_CLAIM_ENV,
   SPONSORED_FPC_REFUSED_ERROR,
   deriveAccountKeys,
   deriveDeployerKeys,
@@ -12,13 +21,23 @@ import {
   SpendingLimitAccountContract,
   type SpendingLimitConfig,
 } from "../../src/spending-limit-account.js";
+import {
+  claimFeeJuiceFor,
+  recoverFeeJuiceClaim,
+  type ClaimingWallet,
+} from "../../src/fee-juice.js";
 import type { BridgedFeeJuiceClaim } from "../../src/types.js";
 import {
   bridgeClaim,
+  bridgeLosingReceipt,
   deployTestToken,
+  feeWithHeadroom,
   getTestConfig,
   mintOne,
+  requireTestToken,
+  sponsoredFee,
   FUNDER_KEY,
+  L1_RPC,
 } from "./helpers.js";
 
 /**
@@ -38,6 +57,12 @@ const config = getTestConfig();
 // other suites ran first.
 const DEPLOYER_PATH_KEY = "0x000000000000000000000000000000000000000000000000000000000000feed";
 const REFUSED_PATH_KEY = "0x000000000000000000000000000000000000000000000000000000000000fade";
+const FUNDED_PATH_KEY = "0x000000000000000000000000000000000000000000000000000000000000face";
+const SPENT_CLAIM_KEY = "0x000000000000000000000000000000000000000000000000000000000000deaf";
+
+const TSX = fileURLToPath(new URL("../../node_modules/.bin/tsx", import.meta.url));
+const BRIDGE_SCRIPT = fileURLToPath(new URL("../../scripts/bridge-fee-juice.ts", import.meta.url));
+const execFileAsync = promisify(execFile);
 
 // Pinned by the L1 faucet: bridgeClaim mints, and a mint must equal the
 // faucet's fixed amount.
@@ -72,6 +97,57 @@ async function limitAccountAddress(
     { salt },
   );
   return manager.getInstance().address.toString();
+}
+
+/** Runs connect() and returns the lines it logged. */
+async function connectLogged(client: AztecClient): Promise<string[]> {
+  const log = vi.spyOn(console, "log");
+  try {
+    await client.connect();
+    return log.mock.calls.map((args) => args.join(" "));
+  } finally {
+    log.mockRestore();
+  }
+}
+
+async function connectFunder(): Promise<{ wallet: EmbeddedWallet; address: string }> {
+  const funder = new AztecClient(config.nodeUrl, FUNDER_KEY);
+  await funder.connect();
+  return {
+    wallet: (funder as unknown as { wallet: EmbeddedWallet }).wallet,
+    address: funder.getAddress()!,
+  };
+}
+
+/** Limits on global-setup's token, whose admin is the funder. */
+function limitsOn(admin: string): SpendingLimitConfig {
+  return {
+    maxAmountPerTx: 1_000n,
+    dailyLimit: 10_000n,
+    admin,
+    token: requireTestToken(),
+    allowlistSeed: "0x" + "09".repeat(32),
+    allowlistRecipients: [{ address: "0x" + "11".repeat(32), index: 512 }],
+  };
+}
+
+/** Registers the deployer `key` derives with `wallet`, without deploying it. */
+async function registerDeployer(
+  wallet: EmbeddedWallet,
+  key: string,
+): Promise<{ address: AztecAddress; deploy: () => Promise<unknown> }> {
+  const { secret, salt, signingKey } = await deriveDeployerKeys(key);
+  const manager = await wallet.createSchnorrAccount(secret, salt, signingKey);
+  return {
+    address: (await manager.getAccount()).getAddress(),
+    deploy: async () =>
+      (await manager.getDeployMethod()).send({ from: NO_FROM, fee: await feeWithHeadroom(wallet) }),
+  };
+}
+
+async function isInitialized(wallet: EmbeddedWallet, address: AztecAddress): Promise<boolean> {
+  const { initializationStatus } = await wallet.getContractMetadata(address);
+  return initializationStatus === ContractInitializationStatus.INITIALIZED;
 }
 
 describe("spending limit account deployed from a funded deployer (e2e)", () => {
@@ -217,6 +293,171 @@ describe("spending limit account deployed from a funded deployer (e2e)", () => {
         await limitAccountAddress(funderWallet, REFUSED_PATH_KEY, limits),
       );
       expect(await node.getContract(account)).toBeUndefined();
+    },
+    600_000,
+  );
+});
+
+// No deployer claim configured: the deployer is initialized and funded by a
+// top-up, the claim for which is recovered from its secret alone.
+describe("deployer funded by a top-up, no claim configured (e2e)", () => {
+  let funderWallet: EmbeddedWallet;
+  let funderAddress: string;
+  let limits: SpendingLimitConfig;
+  let deployer: AztecAddress;
+
+  beforeAll(async () => {
+    ({ wallet: funderWallet, address: funderAddress } = await connectFunder());
+    limits = limitsOn(funderAddress);
+    // Initialized with no balance, as a deployer that paid via SponsoredFPC.
+    const registered = await registerDeployer(funderWallet, FUNDED_PATH_KEY);
+    deployer = registered.address;
+    await registered.deploy();
+  }, 600_000);
+
+  it(
+    "recovers a claim from its secret and claims it for the deployer",
+    async () => {
+      const node = createAztecNodeClient(config.nodeUrl);
+      expect(await getFeeJuiceBalance(deployer, node)).toBe(0n);
+
+      const token = requireTestToken();
+      const deposit = await bridgeLosingReceipt(
+        config.nodeUrl,
+        deployer.toString(),
+        DEPLOYER_FEE_JUICE,
+        () => mintOne(funderWallet, token, funderAddress),
+      );
+
+      const recovered = await recoverFeeJuiceClaim({
+        nodeUrl: config.nodeUrl,
+        l1RpcUrl: L1_RPC,
+        recipient: deposit.recipient,
+        amount: BigInt(deposit.claimAmount),
+        claimSecret: deposit.claimSecret,
+        secretHash: deposit.secretHash,
+        fromBlock: BigInt(deposit.l1FromBlock),
+      });
+      const info = await node.getNodeInfo();
+      expect(recovered.messageHash).toBe(
+        await feeJuiceMessageHash(deployer.toString(), recovered, info.l1ChainId, info.rollupVersion),
+      );
+
+      // The operator path prints the same claim.
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        AZTEC_NODE_URL: config.nodeUrl,
+        L1_RPC_URL: L1_RPC,
+        BRIDGE_AMOUNT: deposit.claimAmount,
+        FEE_JUICE_CLAIM_SECRET: deposit.claimSecret,
+        FEE_JUICE_RECOVER_FROM_BLOCK: deposit.l1FromBlock,
+      };
+      delete env["PXE_BRIDGE_SECRET_KEY"];
+      delete env["FEE_JUICE_RECIPIENT"];
+      const { stdout } = await execFileAsync(
+        TSX,
+        [BRIDGE_SCRIPT, "--deployer", "--recipient", deposit.recipient, "--recover", deposit.secretHash],
+        { env },
+      );
+      const printed = new RegExp(`^${DEPLOYER_FEE_JUICE_CLAIM_ENV}='(.*)'$`, "m").exec(stdout);
+      expect(printed, stdout).not.toBeNull();
+      expect(JSON.parse(printed![1]!)).toEqual({
+        claimAmount: recovered.claimAmount,
+        claimSecret: recovered.claimSecret,
+        messageLeafIndex: recovered.messageLeafIndex,
+      });
+
+      await claimFeeJuiceFor({
+        wallet: funderWallet as unknown as ClaimingWallet,
+        payer: funderAddress,
+        recipient: deployer.toString(),
+        claim: recovered,
+        paymentMethod: await sponsoredFee(funderWallet),
+      });
+      expect(await getFeeJuiceBalance(deployer, node)).toBe(DEPLOYER_FEE_JUICE);
+    },
+    600_000,
+  );
+
+  // Runs after the top-up above.
+  it(
+    "deploys the account from the deployer's balance without SponsoredFPC",
+    async () => {
+      const node = createAztecNodeClient(config.nodeUrl);
+      expect(await isInitialized(funderWallet, deployer)).toBe(true);
+      const before = await getFeeJuiceBalance(deployer, node);
+      expect(before).toBeGreaterThan(0n);
+      const expectedAccount = await limitAccountAddress(funderWallet, FUNDED_PATH_KEY, limits);
+      expect(await node.getContract(AztecAddress.fromStringUnsafe(expectedAccount))).toBeUndefined();
+
+      const client = new AztecClient(config.nodeUrl, FUNDED_PATH_KEY, undefined, limits, undefined, {
+        allowSponsoredFpc: false,
+      });
+      const lines = await connectLogged(client);
+
+      expect(client.getAddress()).toBe(expectedAccount);
+      expect(lines).toContain(
+        `[pxe-bridge] Paying deployment of ${expectedAccount} from the deployer's fee juice balance`,
+      );
+      expect(lines).not.toContain(`[pxe-bridge] Deploying deployer account ${deployer.toString()}...`);
+      expect(await node.getContract(AztecAddress.fromStringUnsafe(expectedAccount))).toBeDefined();
+      expect(await getFeeJuiceBalance(deployer, node)).toBeLessThan(before);
+    },
+    600_000,
+  );
+});
+
+// The configured claim was consumed for the deployer by another payer before
+// the deployer was initialized: the balance it credited pays both deploys.
+describe("uninitialized deployer whose claim is already spent (e2e)", () => {
+  let funderWallet: EmbeddedWallet;
+  let limits: SpendingLimitConfig;
+  let deployer: AztecAddress;
+  let claim: BridgedFeeJuiceClaim;
+
+  beforeAll(async () => {
+    let funderAddress: string;
+    ({ wallet: funderWallet, address: funderAddress } = await connectFunder());
+    limits = limitsOn(funderAddress);
+    deployer = (await registerDeployer(funderWallet, SPENT_CLAIM_KEY)).address;
+
+    const token = requireTestToken();
+    claim = await bridgeClaim(config.nodeUrl, deployer.toString(), DEPLOYER_FEE_JUICE, () =>
+      mintOne(funderWallet, token, funderAddress),
+    );
+    await claimFeeJuiceFor({
+      wallet: funderWallet as unknown as ClaimingWallet,
+      payer: funderAddress,
+      recipient: deployer.toString(),
+      claim,
+      paymentMethod: await sponsoredFee(funderWallet),
+    });
+  }, 600_000);
+
+  it(
+    "self-deploys the deployer from its balance, then the account",
+    async () => {
+      const node = createAztecNodeClient(config.nodeUrl);
+      expect(await isInitialized(funderWallet, deployer)).toBe(false);
+      expect(await getFeeJuiceBalance(deployer, node)).toBe(DEPLOYER_FEE_JUICE);
+      const expectedAccount = await limitAccountAddress(funderWallet, SPENT_CLAIM_KEY, limits);
+
+      const client = new AztecClient(config.nodeUrl, SPENT_CLAIM_KEY, undefined, limits, claim, {
+        allowSponsoredFpc: false,
+      });
+      const lines = await connectLogged(client);
+
+      expect(lines).toContain(
+        `[pxe-bridge] ${DEPLOYER_FEE_JUICE_CLAIM_ENV} is spent; paying the deployer's deployment ` +
+          `from its fee juice balance (${DEPLOYER_FEE_JUICE})`,
+      );
+      expect(lines).toContain(
+        `[pxe-bridge] Paying deployment of ${expectedAccount} from the deployer's fee juice balance`,
+      );
+      expect(await isInitialized(funderWallet, deployer)).toBe(true);
+      expect(client.getAddress()).toBe(expectedAccount);
+      expect(await node.getContract(AztecAddress.fromStringUnsafe(expectedAccount))).toBeDefined();
+      expect(await getFeeJuiceBalance(deployer, node)).toBeLessThan(DEPLOYER_FEE_JUICE);
     },
     600_000,
   );
