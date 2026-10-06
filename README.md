@@ -136,8 +136,9 @@ of what is left: the deployment is sent from the deployer with no fee payment
 method, so the deployer pays from its own fee juice balance. The claim has to be
 bridged to the deployer, not to the account (`npm run bridge-fee-juice --
 --deployer --recipient <Deployer address>`), and is refused without
-`PXE_BRIDGE_SPENDING_LIMIT_ADMIN`. Without it, both deployments fall back to
-SponsoredFPC. If the claim is already spent while the deployer is not yet
+`PXE_BRIDGE_SPENDING_LIMIT_ADMIN`. Without it, a deployer that already holds
+fee juice pays both deployments from that balance; one that holds none falls
+back to SponsoredFPC for both. If the claim is already spent while the deployer is not yet
 deployed, the deployer deploys itself from the balance the claim credited; with
 no balance left, startup fails naming the spent claim before sending anything.
 

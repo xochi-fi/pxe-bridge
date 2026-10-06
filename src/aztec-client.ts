@@ -167,19 +167,25 @@ export const SPONSORED_FPC_REFUSED_ERROR =
   "both the deployer and the account. Set " +
   `${ALLOW_SPONSORED_FPC_ENV}=true only if this node is a sandbox or testnet.`;
 
-/** State of the configured deployer claim's L1 to L2 message. */
-export type DeployerClaimState = "absent" | "unspent" | "spent";
+/**
+ * State of the configured deployer claim's L1 to L2 message, or with no claim
+ * configured, whether the deployer holds fee juice (`funded`) or not
+ * (`absent`).
+ */
+export type DeployerClaimState = "absent" | "funded" | "unspent" | "spent";
 
 /**
  * How the spending-limit account's deployment, sent from the deployer, is paid.
  *
- * - `sponsored`: no deployer claim; SponsoredFPC, subject to
- *   `sponsoredFpcSetting`.
+ * - `sponsored`: no deployer claim and no deployer balance; SponsoredFPC,
+ *   subject to `sponsoredFpcSetting`.
  * - `claim`: the claim is unspent, because the deployer was initialized by
  *   other means (another run, a manual deploy). The deploy consumes it, with
  *   the deployer as both sender and fee payer.
  * - `preexisting`: the claim is spent, normally by the deployer's own deploy
- *   on this or an earlier run. The deployer pays from its balance.
+ *   on this or an earlier run, or there is no claim and the deployer holds
+ *   fee juice (a top-up, a claim since removed). The deployer pays from its
+ *   balance.
  */
 function limitAccountFeePath(claim: DeployerClaimState): "sponsored" | "claim" | "preexisting" {
   switch (claim) {
@@ -188,6 +194,7 @@ function limitAccountFeePath(claim: DeployerClaimState): "sponsored" | "claim" |
     case "unspent":
       return "claim";
     case "spent":
+    case "funded":
       return "preexisting";
   }
 }
@@ -649,8 +656,8 @@ export class AztecClient implements IAztecClient {
    * so it needs no separate key material and is reproducible across restarts.
    * A standard Schnorr account can self-deploy because its entrypoint has no
    * single-call restriction. It pays with the deployer claim when one is
-   * configured and unspent, from its own balance when the claim is spent but
-   * left one, else SponsoredFPC, subject to `sponsoredFpcSetting`.
+   * configured and unspent, from its own balance when the claim is spent or
+   * absent and it holds one, else SponsoredFPC, subject to `sponsoredFpcSetting`.
    */
   private async ensureDeployer(
     secret: Fr,
@@ -675,34 +682,38 @@ export class AztecClient implements IAztecClient {
     // after a failed account deploy would resend the deployer's deployment,
     // including a claim that was already consumed. createSchnorrAccount has
     // registered the instance, so the status is definitive.
+    const claim = this.deployerFeeJuiceClaim;
     if (await this.isInitialized(deployerAddress)) {
-      const claim = this.deployerFeeJuiceClaim;
-      if (!claim) return { address: deployerAddress, claim: "absent" };
+      if (!claim) {
+        const funded = (await this.feeJuiceBalance(deployerAddress)) > 0n;
+        return { address: deployerAddress, claim: funded ? "funded" : "absent" };
+      }
       const spent = await this.deployerClaimSpent(deployerAddress, claim);
       return { address: deployerAddress, claim: spent ? "spent" : "unspent" };
     }
 
-    const claim = this.deployerFeeJuiceClaim;
     // Checked before sending. A claim with no message would fail the deploy
     // with "No L1 to L2 message found", which deployerClaimSpent names; a
     // spent one with an existing nullifier, though the balance it credited
-    // may still pay for the deploy.
+    // may still pay for the deploy. With no claim, a balance pays before
+    // SponsoredFPC is considered.
     const spent = claim ? await this.deployerClaimSpent(deployerAddress, claim) : false;
     let fromBalance = false;
-    if (spent) {
+    if (!claim || spent) {
       const balance = await this.feeJuiceBalance(deployerAddress);
-      if (balance === 0n) {
+      if (balance > 0n) {
+        fromBalance = true;
+        console.log(
+          `[pxe-bridge] ${claim ? `${DEPLOYER_FEE_JUICE_CLAIM_ENV} is spent; paying` : "Paying"} ` +
+            `the deployer's deployment from its fee juice balance (${balance})`,
+        );
+      } else if (spent) {
         throw new Error(
           `Deployer ${deployerAddress.toString()} is not initialized, ${DEPLOYER_FEE_JUICE_CLAIM_ENV} ` +
             "is already spent and the deployer holds no fee juice. Bridge a new claim to the " +
             `deployer (npm run bridge-fee-juice -- --deployer --recipient ${deployerAddress.toString()}).`,
         );
       }
-      fromBalance = true;
-      console.log(
-        `[pxe-bridge] ${DEPLOYER_FEE_JUICE_CLAIM_ENV} is spent; paying the deployer's deployment ` +
-          `from its fee juice balance (${balance})`,
-      );
     }
 
     console.log(`[pxe-bridge] Deploying deployer account ${deployerAddress.toString()}...`);
@@ -751,7 +762,7 @@ export class AztecClient implements IAztecClient {
     }
     return {
       address: deployerAddress,
-      claim: claim ? "spent" : "absent",
+      claim: claim ? "spent" : fromBalance ? "funded" : "absent",
     };
   }
 
