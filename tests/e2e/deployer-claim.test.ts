@@ -1,13 +1,18 @@
 import { describe, it, expect, beforeAll, vi } from "vitest";
 import { execFile } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { EmbeddedWallet } from "@aztec/wallets/embedded";
 import { NO_FROM } from "@aztec/aztec.js/account";
+import { generateClaimSecret } from "@aztec/aztec.js/ethereum";
 import { AztecAddress } from "@aztec/aztec.js/addresses";
 import { createAztecNodeClient } from "@aztec/aztec.js/node";
 import { getFeeJuiceBalance } from "@aztec/aztec.js/utils";
 import { ContractInitializationStatus } from "@aztec/aztec.js/wallet";
+import { createPublicClient, http } from "viem";
 import {
   ALLOW_SPONSORED_FPC_ENV,
   AztecClient,
@@ -24,6 +29,7 @@ import {
 import {
   claimFeeJuiceFor,
   recoverFeeJuiceClaim,
+  writePendingDeposit,
   type ClaimingWallet,
 } from "../../src/fee-juice.js";
 import type { BridgedFeeJuiceClaim } from "../../src/types.js";
@@ -61,6 +67,9 @@ const REFUSED_PATH_KEY = "0x0000000000000000000000000000000000000000000000000000
 const FUNDED_PATH_KEY = "0x000000000000000000000000000000000000000000000000000000000000face";
 const SPENT_CLAIM_KEY = "0x000000000000000000000000000000000000000000000000000000000000deaf";
 const DUST_KEY = "0x000000000000000000000000000000000000000000000000000000000000d057";
+
+// Anvil's first default account, the L1 sender in tests/e2e/helpers.ts.
+const ANVIL_ADDRESS = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
 
 const TSX = fileURLToPath(new URL("../../node_modules/.bin/tsx", import.meta.url));
 const BRIDGE_SCRIPT = fileURLToPath(new URL("../../scripts/bridge-fee-juice.ts", import.meta.url));
@@ -339,35 +348,48 @@ describe("deployer funded by a top-up, no claim configured (e2e)", () => {
         claimSecret: deposit.claimSecret,
         secretHash: deposit.secretHash,
         fromBlock: BigInt(deposit.l1FromBlock),
+        l1Sender: deposit.l1Sender,
       });
       const info = await node.getNodeInfo();
       expect(recovered.messageHash).toBe(
         await feeJuiceMessageHash(deployer.toString(), recovered, info.l1ChainId, info.rollupVersion),
       );
 
-      // The operator path prints the same claim.
-      const env: NodeJS.ProcessEnv = {
-        ...process.env,
-        AZTEC_NODE_URL: config.nodeUrl,
-        L1_RPC_URL: L1_RPC,
-        BRIDGE_AMOUNT: deposit.claimAmount,
-        FEE_JUICE_CLAIM_SECRET: deposit.claimSecret,
-        FEE_JUICE_RECOVER_FROM_BLOCK: deposit.l1FromBlock,
-      };
-      delete env["PXE_BRIDGE_SECRET_KEY"];
-      delete env["FEE_JUICE_RECIPIENT"];
-      const { stdout } = await execFileAsync(
-        TSX,
-        [BRIDGE_SCRIPT, "--deployer", "--recipient", deposit.recipient, "--recover", deposit.secretHash],
-        { env },
-      );
-      const printed = new RegExp(`^${DEPLOYER_FEE_JUICE_CLAIM_ENV}='(.*)'$`, "m").exec(stdout);
-      expect(printed, stdout).not.toBeNull();
-      expect(JSON.parse(printed![1]!)).toEqual({
-        claimAmount: recovered.claimAmount,
-        claimSecret: recovered.claimSecret,
-        messageLeafIndex: recovered.messageLeafIndex,
-      });
+      // The operator path: the script recovers from the file it writes before
+      // the deposit, prints the same claim, then deletes the file.
+      const dir = mkdtempSync(join(tmpdir(), "pxe-bridge-recover-"));
+      try {
+        const file = writePendingDeposit(deposit, dir);
+        const env: NodeJS.ProcessEnv = {
+          ...process.env,
+          AZTEC_NODE_URL: config.nodeUrl,
+          L1_RPC_URL: L1_RPC,
+        };
+        for (const name of [
+          "PXE_BRIDGE_SECRET_KEY",
+          "FEE_JUICE_RECIPIENT",
+          "BRIDGE_AMOUNT",
+          "FEE_JUICE_CLAIM_SECRET",
+          "FEE_JUICE_RECOVER_FROM_BLOCK",
+        ]) {
+          delete env[name];
+        }
+        const { stdout } = await execFileAsync(
+          TSX,
+          [BRIDGE_SCRIPT, "--deployer", "--recipient", deposit.recipient, "--recover", file],
+          { env, cwd: dir },
+        );
+        const printed = new RegExp(`^${DEPLOYER_FEE_JUICE_CLAIM_ENV}='(.*)'$`, "m").exec(stdout);
+        expect(printed, stdout).not.toBeNull();
+        expect(JSON.parse(printed![1]!)).toEqual({
+          claimAmount: recovered.claimAmount,
+          claimSecret: recovered.claimSecret,
+          messageLeafIndex: recovered.messageLeafIndex,
+        });
+        expect(existsSync(file)).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
 
       await claimFeeJuiceFor({
         wallet: funderWallet as unknown as ClaimingWallet,
@@ -379,6 +401,28 @@ describe("deployer funded by a top-up, no claim configured (e2e)", () => {
       expect(await getFeeJuiceBalance(deployer, node)).toBe(DEPLOYER_FEE_JUICE);
     },
     600_000,
+  );
+
+  // A deposit that was never mined, with nothing pending from its sender.
+  it(
+    "reports a missing deposit with nothing pending as safe to bridge anew",
+    async () => {
+      const [secret, secretHash] = await generateClaimSecret();
+      const fromBlock = await createPublicClient({ transport: http(L1_RPC) }).getBlockNumber();
+      await expect(
+        recoverFeeJuiceClaim({
+          nodeUrl: config.nodeUrl,
+          l1RpcUrl: L1_RPC,
+          recipient: deployer.toString(),
+          amount: DEPLOYER_FEE_JUICE,
+          claimSecret: secret.toString(),
+          secretHash: secretHash.toString(),
+          fromBlock,
+          l1Sender: ANVIL_ADDRESS,
+        }),
+      ).rejects.toThrow(/no transaction from .* is pending at this RPC.*Safe to bridge anew/);
+    },
+    120_000,
   );
 
   // Runs after the top-up above.

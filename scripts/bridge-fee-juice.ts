@@ -27,11 +27,13 @@
  * A claim commits to its recipient, and juice bridged to the wrong address
  * cannot be moved.
  *
- * The claim secret, its hash and the starting L1 block are printed before any
- * L1 write. If the run dies before the claim is printed, the deposit may still
- * land: rerun the same command with --recover <secretHash> and
- * FEE_JUICE_CLAIM_SECRET / FEE_JUICE_RECOVER_FROM_BLOCK set. It finds the
- * deposit on L1 and prints the claim without depositing.
+ * Before any L1 write the claim secret, its hash, the starting L1 block and
+ * the L1 sender are written to fee-juice-deposit-<secretHash>.json in the
+ * working directory, owner-only. If the run dies before the claim is printed,
+ * the deposit may still land: rerun the same command with --recover <file>. It
+ * finds the deposit on L1 and prints the claim without depositing, or says
+ * whether one is still pending. The file is deleted once the claim is printed.
+ * A hangup exits rather than killing the run mid-write.
  *
  * The claim and the L1 to L2 message hash are printed as soon as the L1
  * deposit lands, before the wait. If the wait times out, the deposit is done:
@@ -40,7 +42,7 @@
  * Usage:
  *   npx tsx scripts/bridge-fee-juice.ts [--deployer] --recipient 0x<address>
  *   npx tsx scripts/bridge-fee-juice.ts [--deployer] [--address-only]   (dev, key mode)
- *   npx tsx scripts/bridge-fee-juice.ts [--deployer] --recipient 0x<address> --recover 0x<secretHash>
+ *   npx tsx scripts/bridge-fee-juice.ts [--deployer] --recipient 0x<address> --recover <file>|0x<secretHash>
  *   npx tsx scripts/bridge-fee-juice.ts --wait 0x<messageHash>
  *
  * Env:
@@ -53,14 +55,16 @@
  *   L1_CHAIN_ID            -- L1 chain id (default: Anvil's, per the SDK; with
  *                             --recover, the node's)
  *   BRIDGE_AMOUNT          -- Fee Juice amount in wei (default: 1000000000000000000 = 1e18);
- *                             with --recover, the amount the lost run bridged
+ *                             with --recover 0x<secretHash>, the amount the lost run bridged
  *   FEE_JUICE_MINT         -- "true" to mint BRIDGE_AMOUNT from the L1 faucet first;
  *                             sandbox only, and BRIDGE_AMOUNT must equal the faucet's
  *                             fixed mint amount
- *   FEE_JUICE_CLAIM_SECRET       -- --recover only: the claim secret printed before the deposit
- *   FEE_JUICE_RECOVER_FROM_BLOCK -- --recover only: the L1 block printed with it
+ *   FEE_JUICE_CLAIM_SECRET       -- --recover 0x<secretHash> with no deposit file in the
+ *                                   working directory: the claim secret
+ *   FEE_JUICE_RECOVER_FROM_BLOCK -- likewise: the L1 block recorded with it
  */
 
+import { rmSync } from "node:fs";
 import { parseArgs } from "node:util";
 import {
   DEPLOYER_FEE_JUICE_CLAIM_ENV,
@@ -71,14 +75,16 @@ import {
   assertAztecAddress,
   assertBridgeAmount,
   bridgeFeeJuice,
+  findPendingDeposit,
   recoverFeeJuiceClaim,
   waitForL1ToL2Message,
+  writePendingDeposit,
 } from "../src/fee-juice.js";
 import type { PendingFeeJuiceDeposit } from "../src/fee-juice.js";
 import type { BridgedFeeJuiceClaim } from "../src/types.js";
 
 const USAGE =
-  "Usage: bridge-fee-juice [--deployer] --recipient 0x<address> [--recover 0x<secretHash>] | " +
+  "Usage: bridge-fee-juice [--deployer] --recipient 0x<address> [--recover <file>|0x<secretHash>] | " +
   "[--deployer] [--address-only] (dev, PXE_BRIDGE_SECRET_KEY) | --wait 0x<messageHash>";
 
 const HASH_PATTERN = /^0x[0-9a-fA-F]{64}$/;
@@ -142,11 +148,16 @@ async function main(): Promise<void> {
 
   const toDeployer = values.deployer === true;
   const addressOnly = values["address-only"] === true;
-  const recoverHash = values.recover;
-  if (recoverHash !== undefined) {
+  const recoverArg = values.recover;
+  // A deposit file, or a secret hash whose file is in the working directory.
+  // A hash with no file there takes the secret from the env.
+  let recoverFile: ReturnType<typeof findPendingDeposit>;
+  if (recoverArg !== undefined) {
     if (addressOnly) fail(`--recover and --address-only are exclusive. ${USAGE}`);
-    if (!HASH_PATTERN.test(recoverHash)) {
-      fail(`--recover must be a 32-byte hex secret hash, got ${JSON.stringify(recoverHash)}`);
+    try {
+      recoverFile = findPendingDeposit(recoverArg);
+    } catch (err) {
+      fail((err as Error).message);
     }
   }
   const recipientArg = values.recipient ?? process.env["FEE_JUICE_RECIPIENT"];
@@ -204,20 +215,49 @@ async function main(): Promise<void> {
   if (L1_CHAIN_ID !== undefined && !/^\d+$/.test(L1_CHAIN_ID)) {
     fail("L1_CHAIN_ID must be a decimal integer");
   }
-  const AMOUNT = parseBigInt("BRIDGE_AMOUNT", process.env["BRIDGE_AMOUNT"] ?? "1000000000000000000");
+  const AMOUNT_RAW = process.env["BRIDGE_AMOUNT"];
+  const RECOVER_FROM_RAW = process.env["FEE_JUICE_RECOVER_FROM_BLOCK"];
+  const AMOUNT = parseBigInt("BRIDGE_AMOUNT", AMOUNT_RAW ?? "1000000000000000000");
   try {
     assertBridgeAmount(AMOUNT);
   } catch (err) {
     fail((err as Error).message);
   }
-  let recoverFrom: bigint | undefined;
-  if (recoverHash !== undefined) {
-    if (!CLAIM_SECRET) fail("--recover needs FEE_JUICE_CLAIM_SECRET, printed before the deposit");
-    const raw = process.env["FEE_JUICE_RECOVER_FROM_BLOCK"];
-    if (raw === undefined || !/^\d+$/.test(raw)) {
-      fail("--recover needs FEE_JUICE_RECOVER_FROM_BLOCK, the decimal L1 block printed with the secret");
+  let recovery:
+    | { amount: bigint; claimSecret: string; secretHash: string; fromBlock: bigint; l1Sender?: string }
+    | undefined;
+  if (recoverFile) {
+    // The file is the record; a second source for any of it could disagree.
+    const { path, deposit } = recoverFile;
+    if (AMOUNT_RAW !== undefined || CLAIM_SECRET !== undefined || RECOVER_FROM_RAW !== undefined) {
+      fail(
+        `--recover ${path} takes the amount, secret and block from the file; unset BRIDGE_AMOUNT, ` +
+          "FEE_JUICE_CLAIM_SECRET and FEE_JUICE_RECOVER_FROM_BLOCK",
+      );
     }
-    recoverFrom = BigInt(raw);
+    if (deposit.recipient.toLowerCase() !== recipient.toLowerCase()) {
+      fail(`Deposit file ${path} is for ${deposit.recipient}, not ${recipient}`);
+    }
+    recovery = {
+      amount: BigInt(deposit.claimAmount),
+      claimSecret: deposit.claimSecret,
+      secretHash: deposit.secretHash,
+      fromBlock: BigInt(deposit.l1FromBlock),
+      l1Sender: deposit.l1Sender,
+    };
+  } else if (recoverArg !== undefined) {
+    if (!CLAIM_SECRET) {
+      fail(`No deposit file for ${recoverArg} here; --recover with a secret hash needs FEE_JUICE_CLAIM_SECRET`);
+    }
+    if (RECOVER_FROM_RAW === undefined || !/^\d+$/.test(RECOVER_FROM_RAW)) {
+      fail("--recover needs FEE_JUICE_RECOVER_FROM_BLOCK, the decimal L1 block recorded with the secret");
+    }
+    recovery = {
+      amount: AMOUNT,
+      claimSecret: CLAIM_SECRET,
+      secretHash: recoverArg,
+      fromBlock: BigInt(RECOVER_FROM_RAW),
+    };
   } else if (!L1_PRIVATE_KEY) {
     fail("L1_PRIVATE_KEY is required (Ethereum key with Fee Juice)");
   }
@@ -225,11 +265,12 @@ async function main(): Promise<void> {
   const envName = toDeployer ? DEPLOYER_FEE_JUICE_CLAIM_ENV : "FEE_JUICE_CLAIM";
   let pending: PendingFeeJuiceDeposit | undefined;
   let bridged: BridgedFeeJuiceClaim | undefined;
+  // Deleted once the claim is printed, which is the next record of the deposit.
+  let depositFile = recoverFile?.path;
 
-  const recoverCommand = (d: PendingFeeJuiceDeposit): string =>
-    `  FEE_JUICE_CLAIM_SECRET=${d.claimSecret} FEE_JUICE_RECOVER_FROM_BLOCK=${d.l1FromBlock} ` +
-    `BRIDGE_AMOUNT=${d.claimAmount} npm run bridge-fee-juice -- ${toDeployer ? "--deployer " : ""}` +
-    `--recipient ${d.recipient} --recover ${d.secretHash}`;
+  const recoverCommand = (file: string): string =>
+    `  npm run bridge-fee-juice -- ${toDeployer ? "--deployer " : ""}--recipient ${recipient} ` +
+    `--recover ${file}`;
 
   // Printed before the wait: the L1 deposit is done and cannot be undone,
   // and a wait that times out must not take the only copy of the claim.
@@ -239,21 +280,22 @@ async function main(): Promise<void> {
     console.log("\nBridged. Set this on the bridge once the message has synced:\n");
     console.log(`${envName}='${JSON.stringify(claimJson)}'`);
     console.log(`\nL1 to L2 message hash: ${messageHash}\n`);
+    if (depositFile !== undefined) {
+      rmSync(depositFile, { force: true });
+      depositFile = undefined;
+    }
   };
 
   console.log(`Connecting to Aztec node at ${AZTEC_NODE_URL}`);
   try {
-    if (recoverHash !== undefined) {
+    if (recovery !== undefined) {
       printClaim(
         await recoverFeeJuiceClaim({
           nodeUrl: AZTEC_NODE_URL,
           l1RpcUrl: L1_RPC_URL,
           ...(L1_CHAIN_ID ? { l1ChainId: Number(L1_CHAIN_ID) } : {}),
           recipient,
-          amount: AMOUNT,
-          claimSecret: CLAIM_SECRET!,
-          secretHash: recoverHash,
-          fromBlock: recoverFrom!,
+          ...recovery,
           log: console.log,
         }),
       );
@@ -270,13 +312,16 @@ async function main(): Promise<void> {
         amount: AMOUNT,
         mint: process.env["FEE_JUICE_MINT"] === "true",
         log: console.log,
-        // Printed before any L1 write: until the receipt is read, this is the
-        // only copy of the secret a broadcast deposit needs.
+        // Written before any L1 write: until the receipt is read, this is the
+        // only copy of the secret a broadcast deposit needs. A failed write
+        // throws here, before anything is sent.
         onSecret: (d) => {
+          depositFile = writePendingDeposit(d);
           pending = d;
-          console.log("\nClaim secret, before the deposit. If this run dies before the claim is");
-          console.log("printed, the deposit may still land. Do not bridge again; recover it with:\n");
-          console.log(recoverCommand(d));
+          console.log(`\nDeposit recorded in ${depositFile} (owner-only; holds the claim secret).`);
+          console.log("If this run dies before the claim is printed, the deposit may still land.");
+          console.log("Do not bridge again; recover it from this directory with:\n");
+          console.log(recoverCommand(depositFile));
           console.log("\n(with the same AZTEC_NODE_URL and L1_RPC_URL)\n");
         },
         onClaim: printClaim,
@@ -290,14 +335,14 @@ async function main(): Promise<void> {
           `  npm run bridge-fee-juice -- --wait ${bridged.messageHash}`,
       );
     }
-    if (pending !== undefined) {
+    if (pending !== undefined && depositFile !== undefined) {
       console.error("Fatal:", err);
       fail(
         "\nThe deposit may be on L1. Do not bridge again before recovering it:\n" +
-          recoverCommand(pending),
+          recoverCommand(depositFile),
       );
     }
-    if (recoverHash !== undefined) fail((err as Error).message);
+    if (recovery !== undefined) fail((err as Error).message);
     throw err;
   }
 
@@ -331,6 +376,11 @@ async function waitForSync(nodeUrl: string, messageHash: string): Promise<void> 
   }
   console.log("Message synced. The claim printed with it can now be consumed.");
 }
+
+// Unhandled, a hangup kills the process wherever it is, possibly mid-write of
+// the deposit file. Handled, it runs between synchronous steps: before
+// onSecret, with nothing sent, or after the file is complete.
+process.on("SIGHUP", () => process.exit(129));
 
 main()
   .then(() => process.exit(0))

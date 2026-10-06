@@ -1,13 +1,20 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   assertAztecAddress,
   assertBridgeAmount,
   claimFeeJuiceFor,
+  findPendingDeposit,
   isDepositOf,
+  pendingDepositPath,
   recoverFeeJuiceClaim,
   topUpFeeJuice,
+  writePendingDeposit,
   type ClaimingWallet,
+  type PendingFeeJuiceDeposit,
 } from "../src/fee-juice.js";
 import {
   AztecClient,
@@ -174,6 +181,57 @@ describe("fee juice deposit recovery", () => {
         fromBlock: 0n,
       }),
     ).rejects.toThrow(`hashes to`);
+  });
+});
+
+describe("pending deposit file", () => {
+  const SECRET_HASH = "0x" + "0A".repeat(32);
+  const pending: PendingFeeJuiceDeposit = {
+    recipient: "0x" + "ab".repeat(32),
+    claimAmount: "1000",
+    claimSecret: "0x" + "01".repeat(32),
+    secretHash: SECRET_HASH,
+    l1FromBlock: "42",
+    l1Sender: "0x" + "cd".repeat(20),
+  };
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "pxe-bridge-deposit-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // It holds the claim secret.
+  it("is written owner-only", () => {
+    const path = writePendingDeposit(pending, dir);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
+  // A second deposit under the same secret hash would make the first
+  // unrecoverable.
+  it("is never overwritten", () => {
+    writePendingDeposit(pending, dir);
+    expect(() => writePendingDeposit({ ...pending, claimAmount: "1" }, dir)).toThrow(/EEXIST/);
+  });
+
+  it("is found by its path or by its secret hash in any case", () => {
+    const path = writePendingDeposit(pending, dir);
+    expect(findPendingDeposit(path)).toEqual({ path, deposit: pending });
+    expect(findPendingDeposit(SECRET_HASH.toLowerCase(), dir)?.deposit).toEqual(pending);
+  });
+
+  // The hash form falls back to the env-supplied secret.
+  it("is absent for a secret hash with no file", () => {
+    expect(findPendingDeposit(SECRET_HASH, dir)).toBeUndefined();
+  });
+
+  it("rejects a missing path or a malformed file", () => {
+    expect(() => findPendingDeposit(join(dir, "nope.json"))).toThrow(/Cannot read deposit file/);
+    const path = pendingDepositPath(SECRET_HASH, dir);
+    writeFileSync(path, JSON.stringify({ ...pending, claimSecret: "0x01" }));
+    expect(() => findPendingDeposit(SECRET_HASH, dir)).toThrow(/claimSecret/);
   });
 });
 

@@ -22,6 +22,9 @@
  * L2 balance cannot be moved between accounts.
  */
 
+import { closeSync, existsSync, fsyncSync, openSync, readFileSync, writeSync } from "node:fs";
+import { join } from "node:path";
+import { z } from "zod";
 import { FeeJuiceContract } from "@aztec/noir-contracts.js/FeeJuice";
 import type { FeePaymentMethod } from "@aztec/aztec.js/fee";
 import type { AztecNode } from "@aztec/aztec.js/node";
@@ -38,6 +41,7 @@ const DEFAULT_WAIT_INTERVAL_MS = 5_000;
 
 const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 const FIELD_PATTERN = /^0x[0-9a-fA-F]{64}$/;
+const L1_ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
 
 /** u128 on chain, in `_increase_public_balance` and in the message hash. */
 const MAX_CLAIM_AMOUNT = 1n << 128n;
@@ -55,14 +59,72 @@ const RECOVERY_LOG_RANGE = 2_000n;
 /**
  * A deposit as it stands before the L1 write: everything needed to find it on
  * L1 and rebuild its claim if the run dies before the receipt is read.
+ * `l1FromBlock` is read before any L1 write, so the deposit lands at or after
+ * it. `l1Sender` is the account that sends it, whose nonces tell a recovery
+ * miss apart: still pending, or dropped.
  */
-export interface PendingFeeJuiceDeposit {
-  recipient: string;
-  claimAmount: string;
-  claimSecret: string;
-  secretHash: string;
-  /** L1 block read before any L1 write. The deposit lands at or after it. */
-  l1FromBlock: string;
+const PendingFeeJuiceDepositSchema = z.object({
+  recipient: z.string().regex(ADDRESS_PATTERN),
+  claimAmount: z.string().regex(/^[1-9]\d*$/),
+  claimSecret: z.string().regex(FIELD_PATTERN),
+  secretHash: z.string().regex(FIELD_PATTERN),
+  l1FromBlock: z.string().regex(/^\d+$/),
+  l1Sender: z.string().regex(L1_ADDRESS_PATTERN),
+});
+export type PendingFeeJuiceDeposit = z.infer<typeof PendingFeeJuiceDepositSchema>;
+
+/** File a script records `deposit` in: `dir`, named by the secret hash. */
+export function pendingDepositPath(secretHash: string, dir: string = process.cwd()): string {
+  return join(dir, `fee-juice-deposit-${secretHash.toLowerCase()}.json`);
+}
+
+/**
+ * Writes `deposit` to `pendingDepositPath`: owner-only, flushed, never over an
+ * existing file. Synchronous, for `onSecret`, so it completes before any L1
+ * write and a signal handler cannot run until it has. Stdout alone is lost
+ * with the terminal, and with it the secret a broadcast deposit needs.
+ */
+export function writePendingDeposit(deposit: PendingFeeJuiceDeposit, dir?: string): string {
+  const path = pendingDepositPath(deposit.secretHash, dir);
+  const fd = openSync(path, "wx", 0o600);
+  try {
+    writeSync(fd, `${JSON.stringify(deposit, null, 2)}\n`);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  return path;
+}
+
+/**
+ * The deposit a `--recover` / `FEE_JUICE_RECOVER` value names: the path of a
+ * file `writePendingDeposit` wrote, or a secret hash whose file is in `dir`.
+ * Undefined for a hash with no file there, which leaves the secret to the env.
+ */
+export function findPendingDeposit(
+  value: string,
+  dir?: string,
+): { path: string; deposit: PendingFeeJuiceDeposit } | undefined {
+  const byHash = FIELD_PATTERN.test(value);
+  const path = byHash ? pendingDepositPath(value, dir) : value;
+  if (byHash && !existsSync(path)) return undefined;
+
+  let json: unknown;
+  try {
+    json = JSON.parse(readFileSync(path, "utf8"));
+  } catch (err) {
+    throw new Error(`Cannot read deposit file ${path}: ${(err as Error).message}`);
+  }
+  const parsed = PendingFeeJuiceDepositSchema.safeParse(json);
+  if (!parsed.success) {
+    throw new Error(
+      `Deposit file ${path}: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
+    );
+  }
+  if (byHash && parsed.data.secretHash.toLowerCase() !== value.toLowerCase()) {
+    throw new Error(`Deposit file ${path} holds secret hash ${parsed.data.secretHash}, not ${value}`);
+  }
+  return { path, deposit: parsed.data };
 }
 
 export interface BridgeFeeJuiceOptions {
@@ -143,6 +205,11 @@ export interface RecoverFeeJuiceClaimOptions {
   secretHash: string;
   /** First L1 block to scan, `l1FromBlock` as `onSecret` recorded it. */
   fromBlock: bigint;
+  /**
+   * `l1Sender` as `onSecret` recorded it. On a miss its nonces decide between
+   * "still pending" and "dropped"; without it a miss cannot say which.
+   */
+  l1Sender?: string;
   log?: (message: string) => void;
 }
 
@@ -273,6 +340,7 @@ export async function bridgeFeeJuice(opts: BridgeFeeJuiceOptions): Promise<FeeJu
     claimSecret: claimSecret.toString(),
     secretHash: secretHash.toString(),
     l1FromBlock: (await l1Client.getBlockNumber()).toString(),
+    l1Sender: l1Client.account.address,
   };
   opts.onSecret?.(pending);
 
@@ -356,8 +424,10 @@ export function isDepositOf(
  *
  * Scans the portal's `DepositToAztecPublic` events to `recipient` from
  * `fromBlock`. `to` is the only indexed field, so the secret hash and amount
- * are matched here. Throws when nothing matches: the deposit is unmined, and
- * one still pending can land after a fresh bridge, depositing twice.
+ * are matched here. Throws when nothing matches. With `l1Sender`, the error
+ * says whether a transaction from it is still pending at this RPC, which can
+ * land after a fresh bridge and deposit twice, or none is and bridging anew
+ * is safe.
  */
 export async function recoverFeeJuiceClaim(opts: RecoverFeeJuiceClaimOptions): Promise<BridgedFeeJuiceClaim> {
   assertAztecAddress("recipient", opts.recipient);
@@ -367,6 +437,9 @@ export async function recoverFeeJuiceClaim(opts: RecoverFeeJuiceClaimOptions): P
   }
   if (!FIELD_PATTERN.test(opts.secretHash)) {
     throw new Error(`secret hash must be 32-byte hex, got ${JSON.stringify(opts.secretHash)}`);
+  }
+  if (opts.l1Sender !== undefined && !L1_ADDRESS_PATTERN.test(opts.l1Sender)) {
+    throw new Error(`L1 sender must be a 20-byte hex address, got ${JSON.stringify(opts.l1Sender)}`);
   }
 
   const log = opts.log ?? (() => {});
@@ -397,34 +470,67 @@ export async function recoverFeeJuiceClaim(opts: RecoverFeeJuiceClaimOptions): P
     secretHash: opts.secretHash,
   };
 
-  const latest = await client.getBlockNumber();
-  log(`Scanning L1 blocks ${opts.fromBlock}..${latest} for the deposit`);
-  for (let from = opts.fromBlock; from <= latest; from += RECOVERY_LOG_RANGE) {
-    const to = from + RECOVERY_LOG_RANGE - 1n < latest ? from + RECOVERY_LOG_RANGE - 1n : latest;
-    const events = await client.getContractEvents({
-      address: portal,
-      abi: FeeJuicePortalAbi,
-      eventName: "DepositToAztecPublic",
-      args: { to: opts.recipient.toLowerCase() as `0x${string}` },
-      fromBlock: from,
-      toBlock: to,
-    });
-    const match = events.find((e) => isDepositOf(e.args, deposit));
-    if (match?.args.index !== undefined && match.args.key !== undefined) {
-      return {
-        claimAmount: deposit.claimAmount,
-        claimSecret: opts.claimSecret,
-        messageLeafIndex: match.args.index.toString(),
-        messageHash: match.args.key,
-      };
+  const scan = async (fromBlock: bigint, toBlock: bigint): Promise<BridgedFeeJuiceClaim | undefined> => {
+    log(`Scanning L1 blocks ${fromBlock}..${toBlock} for the deposit`);
+    for (let from = fromBlock; from <= toBlock; from += RECOVERY_LOG_RANGE) {
+      const to = from + RECOVERY_LOG_RANGE - 1n < toBlock ? from + RECOVERY_LOG_RANGE - 1n : toBlock;
+      const events = await client.getContractEvents({
+        address: portal,
+        abi: FeeJuicePortalAbi,
+        eventName: "DepositToAztecPublic",
+        args: { to: opts.recipient.toLowerCase() as `0x${string}` },
+        fromBlock: from,
+        toBlock: to,
+      });
+      const match = events.find((e) => isDepositOf(e.args, deposit));
+      if (match?.args.index !== undefined && match.args.key !== undefined) {
+        return {
+          claimAmount: deposit.claimAmount,
+          claimSecret: opts.claimSecret,
+          messageLeafIndex: match.args.index.toString(),
+          messageHash: match.args.key,
+        };
+      }
     }
+    return undefined;
+  };
+
+  const missed = `No DepositToAztecPublic of ${opts.amount} to ${opts.recipient} with secret hash ${opts.secretHash}`;
+  let latest = await client.getBlockNumber();
+  const found = await scan(opts.fromBlock, latest);
+  if (found) return found;
+
+  if (opts.l1Sender === undefined) {
+    throw new Error(
+      `${missed} in L1 blocks ${opts.fromBlock}..${latest}. The deposit is not mined: ` +
+        "never sent, or still pending. A pending one can still land, so recover again before " +
+        "bridging anew.",
+    );
   }
 
+  const sender = opts.l1Sender as `0x${string}`;
+  const [mined, pending] = await Promise.all([
+    client.getTransactionCount({ address: sender, blockTag: "latest" }),
+    client.getTransactionCount({ address: sender, blockTag: "pending" }),
+  ]);
+  // A deposit mined since the scan began counts in `mined` but lies past the
+  // blocks scanned. Blocks up to a head read after the nonces cover it.
+  const head = await client.getBlockNumber();
+  const late = head > latest ? await scan(latest + 1n, head) : undefined;
+  if (late) return late;
+  latest = head;
+
+  if (pending > mined) {
+    throw new Error(
+      `${missed} in L1 blocks ${opts.fromBlock}..${latest}, and ${pending - mined} transaction(s) ` +
+        `from ${sender} are pending at this RPC. The deposit may be among them: recover again ` +
+        "once they are mined. Bridging anew now can deposit twice.",
+    );
+  }
   throw new Error(
-    `No DepositToAztecPublic of ${opts.amount} to ${opts.recipient} with secret hash ` +
-      `${opts.secretHash} in L1 blocks ${opts.fromBlock}..${latest}. The deposit is not mined: ` +
-      "never sent, or still pending. A pending one can still land, so recover again before " +
-      "bridging anew.",
+    `${missed} in L1 blocks ${opts.fromBlock}..${latest}, and no transaction from ${sender} is ` +
+      "pending at this RPC: the deposit was never sent, or was dropped or replaced. Safe to " +
+      "bridge anew.",
   );
 }
 
