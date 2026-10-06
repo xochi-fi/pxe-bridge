@@ -315,7 +315,7 @@ npm run top-up-fee-juice
 | `L1_RPC_URL` | No | `http://localhost:8545` | Ethereum RPC |
 | `L1_CHAIN_ID` | No | Anvil's | Required for any L1 other than the sandbox |
 | `BRIDGE_AMOUNT` | No | `1e18` | Fee juice in wei |
-| `FEE_JUICE_PAYER_SPONSORED` | No | -- | `true` pays via SponsoredFPC; sandbox and testnet only |
+| `FEE_JUICE_PAYER_SPONSORED` | No | -- | `true` pays via SponsoredFPC; sandbox and testnet only, refused under the same policy as `PXE_BRIDGE_ALLOW_SPONSORED_FPC` |
 | `FEE_JUICE_MINT` | No | -- | `true` mints from the L1 faucet first; sandbox only, and `BRIDGE_AMOUNT` must equal the faucet's fixed mint amount |
 
 There is nothing to set on the bridge afterwards. The balance is on chain, and

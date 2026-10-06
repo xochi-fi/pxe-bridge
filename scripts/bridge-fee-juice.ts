@@ -67,6 +67,7 @@
 import { rmSync } from "node:fs";
 import { parseArgs } from "node:util";
 import {
+  booleanEnv,
   DEPLOYER_FEE_JUICE_CLAIM_ENV,
   deriveAccountKeys,
   deriveDeployerKeys,
@@ -223,6 +224,12 @@ async function main(): Promise<void> {
   } catch (err) {
     fail((err as Error).message);
   }
+  let MINT: boolean;
+  try {
+    MINT = booleanEnv(process.env, "FEE_JUICE_MINT") ?? false;
+  } catch (err) {
+    fail((err as Error).message);
+  }
   let recovery:
     | { amount: bigint; claimSecret: string; secretHash: string; fromBlock: bigint; l1Sender?: string }
     | undefined;
@@ -310,7 +317,7 @@ async function main(): Promise<void> {
         ...(L1_CHAIN_ID ? { l1ChainId: Number(L1_CHAIN_ID) } : {}),
         recipient,
         amount: AMOUNT,
-        mint: process.env["FEE_JUICE_MINT"] === "true",
+        mint: MINT,
         log: console.log,
         // Written before any L1 write: until the receipt is read, this is the
         // only copy of the secret a broadcast deposit needs. A failed write

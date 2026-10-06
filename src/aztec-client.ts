@@ -125,6 +125,18 @@ export interface SponsoredFpcSetting {
 }
 
 /**
+ * A boolean env flag: "true", "false", or unset. Anything else, the empty
+ * string included, throws naming the variable, so a typo fails rather than
+ * silently meaning either one.
+ */
+export function booleanEnv(env: Record<string, string | undefined>, name: string): boolean | undefined {
+  const raw = env[name];
+  if (raw === undefined) return undefined;
+  if (raw === "true" || raw === "false") return raw === "true";
+  throw new Error(`${name} must be "true" or "false", got ${JSON.stringify(raw)}`);
+}
+
+/**
  * Whether an undeployed account may pay its deployment fee via SponsoredFPC.
  *
  * SponsoredFPC is a testing contract (`@aztec/aztec.js/fee/testing`) that
@@ -144,12 +156,9 @@ export interface SponsoredFpcSetting {
  * a deliberate setting, not as unset. `reason` names the variable that decided.
  */
 export function sponsoredFpcSetting(env: Record<string, string | undefined>): SponsoredFpcSetting {
-  const raw = env[ALLOW_SPONSORED_FPC_ENV];
-  if (raw === "true" || raw === "false") {
-    return { allowed: raw === "true", reason: `${ALLOW_SPONSORED_FPC_ENV}=${raw}` };
-  }
-  if (raw !== undefined) {
-    throw new Error(`${ALLOW_SPONSORED_FPC_ENV} must be "true" or "false", got ${JSON.stringify(raw)}`);
+  const flag = booleanEnv(env, ALLOW_SPONSORED_FPC_ENV);
+  if (flag !== undefined) {
+    return { allowed: flag, reason: `${ALLOW_SPONSORED_FPC_ENV}=${flag}` };
   }
   return {
     allowed: env["NODE_ENV"] !== "production",

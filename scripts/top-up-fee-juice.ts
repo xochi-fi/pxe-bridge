@@ -71,7 +71,7 @@
 import { rmSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import type { AztecLMDBStoreV2 } from "@aztec/kv-store/lmdb-v2";
-import { deriveAccountKeys, deriveDeployerKeys } from "../src/aztec-client.js";
+import { booleanEnv, deriveAccountKeys, deriveDeployerKeys, sponsoredFpcSetting } from "../src/aztec-client.js";
 import type { AccountKeys } from "../src/aztec-client.js";
 import {
   assertAztecAddress,
@@ -157,9 +157,17 @@ function parseResumeClaim(raw: string): BridgedFeeJuiceClaim {
   return parsed.data;
 }
 
+function flag(name: string): boolean {
+  try {
+    return booleanEnv(process.env, name) ?? false;
+  } catch (err) {
+    fail((err as Error).message);
+  }
+}
+
 async function main(): Promise<void> {
   const RECIPIENT = required("FEE_JUICE_RECIPIENT");
-  const PAYER_DEPLOYER = process.env["FEE_JUICE_PAYER_DEPLOYER"] === "true";
+  const PAYER_DEPLOYER = flag("FEE_JUICE_PAYER_DEPLOYER");
   const PAYER_KEY = process.env["FEE_JUICE_PAYER_KEY"];
   const L1_PRIVATE_KEY = process.env["L1_PRIVATE_KEY"];
   const RESUME = process.env["FEE_JUICE_RESUME_CLAIM"];
@@ -178,8 +186,25 @@ async function main(): Promise<void> {
 
   const AZTEC_NODE_URL = process.env["AZTEC_NODE_URL"] ?? "http://localhost:8080";
   const L1_RPC_URL = process.env["L1_RPC_URL"] ?? "http://localhost:8545";
-  const SPONSORED = process.env["FEE_JUICE_PAYER_SPONSORED"] === "true";
-  const MINT = process.env["FEE_JUICE_MINT"] === "true";
+  const SPONSORED = flag("FEE_JUICE_PAYER_SPONSORED");
+  const MINT = flag("FEE_JUICE_MINT");
+  // SponsoredFPC exists only on sandbox and testnet; the bridge's own policy
+  // decides whether this environment may name it.
+  if (SPONSORED) {
+    let setting: ReturnType<typeof sponsoredFpcSetting>;
+    try {
+      setting = sponsoredFpcSetting(process.env);
+    } catch (err) {
+      fail((err as Error).message);
+    }
+    if (!setting.allowed) {
+      fail(
+        `FEE_JUICE_PAYER_SPONSORED=true is refused (${setting.reason}): SponsoredFPC is a testing ` +
+          "contract that exists only on sandbox and testnet. Set PXE_BRIDGE_ALLOW_SPONSORED_FPC=true " +
+          "only if this node is one.",
+      );
+    }
+  }
 
   const AMOUNT_RAW = process.env["BRIDGE_AMOUNT"];
   const AMOUNT = parseBigInt("BRIDGE_AMOUNT", AMOUNT_RAW ?? "1000000000000000000");

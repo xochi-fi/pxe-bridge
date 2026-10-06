@@ -18,6 +18,7 @@ import {
 } from "../src/fee-juice.js";
 import {
   AztecClient,
+  booleanEnv,
   DEPLOYER_CLAIM_WITHOUT_SPENDING_LIMIT_ERROR,
   FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR,
   deriveAccountKeys,
@@ -232,6 +233,21 @@ describe("pending deposit file", () => {
     const path = pendingDepositPath(SECRET_HASH, dir);
     writeFileSync(path, JSON.stringify({ ...pending, claimSecret: "0x01" }));
     expect(() => findPendingDeposit(SECRET_HASH, dir)).toThrow(/claimSecret/);
+  });
+});
+
+describe("booleanEnv", () => {
+  it("reads true, false and unset", () => {
+    expect(booleanEnv({ F: "true" }, "F")).toBe(true);
+    expect(booleanEnv({ F: "false" }, "F")).toBe(false);
+    expect(booleanEnv({}, "F")).toBeUndefined();
+  });
+
+  // "1", "TRUE" or an empty value meaning false would be a silent choice.
+  it("rejects anything else, naming the variable", () => {
+    for (const raw of ["", "1", "TRUE", "yes"]) {
+      expect(() => booleanEnv({ F: raw }, "F")).toThrow(`F must be "true" or "false", got ${JSON.stringify(raw)}`);
+    }
   });
 });
 
