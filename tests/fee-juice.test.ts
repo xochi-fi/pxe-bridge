@@ -11,7 +11,7 @@ import {
   AztecClient,
   FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR,
   deriveAccountKeys,
-  sponsoredFpcPermitted,
+  sponsoredFpcSetting,
 } from "../src/aztec-client.js";
 import type { FeeJuiceClaim } from "../src/types.js";
 import type { SpendingLimitConfig } from "../src/spending-limit-account.js";
@@ -203,30 +203,40 @@ describe("SponsoredFPC deployment fee fallback", () => {
   // NODE_ENV=production everywhere, so production needs an explicit opt-in
   // rather than the fallback being taken on any network by default.
   it("is refused in production by default", () => {
-    expect(sponsoredFpcPermitted({ NODE_ENV: "production" })).toBe(false);
+    expect(sponsoredFpcSetting({ NODE_ENV: "production" }).allowed).toBe(false);
   });
 
   it("is permitted in production on explicit opt-in", () => {
     expect(
-      sponsoredFpcPermitted({ NODE_ENV: "production", PXE_BRIDGE_ALLOW_SPONSORED_FPC: "true" }),
+      sponsoredFpcSetting({ NODE_ENV: "production", PXE_BRIDGE_ALLOW_SPONSORED_FPC: "true" }).allowed,
     ).toBe(true);
   });
 
   it("is permitted outside production, where the sandbox runs", () => {
-    expect(sponsoredFpcPermitted({})).toBe(true);
-    expect(sponsoredFpcPermitted({ NODE_ENV: "development" })).toBe(true);
+    expect(sponsoredFpcSetting({}).allowed).toBe(true);
+    expect(sponsoredFpcSetting({ NODE_ENV: "development" }).allowed).toBe(true);
   });
 
   it("can be switched off outside production", () => {
     expect(
-      sponsoredFpcPermitted({ NODE_ENV: "development", PXE_BRIDGE_ALLOW_SPONSORED_FPC: "false" }),
+      sponsoredFpcSetting({ NODE_ENV: "development", PXE_BRIDGE_ALLOW_SPONSORED_FPC: "false" }).allowed,
     ).toBe(false);
+  });
+
+  // Logged when the fallback is taken, so an operator can tell a deliberate
+  // opt-in from a missing NODE_ENV.
+  it("names the variable that decided", () => {
+    expect(
+      sponsoredFpcSetting({ NODE_ENV: "production", PXE_BRIDGE_ALLOW_SPONSORED_FPC: "true" }).reason,
+    ).toBe("PXE_BRIDGE_ALLOW_SPONSORED_FPC=true");
+    expect(sponsoredFpcSetting({ PXE_BRIDGE_ALLOW_SPONSORED_FPC: "" }).reason).toBe("NODE_ENV=(unset)");
+    expect(sponsoredFpcSetting({ NODE_ENV: "development" }).reason).toBe("NODE_ENV=development");
   });
 
   // "1" or "yes" meaning neither would be a silent choice either way.
   it("rejects any value other than true or false", () => {
     expect(() =>
-      sponsoredFpcPermitted({ NODE_ENV: "production", PXE_BRIDGE_ALLOW_SPONSORED_FPC: "1" }),
+      sponsoredFpcSetting({ NODE_ENV: "production", PXE_BRIDGE_ALLOW_SPONSORED_FPC: "1" }),
     ).toThrow(/PXE_BRIDGE_ALLOW_SPONSORED_FPC must be "true" or "false"/);
   });
 });

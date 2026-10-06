@@ -95,6 +95,12 @@ export const FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR =
 /** Opts a production bridge into the SponsoredFPC deployment fee fallback. */
 export const ALLOW_SPONSORED_FPC_ENV = "PXE_BRIDGE_ALLOW_SPONSORED_FPC";
 
+export interface SponsoredFpcSetting {
+  allowed: boolean;
+  /** The setting that decided, as `NAME=value`, for the log. */
+  reason: string;
+}
+
 /**
  * Whether an undeployed account may pay its deployment fee via SponsoredFPC.
  *
@@ -111,16 +117,20 @@ export const ALLOW_SPONSORED_FPC_ENV = "PXE_BRIDGE_ALLOW_SPONSORED_FPC";
  * alone cannot tell a testnet from a network that charges.
  *
  * Only "true" and "false" are accepted, so a typo fails at startup rather than
- * silently meaning either one.
+ * silently meaning either one. `reason` names the variable that decided.
  */
-export function sponsoredFpcPermitted(env: Record<string, string | undefined>): boolean {
+export function sponsoredFpcSetting(env: Record<string, string | undefined>): SponsoredFpcSetting {
   const raw = env[ALLOW_SPONSORED_FPC_ENV];
-  if (raw === "true") return true;
-  if (raw === "false") return false;
+  if (raw === "true" || raw === "false") {
+    return { allowed: raw === "true", reason: `${ALLOW_SPONSORED_FPC_ENV}=${raw}` };
+  }
   if (raw !== undefined && raw !== "") {
     throw new Error(`${ALLOW_SPONSORED_FPC_ENV} must be "true" or "false", got ${JSON.stringify(raw)}`);
   }
-  return env["NODE_ENV"] !== "production";
+  return {
+    allowed: env["NODE_ENV"] !== "production",
+    reason: `NODE_ENV=${env["NODE_ENV"] ?? "(unset)"}`,
+  };
 }
 
 export const SPONSORED_FPC_REFUSED_ERROR =
@@ -235,17 +245,16 @@ export class AztecClient implements IAztecClient {
     if (feeJuiceClaim && spendingLimitConfig) {
       throw new Error(FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR);
     }
-    // Defaults to the env, read at construction, so a library caller is gated
-    // the same as index.ts and a malformed value fails before connecting.
+    // Defaults to the env, read at construction, so index.ts and a library
+    // caller are gated alike, the log names the variable that decided, and a
+    // malformed value fails before connecting.
     if (options.allowSponsoredFpc !== undefined) {
       this.allowSponsoredFpc = options.allowSponsoredFpc;
       this.sponsoredFpcReason = `allowSponsoredFpc=${options.allowSponsoredFpc}`;
     } else {
-      this.allowSponsoredFpc = sponsoredFpcPermitted(process.env);
-      this.sponsoredFpcReason =
-        process.env[ALLOW_SPONSORED_FPC_ENV] === "true"
-          ? `${ALLOW_SPONSORED_FPC_ENV}=true`
-          : `NODE_ENV=${process.env["NODE_ENV"] ?? "(unset)"}`;
+      const setting = sponsoredFpcSetting(process.env);
+      this.allowSponsoredFpc = setting.allowed;
+      this.sponsoredFpcReason = setting.reason;
     }
     this.secretKey = secretKey;
   }
@@ -491,7 +500,7 @@ export class AztecClient implements IAztecClient {
    * then pays the spending-limit account's deployment the same way. A claim
    * cannot pay for it: claims are bridged to the solver's address. So the
    * spending-limit account can only be deployed where SponsoredFPC is
-   * permitted; see `sponsoredFpcPermitted`.
+   * permitted; see `sponsoredFpcSetting`.
    */
   private async ensureDeployer(
     secret: import("@aztec/aztec.js/fields").Fr,
