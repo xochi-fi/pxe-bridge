@@ -374,11 +374,18 @@ that point the send has not been made, so a retry is correct.
 Keys are held 24h, and durability depends on `PXE_BRIDGE_AUDIT_LOG` being a file
 path. Without it the store is in-memory and a restart forgets every key.
 
-The circuit breaker trips when committed volume reaches the daily cap, not when
-a single request would overshoot it. A request larger than the remaining budget
-is rejected on its own; tripping there meant one oversized request, needing no
-prior volume when `PXE_BRIDGE_MAX_AMOUNT` was unset, stopped the bridge for a
-full window. In-flight reservations count toward the remaining budget but not
+The circuit breaker trips when committed volume drains the daily cap, not when a
+single request would overshoot it. Drained means committed volume reaches the
+cap, or leaves less than 1% of it and less than the request needs. The second
+case exists because admission never lets committed volume exceed the cap, so a
+drain in amounts that do not divide it stops short (4999 of 5000) and the
+breaker never fired. The cost is that a residual under 1% of the cap is lost
+for the window once it trips. Above that residual, a request larger than the
+remaining budget is rejected on its own; tripping there meant one oversized
+request, needing no prior volume when `PXE_BRIDGE_MAX_AMOUNT` was unset, stopped
+the bridge for a full window, and a busy legitimate day at 80% of the cap would
+pause over one transfer too large for what was left.
+In-flight reservations count toward the remaining budget but not
 toward the trip: a reservation that releases moved no tokens. Not nothing, since
 a send that reverts on chain still burns its fee, but the daily limit counts
 token volume and not fees. `POST /admin/resume` reports `windowTotal` (committed

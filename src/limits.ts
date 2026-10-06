@@ -15,6 +15,14 @@ export type LimitsReservation =
 
 const WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
 const CLEANUP_INTERVAL_MS = 60_000; // 1 minute
+// The window counts as drained once committed volume leaves less than
+// 1/DRAINED_RESIDUAL_DIVISOR of the daily limit. See check() for why the
+// breaker needs a threshold at all, and why this one.
+const DRAINED_RESIDUAL_DIVISOR = 100n;
+
+function drained(volume: bigint, dailyLimit: bigint): boolean {
+  return volume >= dailyLimit || (dailyLimit - volume) * DRAINED_RESIDUAL_DIVISOR < dailyLimit;
+}
 
 export class TransactionLimits {
   private spendLog: { amount: bigint; timestamp: number }[] = [];
@@ -92,21 +100,39 @@ export class TransactionLimits {
     if (this.config.dailyLimit !== undefined) {
       const committed = this.committedTotal();
 
-      // Committed volume consumed the window. This is the drain signal the
+      // Committed volume drained the window. This is the drain signal the
       // breaker exists for, so it stops everything until an operator resumes
       // or the window elapses. There are three ways out, not one: the operator
       // endpoint, the auto-resume above, and a restart, and none of them hands
       // budget back -- the window is rebuilt from the audit log either way.
-      // In-flight reservations are excluded: a reservation that later releases
-      // moved no tokens, and must not pause the bridge for a full window. It
-      // is not "moved nothing": a send that reverts on chain still burns its
-      // fee, but the daily limit counts token volume, not fees.
-      if (committed >= this.config.dailyLimit) {
+      //
+      // Drained is not only "reached exactly". Admission keeps committed at or
+      // below the limit, so a drain in amounts that do not divide it stops
+      // short -- 4999 of 5000 -- and the breaker never fired, though the
+      // window was as spent as it gets. It also trips when committed volume
+      // alone leaves less than this request needs AND less than 1% of the
+      // limit. The 1% floor is what keeps a single oversized request from
+      // tripping it with no prior volume, and a busy legitimate day at 80%
+      // from pausing over one transfer too large for what is left. The cost
+      // is that a residual under 1% of the limit is unspendable until a
+      // resume or the window elapses.
+      //
+      // In-flight reservations are excluded from both conditions: a
+      // reservation that later releases moved no tokens, and must not pause
+      // the bridge for a full window. It is not "moved nothing": a send that
+      // reverts on chain still burns its fee, but the daily limit counts token
+      // volume, not fees.
+      const dailyLimit = this.config.dailyLimit;
+      if (
+        committed >= dailyLimit ||
+        (committed + amount > dailyLimit && drained(committed, dailyLimit))
+      ) {
+        const left = dailyLimit - committed;
         this.paused = true;
         this.pausedAt = Date.now();
         console.error(
-          `[pxe-bridge] CIRCUIT BREAKER: 24h volume ${committed} reached the daily limit ` +
-            `${this.config.dailyLimit}. Bridge paused.`,
+          `[pxe-bridge] CIRCUIT BREAKER: 24h committed volume ${committed} drained the daily ` +
+            `limit ${dailyLimit} (${left > 0n ? left : 0n} left). Bridge paused.`,
         );
         return {
           allowed: false,

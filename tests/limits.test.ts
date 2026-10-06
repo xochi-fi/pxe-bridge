@@ -84,6 +84,33 @@ describe("TransactionLimits", () => {
       expect(limits.check(1000n).allowed).toBe(true);
     });
 
+    // Admission keeps committed volume at or below the limit, so a drain in
+    // amounts that do not divide it stops short. At 4999 of 5000 the window
+    // is spent, and the breaker used to stay silent because it only tripped
+    // on exactly 5000.
+    it("trips on an uneven drain that stops short of the limit", () => {
+      const limits = new TransactionLimits({ dailyLimit: 5000n });
+      limits.recordSpend(4999n);
+
+      // The residual still fits a request that small.
+      expect(limits.check(1n).allowed).toBe(true);
+      expect(limits.isPaused()).toBe(false);
+
+      expect(limits.check(100n).allowed).toBe(false);
+      expect(limits.isPaused()).toBe(true);
+    });
+
+    // The drain threshold is a residual under 1% of the limit. At exactly 1%
+    // an oversized request is still rejected on its own.
+    it("does not trip while committed volume leaves 1% of the limit", () => {
+      const limits = new TransactionLimits({ dailyLimit: 5000n });
+      limits.recordSpend(4950n);
+
+      expect(limits.check(100n).allowed).toBe(false);
+      expect(limits.isPaused()).toBe(false);
+      expect(limits.check(50n).allowed).toBe(true);
+    });
+
     it("resumes after manual resume", () => {
       const limits = new TransactionLimits({ dailyLimit: 5000n });
       limits.recordSpend(5000n);
@@ -320,6 +347,30 @@ describe("TransactionLimits", () => {
       if (r.allowed) limits.commit(r.reservationId);
 
       expect(limits.check(1n).allowed).toBe(false);
+      expect(limits.isPaused()).toBe(true);
+    });
+
+    // The uneven-drain trip counts committed volume only. In-flight volume
+    // that leaves the same residual must not trip it, since it may release.
+    it("does not trip on an uneven in-flight volume that releases", () => {
+      const limits = new TransactionLimits({ dailyLimit: 5000n });
+      const r = limits.reserve(4999n);
+      expect(r.allowed).toBe(true);
+
+      expect(limits.reserve(100n).allowed).toBe(false);
+      expect(limits.isPaused()).toBe(false);
+
+      if (r.allowed) limits.release(r.reservationId);
+      expect(limits.reserve(100n).allowed).toBe(true);
+      expect(limits.isPaused()).toBe(false);
+    });
+
+    it("trips on an uneven drain once the reservation commits", () => {
+      const limits = new TransactionLimits({ dailyLimit: 5000n });
+      const r = limits.reserve(4999n);
+      if (r.allowed) limits.commit(r.reservationId);
+
+      expect(limits.reserve(100n).allowed).toBe(false);
       expect(limits.isPaused()).toBe(true);
     });
   });
