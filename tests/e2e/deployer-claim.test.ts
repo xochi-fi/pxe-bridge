@@ -32,6 +32,7 @@ import {
   bridgeLosingReceipt,
   deployTestToken,
   feeWithHeadroom,
+  fundFeeJuiceDust,
   getTestConfig,
   mintOne,
   requireTestToken,
@@ -59,6 +60,7 @@ const DEPLOYER_PATH_KEY = "0x000000000000000000000000000000000000000000000000000
 const REFUSED_PATH_KEY = "0x000000000000000000000000000000000000000000000000000000000000fade";
 const FUNDED_PATH_KEY = "0x000000000000000000000000000000000000000000000000000000000000face";
 const SPENT_CLAIM_KEY = "0x000000000000000000000000000000000000000000000000000000000000deaf";
+const DUST_KEY = "0x000000000000000000000000000000000000000000000000000000000000d057";
 
 const TSX = fileURLToPath(new URL("../../node_modules/.bin/tsx", import.meta.url));
 const BRIDGE_SCRIPT = fileURLToPath(new URL("../../scripts/bridge-fee-juice.ts", import.meta.url));
@@ -458,6 +460,51 @@ describe("uninitialized deployer whose claim is already spent (e2e)", () => {
       expect(client.getAddress()).toBe(expectedAccount);
       expect(await node.getContract(AztecAddress.fromStringUnsafe(expectedAccount))).toBeDefined();
       expect(await getFeeJuiceBalance(deployer, node)).toBeLessThan(DEPLOYER_FEE_JUICE);
+    },
+    600_000,
+  );
+});
+
+// Anyone can deposit fee juice to the deployer. Where SponsoredFPC is
+// permitted, a dust balance must not take the deploy off it.
+describe("deployer holding dust, SponsoredFPC permitted (e2e)", () => {
+  let funderWallet: EmbeddedWallet;
+  let limits: SpendingLimitConfig;
+  let deployer: AztecAddress;
+
+  beforeAll(async () => {
+    let funderAddress: string;
+    ({ wallet: funderWallet, address: funderAddress } = await connectFunder());
+    limits = limitsOn(funderAddress);
+    const registered = await registerDeployer(funderWallet, DUST_KEY);
+    deployer = registered.address;
+    await registered.deploy();
+    const token = requireTestToken();
+    await fundFeeJuiceDust(config.nodeUrl, funderWallet, funderAddress, deployer.toString(), () =>
+      mintOne(funderWallet, token, funderAddress),
+    );
+  }, 600_000);
+
+  it(
+    "deploys the account via SponsoredFPC and leaves the dust",
+    async () => {
+      const node = createAztecNodeClient(config.nodeUrl);
+      expect(await isInitialized(funderWallet, deployer)).toBe(true);
+      expect(await getFeeJuiceBalance(deployer, node)).toBe(1n);
+      const expectedAccount = await limitAccountAddress(funderWallet, DUST_KEY, limits);
+
+      const client = new AztecClient(config.nodeUrl, DUST_KEY, undefined, limits, undefined, {
+        allowSponsoredFpc: true,
+      });
+      const lines = await connectLogged(client);
+
+      expect(
+        lines.some((l) => l.startsWith("[pxe-bridge] Deployer fee juice balance 1 is below a deployment's fee limit")),
+        lines.join("\n"),
+      ).toBe(true);
+      expect(client.getAddress()).toBe(expectedAccount);
+      expect(await node.getContract(AztecAddress.fromStringUnsafe(expectedAccount))).toBeDefined();
+      expect(await getFeeJuiceBalance(deployer, node)).toBe(1n);
     },
     600_000,
   );

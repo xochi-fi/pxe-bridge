@@ -169,15 +169,15 @@ export const SPONSORED_FPC_REFUSED_ERROR =
 
 /**
  * State of the configured deployer claim's L1 to L2 message, or with no claim
- * configured, whether the deployer holds fee juice (`funded`) or not
- * (`absent`).
+ * configured, whether the deployer's fee juice balance funds a deploy
+ * (`funded`, see `balanceFundsDeploy`) or not (`absent`).
  */
 export type DeployerClaimState = "absent" | "funded" | "unspent" | "spent";
 
 /**
  * How the spending-limit account's deployment, sent from the deployer, is paid.
  *
- * - `sponsored`: no deployer claim and no deployer balance; SponsoredFPC,
+ * - `sponsored`: no deployer claim and no balance that funds a deploy; SponsoredFPC,
  *   subject to `sponsoredFpcSetting`.
  * - `claim`: the claim is unspent, because the deployer was initialized by
  *   other means (another run, a manual deploy). The deploy consumes it, with
@@ -683,7 +683,7 @@ export class AztecClient implements IAztecClient {
     const claim = this.deployerFeeJuiceClaim;
     if (await this.isInitialized(deployerAddress)) {
       if (!claim) {
-        const funded = (await this.feeJuiceBalance(deployerAddress)) > 0n;
+        const funded = await this.balanceFundsDeploy(await this.feeJuiceBalance(deployerAddress));
         return { address: deployerAddress, claim: funded ? "funded" : "absent" };
       }
       const spent = await this.deployerClaimSpent(deployerAddress, claim);
@@ -693,13 +693,15 @@ export class AztecClient implements IAztecClient {
     // Checked before sending. A claim with no message would fail the deploy
     // with "No L1 to L2 message found", which deployerClaimSpent names; a
     // spent one with an existing nullifier, though the balance it credited
-    // may still pay for the deploy. With no claim, a balance pays before
-    // SponsoredFPC is considered.
+    // may still pay for the deploy. With no claim, a balance that covers the
+    // deploy pays before SponsoredFPC is considered.
     const spent = claim ? await this.deployerClaimSpent(deployerAddress, claim) : false;
     let fromBalance = false;
     if (!claim || spent) {
       const balance = await this.feeJuiceBalance(deployerAddress);
-      if (balance > 0n) {
+      // A spent claim leaves the balance as the only fee source, so any of it
+      // is tried; see balanceFundsDeploy for the no-claim case.
+      if (spent ? balance > 0n : await this.balanceFundsDeploy(balance)) {
         fromBalance = true;
         console.log(
           `[pxe-bridge] ${claim ? `${DEPLOYER_FEE_JUICE_CLAIM_ENV} is spent; paying` : "Paying"} ` +
@@ -769,6 +771,35 @@ export class AztecClient implements IAztecClient {
     const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
     const { getFeeJuiceBalance } = await import("@aztec/aztec.js/utils");
     return getFeeJuiceBalance(address, createAztecNodeClient(this.nodeUrl));
+  }
+
+  /**
+   * Whether a deployer with no claim configured pays from `balance` rather
+   * than via SponsoredFPC.
+   *
+   * Anyone can deposit fee juice to any address, so treating any positive
+   * balance as funding let a 1 wei deposit steer the deploy away from a
+   * SponsoredFPC that would pay and into a send that fails. Where SponsoredFPC
+   * is permitted, the balance must cover the most a deploy can be charged: the
+   * per-tx gas the node admits (`txsLimits.gas`, what the wallet declares
+   * before it has an estimate) at the deploy's max fees. Where it is refused,
+   * the balance is the only fee source, so any of it is tried.
+   */
+  private async balanceFundsDeploy(balance: bigint): Promise<boolean> {
+    if (balance === 0n) return false;
+    if (!this.allowSponsoredFpc) return true;
+    const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
+    const { txsLimits } = await createAztecNodeClient(this.nodeUrl).getNodeInfo();
+    const { maxFeesPerGas } = await this.deployGasSettings();
+    const feeLimit =
+      BigInt(txsLimits.gas.daGas) * maxFeesPerGas.feePerDaGas +
+      BigInt(txsLimits.gas.l2Gas) * maxFeesPerGas.feePerL2Gas;
+    if (balance >= feeLimit) return true;
+    console.log(
+      `[pxe-bridge] Deployer fee juice balance ${balance} is below a deployment's fee limit ` +
+        `${feeLimit}; not used`,
+    );
+    return false;
   }
 
   /**

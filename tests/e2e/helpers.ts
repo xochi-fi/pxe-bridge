@@ -7,6 +7,10 @@ import {
   type PendingFeeJuiceDeposit,
 } from "../../src/fee-juice.js";
 import { headroomGasSettings } from "../../src/aztec-client.js";
+import { L1TokenManager } from "@aztec/aztec.js/ethereum";
+import { createLogger } from "@aztec/aztec.js/log";
+import { createAztecNodeClient } from "@aztec/aztec.js/node";
+import { createExtendedL1Client } from "@aztec/ethereum/client";
 
 export interface E2EConfig {
   nodeUrl: string;
@@ -233,6 +237,42 @@ export async function bridgeClaim(
   });
   if (!bridged) throw new Error("bridgeFeeJuice returned without reporting its claim");
   return bridged;
+}
+
+/**
+ * Credits `recipient` with 1 wei of fee juice. The faucet mints one fixed
+ * amount, so it mints to the L1 key first and the bridge then takes 1 wei of
+ * that balance.
+ */
+export async function fundFeeJuiceDust(
+  nodeUrl: string,
+  wallet: unknown,
+  payer: string,
+  recipient: string,
+  onBlockNeeded: () => Promise<void>,
+): Promise<void> {
+  const { feeJuiceAddress, feeAssetHandlerAddress } = (
+    await createAztecNodeClient(nodeUrl).getNodeInfo()
+  ).l1ContractAddresses;
+  const l1Client = createExtendedL1Client([L1_RPC], ANVIL_KEY);
+  await new L1TokenManager(
+    feeJuiceAddress,
+    feeAssetHandlerAddress,
+    l1Client,
+    createLogger("e2e:fee-juice"),
+  ).mint(l1Client.account.address);
+  await topUpFeeJuice({
+    nodeUrl,
+    l1RpcUrl: L1_RPC,
+    l1PrivateKey: ANVIL_KEY,
+    recipient,
+    amount: 1n,
+    onBlockNeeded,
+    attempts: SANDBOX_WAIT_ATTEMPTS,
+    wallet: wallet as ClaimingWallet,
+    payer,
+    paymentMethod: await sponsoredFee(wallet),
+  });
 }
 
 /**
