@@ -48,6 +48,7 @@ EVM Solver --JSON-RPC--> pxe-bridge --Aztec SDK--> Aztec L2 Node
 | `AZTEC_NODE_URL`        | No       | `http://localhost:8080` | Aztec L2 node RPC endpoint                     |
 | `PXE_BRIDGE_HOST`       | No       | `127.0.0.1`             | Bind address (localhost-only by default)       |
 | `PXE_BRIDGE_PORT`       | No       | `8547`                  | HTTP listen port (0-65535)                     |
+| `PXE_BRIDGE_MIN_FEE_JUICE` | No    | --                      | Fee juice floor; below it `/status` reports `degraded` and a warning is logged |
 
 The secret key is a BN254 scalar, not an arbitrary 32 bytes. About 81% of
 random 32-byte values are at or above the field modulus and are rejected at
@@ -254,7 +255,15 @@ Returns the connected Aztec node version string.
 
 ### Health Check
 
-`GET /status` returns `{ status: "ok", version }` (200) or `{ status: "starting" }` (503).
+`GET /status` returns `{ status, version, feeJuice: { balance } }` (200) or
+`{ status: "starting" }` (503). `balance` is the solver account's fee juice as a
+decimal string, cached for 30s so the unauthenticated endpoint does not query
+the node per request, and `null` if the last read failed. With
+`PXE_BRIDGE_MIN_FEE_JUICE` set, `feeJuice.low` is added and `status` is
+`degraded` while the balance is below it. Degraded still answers 200: the
+bridge is up, and restarting it does not add fee juice. Top up with
+`npm run top-up-fee-juice` before it runs out, since every transfer fails once
+it does.
 
 ## Security
 

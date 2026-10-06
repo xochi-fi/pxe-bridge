@@ -93,6 +93,14 @@ if (DAILY_LIMIT_RAW) {
   limitsConfig.dailyLimit = parsePositiveBigInt("PXE_BRIDGE_DAILY_LIMIT", DAILY_LIMIT_RAW);
 }
 
+// Unlike the limits above, a floor on the bridge's own fee juice. The
+// spending-limit account cannot refill itself, so running dry means every
+// transfer fails; this surfaces it on /status before that happens.
+const MIN_FEE_JUICE_RAW = process.env["PXE_BRIDGE_MIN_FEE_JUICE"];
+const minFeeJuice = MIN_FEE_JUICE_RAW
+  ? parsePositiveBigInt("PXE_BRIDGE_MIN_FEE_JUICE", MIN_FEE_JUICE_RAW)
+  : undefined;
+
 const COOLDOWN_THRESHOLD_RAW = process.env["PXE_BRIDGE_COOLDOWN_THRESHOLD"];
 const COOLDOWN_DELAY_RAW = process.env["PXE_BRIDGE_COOLDOWN_DELAY_MS"];
 if (COOLDOWN_THRESHOLD_RAW && COOLDOWN_DELAY_RAW) {
@@ -345,6 +353,7 @@ async function main(): Promise<void> {
     limits,
     audit,
     idempotency,
+    minFeeJuice,
   });
 
   await client.connect();

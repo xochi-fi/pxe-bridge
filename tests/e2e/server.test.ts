@@ -42,10 +42,16 @@ describe("HTTP server (e2e)", () => {
       const res = await fetch(`${baseUrl}/status`);
       expect(res.status).toBe(200);
 
-      const body = (await res.json()) as { status: string; version: string };
+      const body = (await res.json()) as {
+        status: string;
+        version: string;
+        feeJuice: { balance: string | null };
+      };
       expect(body.status).toBe("ok");
       expect(body.version).toBeTruthy();
       expect(body.version).not.toBe("unknown");
+      // Read from the node's public FeeJuice storage for the solver account.
+      expect(body.feeJuice.balance).toMatch(/^\d+$/);
     });
   });
 
