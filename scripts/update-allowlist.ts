@@ -35,8 +35,10 @@
  * Refuses before sending unless the key derives the account's admin and the
  * configured set reproduces the account's allowlist_root.
  *
- * After a successful update, change PXE_BRIDGE_ALLOWLIST_RECIPIENTS to the set
- * this prints and restart the bridge. Until you do, the bridge refuses to send:
+ * The next PXE_BRIDGE_ALLOWLIST_RECIPIENTS set is printed as soon as the tx is
+ * sent, before the wait, so a timeout or signal does not lose it; the script
+ * then says how to check whether the update landed. Once it has, set it and
+ * restart the bridge. Until you do, the bridge refuses to send:
  * it checks its root against the account's before every transfer.
  */
 
@@ -44,7 +46,9 @@ import { AllowlistTree, allowlistLeaf } from "../src/allowlist-tree.js";
 import type { AllowlistRecipient } from "../src/allowlist-tree.js";
 import {
   accountContract,
+  allowlistSentNotice,
   connectAdmin,
+  onInterrupt,
   parseAllowlistEnv,
   readAccountState,
   requiredEnv,
@@ -170,17 +174,32 @@ async function main(): Promise<number> {
   console.log(`[update-allowlist] admin:    ${admin.toString()}`);
   const contract = await accountContract(wallet, account);
 
-  const receipt = await sendAndWait(
-    NODE_URL,
-    contract.methods["update_recipient"]!(plan.index, oldLeaf, newLeaf, witness.siblingPath),
-    admin,
-    (line) => console.log(`[update-allowlist] ${line}`),
-  );
-  if (receipt.executionResult !== TxExecutionResult.SUCCESS) fail("update_recipient did not succeed");
+  const say = (line: string): void => console.log(`[update-allowlist] ${line}`);
+  let uncertain: string[] = [];
+  let receipt;
+  try {
+    receipt = await sendAndWait(
+      NODE_URL,
+      contract.methods["update_recipient"]!(plan.index, oldLeaf, newLeaf, witness.siblingPath),
+      admin,
+      say,
+      (txHash) => {
+        // Before the wait: a timeout or signal must not lose the next set.
+        const notice = allowlistSentNotice(txHash, nextConfig, after.root.toString());
+        for (const line of notice.applyLines) say(line);
+        uncertain = notice.uncertainLines;
+        onInterrupt(uncertain);
+      },
+    );
+  } catch (err) {
+    for (const line of uncertain) console.error(`[update-allowlist] ${line}`);
+    throw err;
+  }
+  if (receipt.executionResult !== TxExecutionResult.SUCCESS) {
+    fail("update_recipient did not succeed; the set above does NOT apply");
+  }
 
-  console.log("[update-allowlist] done");
-  console.log("[update-allowlist] set PXE_BRIDGE_ALLOWLIST_RECIPIENTS to this and restart:");
-  console.log(JSON.stringify(nextConfig));
+  console.log("[update-allowlist] done: the update landed. Apply the set printed above and restart");
   return 0;
 }
 

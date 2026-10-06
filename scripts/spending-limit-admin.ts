@@ -96,6 +96,13 @@ export async function parseAllowlistEnv(seed: string | undefined): Promise<Allow
 // wait on a proof in flight; stores are deleted either way.
 type Disposer = (graceful: boolean) => Promise<void>;
 const disposers: Disposer[] = [];
+// Printed if a signal interrupts the script, for state the operator must not lose.
+const interruptNotices: string[] = [];
+
+/** Lines runScript prints to stderr if a signal arrives. */
+export function onInterrupt(lines: readonly string[]): void {
+  interruptNotices.push(...lines);
+}
 
 async function disposeAll(tag: string, graceful: boolean): Promise<void> {
   for (let d = disposers.pop(); d; d = disposers.pop()) {
@@ -134,6 +141,7 @@ export function runScript(tag: string, main: () => Promise<number>): void {
     process.on(signal, () => {
       if (signalled) return;
       signalled = true;
+      for (const line of interruptNotices) console.error(`${tag} ${line}`);
       console.error(`${tag} ${signal}: deleting wallet stores`);
       void disposeAll(tag, false).finally(() => process.exit(code));
     });
@@ -512,6 +520,30 @@ export async function readAccountState(
   return { state, now };
 }
 
+/**
+ * What update-allowlist prints once update_recipient is sent and before the
+ * receipt: the next recipient set, and how to tell whether the update landed
+ * if the script stops waiting.
+ */
+export function allowlistSentNotice(
+  txHash: string,
+  nextConfig: readonly { address: string; index: number }[],
+  rootAfter: string,
+): { applyLines: string[]; uncertainLines: string[] } {
+  return {
+    applyLines: [
+      `sent ${txHash}`,
+      "PXE_BRIDGE_ALLOWLIST_RECIPIENTS to apply once the tx lands (then restart the bridge):",
+      JSON.stringify(nextConfig),
+    ],
+    uncertainLines: [
+      `stopped waiting for ${txHash}; the update may have landed`,
+      `check: npm run admin -- status --expect-root ${rootAfter}`,
+      "no bit 8 in the exit code means it landed: apply the set above. Bit 8 means it has not, yet",
+    ],
+  };
+}
+
 /** Fee juice balance from the FeeJuice contract's public storage. Trusts the node. */
 export async function readFeeJuiceBalance(nodeUrl: string, owner: string): Promise<bigint> {
   const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
@@ -689,6 +721,7 @@ export async function sendAndWait(
   interaction: ContractFunctionInteraction,
   from: AztecAddress,
   log: (line: string) => void,
+  onSent?: (txHash: string) => void,
 ): Promise<TxReceipt> {
   const { NO_WAIT } = await import("@aztec/aztec.js/contracts");
   const { createAztecNodeClient, waitForTx } = await import("@aztec/aztec.js/node");
@@ -700,6 +733,7 @@ export async function sendAndWait(
     wait: NO_WAIT,
   });
   log(`tx:     ${txHash.toString()}`);
+  onSent?.(txHash.toString());
 
   const receipt = await waitForTx(createAztecNodeClient(nodeUrl), txHash, {
     timeout: RECEIPT_TIMEOUT_SECONDS,

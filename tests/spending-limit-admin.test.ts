@@ -4,6 +4,7 @@ import {
   PARAM_APPLY_WINDOW_SECONDS,
   PARAM_TIMELOCK_SECONDS,
   U128_MAX,
+  allowlistSentNotice,
   decodeAccountState,
   parseAdminCommand,
   proposalWindow,
@@ -201,6 +202,17 @@ describe("readAdminFeeJuice", () => {
     expect(balance).toBeUndefined();
     expect(logged).toEqual(["warning: node down"]);
     expect(statusExitCode(decodeAccountState(RAW), expect16, balance)).toBe(16);
+  });
+});
+
+describe("allowlistSentNotice", () => {
+  it("gives the next set and a root check an operator can run", () => {
+    const next = [{ address: "0x" + "1".repeat(64), index: 7 }];
+    const root = "0x" + "2".repeat(64);
+    const { applyLines, uncertainLines } = allowlistSentNotice("0xabc", next, root);
+    expect(JSON.parse(applyLines.at(-1)!)).toEqual(next);
+    expect(uncertainLines.join("\n")).toContain(`npm run admin -- status --expect-root ${root}`);
+    expect(uncertainLines.join("\n")).toContain("0xabc");
   });
 });
 
