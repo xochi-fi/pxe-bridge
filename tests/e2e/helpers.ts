@@ -1,7 +1,16 @@
-import type { FeeJuiceClaim } from "../../src/types.js";
+import type { BridgedFeeJuiceClaim, FeeJuiceClaim } from "../../src/types.js";
 import { FeeJuiceClaimSchema } from "../../src/types.js";
-import { topUpFeeJuice, type ClaimingWallet } from "../../src/fee-juice.js";
+import {
+  bridgeFeeJuice,
+  topUpFeeJuice,
+  type ClaimingWallet,
+  type PendingFeeJuiceDeposit,
+} from "../../src/fee-juice.js";
 import { headroomGasSettings } from "../../src/aztec-client.js";
+import { L1TokenManager } from "@aztec/aztec.js/ethereum";
+import { createLogger } from "@aztec/aztec.js/log";
+import { createAztecNodeClient } from "@aztec/aztec.js/node";
+import { createExtendedL1Client } from "@aztec/ethereum/client";
 
 export interface E2EConfig {
   nodeUrl: string;
@@ -159,7 +168,7 @@ export async function sponsoredFee(
 // Anvil's first default account. docker-compose starts anvil with the stock
 // mnemonic, so this key is funded on L1 and is test-only by construction.
 const ANVIL_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-const L1_RPC = process.env["L1_RPC_URL"] ?? "http://localhost:8545";
+export const L1_RPC = process.env["L1_RPC_URL"] ?? "http://localhost:8545";
 
 // An idle sandbox may not build a block on its own, so every wait here drives
 // one instead of sleeping. Twelve is plenty for a healthy node and keeps a
@@ -172,9 +181,10 @@ const SANDBOX_WAIT_ATTEMPTS = 12;
  *
  * The mechanism and the reason it has to work this way live in
  * `src/fee-juice.ts`, which the bridge's own top-up script also uses. What is
- * specific here is the sandbox: Anvil's key funds the L1 side, blocks are
- * driven rather than waited for, and the payer pays via SponsoredFPC because a
- * sandbox account has no fee juice until somebody bridges it some.
+ * specific here is the sandbox: Anvil's key funds the L1 side by minting from
+ * the faucet, blocks are driven rather than waited for, and the payer pays via
+ * SponsoredFPC because a sandbox account has no fee juice until somebody
+ * bridges it some.
  */
 export async function fundFeeJuice(
   nodeUrl: string,
@@ -190,12 +200,107 @@ export async function fundFeeJuice(
     l1PrivateKey: ANVIL_KEY,
     recipient,
     amount,
+    mint: true,
     onBlockNeeded,
     attempts: SANDBOX_WAIT_ATTEMPTS,
     wallet: wallet as ClaimingWallet,
     payer,
     paymentMethod: await sponsoredFee(wallet),
   });
+}
+
+/**
+ * Bridges fee juice from L1 to `recipient` and returns the claim UNCONSUMED,
+ * synced into the L2 tree so it is spendable. What `npm run bridge-fee-juice`
+ * hands an operator, for a test that passes it to the bridge rather than
+ * claiming it here. `messageHash` is the leaf the L1 Inbox reported.
+ */
+export async function bridgeClaim(
+  nodeUrl: string,
+  recipient: string,
+  amount: bigint,
+  onBlockNeeded: () => Promise<void>,
+): Promise<BridgedFeeJuiceClaim> {
+  let bridged: BridgedFeeJuiceClaim | undefined;
+  await bridgeFeeJuice({
+    nodeUrl,
+    l1RpcUrl: L1_RPC,
+    l1PrivateKey: ANVIL_KEY,
+    recipient,
+    amount,
+    mint: true,
+    onBlockNeeded,
+    attempts: SANDBOX_WAIT_ATTEMPTS,
+    onClaim: (claim) => {
+      bridged = claim;
+    },
+  });
+  if (!bridged) throw new Error("bridgeFeeJuice returned without reporting its claim");
+  return bridged;
+}
+
+/**
+ * Credits `recipient` with 1 wei of fee juice. The faucet mints one fixed
+ * amount, so it mints to the L1 key first and the bridge then takes 1 wei of
+ * that balance.
+ */
+export async function fundFeeJuiceDust(
+  nodeUrl: string,
+  wallet: unknown,
+  payer: string,
+  recipient: string,
+  onBlockNeeded: () => Promise<void>,
+): Promise<void> {
+  const { feeJuiceAddress, feeAssetHandlerAddress } = (
+    await createAztecNodeClient(nodeUrl).getNodeInfo()
+  ).l1ContractAddresses;
+  const l1Client = createExtendedL1Client([L1_RPC], ANVIL_KEY);
+  await new L1TokenManager(
+    feeJuiceAddress,
+    feeAssetHandlerAddress,
+    l1Client,
+    createLogger("e2e:fee-juice"),
+  ).mint(l1Client.account.address);
+  await topUpFeeJuice({
+    nodeUrl,
+    l1RpcUrl: L1_RPC,
+    l1PrivateKey: ANVIL_KEY,
+    recipient,
+    amount: 1n,
+    onBlockNeeded,
+    attempts: SANDBOX_WAIT_ATTEMPTS,
+    wallet: wallet as ClaimingWallet,
+    payer,
+    paymentMethod: await sponsoredFee(wallet),
+  });
+}
+
+/**
+ * Bridges fee juice to `recipient` and returns only what `onSecret` recorded:
+ * a run that died after broadcasting, before the receipt was read.
+ */
+export async function bridgeLosingReceipt(
+  nodeUrl: string,
+  recipient: string,
+  amount: bigint,
+  onBlockNeeded: () => Promise<void>,
+): Promise<PendingFeeJuiceDeposit> {
+  let pending: PendingFeeJuiceDeposit | undefined;
+  await bridgeFeeJuice({
+    nodeUrl,
+    l1RpcUrl: L1_RPC,
+    l1PrivateKey: ANVIL_KEY,
+    recipient,
+    amount,
+    mint: true,
+    onBlockNeeded,
+    attempts: SANDBOX_WAIT_ATTEMPTS,
+    onSecret: (deposit) => {
+      pending = deposit;
+    },
+  });
+  if (!pending) throw new Error("bridgeFeeJuice returned without reporting its secret");
+  return pending;
 }
 
 /**

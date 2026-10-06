@@ -1,12 +1,14 @@
 import {
   AztecClient,
+  DEPLOYER_CLAIM_WITHOUT_SPENDING_LIMIT_ERROR,
+  DEPLOYER_FEE_JUICE_CLAIM_ENV,
   FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR,
   TX_TIMEOUT_MS,
   sponsoredFpcSetting,
   type SponsoredFpcSetting,
 } from "./aztec-client.js";
 import { createApp, RESPONSE_TIMEOUT_MS } from "./server.js";
-import { AllowlistRecipientsSchema, FeeJuiceClaimSchema } from "./types.js";
+import { AllowlistRecipientsSchema, FeeJuiceClaimSchema, type FeeJuiceClaim } from "./types.js";
 import { TransactionLimits, type LimitsConfig } from "./limits.js";
 import { AuditLogger, replayAuditLog } from "./audit.js";
 import { IdempotencyStore } from "./idempotency.js";
@@ -51,25 +53,34 @@ if (!API_KEY) {
   );
 }
 
-let feeJuiceClaim: import("./types.js").FeeJuiceClaim | undefined;
-const FEE_JUICE_CLAIM_RAW = process.env["FEE_JUICE_CLAIM"];
-if (FEE_JUICE_CLAIM_RAW) {
+/**
+ * Parses a fee juice claim env var, exiting with a message naming it on any
+ * malformation. FEE_JUICE_CLAIM and the deployer claim share one shape, since
+ * both are printed by `npm run bridge-fee-juice`.
+ */
+function parseFeeJuiceClaim(name: string): FeeJuiceClaim | undefined {
+  const raw = process.env[name];
+  // The claim secret spends the bridged fee juice; keep it out of the
+  // environment child processes and crash dumps inherit.
+  delete process.env[name];
+  if (!raw) return undefined;
   let json: unknown;
   try {
-    json = JSON.parse(FEE_JUICE_CLAIM_RAW);
+    json = JSON.parse(raw);
   } catch {
-    console.error("[pxe-bridge] FEE_JUICE_CLAIM is not valid JSON");
+    console.error(`[pxe-bridge] ${name} is not valid JSON`);
     process.exit(1);
   }
   const parsed = FeeJuiceClaimSchema.safeParse(json);
   if (!parsed.success) {
-    console.error(
-      "[pxe-bridge] FEE_JUICE_CLAIM must be: {claimAmount, claimSecret, messageLeafIndex}",
-    );
+    console.error(`[pxe-bridge] ${name} must be: {claimAmount, claimSecret, messageLeafIndex}`);
     process.exit(1);
   }
-  feeJuiceClaim = parsed.data;
+  return parsed.data;
 }
+
+const feeJuiceClaim = parseFeeJuiceClaim("FEE_JUICE_CLAIM");
+const deployerFeeJuiceClaim = parseFeeJuiceClaim(DEPLOYER_FEE_JUICE_CLAIM_ENV);
 
 // SponsoredFPC deployment fee fallback. Validated here so a malformed value is
 // named at startup, and announced because otherwise nothing mentions it until
@@ -88,14 +99,14 @@ try {
 if (sponsoredFpc.allowed) {
   console.warn(
     "[pxe-bridge] SponsoredFPC deployment fee fallback ENABLED (sandbox and testnet only; " +
-      `${sponsoredFpc.reason}): an undeployed account not covered by FEE_JUICE_CLAIM, and ` +
-      "the spending-limit deployer, pay their deployment via SponsoredFPC",
+      `${sponsoredFpc.reason}): an undeployed account not covered by FEE_JUICE_CLAIM, and a ` +
+      `spending-limit account without ${DEPLOYER_FEE_JUICE_CLAIM_ENV}, pay their deployment via SponsoredFPC`,
   );
 } else {
   console.log(
     `[pxe-bridge] SponsoredFPC deployment fee fallback disabled (${sponsoredFpc.reason}): an ` +
-      "undeployed plain Schnorr account needs FEE_JUICE_CLAIM, and the spending-limit " +
-      "account must already be deployed",
+      "undeployed plain Schnorr account needs FEE_JUICE_CLAIM, and an undeployed spending-limit " +
+      `account needs ${DEPLOYER_FEE_JUICE_CLAIM_ENV}`,
   );
 }
 
@@ -338,6 +349,14 @@ if (SPENDING_LIMIT_ADMIN) {
   };
 }
 
+// The deployer exists only to deploy the spending-limit account; see
+// DEPLOYER_CLAIM_WITHOUT_SPENDING_LIMIT_ERROR. AztecClient refuses this too,
+// but here the message names the cause before the secret key is fetched.
+if (deployerFeeJuiceClaim && !spendingLimitConfig) {
+  console.error(`[pxe-bridge] ${DEPLOYER_CLAIM_WITHOUT_SPENDING_LIMIT_ERROR}`);
+  process.exit(1);
+}
+
 async function main(): Promise<void> {
   const { key: secretKey, source: keySource } = await resolveSecretKey();
   console.log(`[pxe-bridge] Secret key loaded from ${keySource}`);
@@ -372,7 +391,13 @@ async function main(): Promise<void> {
     );
   }
 
-  const client = new AztecClient(AZTEC_NODE_URL, secretKey, feeJuiceClaim, spendingLimitConfig);
+  const client = new AztecClient(
+    AZTEC_NODE_URL,
+    secretKey,
+    feeJuiceClaim,
+    spendingLimitConfig,
+    deployerFeeJuiceClaim,
+  );
   const server = createApp(client, {
     apiKey: API_KEY,
     adminKey: ADMIN_KEY,
