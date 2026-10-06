@@ -33,9 +33,10 @@ export class TransactionLimits {
 
   /**
    * Atomically evaluate limits and reserve `amount` against the rolling window.
-   * The reservation counts toward the daily volume immediately -- before the
+   * The reservation counts toward the daily budget immediately -- before the
    * (awaited) transaction is sent -- so concurrent in-flight requests cannot
    * each read a stale total and collectively exceed the cap (TOCTOU race).
+   * It does not count toward the breaker, which trips on committed volume only.
    * Call commit() on success or release() on failure/rejection downstream.
    */
   reserve(amount: bigint): LimitsReservation {
