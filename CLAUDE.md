@@ -35,6 +35,8 @@ CI runs `typecheck` -> `test` -> `build`, then a separate `e2e` job via docker c
 
 E2e tests (`tests/e2e/`) run against a real Aztec sandbox node via `docker-compose.yml` (Anvil L1 + Aztec node). The `globalSetup` auto-starts compose if `AZTEC_NODE_URL` is not set.
 
+Anvil runs with `--block-base-fee-per-gas 0`, which it holds constant. With a nonzero base fee the L2 min fee steps down 3-15x at each L1 fee oracle refresh, and a send priced off `getPredictedMinFees` right after a checkpoint is simulated against the previous, higher fee and rejected. CI starts compose itself and dumps `docker compose logs` on e2e failure.
+
 The Aztec sandbox requires native x86_64 -- barretenberg's ZK prover crashes under ARM emulation (SIGILL). E2e tests work on CI (ubuntu x86_64) but not on Apple Silicon Macs.
 
 ## Required Environment

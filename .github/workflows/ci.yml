@@ -180,10 +180,18 @@ jobs:
         with:
           name: contract-artifact
           path: contracts/spending_limit_account/target
+      # Compose is started here rather than by test:e2e:up, which takes it down
+      # on exit and with it the node log, the only record of why the node
+      # rejected a send.
+      - run: docker compose up -d --wait anvil aztec-sandbox
       # No PXE_BRIDGE_SECRET_KEY override: tests/e2e/helpers.ts supplies a valid
       # BN254 field element. This used to pass the Anvil secp256k1 test key,
       # which exceeds the BN254 modulus and cannot be an Aztec secret at all.
-      - run: npm run test:e2e:up
+      - run: npm run test:e2e
+        env:
+          AZTEC_NODE_URL: http://localhost:8080
+      - if: failure()
+        run: docker compose logs --no-color --timestamps anvil aztec-sandbox
 
   docker:
     # e2e too, not just [check, contract]. With the same dependencies as the

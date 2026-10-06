@@ -1,8 +1,17 @@
 services:
   anvil:
-    image: ghcr.io/foundry-rs/foundry:latest
+    # Pinned: the zero base fee below relies on anvil holding 0 constant.
+    image: ghcr.io/foundry-rs/foundry:v1.8.1
     platform: linux/amd64
-    entrypoint: ["anvil", "--host", "0.0.0.0", "--chain-id", "31337", "--block-time", "1"]
+    # Base fee 0. The L2 min fee is mostly L1 base fee, which decays 12.5% per
+    # near-empty sandbox L1 block, so each fee oracle refresh cut the L2 fee
+    # 3-15x. Right after a checkpoint the node simulates against the previous
+    # block's fee while getPredictedMinFees reports the next, lower one, and a
+    # send priced off the prediction failed "maxFeesPerGas.feePerL2Gas must be
+    # greater than or equal to gasFees.feePerL2Gas". At 0 the L2 fee is the
+    # proving cost floor and constant.
+    entrypoint:
+      ["anvil", "--host", "0.0.0.0", "--chain-id", "31337", "--block-time", "1", "--block-base-fee-per-gas", "0"]
     ports:
       - "8545:8545"
     healthcheck:
