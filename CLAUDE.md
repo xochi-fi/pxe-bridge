@@ -26,9 +26,9 @@ npm start                # run compiled dist/index.js
 npm run bridge-fee-juice -- --recipient 0x<addr>   # bridge fee juice from L1, print FEE_JUICE_CLAIM (Schnorr only)
 npm run bridge-fee-juice -- --deployer --recipient 0x<addr>   # same, printed as PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM
 npm run bridge-fee-juice -- --wait 0x<messageHash>   # resume a timed-out wait; never rerun the bridge step
-npm run bridge-fee-juice -- --recipient 0x<addr> --recover <deposit file>   # find a deposit whose run died before printing the claim
+npm run bridge-fee-juice -- [--deployer] --recipient 0x<addr> --recover <deposit file>   # find a deposit whose run died; same --deployer as the lost run, or the claim prints under the wrong variable
 npm run bridge-fee-juice -- [--deployer] --address-only   # dev: derive the address from PXE_BRIDGE_SECRET_KEY, offline
-npm run top-up-fee-juice # bridge + claim on an account's behalf (spending limit account)
+npm run top-up-fee-juice # bridge + claim on an account's behalf (spending limit account); env only, refuses arguments
 npm run update-allowlist -- --add 0x<addr> --index <n>   # add one allowlist recipient
 npm run update-allowlist -- --revoke 0x<addr>            # revoke one allowlist recipient
 ```

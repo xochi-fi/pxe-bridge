@@ -162,23 +162,30 @@ testnet.
    then stops at the SponsoredFPC refusal before sending anything. Both
    addresses are public; the key stays in Secrets Manager.
 
-2. **Bridge fee juice to it.**
+2. **Bridge fee juice to it.** Keep the L1 key out of shell history and the
+   process list: read it from the terminal, or run under `op run` with an
+   `op://` reference.
 
    ```bash
-   L1_PRIVATE_KEY=0x... L1_RPC_URL=https://... L1_CHAIN_ID=1 \
+   read -s L1_PRIVATE_KEY; export L1_PRIVATE_KEY
+   L1_RPC_URL=https://... L1_CHAIN_ID=1 \
    AZTEC_NODE_URL=https://... BRIDGE_AMOUNT=... \
      npm run bridge-fee-juice -- --deployer --recipient <Deployer address>
+   unset L1_PRIVATE_KEY
    ```
 
    Before any L1 write it writes the claim secret, its hash, the starting L1
    block and the L1 sender to `fee-juice-deposit-<secretHash>.json` in the
    working directory (mode 0600), and prints a `--recover` command naming it.
-   The file is deleted once the claim is printed. A hangup exits the run
-   rather than killing it mid-write. If the run dies before the claim is
-   printed (timeout, signal, crash), the deposit may still land: run that
-   command from the same directory, with the same `AZTEC_NODE_URL` and
-   `L1_RPC_URL`, instead of this step. It finds the deposit on L1, prints the
-   claim and waits, without depositing:
+   Once the deposit lands the claim is added to the file, which is deleted
+   only after the message has synced. A hangup exits the run rather than
+   killing it mid-write. If the run dies (timeout, signal, crash), the deposit
+   may still land: run that command from the same directory, with the same
+   `AZTEC_NODE_URL` and `L1_RPC_URL`, instead of this step. It finds the
+   deposit on L1 (or, if the file already records the landed claim, takes it
+   from there), prints the claim and waits, without depositing. Keep
+   `--deployer`: without it the claim prints as `FEE_JUICE_CLAIM`, which the
+   spending-limit bridge refuses:
 
    ```bash
    L1_RPC_URL=https://... AZTEC_NODE_URL=https://... \
@@ -304,9 +311,9 @@ after that, rerun with that variable set: it skips the deposit, waits for the
 message and sends the claim. Rerunning with neither deposits again.
 
 ```bash
+read -s FEE_JUICE_PAYER_KEY; export FEE_JUICE_PAYER_KEY
+read -s L1_PRIVATE_KEY; export L1_PRIVATE_KEY
 FEE_JUICE_RECIPIENT=0x...   \
-FEE_JUICE_PAYER_KEY=0x...   \
-L1_PRIVATE_KEY=0x...        \
 AZTEC_NODE_URL=http://localhost:8080 \
 L1_RPC_URL=https://... L1_CHAIN_ID=1 \
 BRIDGE_AMOUNT=1000000000000000000 \

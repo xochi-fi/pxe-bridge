@@ -502,8 +502,9 @@ export class AztecClient implements IAztecClient {
         } else if (deployer && deployer.claim !== "absent" && deployerUnderfunded(message)) {
           throw new Error(
             `Deployer ${deployer.address.toString()} cannot pay the fee for deploying ` +
-              `${address.toString()}. Top it up: FEE_JUICE_RECIPIENT=${deployer.address.toString()} ` +
-              "FEE_JUICE_PAYER_KEY=<funded payer key> npm run top-up-fee-juice, or bridge a new " +
+              `${address.toString()}. Top it up: read -s FEE_JUICE_PAYER_KEY; export FEE_JUICE_PAYER_KEY ` +
+              `(or op run), then FEE_JUICE_RECIPIENT=${deployer.address.toString()} ` +
+              "npm run top-up-fee-juice, or bridge a new " +
               `claim to it (npm run bridge-fee-juice -- --deployer --recipient ${deployer.address.toString()}). ` +
               `Cause: ${message}`,
             { cause: err },
