@@ -40,8 +40,8 @@ const DAILY_LIMIT = 5_000_000_000_000_000_000_000n;
 const FEE_JUICE_AMOUNT = 1_000_000_000_000_000_000_000n;
 
 const ALLOWLIST_SEED = "0x" + "09".repeat(32);
-const RECIPIENTS: AllowlistRecipient[] = [{ address: "0x" + "33".repeat(32), index: 137 }];
-const ADDED: AllowlistRecipient = { address: "0x" + "44".repeat(32), index: 613 };
+const RECIPIENTS: AllowlistRecipient[] = [{ address: "0x" + "13".repeat(32), index: 137 }];
+const ADDED: AllowlistRecipient = { address: "0x" + "14".repeat(32), index: 613 };
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const TSX = join(REPO_ROOT, "node_modules", ".bin", "tsx");
