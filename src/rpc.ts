@@ -169,6 +169,18 @@ async function handleCreateNote(
     }
   };
 
+  // A token the account is not pinned to would pass every check below,
+  // prove, and revert only in public, burning fee juice on the way. Refused
+  // here so it neither costs fees nor reserves daily budget.
+  const pinned = client.pinnedToken();
+  if (pinned !== undefined && pinned.toLowerCase() !== noteParams.token.toLowerCase()) {
+    const reason = "token is not the token this bridge is pinned to";
+    console.error(`[rpc] Rejected token ${noteParams.token}: pinned to ${pinned}`);
+    abandon();
+    await logOutcome({ ...auditBase(noteParams, ctx), status: "rejected", error: reason });
+    return rpcError(id, RPC_ERRORS.INVALID_PARAMS, reason);
+  }
+
   // Enforce transaction limits (ceiling, daily volume, circuit breaker).
   // reserve() counts the amount against the rolling window immediately, so
   // concurrent in-flight requests cannot each pass on a stale total and
