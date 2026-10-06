@@ -285,8 +285,10 @@ The account stores only a root. Unlike the public array it replaces, **the set
 cannot be recovered from the chain.** Losing either the seed
 (`PXE_BRIDGE_ALLOWLIST_SEED`) or the list of `(address, position)` pairs is
 terminal for allowlist management: no witness can be built, so no transfer can
-be sent, and no `update_recipient` can be constructed, so nothing can be
-repaired on chain.
+be sent, and no `update_recipient` can be constructed for a position whose path
+has never been published. Positions whose path is on chain stay rewritable by
+the admin key alone, which is the same exposure described in "An attacker
+holding the admin key", not a recovery path.
 
 Archive both with the same discipline as the contract artifact. This account
 already has permanent-brick modes -- `permitted_token` has no setter, and a zero

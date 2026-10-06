@@ -635,14 +635,10 @@ pub contract SpendingLimitAccount {
     // proves that everything except position `index` is unchanged, without the
     // contract ever learning what any of it is.
     //
-    // It also means the caller must already know the tree. An attacker holding
-    // only the admin key cannot produce a valid sibling path, so the off-chain
-    // tree is a second factor on every allowlist change. That is the defence
-    // that replaces the 24h notice, and it is stronger: the notice assumed the
-    // account owner could react in time, and this account gives them nothing to
-    // react with (pause and revocation are both admin-gated, and the entrypoint
-    // only pays allowlisted recipients, so a compromised admin closes the
-    // escape window immediately).
+    // The caller must supply a valid sibling path, but every call publishes
+    // one. The admin key alone can therefore rewrite any position, and its
+    // sibling, once a path covering it is on chain; the off-chain tree and
+    // seed protect only positions never touched by an update (#32).
     //
     // UNTIMELOCKED, which is a deliberate change from propose/apply. The
     // timelock protected against a compromised admin adding an address they
