@@ -29,10 +29,11 @@ period they need.
 where additions waited 24h and removals were immediate. Under a Merkle
 allowlist the contract cannot tell the two apart: leaves are commitments, so
 adding, revoking and substituting are one operation on one leaf, and that
-indistinguishability is the privacy property. One policy therefore has to cover
-all three. The timelock is the half that had to go, because the notice it gave
-was legible only when the allowlist was public, while revocation latency is a
-cost that lands during an incident.
+indistinguishability is the privacy property, though repeated updates at one
+position erode it for observers (see "What is public"). One policy therefore
+has to cover all three. The timelock is the half that had to go, because the
+notice it gave was legible only when the allowlist was public, while
+revocation latency is a cost that lands during an incident.
 
 ### An attacker holding the admin key
 
@@ -267,10 +268,16 @@ What an observer learns from an admin update is every argument of the public
 path. Positions are therefore assigned randomly rather than filled left to
 right, or the first touch of position `k` would be visibly an addition. The
 leaves are opaque commitments, so the observer does not learn which address
-occupies a position, whether the update added, revoked or substituted, or how
-full the tree is: empty positions hold `h(0, salt_i)` with that position's own
-salt, so they are not recognisable as empty and the canonical empty-subtree
-roots never appear in a sibling path. The published path does let the admin key
+occupies a position. Empty positions hold `h(0, salt_i)` with that position's
+own salt, so a never-touched position is not recognisable as empty and the
+canonical empty-subtree roots never appear in a sibling path.
+
+That opacity does not survive repeated updates at one position. Salts are fixed
+per position, and both addition and revocation pass through the same empty leaf
+`h(0, salt_i)`. After two updates at a position the observer has seen that
+leaf, so every later update there classifies as an addition or a revocation,
+and the position's occupancy is known. Re-adding a recipient at the same
+position republishes its old leaf, linking the two periods. Tracked in #32. The published path does let the admin key
 rewrite that position and its sibling without the seed; see "An attacker
 holding the admin key" and #32.
 
