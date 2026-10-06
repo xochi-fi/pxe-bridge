@@ -1207,6 +1207,25 @@ pub contract SpendingLimitAccount {
         );
     }
 
+    // CROSS-CHECK of sibling path orientation against rootFromSiblingPath in
+    // src/allowlist-tree.ts, the half leaf_and_node_hashes_match_typescript
+    // leaves open. Production height, ten distinct siblings, and an index whose
+    // bit pattern is not a palindrome, so reading the bits in the other order
+    // or putting the running node on the other side gives a different root.
+    // Pinned identically in tests/allowlist-tree.test.ts.
+    #[test]
+    fn sibling_path_orientation_matches_typescript() {
+        let path: [Field; ALLOWLIST_TREE_HEIGHT] = [
+            0x1001, 0x1002, 0x1003, 0x1004, 0x1005, 0x1006, 0x1007, 0x1008, 0x1009, 0x100a,
+        ];
+        // 0b1011010011
+        let index: Field = 723;
+        assert_eq(
+            root_from_sibling_path(allowlist_leaf(A, SALT_A), index, path),
+            0x293ca1082ef45e1af6ebccd4c0e737a4baac36d55aaf72599404667ba1e173a4,
+        );
+    }
+
     // Leaves and internal nodes must not share a hash. Without the domain
     // split, an internal node is a well-formed leaf and a path one level short
     // proves membership of something that is not a recipient.
