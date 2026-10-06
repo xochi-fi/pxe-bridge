@@ -3,6 +3,7 @@
  *
  * Usage:
  *   npm run admin -- status [--expect-root <hex>] [--expect-paused] [--min-fee-juice <n>]
+ *   npm run admin -- deploy
  *   npm run admin -- pause
  *   npm run admin -- unpause
  *   npm run admin -- propose-limits --max-per-tx <n> --daily <n>
@@ -10,8 +11,9 @@
  *   npm run admin -- cancel-limits
  *
  * Env:
- *   SPENDING_LIMIT_ACCOUNT           -- AztecAddress of the account (all commands)
+ *   SPENDING_LIMIT_ACCOUNT           -- AztecAddress of the account (all but deploy)
  *   SPENDING_LIMIT_ADMIN_KEY         -- 32-byte hex secret key of the admin (all but status)
+ *   FEE_JUICE_CLAIM                  -- deploy: claim JSON from bridge-fee-juice to the admin
  *   PXE_BRIDGE_ALLOWLIST_SEED        -- status: with RECIPIENTS, the expected root
  *   PXE_BRIDGE_ALLOWLIST_RECIPIENTS     when --expect-root is not given
  *   AZTEC_NODE_URL                   -- Aztec node (default: http://localhost:8080)
@@ -36,8 +38,10 @@ import {
   PARAM_TIMELOCK_SECONDS,
   accountContract,
   connectAdmin,
+  deployAdmin,
   formatStatus,
   parseAdminCommand,
+  parseFeeJuiceClaim,
   parseAllowlistEnv,
   proposalWindow,
   readAccountState,
@@ -120,6 +124,7 @@ function describe(command: AdminCommand, state: AccountState, now: bigint): stri
         `drops pending max_per_tx ${state.pendingMaxAmount}, daily ${state.pendingDailyLimit}`,
       ];
     case "status":
+    case "deploy":
       return [];
   }
 }
@@ -128,6 +133,7 @@ async function main(): Promise<number> {
   // Before anything that could spawn a prover.
   const adminKeyEnv = takeSecretEnv("SPENDING_LIMIT_ADMIN_KEY");
   const seedEnv = takeSecretEnv("PXE_BRIDGE_ALLOWLIST_SEED");
+  const claimEnv = takeSecretEnv("FEE_JUICE_CLAIM");
 
   let command: AdminCommand;
   try {
@@ -135,6 +141,14 @@ async function main(): Promise<number> {
   } catch (err) {
     throw new Error(`${(err as Error).message}\n${ADMIN_USAGE}`);
   }
+
+  if (command.kind === "deploy") {
+    const adminKey = await validateSecret("SPENDING_LIMIT_ADMIN_KEY", adminKeyEnv);
+    const claim = await parseFeeJuiceClaim(claimEnv);
+    await deployAdmin(NODE_URL, adminKey, claim, log);
+    return 0;
+  }
+
   const account = requiredEnv("SPENDING_LIMIT_ACCOUNT");
 
   if (command.kind === "status") {

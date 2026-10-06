@@ -354,12 +354,15 @@ own fees.
 
 Prerequisites:
 
-- The admin account is deployed and holds fee juice. It derives the address a
-  plain-Schnorr bridge would, so deploy it by running the bridge once with
-  `PXE_BRIDGE_SECRET_KEY` set to the admin key and `FEE_JUICE_CLAIM` from
-  `npm run bridge-fee-juice`. Keep it funded with `npm run top-up-fee-juice`
-  and `FEE_JUICE_RECIPIENT` set to the admin address: `pause` cannot be sent
-  without it.
+- The admin account is deployed and holds fee juice. Deploy it with
+  `npm run admin -- deploy`, `SPENDING_LIMIT_ADMIN_KEY` set and
+  `FEE_JUICE_CLAIM` from `npm run bridge-fee-juice` run with
+  `PXE_BRIDGE_SECRET_KEY` set to the admin key, which bridges to the admin
+  address. `deploy` prints that address and sends nothing if it is already
+  deployed. Do not deploy it by running the bridge with the admin key: the
+  bridge's wallet persists the key in `./aztec-wallet-data`. Keep it funded
+  with `npm run top-up-fee-juice` and `FEE_JUICE_RECIPIENT` set to the admin
+  address: `pause` cannot be sent without it.
 - The contract artifact is in `contracts/spending_limit_account/target/`, for
   every command including `status`, which takes storage slots from it. It is
   gitignored: download `contract-artifact` from CI or build it with
@@ -367,6 +370,7 @@ Prerequisites:
   account's.
 
 ```bash
+npm run admin -- deploy
 npm run admin -- status [--expect-root <hex>] [--expect-paused] [--min-fee-juice <n>]
 npm run admin -- pause
 npm run admin -- unpause
@@ -379,13 +383,14 @@ npm run update-allowlist -- --revoke 0x<addr>
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
-| `SPENDING_LIMIT_ACCOUNT` | Yes | -- | Address of the spending-limit account |
+| `SPENDING_LIMIT_ACCOUNT` | All but `deploy` | -- | Address of the spending-limit account |
 | `SPENDING_LIMIT_ADMIN_KEY` | All but `status` | -- | Secret key of the admin |
+| `FEE_JUICE_CLAIM` | `deploy` | -- | Claim JSON from `npm run bridge-fee-juice` to the admin address. Not needed if already deployed |
 | `PXE_BRIDGE_ALLOWLIST_SEED` | `update-allowlist` | -- | The bridge's allowlist seed. Optional for `status`, see below |
 | `PXE_BRIDGE_ALLOWLIST_RECIPIENTS` | `update-allowlist` | -- | The current set, as the bridge has it. Optional for `status` |
 | `AZTEC_NODE_URL` | No | `http://localhost:8080` | Aztec node |
 
-Keys and the seed are range-checked without echoing them and deleted from the
+Keys, the seed and the claim are checked without echoing them and deleted from the
 process environment on read. The admin wallet's stores, which hold the admin
 key, live in `os.tmpdir()` (`wallet_data-*`, `pxe_data-*`) and are deleted on
 exit, on error and on SIGINT/SIGTERM. SIGKILL or a crash leaves them.

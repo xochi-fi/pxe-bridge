@@ -13,6 +13,7 @@ import type { AztecLMDBStoreV2 } from "@aztec/kv-store/lmdb-v2";
 import type { TxReceipt } from "@aztec/stdlib/tx";
 import type { EmbeddedWallet } from "@aztec/wallets/embedded";
 import type { AllowlistRecipient } from "../src/allowlist-tree.js";
+import type { FeeJuiceClaim } from "../src/types.js";
 
 // Must match PARAM_TIMELOCK_SECONDS and PARAM_APPLY_WINDOW_SECONDS in main.nr.
 export const PARAM_TIMELOCK_SECONDS = 86_400n;
@@ -162,11 +163,12 @@ export type AdminCommand =
   | { kind: "unpause" }
   | { kind: "propose-limits"; maxPerTx: bigint; dailyLimit: bigint }
   | { kind: "apply-limits" }
-  | { kind: "cancel-limits" };
+  | { kind: "cancel-limits" }
+  | { kind: "deploy" };
 
 export const ADMIN_USAGE =
   "usage: npm run admin -- status [--expect-root <hex>] [--expect-paused] [--min-fee-juice <n>]\n" +
-  "       npm run admin -- <pause|unpause|apply-limits|cancel-limits>\n" +
+  "       npm run admin -- <deploy|pause|unpause|apply-limits|cancel-limits>\n" +
   "       npm run admin -- propose-limits --max-per-tx <n> --daily <n>";
 
 /** A u128 in base units, as a plain decimal. No sign, exponent or leading zero. */
@@ -237,6 +239,7 @@ export function parseAdminCommand(argv: readonly string[]): AdminCommand {
         },
       };
     }
+    case "deploy":
     case "pause":
     case "unpause":
     case "apply-limits":
@@ -478,20 +481,33 @@ export async function readFeeJuiceBalance(nodeUrl: string, owner: string): Promi
 }
 
 /**
- * The admin wallet. The admin is an ordinary Schnorr account derived exactly
- * the way the bridge derives its own, so a key cannot map to two addresses.
- * Refuses unless the key derives `expectedAdmin`, the account's on-chain admin.
- *
- * Only call under runScript, which deletes the wallet's stores on exit.
+ * FEE_JUICE_CLAIM as produced by `npm run bridge-fee-juice`, validated as
+ * src/index.ts does. `raw` already taken with takeSecretEnv.
  */
-export async function connectAdmin(
-  nodeUrl: string,
-  adminKey: string,
-  expectedAdmin: string,
-): Promise<{ wallet: EmbeddedWallet; admin: AztecAddress }> {
+export async function parseFeeJuiceClaim(raw: string | undefined): Promise<FeeJuiceClaim | undefined> {
+  if (!raw) return undefined;
+  const { FeeJuiceClaimSchema } = await import("../src/types.js");
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    throw new Error("FEE_JUICE_CLAIM is not valid JSON");
+  }
+  const parsed = FeeJuiceClaimSchema.safeParse(json);
+  if (!parsed.success) {
+    throw new Error("FEE_JUICE_CLAIM must be: {claimAmount, claimSecret, messageLeafIndex}");
+  }
+  return parsed.data;
+}
+
+/**
+ * The admin as an ordinary Schnorr account in a wallet whose stores runScript
+ * deletes on exit. Derived exactly the way the bridge derives its own, so a
+ * key cannot map to two addresses.
+ */
+async function openAdminWallet(nodeUrl: string, adminKey: string) {
   const { EmbeddedWallet } = await import("@aztec/wallets/embedded");
   const { openEphemeralStore } = await import("@aztec/kv-store/lmdb-v2");
-  const { ContractInitializationStatus } = await import("@aztec/aztec.js/wallet");
   const { deriveAccountKeys } = await import("../src/aztec-client.js");
 
   // createSchnorrAccount writes the secret and signing key to the wallet DB,
@@ -516,7 +532,69 @@ export async function connectAdmin(
   const keys = await deriveAccountKeys(adminKey);
   const manager = await wallet.createSchnorrAccount(keys.secret, keys.salt, keys.signingKey);
   const admin = (await manager.getAccount()).getAddress();
-  if (admin.toString() !== expectedAdmin) {
+  return { wallet, manager, admin };
+}
+
+/**
+ * Self-deploys the admin account, paying with a fee juice claim bridged to
+ * its address. Returns false without sending when it is already initialized,
+ * which needs no claim.
+ *
+ * Only call under runScript, which deletes the wallet's stores on exit.
+ */
+export async function deployAdmin(
+  nodeUrl: string,
+  adminKey: string,
+  claim: FeeJuiceClaim | undefined,
+  log: (line: string) => void,
+): Promise<boolean> {
+  const { ContractInitializationStatus } = await import("@aztec/aztec.js/wallet");
+  const { NO_FROM } = await import("@aztec/aztec.js/account");
+  const { FeeJuicePaymentMethodWithClaim } = await import("@aztec/aztec.js/fee");
+  const { Fr } = await import("@aztec/aztec.js/fields");
+  const { headroomGasSettings } = await import("../src/aztec-client.js");
+
+  const { wallet, manager, admin } = await openAdminWallet(nodeUrl, adminKey);
+  log(`admin:  ${admin.toString()}`);
+  const { initializationStatus } = await wallet.getContractMetadata(admin);
+  if (initializationStatus === ContractInitializationStatus.INITIALIZED) {
+    log("already deployed; nothing sent");
+    return false;
+  }
+  if (!claim) {
+    throw new Error(`FEE_JUICE_CLAIM is required: npm run bridge-fee-juice to ${admin.toString()}`);
+  }
+
+  const paymentMethod = new FeeJuicePaymentMethodWithClaim(admin, {
+    claimAmount: BigInt(claim.claimAmount),
+    claimSecret: Fr.fromString(claim.claimSecret),
+    messageLeafIndex: BigInt(claim.messageLeafIndex),
+  });
+  const deployMethod = await manager.getDeployMethod();
+  await deployMethod.send({
+    from: NO_FROM,
+    fee: { paymentMethod, gasSettings: await headroomGasSettings(nodeUrl) },
+    skipClassPublication: false,
+    skipInstancePublication: false,
+  });
+  log("deployed");
+  return true;
+}
+
+/**
+ * The deployed admin's wallet. Refuses unless the key derives `expectedAdmin`,
+ * the account's on-chain admin, when given.
+ *
+ * Only call under runScript, which deletes the wallet's stores on exit.
+ */
+export async function connectAdmin(
+  nodeUrl: string,
+  adminKey: string,
+  expectedAdmin: string | undefined,
+): Promise<{ wallet: EmbeddedWallet; admin: AztecAddress }> {
+  const { ContractInitializationStatus } = await import("@aztec/aztec.js/wallet");
+  const { wallet, admin } = await openAdminWallet(nodeUrl, adminKey);
+  if (expectedAdmin !== undefined && admin.toString() !== expectedAdmin) {
     throw new Error(
       `admin mismatch: SPENDING_LIMIT_ADMIN_KEY derives ${admin.toString()}, the account's admin is ${expectedAdmin}`,
     );
