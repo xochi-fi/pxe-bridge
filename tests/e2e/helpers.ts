@@ -210,6 +210,28 @@ export async function fundFeeJuice(
 }
 
 /**
+ * Bridges fee juice from L1 to `recipient` and returns the claim unconsumed,
+ * for an account that pays its own deployment with it.
+ */
+export async function bridgeFeeJuiceClaim(
+  nodeUrl: string,
+  recipient: string,
+  amount: bigint,
+  onBlockNeeded: () => Promise<void>,
+): Promise<FeeJuiceClaim> {
+  return bridgeFeeJuice({
+    nodeUrl,
+    l1RpcUrl: L1_RPC,
+    l1PrivateKey: ANVIL_KEY,
+    recipient,
+    amount,
+    mint: true,
+    onBlockNeeded,
+    attempts: SANDBOX_WAIT_ATTEMPTS,
+  });
+}
+
+/**
  * Bridges fee juice from L1 to `recipient` and returns the claim UNCONSUMED,
  * synced into the L2 tree so it is spendable. What `npm run bridge-fee-juice`
  * hands an operator, for a test that passes it to the bridge rather than
