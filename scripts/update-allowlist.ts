@@ -44,16 +44,17 @@
  * restart the bridge. Until you do, the bridge refuses to send:
  * it checks its root against the account's before every transfer.
  *
- * A bridge with PXE_BRIDGE_ACCOUNT_ADDRESS recorded (required in production)
- * also refuses to RESTART on the new set. The allowlist root, like
- * PXE_BRIDGE_MAX_AMOUNT and PXE_BRIDGE_DAILY_LIMIT, is a constructor argument
- * of the spending-limit account, so a new set derives a different address and
- * connect() refuses it. Until the deployment record (xochi-fi/pxe-bridge#42)
- * fixes the constructor inputs, such a bridge cannot send after this script
- * runs. Do NOT unset PXE_BRIDGE_ACCOUNT_ADDRESS or set
- * PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1 to bring it up: without the recorded
- * address the bridge derives the new address and deploys a fresh, empty
- * account there. See SECURITY.md, "Account address pinning".
+ * Leave PXE_BRIDGE_ACCOUNT_DEPLOYMENT and PXE_BRIDGE_ACCOUNT_ADDRESS as they
+ * are. The record holds the root the account was deployed with, which is what
+ * pins the address; the new root is checked against the chain, not against the
+ * record. With the record set, a restart on the new set derives the same
+ * address, and the recorded PXE_BRIDGE_ACCOUNT_ADDRESS still matches it. A
+ * bridge restarted without the record derives its address from the new set:
+ * with PXE_BRIDGE_ACCOUNT_ADDRESS recorded (required in production) connect()
+ * refuses it, and without that it finds nothing there and deploys an empty
+ * account in place of this one. Do NOT unset PXE_BRIDGE_ACCOUNT_ADDRESS or set
+ * PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1 to bring up a bridge that lacks the
+ * record. See SECURITY.md, "Account address pinning".
  */
 
 import { AllowlistTree, allowlistLeaf } from "../src/allowlist-tree.js";
@@ -215,11 +216,10 @@ async function main(): Promise<number> {
 
   console.log("[update-allowlist] done: the update landed. Apply the set printed above and restart");
   console.warn(
-    "[update-allowlist] The bridge refuses to send until it runs on that set. " +
-      "With PXE_BRIDGE_ACCOUNT_ADDRESS recorded it also refuses to restart on it: the " +
-      "allowlist root is a constructor argument, so the new set derives a different " +
-      "account address. Until xochi-fi/pxe-bridge#42 lands there is no supported " +
-      "restart. Do NOT unset PXE_BRIDGE_ACCOUNT_ADDRESS or set " +
+    "[update-allowlist] Keep PXE_BRIDGE_ACCOUNT_DEPLOYMENT and PXE_BRIDGE_ACCOUNT_ADDRESS " +
+      "unchanged: the record pins the account's address across the new set, and a " +
+      "bridge restarted without it derives a different address, which the recorded " +
+      "address refuses. Do NOT unset PXE_BRIDGE_ACCOUNT_ADDRESS or set " +
       "PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1 to bring it up: that deploys a fresh, empty " +
       'account at the new address. See SECURITY.md, "Account address pinning".',
   );

@@ -391,9 +391,10 @@ has never been published. Positions whose path is on chain stay rewritable by
 the admin key alone, which is the same exposure described in "An attacker
 holding the admin key", not a recovery path.
 
-Archive both with the same discipline as the contract artifact. This account
-already has permanent-brick modes -- `permitted_token` has no setter, and a zero
-admin is unrecoverable -- and this is one more.
+Archive both with the same discipline as the contract artifact, together with
+the deployment record (`PXE_BRIDGE_ACCOUNT_DEPLOYMENT`). This account already
+has permanent-brick modes -- `permitted_token` has no setter, and a zero admin
+is unrecoverable -- and this is one more.
 
 The seed is a secret, but a weaker one than the signing key: holding it lets
 someone test a candidate address against a leaf, which costs recipient privacy
@@ -405,6 +406,34 @@ The bridge checks its copy against the chain before every send, via
 a secret set monitorable: the root commits to exactly the set that produces it,
 so an operator can verify a published set against the chain and a compromised
 admin cannot publish one set while committing another.
+
+## The account address is pinned by a deployment record
+
+The account's address derives from its constructor arguments, and those include
+the per-tx cap, the daily limit and the allowlist root. All three are meant to
+change after deployment: `update_recipient` moves the root, `apply_limits`
+moves the caps. The bridge used to rebuild the constructor arguments from live
+configuration on every start, so following the runbook after an allowlist
+update (set the new recipients, restart) derived a different address. Nothing
+was deployed there, so the bridge deployed a fresh, empty account, logged
+"Ready", and left the funded one orphaned.
+
+The constructor arguments now come from `PXE_BRIDGE_ACCOUNT_DEPLOYMENT`, a
+record of what the account was deployed with and the address that produced.
+Live configuration keeps its other jobs: recipients and seed build the witness
+tree, which is checked against the chain's current root before every send, and
+the limit variables drive `src/limits.ts`. With a record set the bridge never
+deploys, and it refuses to start when the record does not reproduce its own
+address, when nothing is initialized at that address, or when the configured
+admin or token differ from it. Each of those is a configuration for some other
+account, and the safe response to that is to stop.
+
+A first deployment has no record, and has to derive from live configuration.
+Production refuses to do that unless `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1` is
+set, so a lost or unset record fails startup instead of quietly deploying a new
+account. Outside production the bridge deploys and prints the record on every
+start that lacks one. The trade is one more value to archive, and one more
+operator step on the first deployment.
 
 ## Transaction cancellation is not supported
 
@@ -611,32 +640,41 @@ key under salt + 1) and `scripts/test-deploy.ts`, which constructs
 
 - **The bridge** (`connect()`) refuses an account that derives away from
   `PXE_BRIDGE_ACCOUNT_ADDRESS` before it deploys, serves or sets a sending
-  address. In production `PXE_BRIDGE_ACCOUNT_ADDRESS` is required; the only way
+  address. In production `PXE_BRIDGE_ACCOUNT_ADDRESS` is required (in
+  spending-limit mode the deployment record's `address` satisfies it); the only way
   to start without it is `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1`, named for the
   first deployment, which cannot know its address in advance. An upgraded
   deployment that sets nothing therefore stops at startup instead of deploying
   a fresh account. Setting the flag on an upgraded deployment is consent to a
   new account; it is not a way past the check when an address is recorded.
-- **`update-allowlist.ts`** reads the admin stored in the account (the
-  contract has no getter, so it reads the `admin` slot from public storage,
-  after checking the instance runs the spending-limit class) and refuses a key
-  that derives to anyone else, before sending.
-- **`top-up-fee-juice.ts`** requires `FEE_JUICE_PAYER_ADDRESS` and refuses a
-  payer key that derives elsewhere, before the L1 write.
-- **`bridge-fee-juice.ts`** requires `PXE_BRIDGE_ACCOUNT_ADDRESS` and refuses a
-  key that derives elsewhere, before bridging, since the L1 message commits to
-  the recipient. The only way to run it without the address is
-  `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1`, for a first deployment; it then logs the
-  derived address it bridges to.
+- **`update-allowlist.ts`** and **`admin.ts`** read the admin stored in the
+  account (the contract has no getter, so `readAccountState` reads the `admin`
+  slot from public storage, after checking the instance runs the pinned class)
+  and refuse, through `assertAccountIdentity`, a key that derives to anyone
+  else, before sending.
+- **`top-up-fee-juice.ts`** requires `FEE_JUICE_PAYER_ADDRESS` with
+  `FEE_JUICE_PAYER_KEY` (and checks it for the deployer payer when set) and
+  refuses a payer key that derives elsewhere, before the L1 write.
+- **`bridge-fee-juice.ts`**, bridging to the bridge account (no `--deployer`),
+  requires `PXE_BRIDGE_ACCOUNT_ADDRESS` and refuses a recipient that differs
+  from it: a `--recipient` that is not the recorded address, or a key-mode
+  address that derives elsewhere. The L1 message commits to the recipient, so
+  this runs before anything is bridged. The only way to run it without the
+  address is `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1`, for a first deployment; it
+  then logs the address it bridges to. `--deployer` bridges to the
+  spending-limit deployer, which has no recorded address and is not checked.
 
 In spending-limit mode the bridge's address also moves when the constructor
-inputs do (limits, admin, token, allowlist root), so with an address recorded a
-restart after `update-allowlist` or new limits refuses rather than deploying an
-empty account. The deployment record in PR #42 (`PXE_BRIDGE_ACCOUNT_DEPLOYMENT`)
-fixes the inputs and removes that refusal. When it lands the two compose: in
-spending-limit mode the record's `address` satisfies the production
-requirement, a separately set `PXE_BRIDGE_ACCOUNT_ADDRESS` must equal it, and
-`PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY` keeps one meaning in both.
+inputs do (limits, admin, token, allowlist root). The deployment record
+(`PXE_BRIDGE_ACCOUNT_DEPLOYMENT`, "The account address is pinned by a deployment record" above) fixes the inputs, so with it set a
+restart after `update-allowlist` or new limits keeps the address. The two
+compose, and each fails closed on its own: the record's `address` satisfies the
+production requirement for `PXE_BRIDGE_ACCOUNT_ADDRESS`, a separately set
+`PXE_BRIDGE_ACCOUNT_ADDRESS` must equal it (`index.ts` refuses a disagreement
+before connecting, naming both), `connect()` checks the derived address against
+both, and `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY` keeps one meaning in both. Without
+the record, a recorded address still refuses a restart on moved inputs rather
+than deploying an empty account.
 
 ## Application-level limits
 
