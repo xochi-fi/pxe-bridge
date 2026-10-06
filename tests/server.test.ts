@@ -494,11 +494,65 @@ describe("POST /admin/resume", () => {
       expect(await res.json()).toEqual({
         status: "resumed",
         paused: false,
-        windowTotal: "0",
+        committed: "0",
+        reserved: "0",
         dailyLimit: "5000",
-        willTripAgain: false,
+        remaining: "5000",
+        mayTripAgain: false,
       });
       expect(limits.check(1n).allowed).toBe(true);
+    } finally {
+      await close();
+    }
+  });
+
+  it("reports in-flight volume against the budget, not the breaker", async () => {
+    const limits = new TransactionLimits({ dailyLimit: 5000n });
+    limits.recordSpend(1000n);
+    expect(limits.reserve(3000n).allowed).toBe(true);
+    const { url, close } = await boot({ adminKey: ADMIN_KEY, limits });
+    try {
+      const res = await resume(url, ADMIN_KEY);
+      expect(await res.json()).toEqual({
+        status: "resumed",
+        paused: false,
+        committed: "1000",
+        reserved: "3000",
+        dailyLimit: "5000",
+        remaining: "1000",
+        mayTripAgain: false,
+      });
+      expect(limits.check(1001n).allowed).toBe(false);
+      expect(limits.check(1000n).allowed).toBe(true);
+    } finally {
+      await close();
+    }
+  });
+
+  // Mid-drain: committed volume alone is well short, but the sends in flight
+  // would leave a residual under 1% if they land. The old willTripAgain read
+  // committed volume only and answered false here.
+  it("warns that in-flight volume may re-trip the breaker", async () => {
+    const limits = new TransactionLimits({ dailyLimit: 5000n });
+    limits.recordSpend(1000n);
+    const inFlight = limits.reserve(3999n);
+    expect(inFlight.allowed).toBe(true);
+    const { url, close } = await boot({ adminKey: ADMIN_KEY, limits });
+    try {
+      const res = await resume(url, ADMIN_KEY);
+      expect(await res.json()).toEqual({
+        status: "resumed",
+        paused: false,
+        committed: "1000",
+        reserved: "3999",
+        dailyLimit: "5000",
+        remaining: "1",
+        mayTripAgain: true,
+      });
+
+      if (inFlight.allowed) limits.commit(inFlight.reservationId);
+      expect(limits.check(100n).allowed).toBe(false);
+      expect(limits.isPaused()).toBe(true);
     } finally {
       await close();
     }
@@ -534,13 +588,15 @@ describe("POST /admin/resume", () => {
       expect(await res.json()).toEqual({
         status: "resumed",
         paused: false,
-        windowTotal: "5000",
+        committed: "5000",
+        reserved: "0",
         dailyLimit: "5000",
-        willTripAgain: true,
+        remaining: "0",
+        mayTripAgain: true,
       });
       expect(limits.isPaused()).toBe(false);
 
-      // What willTripAgain is warning about. Nothing tested this before, so
+      // What mayTripAgain is warning about. Nothing tested this before, so
       // the gap between the 200 and the recovery was never visible.
       expect(limits.check(1n).allowed).toBe(false);
       expect(limits.isPaused()).toBe(true);

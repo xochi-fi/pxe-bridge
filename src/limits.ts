@@ -15,6 +15,14 @@ export type LimitsReservation =
 
 const WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
 const CLEANUP_INTERVAL_MS = 60_000; // 1 minute
+// The window counts as drained once committed volume leaves less than
+// 1/DRAINED_RESIDUAL_DIVISOR of the daily limit. See check() for why the
+// breaker needs a threshold at all, and why this one.
+const DRAINED_RESIDUAL_DIVISOR = 100n;
+
+function drained(volume: bigint, dailyLimit: bigint): boolean {
+  return volume >= dailyLimit || (dailyLimit - volume) * DRAINED_RESIDUAL_DIVISOR < dailyLimit;
+}
 
 export class TransactionLimits {
   private spendLog: { amount: bigint; timestamp: number }[] = [];
@@ -33,9 +41,10 @@ export class TransactionLimits {
 
   /**
    * Atomically evaluate limits and reserve `amount` against the rolling window.
-   * The reservation counts toward the daily volume immediately -- before the
+   * The reservation counts toward the daily budget immediately -- before the
    * (awaited) transaction is sent -- so concurrent in-flight requests cannot
    * each read a stale total and collectively exceed the cap (TOCTOU race).
+   * It does not count toward the breaker, which trips on committed volume only.
    * Call commit() on success or release() on failure/rejection downstream.
    */
   reserve(amount: bigint): LimitsReservation {
@@ -89,19 +98,41 @@ export class TransactionLimits {
     }
 
     if (this.config.dailyLimit !== undefined) {
-      const windowTotal = this.rollingTotal();
+      const committed = this.committedTotal();
 
-      // Volume actually consumed the window. This is the drain signal the
+      // Committed volume drained the window. This is the drain signal the
       // breaker exists for, so it stops everything until an operator resumes
       // or the window elapses. There are three ways out, not one: the operator
       // endpoint, the auto-resume above, and a restart, and none of them hands
       // budget back -- the window is rebuilt from the audit log either way.
-      if (windowTotal >= this.config.dailyLimit) {
+      //
+      // Drained is not only "reached exactly". Admission keeps committed at or
+      // below the limit, so a drain in amounts that do not divide it stops
+      // short -- 4999 of 5000 -- and the breaker never fired, though the
+      // window was as spent as it gets. It also trips when committed volume
+      // alone leaves less than this request needs AND less than 1% of the
+      // limit. The 1% floor is what keeps a single oversized request from
+      // tripping it with no prior volume, and a busy legitimate day at 80%
+      // from pausing over one transfer too large for what is left. The cost
+      // is that a residual under 1% of the limit is unspendable until a
+      // resume or the window elapses.
+      //
+      // In-flight reservations are excluded from both conditions: a
+      // reservation that later releases moved no tokens, and must not pause
+      // the bridge for a full window. It is not "moved nothing": a send that
+      // reverts on chain still burns its fee, but the daily limit counts token
+      // volume, not fees.
+      const dailyLimit = this.config.dailyLimit;
+      if (
+        committed >= dailyLimit ||
+        (committed + amount > dailyLimit && drained(committed, dailyLimit))
+      ) {
+        const left = dailyLimit - committed;
         this.paused = true;
         this.pausedAt = Date.now();
         console.error(
-          `[pxe-bridge] CIRCUIT BREAKER: 24h volume ${windowTotal} reached the daily limit ` +
-            `${this.config.dailyLimit}. Bridge paused.`,
+          `[pxe-bridge] CIRCUIT BREAKER: 24h committed volume ${committed} drained the daily ` +
+            `limit ${dailyLimit} (${left > 0n ? left : 0n} left). Bridge paused.`,
         );
         return {
           allowed: false,
@@ -109,16 +140,18 @@ export class TransactionLimits {
         };
       }
 
-      // One request larger than what is left. Reject it alone and keep
-      // serving: tripping the breaker here let a single oversized request --
-      // which needs no prior volume at all when maxAmount is unset -- stop the
-      // bridge for the full window.
-      if (windowTotal + amount > this.config.dailyLimit) {
+      // Budget counts reservations too, so concurrent requests cannot each
+      // read a stale total and collectively exceed the cap. Rejected alone,
+      // without tripping: an oversized request, or one blocked only by
+      // in-flight volume, is not evidence of a drain.
+      const budgetUsed = committed + this.reservedTotal();
+      if (budgetUsed + amount > this.config.dailyLimit) {
+        const remaining = this.config.dailyLimit - budgetUsed;
         return {
           allowed: false,
           reason:
             `Amount ${amount} exceeds the remaining daily budget ` +
-            `${this.config.dailyLimit - windowTotal}`,
+            `${remaining > 0n ? remaining : 0n}`,
         };
       }
     }
@@ -152,19 +185,44 @@ export class TransactionLimits {
    * `resume()` clears the latch and not the window, which is the correct
    * semantics: volume genuinely consumed the budget, and resuming must not
    * hand it back. The consequence is that a resume issued while the window is
-   * still full is undone by the very next request. The endpoint used to answer
-   * `paused: false` and stop there, which reads as "service restored" during
-   * exactly the incident where it is not, so an operator could believe they
-   * had recovered the bridge and walk away. The deciding number is reported
-   * now instead of being left for them to infer.
+   * still drained is undone by the next request that does not fit. The
+   * endpoint used to answer `paused: false` and stop there, which reads as
+   * "service restored" during exactly the incident where it is not, so an
+   * operator could believe they had recovered the bridge and walk away. The
+   * deciding numbers are reported now instead of being left for them to infer.
+   *
+   * `committed` is the breaker's input. `reserved` is in flight: it counts
+   * against the budget and not the breaker, but it becomes committed if those
+   * sends land. `remaining` is what a new request can still spend after both.
+   * `mayTripAgain` is whether the window is drained, or will be if every
+   * in-flight reservation commits. It is "may" rather than "will" on both
+   * counts: reservations can release, and a drained window still serves a
+   * request that fits its residual. It used to be `willTripAgain`, computed
+   * from committed volume alone, which answered false while in-flight sends
+   * were about to fill the window.
    */
-  windowStatus(): { total: bigint; dailyLimit: bigint | undefined; willTripAgain: boolean } {
-    const total = this.rollingTotal();
+  windowStatus(): {
+    committed: bigint;
+    reserved: bigint;
+    remaining: bigint | undefined;
+    dailyLimit: bigint | undefined;
+    mayTripAgain: boolean;
+  } {
+    const committed = this.committedTotal();
+    const reserved = this.reservedTotal();
+    const budgetUsed = committed + reserved;
     const dailyLimit = this.config.dailyLimit;
+    let remaining: bigint | undefined;
+    if (dailyLimit !== undefined) {
+      const left = dailyLimit - budgetUsed;
+      remaining = left > 0n ? left : 0n;
+    }
     return {
-      total,
+      committed,
+      reserved,
+      remaining,
       dailyLimit,
-      willTripAgain: dailyLimit !== undefined && total >= dailyLimit,
+      mayTripAgain: dailyLimit !== undefined && drained(budgetUsed, dailyLimit),
     };
   }
 
@@ -187,7 +245,7 @@ export class TransactionLimits {
     return this.paused;
   }
 
-  private rollingTotal(): bigint {
+  private committedTotal(): bigint {
     const cutoff = Date.now() - WINDOW_MS;
     let total = 0n;
     for (const entry of this.spendLog) {
@@ -195,8 +253,12 @@ export class TransactionLimits {
         total += entry.amount;
       }
     }
-    // In-flight reservations count toward the cap so concurrent requests
-    // cannot each read a stale total and collectively exceed the limit.
+    return total;
+  }
+
+  private reservedTotal(): bigint {
+    const cutoff = Date.now() - WINDOW_MS;
+    let total = 0n;
     for (const reservation of this.pending.values()) {
       if (reservation.timestamp >= cutoff) {
         total += reservation.amount;
