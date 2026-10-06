@@ -217,15 +217,16 @@ export class AztecClient implements IAztecClient {
   private tokenCache = new Map<string, TokenContract>();
   private secretKey: string | null;
   private spendingLimitContract: SpendingLimitAccountContract | null = null;
-  // Read at construction, like the claim check below, so a library caller is
-  // gated the same as index.ts and a malformed value fails before connecting.
-  private readonly allowSponsoredFpc = sponsoredFpcPermitted(process.env);
+  private readonly allowSponsoredFpc: boolean;
+  // Captured with the value, so the log names what actually permitted it.
+  private readonly sponsoredFpcReason: string;
 
   constructor(
     private readonly nodeUrl: string,
     secretKey: string,
     private readonly feeJuiceClaim?: FeeJuiceClaim,
     private readonly spendingLimitConfig?: SpendingLimitConfig,
+    options: { allowSponsoredFpc?: boolean } = {},
   ) {
     // Refused here rather than in index.ts alone, so a library caller gets the
     // same answer. Left unchecked the combination fails deep in the SDK during
@@ -233,6 +234,18 @@ export class AztecClient implements IAztecClient {
     // the claim that caused it.
     if (feeJuiceClaim && spendingLimitConfig) {
       throw new Error(FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR);
+    }
+    // Defaults to the env, read at construction, so a library caller is gated
+    // the same as index.ts and a malformed value fails before connecting.
+    if (options.allowSponsoredFpc !== undefined) {
+      this.allowSponsoredFpc = options.allowSponsoredFpc;
+      this.sponsoredFpcReason = `allowSponsoredFpc=${options.allowSponsoredFpc}`;
+    } else {
+      this.allowSponsoredFpc = sponsoredFpcPermitted(process.env);
+      this.sponsoredFpcReason =
+        process.env[ALLOW_SPONSORED_FPC_ENV] === "true"
+          ? `${ALLOW_SPONSORED_FPC_ENV}=true`
+          : `NODE_ENV=${process.env["NODE_ENV"] ?? "(unset)"}`;
     }
     this.secretKey = secretKey;
   }
@@ -765,13 +778,9 @@ export class AztecClient implements IAztecClient {
         `Account ${accountAddress.toString()} is not deployed. ${SPONSORED_FPC_REFUSED_ERROR}`,
       );
     }
-    const why =
-      process.env[ALLOW_SPONSORED_FPC_ENV] === "true"
-        ? `${ALLOW_SPONSORED_FPC_ENV}=true`
-        : `NODE_ENV=${process.env["NODE_ENV"] ?? "(unset)"}`;
     console.warn(
       `[pxe-bridge] Paying deployment of ${accountAddress.toString()} via SponsoredFPC ` +
-        `(sandbox and testnet only; permitted by ${why})`,
+        `(sandbox and testnet only; permitted by ${this.sponsoredFpcReason})`,
     );
     const { SponsoredFeePaymentMethod } = await import("@aztec/aztec.js/fee/testing");
     const { getContractInstanceFromInstantiationParams } = await import("@aztec/stdlib/contract");

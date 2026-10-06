@@ -370,7 +370,9 @@ async function main(): Promise<void> {
     );
   }
 
-  const client = new AztecClient(AZTEC_NODE_URL, secretKey, feeJuiceClaim, spendingLimitConfig);
+  const client = new AztecClient(AZTEC_NODE_URL, secretKey, feeJuiceClaim, spendingLimitConfig, {
+    allowSponsoredFpc,
+  });
   const server = createApp(client, {
     apiKey: API_KEY,
     adminKey: ADMIN_KEY,
