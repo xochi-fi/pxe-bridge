@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   PARAM_APPLY_WINDOW_SECONDS,
+  PARAM_TIMELOCK_SECONDS,
   U128_MAX,
   decodeAccountState,
   parseAdminCommand,
@@ -168,5 +169,15 @@ describe("statusExitCode", () => {
     expect(
       statusExitCode(state, { paused: true, allowlistRoot: "0x" + "0".repeat(64), minFeeJuice: 1n }, 0n),
     ).toBe(2 | 4 | 8 | 16);
+  });
+});
+
+// Pins the copies of main.nr's `global PARAM_TIMELOCK_SECONDS` and
+// `global PARAM_APPLY_WINDOW_SECONDS`. Changing either here means main.nr
+// changed, which moves the class ID.
+describe("timelock constants", () => {
+  it("match main.nr", () => {
+    expect(PARAM_TIMELOCK_SECONDS).toBe(86_400n);
+    expect(PARAM_APPLY_WINDOW_SECONDS).toBe(86_400n);
   });
 });
