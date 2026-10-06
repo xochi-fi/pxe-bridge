@@ -57,6 +57,7 @@ EVM Solver --JSON-RPC--> pxe-bridge --Aztec SDK--> Aztec L2 Node
 | `PXE_BRIDGE_PORT`       | No       | `8547`                  | HTTP listen port (0-65535)                     |
 | `PXE_BRIDGE_ACCOUNT_ADDRESS` | Prod | --                   | The bridge account's recorded address; startup refuses any other |
 | `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY` | Prod, first deploy only | -- | `1` lets production start without a recorded address |
+| `PXE_BRIDGE_MIN_FEE_JUICE` | No    | --                      | Fee juice floor; below it `/status` reports `degraded` and a warning is logged |
 
 The secret key is a BN254 scalar, not an arbitrary 32 bytes. About 81% of
 random 32-byte values are at or above the field modulus and are rejected at
@@ -589,7 +590,33 @@ Returns the connected Aztec node version string.
 
 ### Health Check
 
-`GET /status` returns `{ status: "ok", version }` (200) or `{ status: "starting" }` (503).
+`GET /status` returns `{ status, version, feeJuice: { balance } }` (200) or
+`{ status: "starting" }` (503). `balance` is the solver account's fee juice as a
+decimal string, cached for 30s so the unauthenticated endpoint does not query
+the node per request, and `null` if the last read failed. With
+`PXE_BRIDGE_MIN_FEE_JUICE` set, `feeJuice.low` is added and `status` is
+`degraded` while the balance is below it. Degraded still answers 200: the
+bridge is up, and restarting it does not add fee juice. Top up with
+`npm run top-up-fee-juice` before it runs out, since every transfer fails once
+it does.
+
+Response bodies:
+
+```jsonc
+// 200, PXE_BRIDGE_MIN_FEE_JUICE unset
+{ "status": "ok", "version": "6.0.0", "feeJuice": { "balance": "999000000000000000" } }
+// 200, PXE_BRIDGE_MIN_FEE_JUICE set; "low" is present only when the read succeeded
+{ "status": "degraded", "version": "6.0.0", "feeJuice": { "balance": "10", "low": true } }
+// 200, the balance read failed (cached as null for 30s); status is never "degraded" on a failed read
+{ "status": "ok", "version": "6.0.0", "feeJuice": { "balance": null } }
+// 503, not connected yet
+{ "status": "starting" }
+```
+
+Before this field existed the 200 body was `{ status: "ok", version }`. A
+client that compares `status` to `"ok"` must now also accept `"degraded"`, which
+means "up, but top up fee juice"; the Docker `HEALTHCHECK` reads only the HTTP
+code (`curl -sf`), so it is unaffected.
 
 ## Security
 

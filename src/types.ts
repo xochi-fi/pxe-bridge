@@ -165,6 +165,8 @@ export interface IAztecClient {
    * so a mismatched token is otherwise proven, sent, reverted, and paid for.
    */
   pinnedToken(): string | undefined;
+  /** Fee juice held by the solver account, which pays every transfer. */
+  getFeeJuiceBalance(): Promise<bigint>;
 }
 
 /**

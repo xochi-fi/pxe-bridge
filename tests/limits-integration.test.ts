@@ -38,6 +38,10 @@ class FakeAztecClient implements IAztecClient {
   pinnedToken(): string | undefined {
     return undefined;
   }
+
+  async getFeeJuiceBalance(): Promise<bigint> {
+    return 0n;
+  }
 }
 
 function rpcBody(method: string, params: unknown[] = [], id: number = 1) {
