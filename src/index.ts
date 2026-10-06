@@ -1,4 +1,10 @@
-import { AztecClient, FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR, TX_TIMEOUT_MS } from "./aztec-client.js";
+import {
+  AztecClient,
+  FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR,
+  TX_TIMEOUT_MS,
+  sponsoredFpcSetting,
+  type SponsoredFpcSetting,
+} from "./aztec-client.js";
 import { createApp, RESPONSE_TIMEOUT_MS } from "./server.js";
 import { AllowlistRecipientsSchema, FeeJuiceClaimSchema } from "./types.js";
 import { TransactionLimits, type LimitsConfig } from "./limits.js";
@@ -63,6 +69,34 @@ if (FEE_JUICE_CLAIM_RAW) {
     process.exit(1);
   }
   feeJuiceClaim = parsed.data;
+}
+
+// SponsoredFPC deployment fee fallback. Validated here so a malformed value is
+// named at startup, and announced because otherwise nothing mentions it until
+// an undeployed account reaches it. Enforced in AztecClient rather than here:
+// whether it is used depends on whether the account is already on chain, and
+// refusing on configuration alone would stop every restart of a deployed
+// production account that no longer carries a claim. AztecClient reads the
+// same env itself, so its log names the variable that decided.
+let sponsoredFpc: SponsoredFpcSetting;
+try {
+  sponsoredFpc = sponsoredFpcSetting(process.env);
+} catch (err) {
+  console.error(`[pxe-bridge] ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+}
+if (sponsoredFpc.allowed) {
+  console.warn(
+    "[pxe-bridge] SponsoredFPC deployment fee fallback ENABLED (sandbox and testnet only; " +
+      `${sponsoredFpc.reason}): an undeployed account not covered by FEE_JUICE_CLAIM, and ` +
+      "the spending-limit deployer, pay their deployment via SponsoredFPC",
+  );
+} else {
+  console.log(
+    `[pxe-bridge] SponsoredFPC deployment fee fallback disabled (${sponsoredFpc.reason}): an ` +
+      "undeployed plain Schnorr account needs FEE_JUICE_CLAIM, and the spending-limit " +
+      "account must already be deployed",
+  );
 }
 
 // Transaction limits
