@@ -208,14 +208,15 @@ be transferred but can pay for top-up claims. Production runbook:
    deployed and its balance cannot cover the account deploy, bridge a fresh
    claim to the deployer (step 2) and restart with it.
 4. Top up the spending-limit account before its first transfer with
-   `FEE_JUICE_PAYER_DEPLOYER=true npm run top-up-fee-juice`, which sends the
-   claim from the deployer and pays from what the deployer claim left. This
-   loads the bridge key into the operator's process, resolved from
-   `PXE_BRIDGE_SECRET_ARN` as the bridge does. The wallet stores holding it are
-   created under `os.tmpdir()` and deleted on exit, SIGINT, SIGTERM and SIGHUP;
-   SIGKILL or a crash leaves them. A separate payer (`FEE_JUICE_PAYER_KEY`) keeps the
-   bridge key off the operator's machine, at the cost of bootstrapping that
-   payer as a plain Schnorr bridge with its own `FEE_JUICE_CLAIM`.
+   `npm run top-up-fee-juice`, paid by a separate payer (`FEE_JUICE_PAYER_KEY`)
+   bootstrapped as a plain Schnorr bridge with its own `FEE_JUICE_CLAIM`. That
+   key can pay fees and nothing else on the bridge's behalf. Paying from the
+   deployer instead (`FEE_JUICE_PAYER_DEPLOYER=true`) is refused under
+   `NODE_ENV=production`: the deployer's key is the bridge's signing key, and
+   using it would copy the key that authorizes every transfer onto the
+   operator's machine. Outside production it is allowed; the wallet stores
+   holding it are created under `os.tmpdir()` and deleted on exit, SIGINT,
+   SIGTERM and SIGHUP, and SIGKILL or a crash leaves them.
 
 ## What is public
 

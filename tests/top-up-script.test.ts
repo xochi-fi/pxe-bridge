@@ -27,6 +27,16 @@ describe("top-up-fee-juice refusals", { timeout: 60_000 }, () => {
     expect(r.out).toContain("--recover is FEE_JUICE_RECOVER");
   });
 
+  it("refuses the deployer payer under NODE_ENV=production", () => {
+    const r = run({
+      FEE_JUICE_RECIPIENT: RECIPIENT,
+      FEE_JUICE_PAYER_DEPLOYER: "true",
+      NODE_ENV: "production",
+    });
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("FEE_JUICE_PAYER_DEPLOYER=true is refused under NODE_ENV=production");
+  });
+
   it.each(["FEE_JUICE_PAYER_DEPLOYER", "FEE_JUICE_MINT", "FEE_JUICE_PAYER_SPONSORED"])(
     "rejects a %s that is not true or false",
     (name) => {

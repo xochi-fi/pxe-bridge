@@ -12,16 +12,18 @@
  * It must already be initialized on chain. Two payers, exactly one of which is
  * set:
  *
- *   FEE_JUICE_PAYER_DEPLOYER=true  The spending-limit account's deployer, which
- *       holds whatever its deployer claim left after both deploys. Its key is
- *       the bridge's key, resolved as the bridge resolves it
- *       (PXE_BRIDGE_SECRET_ARN; PXE_BRIDGE_SECRET_KEY outside production).
- *       The wallet stores holding it live under os.tmpdir() and are deleted
- *       on exit, SIGINT, SIGTERM and SIGHUP; SIGKILL or a crash leaves them.
  *   FEE_JUICE_PAYER_KEY            A separate plain Schnorr account at the
  *       address the bridge derives from this key. Deploy it by running the
  *       bridge once with this key, without PXE_BRIDGE_SPENDING_LIMIT_ADMIN, and
- *       with FEE_JUICE_CLAIM bridged to the "Account address" it logs.
+ *       with FEE_JUICE_CLAIM bridged to the "Account address" it logs. The
+ *       production payer.
+ *   FEE_JUICE_PAYER_DEPLOYER=true  The spending-limit account's deployer, which
+ *       holds whatever its deployer claim left after both deploys. Its key is
+ *       the bridge's signing key (PXE_BRIDGE_SECRET_KEY), so this is refused
+ *       under NODE_ENV=production: it would copy the key that signs every
+ *       transfer onto whatever machine runs this script. The wallet stores
+ *       holding it live under os.tmpdir() and are deleted on exit, SIGINT,
+ *       SIGTERM and SIGHUP; SIGKILL or a crash leaves them.
  *
  * Before any L1 write the claim secret, its hash, the starting L1 block and
  * the L1 sender are written to fee-juice-deposit-<secretHash>.json in the
@@ -205,6 +207,15 @@ async function main(): Promise<void> {
 
   if (PAYER_DEPLOYER === Boolean(PAYER_KEY)) {
     fail("Set exactly one of FEE_JUICE_PAYER_KEY or FEE_JUICE_PAYER_DEPLOYER=true");
+  }
+  // The deployer's key is the bridge's signing key. Loading it here would put
+  // the key that authorizes every transfer on an operator machine.
+  if (PAYER_DEPLOYER && process.env["NODE_ENV"] === "production") {
+    fail(
+      "FEE_JUICE_PAYER_DEPLOYER=true is refused under NODE_ENV=production: it loads the " +
+        "bridge's signing key onto this machine. Pay from a separate account with " +
+        "FEE_JUICE_PAYER_KEY instead (README, Topping up the spending-limit account).",
+    );
   }
 
   const AZTEC_NODE_URL = process.env["AZTEC_NODE_URL"] ?? "http://localhost:8080";

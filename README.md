@@ -216,22 +216,27 @@ testnet.
    claim to the deployer (step 2) and restart with that one.
 
 4. **Top up the spending-limit account** at the logged `Account address`, paying
-   from the deployer:
+   from a separate payer account (bootstrapped as described in the next
+   section):
 
    ```bash
-   FEE_JUICE_RECIPIENT=<Account address> FEE_JUICE_PAYER_DEPLOYER=true \
-   PXE_BRIDGE_SECRET_ARN=... NODE_ENV=production \
-   L1_PRIVATE_KEY=0x... L1_RPC_URL=https://... L1_CHAIN_ID=1 \
+   read -s FEE_JUICE_PAYER_KEY; export FEE_JUICE_PAYER_KEY
+   read -s L1_PRIVATE_KEY; export L1_PRIVATE_KEY
+   FEE_JUICE_RECIPIENT=<Account address> NODE_ENV=production \
+   L1_RPC_URL=https://... L1_CHAIN_ID=1 \
    AZTEC_NODE_URL=https://... BRIDGE_AMOUNT=... \
      npm run top-up-fee-juice
+   unset FEE_JUICE_PAYER_KEY L1_PRIVATE_KEY
    ```
 
-   The account's transfers pay from that balance, not the deployer's. The
-   deployer's key is the bridge's, so this step reads it from Secrets Manager
-   into the script's memory, not its environment. The wallet stores holding it
-   are created under `os.tmpdir()` and deleted on exit, SIGINT, SIGTERM and SIGHUP;
-   SIGKILL or a crash leaves them. To keep it
-   off the operator's machine, use a separate payer instead (next section).
+   Or keep both in 1Password and run under `op run --env-file=topup.env --
+   npm run top-up-fee-juice`, with `op://` references in `topup.env`.
+
+   The account's transfers pay from that balance, not the payer's.
+   `FEE_JUICE_PAYER_DEPLOYER=true`, which pays from the deployer's leftover
+   balance, is refused under `NODE_ENV=production`: the deployer's key is the
+   bridge's signing key, and the script would load it onto the operator's
+   machine.
 
 The node admits a transaction only if its fee payer's balance covers the fee
 limit, `gasLimits x maxFeesPerGas`, while what is charged is the gas actually
@@ -263,10 +268,9 @@ The bridge logs the address to fund on startup:
 The payer sends the claim and pays its fee from its own balance, so it must
 already be deployed. Set exactly one of:
 
-- `FEE_JUICE_PAYER_DEPLOYER=true`: the spending-limit account's deployer, as
-  in step 4 above. Its key is the bridge's, resolved the way the bridge
-  resolves it (`PXE_BRIDGE_SECRET_ARN`; `PXE_BRIDGE_SECRET_KEY` outside
-  production).
+- `FEE_JUICE_PAYER_DEPLOYER=true`: the spending-limit account's deployer. Its
+  key is the bridge's signing key, read from `PXE_BRIDGE_SECRET_KEY`, so it is
+  refused under `NODE_ENV=production`; use it on sandbox and testnet only.
 - `FEE_JUICE_PAYER_KEY`: a separate plain Schnorr account at the address the
   bridge derives from that key. To deploy it on a network without
   SponsoredFPC, start the bridge once with the payer's key and **without**
@@ -305,7 +309,7 @@ npm run top-up-fee-juice
 | --- | --- | --- | --- |
 | `FEE_JUICE_RECIPIENT` | Yes | -- | Aztec address to credit |
 | `FEE_JUICE_PAYER_KEY` | One of these two | -- | Secret key of a separate payer account |
-| `FEE_JUICE_PAYER_DEPLOYER` | One of these two | -- | `true` pays from the spending-limit account's deployer, using the bridge's key |
+| `FEE_JUICE_PAYER_DEPLOYER` | One of these two | -- | `true` pays from the spending-limit account's deployer, using the bridge's key; refused under `NODE_ENV=production` |
 | `FEE_JUICE_RESUME_CLAIM` | No | -- | JSON printed by an earlier run; skips the L1 deposit |
 | `FEE_JUICE_RECOVER` | No | -- | Deposit file an earlier run wrote before its deposit, or its secret hash; finds that deposit on L1 instead of making one |
 | `FEE_JUICE_CLAIM_SECRET` | With `FEE_JUICE_RECOVER` as a hash with no file | -- | Claim secret of that deposit |
