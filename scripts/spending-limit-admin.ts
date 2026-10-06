@@ -434,7 +434,9 @@ export async function readAccountState(
   const artifactClassId = (await getContractClassFromArtifact(artifact)).id.toString();
   const node = createAztecNodeClient(nodeUrl);
 
-  let raw: Record<StatusField, bigint>;
+  const unreadable = (err: unknown): Error =>
+    new Error(`cannot read account state from ${nodeUrl}: ${err instanceof Error ? err.message : err}`);
+
   let now: bigint;
   let accountClassId: string | undefined;
   try {
@@ -442,30 +444,39 @@ export async function readAccountState(
     if (!block) throw new Error("node returned no latest block");
     now = block.header.globalVariables.timestamp;
     accountClassId = (await node.getContract(address))?.currentContractClassId.toString();
-    const values = await Promise.all(
-      STATUS_FIELDS.map(async (field) => {
-        const layout = artifact.storageLayout[field];
-        if (!layout) throw new Error(`artifact has no storage field ${field}`);
-        const value = await node.getPublicStorageAt("latest", address, layout.slot);
-        return [field, value.toBigInt()] as const;
-      }),
-    );
-    raw = Object.fromEntries(values) as Record<StatusField, bigint>;
   } catch (err) {
-    throw new Error(
-      `cannot read account state from ${nodeUrl}: ${err instanceof Error ? err.message : err}`,
-    );
+    throw unreadable(err);
   }
 
   if (accountClassId === undefined) {
     throw new Error(`no contract instance at ${account} on ${nodeUrl}`);
   }
+  // Before the layout is consulted: another version's layout may lack a field,
+  // and that error would preempt the mismatch pause and unpause proceed on.
   if (accountClassId !== artifactClassId) {
     throw new ClassMismatchError(
       `contract class mismatch: ${account} runs ${accountClassId}, the artifact in ` +
         `contracts/spending_limit_account/target/ is ${artifactClassId}. Its storage layout ` +
         `may not be the account's; build the artifact the account was deployed from`,
     );
+  }
+
+  const slots = STATUS_FIELDS.map((field) => {
+    const layout = artifact.storageLayout[field];
+    if (!layout) throw new Error(`artifact has no storage field ${field}`);
+    return [field, layout.slot] as const;
+  });
+  let raw: Record<StatusField, bigint>;
+  try {
+    const values = await Promise.all(
+      slots.map(async ([field, slot]) => {
+        const value = await node.getPublicStorageAt("latest", address, slot);
+        return [field, value.toBigInt()] as const;
+      }),
+    );
+    raw = Object.fromEntries(values) as Record<StatusField, bigint>;
+  } catch (err) {
+    throw unreadable(err);
   }
 
   const state = decodeAccountState(raw);
