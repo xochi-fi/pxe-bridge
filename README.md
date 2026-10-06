@@ -354,15 +354,25 @@ own fees.
 
 Prerequisites:
 
-- The admin account is deployed and holds fee juice. Deploy it with
-  `npm run admin -- deploy`, `SPENDING_LIMIT_ADMIN_KEY` set and
-  `FEE_JUICE_CLAIM` from `npm run bridge-fee-juice` run with
-  `PXE_BRIDGE_SECRET_KEY` set to the admin key, which bridges to the admin
-  address. `deploy` prints that address and sends nothing if it is already
-  deployed. Do not deploy it by running the bridge with the admin key: the
-  bridge's wallet persists the key in `./aztec-wallet-data`. Keep it funded
-  with `npm run top-up-fee-juice` and `FEE_JUICE_RECIPIENT` set to the admin
-  address: `pause` cannot be sent without it.
+- The admin account is deployed and holds fee juice. To deploy it:
+  1. `npm run admin -- deploy` with `SPENDING_LIMIT_ADMIN_KEY` set. It prints
+     `admin: <address>`, then stops with "SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM is required" if
+     the account is not deployed yet. Nothing is sent, and the wallet it opens
+     lives in `os.tmpdir()` and is deleted on exit.
+  2. `npm run bridge-fee-juice -- --recipient <admin address>`. This needs the
+     `--recipient` flag from PR #31; until that lands, `bridge-fee-juice` can
+     only bridge to the account derived from `PXE_BRIDGE_SECRET_KEY`, and there
+     is no supported way to bridge to the admin.
+  3. `npm run admin -- deploy` again, with `SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM` set to the
+     printed claim JSON. This is not `FEE_JUICE_CLAIM`, the bridge's own claim.
+     `deploy` sends nothing if the admin is already deployed.
+
+  Never put the admin key in `PXE_BRIDGE_SECRET_KEY`, for any script or for
+  the bridge: `bridge-fee-juice` and the bridge both open a persistent wallet
+  that writes the key to `./aztec-wallet-data`, and the admin key cannot be
+  rotated. Keep the admin funded with `npm run top-up-fee-juice` and
+  `FEE_JUICE_RECIPIENT` set to the admin address: `pause` cannot be sent
+  without it.
 - The contract artifact is in `contracts/spending_limit_account/target/`, for
   every command including `status`, which takes storage slots from it. It is
   gitignored: download `contract-artifact` from CI or build it with
@@ -386,7 +396,7 @@ npm run update-allowlist -- --revoke 0x<addr>
 | --- | --- | --- | --- |
 | `SPENDING_LIMIT_ACCOUNT` | All but `deploy` | -- | Address of the spending-limit account |
 | `SPENDING_LIMIT_ADMIN_KEY` | All but `status` | -- | Secret key of the admin |
-| `FEE_JUICE_CLAIM` | `deploy` | -- | Claim JSON from `npm run bridge-fee-juice` to the admin address. Not needed if already deployed |
+| `SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM` | `deploy` | -- | Claim JSON from `npm run bridge-fee-juice -- --recipient <admin address>`. Not needed if already deployed |
 | `PXE_BRIDGE_ALLOWLIST_SEED` | `update-allowlist` | -- | The bridge's allowlist seed. Optional for `status`, see below |
 | `PXE_BRIDGE_ALLOWLIST_RECIPIENTS` | `update-allowlist` | -- | The current set, as the bridge has it. Optional for `status` |
 | `AZTEC_NODE_URL` | No | `http://localhost:8080` | Aztec node |

@@ -55,7 +55,7 @@ const STORE_DIR = /^(wallet_data|pxe_data)-/;
 const SCRIPT_ENV = [
   "SPENDING_LIMIT_ACCOUNT",
   "SPENDING_LIMIT_ADMIN_KEY",
-  "FEE_JUICE_CLAIM",
+  "SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM",
   "PXE_BRIDGE_ALLOWLIST_SEED",
   "PXE_BRIDGE_ALLOWLIST_RECIPIENTS",
 ];
@@ -169,7 +169,7 @@ describe("operator scripts (e2e)", () => {
     const refused = await runCli("admin", ["deploy"], { SPENDING_LIMIT_ADMIN_KEY: ADMIN_KEY });
     expect(refused.code, refused.output).toBe(1);
     expect(refused.output).toContain(
-      `FEE_JUICE_CLAIM is required: npm run bridge-fee-juice to ${adminAddress}`,
+      `SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM is required: npm run bridge-fee-juice -- --recipient ${adminAddress}`,
     );
     expect(refused.storesLeft).toEqual([]);
 
@@ -178,7 +178,7 @@ describe("operator scripts (e2e)", () => {
     );
     const deployed = await runCli("admin", ["deploy"], {
       SPENDING_LIMIT_ADMIN_KEY: ADMIN_KEY,
-      FEE_JUICE_CLAIM: JSON.stringify(claim),
+      SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM: JSON.stringify(claim),
     });
     expect(deployed.code, deployed.output).toBe(0);
     expect(deployed.output).toContain("[admin] deployed");

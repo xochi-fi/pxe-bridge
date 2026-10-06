@@ -562,8 +562,9 @@ export async function readFeeJuiceBalance(nodeUrl: string, owner: string): Promi
 }
 
 /**
- * FEE_JUICE_CLAIM as produced by `npm run bridge-fee-juice`, validated as
- * src/index.ts does. `raw` already taken with takeSecretEnv.
+ * SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM: a claim as produced by `npm run bridge-fee-juice`, validated
+ * as src/index.ts validates FEE_JUICE_CLAIM. Named apart from the bridge's
+ * FEE_JUICE_CLAIM so one shell cannot hand the same claim to both. `raw` already taken with takeSecretEnv.
  */
 export async function parseFeeJuiceClaim(raw: string | undefined): Promise<FeeJuiceClaim | undefined> {
   if (!raw) return undefined;
@@ -572,11 +573,11 @@ export async function parseFeeJuiceClaim(raw: string | undefined): Promise<FeeJu
   try {
     json = JSON.parse(raw);
   } catch {
-    throw new Error("FEE_JUICE_CLAIM is not valid JSON");
+    throw new Error("SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM is not valid JSON");
   }
   const parsed = FeeJuiceClaimSchema.safeParse(json);
   if (!parsed.success) {
-    throw new Error("FEE_JUICE_CLAIM must be: {claimAmount, claimSecret, messageLeafIndex}");
+    throw new Error("SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM must be: {claimAmount, claimSecret, messageLeafIndex}");
   }
   return parsed.data;
 }
@@ -643,7 +644,7 @@ export async function deployAdmin(
     return false;
   }
   if (!claim) {
-    throw new Error(`FEE_JUICE_CLAIM is required: npm run bridge-fee-juice to ${admin.toString()}`);
+    throw new Error(`SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM is required: npm run bridge-fee-juice -- --recipient ${admin.toString()}`);
   }
 
   const paymentMethod = new FeeJuicePaymentMethodWithClaim(admin, {

@@ -13,7 +13,7 @@
  * Env:
  *   SPENDING_LIMIT_ACCOUNT           -- AztecAddress of the account (all but deploy)
  *   SPENDING_LIMIT_ADMIN_KEY         -- 32-byte hex secret key of the admin (all but status)
- *   FEE_JUICE_CLAIM                  -- deploy: claim JSON from bridge-fee-juice to the admin
+ *   SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM -- deploy: claim JSON from bridge-fee-juice to the admin
  *   PXE_BRIDGE_ALLOWLIST_SEED        -- status: with RECIPIENTS, the expected root
  *   PXE_BRIDGE_ALLOWLIST_RECIPIENTS     when --expect-root is not given
  *   AZTEC_NODE_URL                   -- Aztec node (default: http://localhost:8080)
@@ -137,7 +137,7 @@ async function main(): Promise<number> {
   // Before anything that could spawn a prover.
   const adminKeyEnv = takeSecretEnv("SPENDING_LIMIT_ADMIN_KEY");
   const seedEnv = takeSecretEnv("PXE_BRIDGE_ALLOWLIST_SEED");
-  const claimEnv = takeSecretEnv("FEE_JUICE_CLAIM");
+  const claimEnv = takeSecretEnv("SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM");
 
   let command: AdminCommand;
   try {
