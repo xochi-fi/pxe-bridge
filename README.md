@@ -367,7 +367,8 @@ Prerequisites:
   every command including `status`, which takes storage slots from it. It is
   gitignored: download `contract-artifact` from CI or build it with
   `aztec compile`. Commands refuse when its class ID differs from the
-  account's.
+  account's, except `pause` and `unpause`, which read no storage: they warn
+  and send, since `aztec compile` is not reproducible (see `SECURITY.md`).
 
 ```bash
 npm run admin -- deploy

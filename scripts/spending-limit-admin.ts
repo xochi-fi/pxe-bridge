@@ -399,6 +399,15 @@ export function formatStatus(
 }
 
 /**
+ * The account's class is not the artifact's. aztec compile is not
+ * reproducible (SECURITY.md), so pause and unpause, which need no storage,
+ * catch this and proceed.
+ */
+export class ClassMismatchError extends Error {
+  override name = "ClassMismatchError";
+}
+
+/**
  * Reads the account's public storage straight from the node, by the slots the
  * artifact's storage layout assigns. No wallet and no key: the getters are not
  * on the contract yet.
@@ -452,7 +461,7 @@ export async function readAccountState(
     throw new Error(`no contract instance at ${account} on ${nodeUrl}`);
   }
   if (accountClassId !== artifactClassId) {
-    throw new Error(
+    throw new ClassMismatchError(
       `contract class mismatch: ${account} runs ${accountClassId}, the artifact in ` +
         `contracts/spending_limit_account/target/ is ${artifactClassId}. Its storage layout ` +
         `may not be the account's; build the artifact the account was deployed from`,

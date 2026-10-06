@@ -24,6 +24,7 @@
  *   8  allowlist_root is not the expected root
  *   16 admin fee juice below --min-fee-juice
  * 1 alone is an error, including a contract class that is not the artifact's.
+ * pause and unpause warn on that mismatch and send anyway; other commands refuse.
  * Codes >= 128 are interrupts (129 SIGHUP, 130 SIGINT, 143 SIGTERM), not bits.
  *
  * pause and unpause take effect at the inclusion of the next transfer. pause is
@@ -36,6 +37,7 @@
 import { AllowlistTree } from "../src/allowlist-tree.js";
 import {
   ADMIN_USAGE,
+  ClassMismatchError,
   PARAM_TIMELOCK_SECONDS,
   accountContract,
   connectAdmin,
@@ -172,14 +174,23 @@ async function main(): Promise<number> {
   }
 
   const adminKey = await validateSecret("SPENDING_LIMIT_ADMIN_KEY", adminKeyEnv);
-  const { state, now } = await readAccountState(NODE_URL, account);
-  refuseKnownReverts(command, state, now);
+  const pauseToggle = command.kind === "pause" || command.kind === "unpause";
+  let read: Awaited<ReturnType<typeof readAccountState>> | undefined;
+  try {
+    read = await readAccountState(NODE_URL, account);
+  } catch (err) {
+    // pause and unpause read no storage; the artifact's layout does not matter.
+    if (!pauseToggle || !(err instanceof ClassMismatchError)) throw err;
+    log(`warning: ${err.message}`);
+    log("warning: proceeding without reading state; the contract checks the admin");
+  }
+  if (read) refuseKnownReverts(command, read.state, read.now);
 
-  const { wallet, admin } = await connectAdmin(NODE_URL, adminKey, state.admin);
+  const { wallet, admin } = await connectAdmin(NODE_URL, adminKey, read?.state.admin);
 
   log(`account: ${account}`);
   log(`admin:   ${admin.toString()}`);
-  for (const line of describe(command, state, now)) log(line);
+  if (read) for (const line of describe(command, read.state, read.now)) log(line);
 
   const contract = await accountContract(wallet, account);
   const method = contract.methods[CONTRACT_METHOD[command.kind]]!;
@@ -191,6 +202,7 @@ async function main(): Promise<number> {
   const { TxExecutionResult } = await import("@aztec/stdlib/tx");
   const receipt = await sendAndWait(NODE_URL, interaction, admin, log);
   if (receipt.executionResult !== TxExecutionResult.SUCCESS) return 1;
+  if (!read) return 0;
 
   const after = await readAccountState(NODE_URL, account);
   for (const line of formatStatus(account, after.state, after.now)) console.log(line);
