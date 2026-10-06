@@ -387,7 +387,7 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
     const { amount, recipient } = await this.deriveDeclaration(exec.calls);
     const witness = await this.witnessFor(recipient);
 
-    const abi = this.getEntrypointAbi();
+    const abi = spendingLimitEntrypointAbi();
     const encodedArgs = encodeArguments(abi, [
       encodedCalls,
       feePaymentMethodOptions,
@@ -486,124 +486,125 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
       feePayer ?? this.address,
     );
   }
+}
 
-  /**
-   * ABI for the extended entrypoint signature. Hand-maintained against the
-   * Noir contract's entrypoint:
-   *
-   *   entrypoint(AppPayload, u8, bool, u128, AztecAddress, Field, Field,
-   *              [Field; ALLOWLIST_TREE_HEIGHT])
-   *
-   * Drift is not a type error anywhere, and it does NOT move the account
-   * address: the class ID derives from the compiled artifact, not from this
-   * table. What drift produces is a wrong selector or misplaced arguments
-   * against the SAME address, which is a transaction that fails on chain.
-   * `entrypoint_abi_matches_artifact` in tests/spending-limit-account.test.ts
-   * is what catches it.
-   */
-  private getEntrypointAbi(): FunctionAbi {
-    return {
-      name: "entrypoint",
-      isInitializer: false,
-      functionType: "private",
-      isOnlySelf: false,
-      isStatic: false,
-      parameters: [
-        // Standard parameters (identical to DefaultAccountEntrypoint)
-        {
-          name: "app_payload",
-          type: {
-            kind: "struct",
-            path: "authwit::entrypoint::app::AppPayload",
-            fields: [
-              {
-                name: "function_calls",
+/**
+ * ABI for the extended entrypoint signature. Hand-maintained against the
+ * Noir contract's entrypoint:
+ *
+ *   entrypoint(AppPayload, u8, bool, u128, AztecAddress, Field, Field,
+ *              [Field; ALLOWLIST_TREE_HEIGHT])
+ *
+ * Drift is not a type error anywhere, and it does NOT move the account
+ * address: the class ID derives from the compiled artifact, not from this
+ * table. What drift produces is a wrong selector or misplaced arguments
+ * against the SAME address, which is a transaction that fails on chain.
+ * "entrypoint ABI matches the compiled artifact" in
+ * tests/spending-limit-account.test.ts is what catches it. It needs the
+ * artifact, so it runs in CI's `contract` job and skips elsewhere.
+ */
+export function spendingLimitEntrypointAbi(): FunctionAbi {
+  return {
+    name: "entrypoint",
+    isInitializer: false,
+    functionType: "private",
+    isOnlySelf: false,
+    isStatic: false,
+    parameters: [
+      // Standard parameters (identical to DefaultAccountEntrypoint)
+      {
+        name: "app_payload",
+        type: {
+          kind: "struct",
+          path: "authwit::entrypoint::app::AppPayload",
+          fields: [
+            {
+              name: "function_calls",
+              type: {
+                kind: "array",
+                length: 5,
                 type: {
-                  kind: "array",
-                  length: 5,
-                  type: {
-                    kind: "struct",
-                    path: "authwit::entrypoint::function_call::FunctionCall",
-                    fields: [
-                      { name: "args_hash", type: { kind: "field" } },
-                      {
-                        name: "function_selector",
-                        type: {
-                          kind: "struct",
-                          path: "authwit::aztec::protocol_types::abis::function_selector::FunctionSelector",
-                          fields: [
-                            {
-                              name: "inner",
-                              type: {
-                                kind: "integer",
-                                sign: "unsigned",
-                                width: 32,
-                              },
+                  kind: "struct",
+                  path: "authwit::entrypoint::function_call::FunctionCall",
+                  fields: [
+                    { name: "args_hash", type: { kind: "field" } },
+                    {
+                      name: "function_selector",
+                      type: {
+                        kind: "struct",
+                        path: "authwit::aztec::protocol_types::abis::function_selector::FunctionSelector",
+                        fields: [
+                          {
+                            name: "inner",
+                            type: {
+                              kind: "integer",
+                              sign: "unsigned",
+                              width: 32,
                             },
-                          ],
-                        },
+                          },
+                        ],
                       },
-                      {
-                        name: "target_address",
-                        type: {
-                          kind: "struct",
-                          path: "authwit::aztec::protocol_types::address::AztecAddress",
-                          fields: [{ name: "inner", type: { kind: "field" } }],
-                        },
+                    },
+                    {
+                      name: "target_address",
+                      type: {
+                        kind: "struct",
+                        path: "authwit::aztec::protocol_types::address::AztecAddress",
+                        fields: [{ name: "inner", type: { kind: "field" } }],
                       },
-                      { name: "is_public", type: { kind: "boolean" } },
-                      { name: "hide_msg_sender", type: { kind: "boolean" } },
-                      { name: "is_static", type: { kind: "boolean" } },
-                    ],
-                  },
+                    },
+                    { name: "is_public", type: { kind: "boolean" } },
+                    { name: "hide_msg_sender", type: { kind: "boolean" } },
+                    { name: "is_static", type: { kind: "boolean" } },
+                  ],
                 },
               },
-              { name: "tx_nonce", type: { kind: "field" } },
-            ],
-          },
-          visibility: "public",
+            },
+            { name: "tx_nonce", type: { kind: "field" } },
+          ],
         },
-        {
-          name: "fee_payment_method",
-          type: { kind: "integer", sign: "unsigned", width: 8 },
+        visibility: "public",
+      },
+      {
+        name: "fee_payment_method",
+        type: { kind: "integer", sign: "unsigned", width: 8 },
+      },
+      {
+        name: "cancellable",
+        type: { kind: "boolean" },
+      },
+      // Extended parameters for spending limit enforcement
+      {
+        // Hand-maintained pair with `declared_amount: u128` in main.nr.
+        // Drift encodes args at a different width and breaks the binding.
+        name: "declared_amount",
+        type: { kind: "integer", sign: "unsigned", width: 128 },
+      },
+      {
+        name: "declared_recipient",
+        type: {
+          kind: "struct",
+          path: "authwit::aztec::protocol_types::address::AztecAddress",
+          fields: [{ name: "inner", type: { kind: "field" } }],
         },
-        {
-          name: "cancellable",
-          type: { kind: "boolean" },
-        },
-        // Extended parameters for spending limit enforcement
-        {
-          // Hand-maintained pair with `declared_amount: u128` in main.nr.
-          // Drift encodes args at a different width and breaks the binding.
-          name: "declared_amount",
-          type: { kind: "integer", sign: "unsigned", width: 128 },
-        },
-        {
-          name: "declared_recipient",
-          type: {
-            kind: "struct",
-            path: "authwit::aztec::protocol_types::address::AztecAddress",
-            fields: [{ name: "inner", type: { kind: "field" } }],
-          },
-        },
-        {
-          // Hand-maintained triple with `leaf_salt`, `leaf_index` and
-          // `sibling_path` in main.nr's entrypoint. Order matters: arguments
-          // are encoded positionally.
-          name: "leaf_salt",
-          type: { kind: "field" },
-        },
-        {
-          name: "leaf_index",
-          type: { kind: "field" },
-        },
-        {
-          name: "sibling_path",
-          type: { kind: "array", length: ALLOWLIST_TREE_HEIGHT, type: { kind: "field" } },
-        },
-      ],
-      returnTypes: [],
-      errorTypes: {},
-    } as FunctionAbi;
-  }
+      },
+      {
+        // Hand-maintained triple with `leaf_salt`, `leaf_index` and
+        // `sibling_path` in main.nr's entrypoint. Order matters: arguments
+        // are encoded positionally.
+        name: "leaf_salt",
+        type: { kind: "field" },
+      },
+      {
+        name: "leaf_index",
+        type: { kind: "field" },
+      },
+      {
+        name: "sibling_path",
+        type: { kind: "array", length: ALLOWLIST_TREE_HEIGHT, type: { kind: "field" } },
+      },
+    ],
+    returnTypes: [],
+    errorTypes: {},
+  } as FunctionAbi;
 }

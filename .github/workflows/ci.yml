@@ -165,6 +165,13 @@ jobs:
       # empty account, logs "Ready", and strands the balance at the old address.
       - name: Assert artifact is loadable and the class ID has not drifted
         run: node scripts/contract-class-id.js --check contracts/spending_limit_account/CLASS_ID
+      # The entrypoint ABI in src/spending-limit-account.ts is written by hand,
+      # and this is the only job with an artifact to hold it against. Drift
+      # keeps the address and breaks the selector or the argument layout, so it
+      # fails on chain rather than here unless something compares them. The
+      # `check` job runs the same file without the artifact and skips this test.
+      - name: Assert the hand-written entrypoint ABI matches the artifact
+        run: npx vitest run tests/spending-limit-account.test.ts -t "entrypoint ABI matches the compiled artifact"
 
   e2e:
     needs: [check, contract]
