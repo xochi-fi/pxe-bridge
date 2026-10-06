@@ -483,14 +483,12 @@ export class AztecClient implements IAztecClient {
         });
         console.log("[pxe-bridge] Account deployed");
       } catch (err) {
-        // A concurrent deploy of the same account is not an error. The init
-        // nullifier is the authoritative signal: it can only already exist if
-        // the constructor has run, and it is emitted before the instance
-        // becomes visible to the node, so checking it avoids the window where
-        // the initialization status still reads as uninitialized.
+        // A concurrent deploy of the same account is not an error. "Existing
+        // nullifier" does not establish one: a spent fee claim's message
+        // nullifier fails the send the same way with nothing deployed. The
+        // initialization status settles it, for that error and any other.
         const message = err instanceof Error ? err.message : String(err);
-        const alreadyInitialized = message.includes("Existing nullifier");
-        if (alreadyInitialized || (await this.isInitialized(address))) {
+        if (await this.isInitialized(address)) {
           console.log("[pxe-bridge] Account deployed by another process");
         } else if (deployer && deployer.claim !== "absent" && deployerUnderfunded(message)) {
           throw new Error(
