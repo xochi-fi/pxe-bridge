@@ -29,11 +29,12 @@
  *
  * Before any L1 write the claim secret, its hash, the starting L1 block and
  * the L1 sender are written to fee-juice-deposit-<secretHash>.json in the
- * working directory, owner-only. If the run dies before the claim is printed,
- * the deposit may still land: rerun the same command with --recover <file>. It
- * finds the deposit on L1 and prints the claim without depositing, or says
- * whether one is still pending. The file is deleted once the claim is printed.
- * A hangup exits rather than killing the run mid-write.
+ * working directory, owner-only. If the run dies, the deposit may still land:
+ * rerun the same command with --recover <file>. It finds the deposit on L1 and
+ * prints the claim without depositing, or says whether one is still pending.
+ * Once the deposit lands its claim is added to the file, and --recover then
+ * prints it and waits without reading L1. The file is deleted only once the
+ * message has synced. A hangup exits rather than killing the run mid-write.
  *
  * The claim and the L1 to L2 message hash are printed as soon as the L1
  * deposit lands, before the wait. If the wait times out, the deposit is done:
@@ -76,7 +77,9 @@ import {
   assertAztecAddress,
   assertBridgeAmount,
   bridgeFeeJuice,
+  bridgedClaimOf,
   findPendingDeposit,
+  recordBridgedClaim,
   recoverFeeJuiceClaim,
   waitForL1ToL2Message,
   writePendingDeposit,
@@ -233,6 +236,8 @@ async function main(): Promise<void> {
   let recovery:
     | { amount: bigint; claimSecret: string; secretHash: string; fromBlock: bigint; l1Sender?: string }
     | undefined;
+  // A file an earlier run enriched once its deposit landed: no L1 read needed.
+  let recorded: BridgedFeeJuiceClaim | undefined;
   if (recoverFile) {
     // The file is the record; a second source for any of it could disagree.
     const { path, deposit } = recoverFile;
@@ -245,6 +250,7 @@ async function main(): Promise<void> {
     if (deposit.recipient.toLowerCase() !== recipient.toLowerCase()) {
       fail(`Deposit file ${path} is for ${deposit.recipient}, not ${recipient}`);
     }
+    recorded = bridgedClaimOf(deposit);
     recovery = {
       amount: BigInt(deposit.claimAmount),
       claimSecret: deposit.claimSecret,
@@ -272,7 +278,7 @@ async function main(): Promise<void> {
   const envName = toDeployer ? DEPLOYER_FEE_JUICE_CLAIM_ENV : "FEE_JUICE_CLAIM";
   let pending: PendingFeeJuiceDeposit | undefined;
   let bridged: BridgedFeeJuiceClaim | undefined;
-  // Deleted once the claim is printed, which is the next record of the deposit.
+  // Kept until the message has synced; the claim is added to it once printed.
   let depositFile = recoverFile?.path;
 
   const recoverCommand = (file: string): string =>
@@ -280,22 +286,26 @@ async function main(): Promise<void> {
     `--recover ${file}`;
 
   // Printed before the wait: the L1 deposit is done and cannot be undone,
-  // and a wait that times out must not take the only copy of the claim.
+  // and a wait that times out must not take the only copy of the claim. The
+  // file gets the claim too, since the terminal may not survive the wait.
   const printClaim = (claim: BridgedFeeJuiceClaim): void => {
     bridged = claim;
     const { messageHash, ...claimJson } = claim;
     console.log("\nBridged. Set this on the bridge once the message has synced:\n");
     console.log(`${envName}='${JSON.stringify(claimJson)}'`);
     console.log(`\nL1 to L2 message hash: ${messageHash}\n`);
-    if (depositFile !== undefined) {
-      rmSync(depositFile, { force: true });
-      depositFile = undefined;
-    }
+    if (depositFile !== undefined && recorded === undefined) recordBridgedClaim(depositFile, claim);
   };
 
   console.log(`Connecting to Aztec node at ${AZTEC_NODE_URL}`);
   try {
-    if (recovery !== undefined) {
+    if (recorded !== undefined) {
+      console.log(`${depositFile} records the landed deposit; not reading L1`);
+      printClaim(recorded);
+      const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
+      console.log("Waiting for the L1 to L2 message");
+      await waitForL1ToL2Message(createAztecNodeClient(AZTEC_NODE_URL), recorded.messageHash, {});
+    } else if (recovery !== undefined) {
       printClaim(
         await recoverFeeJuiceClaim({
           nodeUrl: AZTEC_NODE_URL,
@@ -326,7 +336,7 @@ async function main(): Promise<void> {
           depositFile = writePendingDeposit(d);
           pending = d;
           console.log(`\nDeposit recorded in ${depositFile} (owner-only; holds the claim secret).`);
-          console.log("If this run dies before the claim is printed, the deposit may still land.");
+          console.log("If this run dies before the message syncs, the deposit may still land.");
           console.log("Do not bridge again; recover it from this directory with:\n");
           console.log(recoverCommand(depositFile));
           console.log("\n(with the same AZTEC_NODE_URL and L1_RPC_URL)\n");
@@ -337,8 +347,9 @@ async function main(): Promise<void> {
   } catch (err) {
     if (bridged !== undefined) {
       fail(
-        `\n${(err as Error).message}.\nThe deposit is on L1 and the claim above stays valid. ` +
-          "Do not run the bridge step again: that deposits a second time. Resume the wait with:\n" +
+        `\n${(err as Error).message}.\nThe deposit is on L1 and the claim above stays valid` +
+          (depositFile !== undefined ? `, also recorded in ${depositFile}` : "") +
+          ". Do not run the bridge step again: that deposits a second time. Resume the wait with:\n" +
           `  npm run bridge-fee-juice -- --wait ${bridged.messageHash}`,
       );
     }
@@ -352,6 +363,8 @@ async function main(): Promise<void> {
     if (recovery !== undefined) fail((err as Error).message);
     throw err;
   }
+  // Synced: the claim is consumable, and the printed copy is the operator's.
+  if (depositFile !== undefined) rmSync(depositFile, { force: true });
 
   console.log(
     toDeployer

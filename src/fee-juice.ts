@@ -22,7 +22,7 @@
  * L2 balance cannot be moved between accounts.
  */
 
-import { closeSync, existsSync, fsyncSync, openSync, readFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { FeeJuiceContract } from "@aztec/noir-contracts.js/FeeJuice";
@@ -70,6 +70,13 @@ const PendingFeeJuiceDepositSchema = z.object({
   secretHash: z.string().regex(FIELD_PATTERN),
   l1FromBlock: z.string().regex(/^\d+$/),
   l1Sender: z.string().regex(L1_ADDRESS_PATTERN),
+  // Added by recordBridgedClaim once the deposit has landed. Either both or
+  // neither: a file with one is not a record either writer produced.
+  messageLeafIndex: z.string().regex(/^\d+$/).optional(),
+  messageHash: z.string().regex(FIELD_PATTERN).optional(),
+}).refine((d) => (d.messageLeafIndex === undefined) === (d.messageHash === undefined), {
+  message: "messageLeafIndex and messageHash go together",
+  path: ["messageHash"],
 });
 export type PendingFeeJuiceDeposit = z.infer<typeof PendingFeeJuiceDepositSchema>;
 
@@ -86,6 +93,11 @@ export function pendingDepositPath(secretHash: string, dir: string = process.cwd
  */
 export function writePendingDeposit(deposit: PendingFeeJuiceDeposit, dir?: string): string {
   const path = pendingDepositPath(deposit.secretHash, dir);
+  writeDepositFile(path, deposit);
+  return path;
+}
+
+function writeDepositFile(path: string, deposit: PendingFeeJuiceDeposit): void {
   const fd = openSync(path, "wx", 0o600);
   try {
     writeSync(fd, `${JSON.stringify(deposit, null, 2)}\n`);
@@ -93,7 +105,37 @@ export function writePendingDeposit(deposit: PendingFeeJuiceDeposit, dir?: strin
   } finally {
     closeSync(fd);
   }
-  return path;
+}
+
+/**
+ * Adds the landed deposit's claim to the file at `path`, which keeps it until
+ * the claim is safe: synced (bridge-fee-juice) or sent (top-up-fee-juice).
+ * Printing the claim is not enough, since a terminal is lost as easily as a
+ * run. Written beside the file and renamed over it, so a crash leaves the old
+ * record or the new one, never neither.
+ */
+export function recordBridgedClaim(path: string, claim: BridgedFeeJuiceClaim): void {
+  const found = findPendingDeposit(path);
+  if (!found) throw new Error(`Deposit file ${path} is missing`);
+  const { deposit } = found;
+  if (deposit.claimSecret !== claim.claimSecret || deposit.claimAmount !== claim.claimAmount) {
+    throw new Error(`Deposit file ${path} records a different deposit than the claim`);
+  }
+  const tmp = `${path}.tmp`;
+  rmSync(tmp, { force: true });
+  writeDepositFile(tmp, { ...deposit, messageLeafIndex: claim.messageLeafIndex, messageHash: claim.messageHash });
+  renameSync(tmp, path);
+}
+
+/** The claim a deposit file records once its deposit landed; undefined before. */
+export function bridgedClaimOf(deposit: PendingFeeJuiceDeposit): BridgedFeeJuiceClaim | undefined {
+  if (deposit.messageLeafIndex === undefined || deposit.messageHash === undefined) return undefined;
+  return {
+    claimAmount: deposit.claimAmount,
+    claimSecret: deposit.claimSecret,
+    messageLeafIndex: deposit.messageLeafIndex,
+    messageHash: deposit.messageHash,
+  };
 }
 
 /**

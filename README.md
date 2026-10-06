@@ -285,10 +285,18 @@ crash leaves them.
 
 Before any L1 write, the script writes the deposit to
 `fee-juice-deposit-<secretHash>.json` in the working directory (mode 0600) and
-prints its path; the file is deleted once `FEE_JUICE_RESUME_CLAIM` is printed.
-If the run dies before then, rerun with `FEE_JUICE_RECOVER=<file>`: it finds
-the deposit on L1, waits for the message and sends the claim, without
-depositing.
+prints its path. Once the deposit lands the claim is added to the file, which
+is deleted only after the claim transaction succeeds. If the run dies, rerun
+with `FEE_JUICE_RECOVER=<file>`: it finds the deposit on L1 (or takes the
+recorded claim from the file), waits for the message and sends the claim,
+without depositing.
+
+The script takes no arguments and refuses any, since an ignored
+`-- --recover <file>` would deposit again. Every option is an env variable.
+`FEE_JUICE_PAYER_DEPLOYER`, `FEE_JUICE_MINT` and `FEE_JUICE_PAYER_SPONSORED`
+accept only `true` or `false`. `FEE_JUICE_PAYER_SPONSORED=true` is refused
+wherever the bridge would refuse SponsoredFPC: under `NODE_ENV=production`
+unless `PXE_BRIDGE_ALLOW_SPONSORED_FPC=true`.
 
 As soon as the L1 deposit lands, the script prints
 `FEE_JUICE_RESUME_CLAIM='{...}'`. If the wait or the claim transaction fails

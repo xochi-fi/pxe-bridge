@@ -6,10 +6,12 @@ import { join } from "node:path";
 import {
   assertAztecAddress,
   assertBridgeAmount,
+  bridgedClaimOf,
   claimFeeJuiceFor,
   findPendingDeposit,
   isDepositOf,
   pendingDepositPath,
+  recordBridgedClaim,
   recoverFeeJuiceClaim,
   topUpFeeJuice,
   writePendingDeposit,
@@ -233,6 +235,43 @@ describe("pending deposit file", () => {
     const path = pendingDepositPath(SECRET_HASH, dir);
     writeFileSync(path, JSON.stringify({ ...pending, claimSecret: "0x01" }));
     expect(() => findPendingDeposit(SECRET_HASH, dir)).toThrow(/claimSecret/);
+  });
+
+  // The printed claim alone is lost with the terminal. Recovery from the
+  // enriched file must yield the landed claim without reading L1 again.
+  it("records the landed claim, owner-only, and is found with it", () => {
+    const path = writePendingDeposit(pending, dir);
+    expect(bridgedClaimOf(pending)).toBeUndefined();
+    const claim = {
+      claimAmount: pending.claimAmount,
+      claimSecret: pending.claimSecret,
+      messageLeafIndex: "7",
+      messageHash: "0x" + "ee".repeat(32),
+    };
+    recordBridgedClaim(path, claim);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    const found = findPendingDeposit(SECRET_HASH, dir);
+    expect(found?.deposit.l1FromBlock).toBe("42");
+    expect(bridgedClaimOf(found!.deposit)).toEqual(claim);
+  });
+
+  it("refuses to record a claim for a different deposit", () => {
+    const path = writePendingDeposit(pending, dir);
+    expect(() =>
+      recordBridgedClaim(path, {
+        claimAmount: "999",
+        claimSecret: pending.claimSecret,
+        messageLeafIndex: "7",
+        messageHash: "0x" + "ee".repeat(32),
+      }),
+    ).toThrow(/different deposit/);
+    expect(bridgedClaimOf(findPendingDeposit(path)!.deposit)).toBeUndefined();
+  });
+
+  it("rejects a file with only half a landed claim", () => {
+    const path = pendingDepositPath(SECRET_HASH, dir);
+    writeFileSync(path, JSON.stringify({ ...pending, messageLeafIndex: "7" }));
+    expect(() => findPendingDeposit(SECRET_HASH, dir)).toThrow(/go together/);
   });
 });
 
