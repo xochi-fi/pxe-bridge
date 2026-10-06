@@ -219,7 +219,7 @@ testnet.
    The account's transfers pay from that balance, not the deployer's. The
    deployer's key is the bridge's, so this step reads it from Secrets Manager
    into the script's memory, not its environment. The wallet stores holding it
-   are created under `os.tmpdir()` and deleted on exit, SIGINT and SIGTERM;
+   are created under `os.tmpdir()` and deleted on exit, SIGINT, SIGTERM and SIGHUP;
    SIGKILL or a crash leaves them. To keep it
    off the operator's machine, use a separate payer instead (next section).
 
@@ -266,7 +266,7 @@ already be deployed. Set exactly one of:
   It deploys itself and keeps the remainder as its balance.
 
 Neither key is written to `./aztec-wallet-data`. The wallet stores are created
-under `os.tmpdir()` and deleted on exit, SIGINT and SIGTERM; SIGKILL or a
+under `os.tmpdir()` and deleted on exit, SIGINT, SIGTERM and SIGHUP; SIGKILL or a
 crash leaves them.
 
 Before any L1 write, the script prints `FEE_JUICE_RECOVER`,

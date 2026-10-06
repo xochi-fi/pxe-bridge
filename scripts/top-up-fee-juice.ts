@@ -17,7 +17,7 @@
  *       the bridge's key, resolved as the bridge resolves it
  *       (PXE_BRIDGE_SECRET_ARN; PXE_BRIDGE_SECRET_KEY outside production).
  *       The wallet stores holding it live under os.tmpdir() and are deleted
- *       on exit, SIGINT and SIGTERM; SIGKILL or a crash leaves them.
+ *       on exit, SIGINT, SIGTERM and SIGHUP; SIGKILL or a crash leaves them.
  *   FEE_JUICE_PAYER_KEY            A separate plain Schnorr account at the
  *       address the bridge derives from this key. Deploy it by running the
  *       bridge once with this key, without PXE_BRIDGE_SPENDING_LIMIT_ADMIN, and
@@ -386,6 +386,7 @@ let signalled = false;
 for (const [signal, code] of [
   ["SIGINT", 130],
   ["SIGTERM", 143],
+  ["SIGHUP", 129],
 ] as const) {
   process.on(signal, () => {
     if (signalled) return;

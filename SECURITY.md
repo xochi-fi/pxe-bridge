@@ -209,7 +209,7 @@ be transferred but can pay for top-up claims. Production runbook:
    claim from the deployer and pays from what the deployer claim left. This
    loads the bridge key into the operator's process, resolved from
    `PXE_BRIDGE_SECRET_ARN` as the bridge does. The wallet stores holding it are
-   created under `os.tmpdir()` and deleted on exit, SIGINT and SIGTERM;
+   created under `os.tmpdir()` and deleted on exit, SIGINT, SIGTERM and SIGHUP;
    SIGKILL or a crash leaves them. A separate payer (`FEE_JUICE_PAYER_KEY`) keeps the
    bridge key off the operator's machine, at the cost of bootstrapping that
    payer as a plain Schnorr bridge with its own `FEE_JUICE_CLAIM`.
