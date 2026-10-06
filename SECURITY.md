@@ -66,18 +66,13 @@ permanent and grows with each update; only making `update_recipient` private
 are unsigned, so a leaf the attacker built with their own salt is spendable by
 the signing key.
 
-The admin key alone can rewrite any position touched by a published
-`update_recipient`, and that position's sibling (`index ^ 1`); the seed
-protects only positions that are neither (#32). Spending still needs the
-signing key.
-
 Practically: admin key custody is the control against a freeze, and against
 allowlist rewrites once any update has been published. The seed must still be
 archived and protected separately from the admin key; see "Losing the
 allowlist" below. The signing secret and the admin key must never share a host,
 an IAM principal, or an operator session: together they can drain to an
-attacker-built leaf within the live limits, with no seed required. Making `update_recipient` private is tracked in #32. A design
-that keeps an emergency pause without giving a single key a permanent freeze is
+attacker-built leaf within the live limits, with no seed required. Making
+`update_recipient` private is tracked in #32. A design that keeps an emergency pause without giving a single key a permanent freeze is
 tracked in #27.
 
 ## Declared-vs-actual amount binding
