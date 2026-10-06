@@ -222,12 +222,26 @@ export class AztecClient implements IAztecClient {
     // to scripts/top-up-fee-juice.ts. Public on chain either way.
     console.log(`[pxe-bridge] Account address: ${address.toString()}`);
 
-    // Deploy account contract if not already on-chain.
-    // Cannot rely on wallet.getAccounts() since the local WalletDB is
-    // ephemeral (Docker restarts clear it). Query the node instead.
-    const alreadyDeployed = await this.isContractDeployed(address);
-
-    if (!alreadyDeployed) {
+    // A recorded account is never deployed here. The record says the account
+    // exists, and accountManager() has already checked that it derives this
+    // address, so finding nothing means the record points at the wrong
+    // network or a deployment that never landed. Deploying would put a fresh,
+    // empty account where the operator believes the funded one is.
+    const deployment = this.spendingLimitConfig?.deployment;
+    if (deployment) {
+      if (!(await this.isContractInitialized(address))) {
+        throw new Error(
+          `Deployment record names account ${address.toString()}, but no initialized ` +
+            `contract exists there on ${this.nodeUrl}. Refusing to deploy over a recorded ` +
+            `account. Check AZTEC_NODE_URL; to deploy a new account, unset ` +
+            `PXE_BRIDGE_ACCOUNT_DEPLOYMENT deliberately.`,
+        );
+      }
+      console.log("[pxe-bridge] Account recovered from deployment record");
+    } else if (!(await this.isContractDeployed(address))) {
+      // Deploy account contract if not already on-chain.
+      // Cannot rely on wallet.getAccounts() since the local WalletDB is
+      // ephemeral (Docker restarts clear it). Query the node instead.
       console.log("[pxe-bridge] Deploying solver account...");
 
       const { NO_FROM } = await import("@aztec/aztec.js/account");
@@ -281,6 +295,19 @@ export class AztecClient implements IAztecClient {
       console.log("[pxe-bridge] Account recovered");
     }
 
+    if (this.spendingLimitContract && !deployment) {
+      // Without the record the address derives from live configuration, and
+      // the next legitimate change to it -- an update_recipient, new limits --
+      // moves the account. Printed on every unrecorded start, not just the
+      // deploying one, so a missed first print is not the end of it.
+      const record = await this.spendingLimitContract.deploymentRecord(address.toString());
+      console.warn(
+        "[pxe-bridge] ACCOUNT DEPLOYMENT RECORD. Persist this as PXE_BRIDGE_ACCOUNT_DEPLOYMENT " +
+          "before changing the allowlist or the limits. Without it the next restart after " +
+          "such a change derives a different address and deploys an empty account there:",
+      );
+      console.warn(JSON.stringify(record));
+    }
     if (this.spendingLimitConfig) {
       console.log(
         `[pxe-bridge] Spending limit account active (max/tx: ${this.spendingLimitConfig.maxAmountPerTx}, daily: ${this.spendingLimitConfig.dailyLimit})`,
@@ -306,7 +333,6 @@ export class AztecClient implements IAztecClient {
     secret: import("@aztec/aztec.js/fields").Fr,
     salt: import("@aztec/aztec.js/fields").Fr,
   ): Promise<import("@aztec/aztec.js/wallet").AccountManager> {
-    const { AccountManager } = await import("@aztec/aztec.js/wallet");
     const { deriveMasterMessageSigningSecretKey } = await import("@aztec/stdlib/keys");
 
     const signingKey = deriveMasterMessageSigningSecretKey(secret);
@@ -316,11 +342,10 @@ export class AztecClient implements IAztecClient {
       this.spendingLimitConfig!,
     );
 
-    const accountManager = await AccountManager.create(
-      this.wallet! as unknown as Parameters<typeof AccountManager.create>[0],
+    const accountManager = await this.spendingLimitContract.accountManager(
+      this.wallet! as unknown as Parameters<SpendingLimitAccountContract["accountManager"]>[0],
       secret,
-      this.spendingLimitContract,
-      { salt },
+      salt,
     );
 
     // Register the contract artifact with PXE so proving works.
@@ -657,6 +682,22 @@ export class AztecClient implements IAztecClient {
           `two agree.`,
       );
     }
+  }
+
+  /**
+   * Whether the account's constructor has run, by its private initialization
+   * nullifier, which the wallet looks up on the node.
+   *
+   * Used for a recorded account, where "not there" must stop startup, so it
+   * asks about initialization rather than publication, the stronger of the
+   * two. Definitive only because createSpendingLimitAccount has registered the
+   * instance by now, which gives the wallet the init hash it needs; without it
+   * the answer would be UNKNOWN.
+   */
+  private async isContractInitialized(address: AztecAddress): Promise<boolean> {
+    const { ContractInitializationStatus } = await import("@aztec/aztec.js/wallet");
+    const metadata = await this.wallet!.getContractMetadata(address);
+    return metadata.initializationStatus === ContractInitializationStatus.INITIALIZED;
   }
 
   /**
