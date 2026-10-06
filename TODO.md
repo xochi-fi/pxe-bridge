@@ -86,11 +86,12 @@ validated at init and apply time (`daily_limit >= max_per_tx`, both non-zero,
 > anything on the deferred list below that touches `main.nr` (transaction
 > cancellation, for one) has to land before an address is fixed, not after.
 >
-> `aztec compile` is also not reproducible: identical sources and toolchain
-> versions have produced two different class IDs across CI runs. So a red check
-> may be that flake rather than a real change. Diff the uploaded artifact before
-> concluding either way, and archive the artifact a deployment was made against
-> rather than rebuilding it. See SECURITY.md, "Build supply chain".
+> `aztec compile` produced a different class ID from identical sources in three
+> CI runs. Cause: `bb aztec_process` derives the private functions' verification
+> keys concurrently and bb 5.1.0 is not thread-safe there, so the constructor
+> VK was occasionally wrong. The job now runs it with `HARDWARE_CONCURRENCY=1`.
+> Archive the artifact a deployment was made against rather than rebuilding it.
+> See SECURITY.md, "Build supply chain".
 
 ## Security Hardening Pass (2026-04-20)
 
@@ -145,16 +146,15 @@ Known limitations (acceptable for alpha):
   position list is terminal for allowlist management, and unlike the public
   array it replaced there is no way to read the set back. See SECURITY.md,
   "Losing the allowlist".
-- `aztec compile` is not reproducible, so the account address cannot be rebuilt
-  from source. Mitigated by the `CLASS_ID` pin and by archiving the artifact a
-  deployment was made against. See the class ID note under Phase 2.
 - The spending-limit account cannot pay its own fees and nothing watches its
   fee juice balance. It drains silently and refills only when an operator runs
   `npm run top-up-fee-juice` from an L1-funded key. Tracked in Phase 3.
 
 Resolved since this list was written: the fixed-epoch daily reset, which
 depended on block production rate and could wedge a stalled chain's counter, is
-now a timestamp-anchored 25-bucket sliding window (NM-1019 [Medium]).
+now a timestamp-anchored 25-bucket sliding window (NM-1019 [Medium]). `aztec
+compile` producing a different class ID from identical sources was concurrent
+VK derivation in bb, serialised in CI with `HARDWARE_CONCURRENCY=1`.
 
 ## Phase 3: Hot/Cold Wallet Split
 

@@ -297,26 +297,40 @@ The artifact it produces is not committed, so the mitigation is downstream:
 compromised or merely updated toolchain changes that ID, and the account address
 derives from it.
 
-### `aztec compile` is not reproducible
+### `aztec compile` was not reproducible
 
-Introducing that check immediately found the following. Across four CI runs of
-identical sources, with identical reported toolchain versions (aztec 5.1.0, noir
-`1.0.0-beta.22+c57152f9`), three produced class ID `0x0df61951...` and one
-produced `0x2ff3ed37...`. Re-running the odd job passed.
+Introducing that check immediately found it. Identical sources and toolchain
+(aztec 5.1.0, noir `1.0.0-beta.22+c57152f9`) occasionally produced a different
+class ID, a different one each time: `0x2ff3ed37...` (run 32048928421) against
+`0x0df61951...`, then `0x14bf25bb...` (37231706545) and `0x0ddebed6...`
+(37251698866) against `0x049106c3...`. Re-running passed.
 
-The consequences are worth stating plainly:
+The two drifted artifacts still downloadable differ from a good one in exactly
+one field, the constructor's `verification_key`. Bytecode, artifact hash and
+public bytecode commitment are identical. The VK hash is a leaf of the private
+functions root, which is an input to the class ID. The drifted VKs keep the
+circuit size and change 26 of 40 commitments, `lagrange_last` among them, so bb
+built a different circuit from the same bytecode.
 
-- **The account address is not reproducible from source.** Rebuilding the
-  artifact can yield a different contract class and therefore a different
-  address, holding no funds.
-- **The artifact that a deployment was made against must be archived**, not
-  regenerated. The CI job uploads it on every run, before the class ID check, so
-  a drifted build is preserved for comparison rather than discarded.
-- **A red class ID check may be this flake rather than a real change.** Diff the
-  uploaded artifact against a known-good one before concluding either way.
+Cause: `bb aztec_process`, which `aztec compile` runs after nargo, derives every
+private function's VK at once, one thread each, in one process. bb 5.1.0 is not
+thread-safe there: `cycle_group` reads offset generators from the
+process-global `generator_data::default_data`, whose `get()` mutates a
+`std::map` unlocked. Reproduced locally (arm64) at `HARDWARE_CONCURRENCY=4`: of
+750 runs, 12 produced a wrong constructor VK and 196 aborted, 113 of the 119
+captured in `cycle_group` ("Point is not on curve"). The constructor alone at 4
+threads: 300 of 300 correct, so parallelism within one derivation is not it.
+All three at `HARDWARE_CONCURRENCY=1`: 300 of 300 correct.
 
-Root cause is not established. Nothing here depends on the ID being stable
-except deployment itself, which is exactly the thing that cannot tolerate it.
+The `contract` job sets `HARDWARE_CONCURRENCY=1` for `aztec compile`. Any other
+build of the artifact needs the same. bb caches each VK under
+`~/.bb/<version>/vk_cache` keyed on bytecode alone, so a build that hit the race
+keeps serving the wrong VK on that machine until the entry is deleted.
+
+The artifact a deployment was made against should still be archived rather than
+regenerated: the installer exposure above can change the build regardless. The
+CI job uploads it on every run, before the class ID check, so a drifted build is
+preserved for comparison.
 
 ## Application-level limits
 

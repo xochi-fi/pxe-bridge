@@ -136,14 +136,22 @@ jobs:
       # loadContractArtifact rejects with "public bytecode has not been
       # transpiled". `aztec compile` runs nargo then postprocesses to transpile
       # public functions to AVM bytecode and generate verification keys.
+      #
+      # HARDWARE_CONCURRENCY=1: `bb aztec_process` otherwise derives all private
+      # function verification keys at once, one thread each, in one process.
+      # bb 5.1.0 is not thread-safe there (cycle_group reads offset generators
+      # from a process-global map that `get()` mutates unlocked), and it
+      # intermittently emitted a wrong constructor VK, which moves the class ID
+      # through the private functions root: runs 32048928421, 37231706545,
+      # 37251698866. With one CPU it derives one key at a time.
       - name: Compile and transpile contract
         working-directory: contracts/spending_limit_account
+        env:
+          HARDWARE_CONCURRENCY: "1"
         run: aztec compile
-      # Uploaded BEFORE the class ID check, deliberately. `aztec compile` has
-      # been observed to produce a different class ID from identical sources
-      # (see below), and with the check first the drifted artifact was
-      # discarded, leaving nothing to diff against a good one. Preserving it is
-      # the only way that gets diagnosed.
+      # Uploaded BEFORE the class ID check, deliberately. With the check first
+      # a drifted artifact was discarded, leaving nothing to diff against a good
+      # one.
       - name: Upload contract artifact
         uses: actions/upload-artifact@v4
         with:
@@ -155,13 +163,6 @@ jobs:
       # from that bytecode and feeds address derivation, so drift silently moves
       # the account address: the bridge finds no contract there, deploys a fresh
       # empty account, logs "Ready", and strands the balance at the old address.
-      #
-      # KNOWN FLAKE: one of four observed runs on this branch produced
-      # 0x2ff3ed37... where the other three produced 0x0df61951..., from the
-      # same commit and the same reported toolchain versions. Re-running the
-      # job passed. So `aztec compile` is not reproducible, and a red here may
-      # be that rather than a real change. Compare the uploaded artifact
-      # against a known-good one before assuming either.
       - name: Assert artifact is loadable and the class ID has not drifted
         run: node scripts/contract-class-id.js --check contracts/spending_limit_account/CLASS_ID
 
@@ -180,10 +181,18 @@ jobs:
         with:
           name: contract-artifact
           path: contracts/spending_limit_account/target
+      # Compose is started here rather than by test:e2e:up, which takes it down
+      # on exit and with it the node log, the only record of why the node
+      # rejected a send.
+      - run: docker compose up -d --wait anvil aztec-sandbox
       # No PXE_BRIDGE_SECRET_KEY override: tests/e2e/helpers.ts supplies a valid
       # BN254 field element. This used to pass the Anvil secp256k1 test key,
       # which exceeds the BN254 modulus and cannot be an Aztec secret at all.
-      - run: npm run test:e2e:up
+      - run: npm run test:e2e
+        env:
+          AZTEC_NODE_URL: http://localhost:8080
+      - if: failure()
+        run: docker compose logs --no-color --timestamps anvil aztec-sandbox
 
   docker:
     # e2e too, not just [check, contract]. With the same dependencies as the
