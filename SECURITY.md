@@ -111,8 +111,11 @@ Aztec v5.1.0. It is validated three ways:
   rejects a declared/actual mismatch, a hidden second call, and an empty
   payload; `stale_witness_is_rejected` and `update_with_a_forged_old_leaf_is_rejected`
   cover the allowlist binding and the single-leaf constraint on admin updates;
-  `leaf_and_node_hashes_match_typescript` pins the hashes against
-  `tests/allowlist-tree.test.ts`. The `contract` CI job runs these
+  `leaf_and_node_hashes_match_typescript` and
+  `sibling_path_orientation_matches_typescript` pin the hashes and the path
+  orientation against `tests/allowlist-tree.test.ts`, and
+  `signed_hash_matches_typescript` pins the signed hash against
+  `tests/spending-limit-account.test.ts`. The `contract` CI job runs these
   and `aztec compile`.
 - e2e tests in `tests/e2e/spending-limit.test.ts` reach what `aztec-nargo test`
   cannot. The guard itself is private, so it runs in ACIR either way; what only
@@ -374,11 +377,36 @@ that point the send has not been made, so a retry is correct.
 Keys are held 24h, and durability depends on `PXE_BRIDGE_AUDIT_LOG` being a file
 path. Without it the store is in-memory and a restart forgets every key.
 
-The circuit breaker trips when committed volume reaches the daily cap, not when
-a single request would overshoot it. A request larger than the remaining budget
-is rejected on its own; tripping there meant one oversized request, needing no
-prior volume when `PXE_BRIDGE_MAX_AMOUNT` was unset, stopped the bridge for a
-full window.
+The circuit breaker trips when committed volume drains the daily cap, not when a
+single request would overshoot it. Drained means committed volume reaches the
+cap, or leaves less than 1% of it and less than the request needs. The second
+case exists because admission never lets committed volume exceed the cap, so a
+drain in amounts that do not divide it stops short (4999 of 5000) and the
+breaker never fired. The cost is that a residual under 1% of the cap is lost
+for the window once it trips. Above that residual, a request larger than the
+remaining budget is rejected on its own; tripping there meant one oversized
+request, needing no prior volume when `PXE_BRIDGE_MAX_AMOUNT` was unset, stopped
+the bridge for a full window, and a busy legitimate day at 80% of the cap would
+pause over one transfer too large for what was left.
+In-flight reservations count toward the remaining budget but not toward the
+trip: a reservation that releases moved no tokens. Not nothing, since a send
+that reverts on chain still burns its fee, but the daily limit counts token
+volume and not fees.
+
+`POST /admin/resume` clears the latch and not the window, so it answers with the
+numbers that decide whether the next request re-trips:
+
+- `committed`: committed volume in the window, the breaker's input.
+- `reserved`: in-flight volume, counted against the budget and not the breaker.
+- `dailyLimit` and `remaining` (`dailyLimit` minus both, floored at 0), present
+  when `PXE_BRIDGE_DAILY_LIMIT` is set.
+- `mayTripAgain`: the window is drained, or will be if every in-flight
+  reservation commits. "May" because reservations can release and a drained
+  window still serves a request that fits its residual.
+
+These replace `windowTotal`, `windowReserved` and `willTripAgain`. The last was
+computed from committed volume alone, so it answered false mid-drain while
+in-flight sends were about to fill the window.
 
 The rolling window is rebuilt from `PXE_BRIDGE_AUDIT_LOG` at startup. Without
 that path set it is in-memory only and a restart hands back the full daily

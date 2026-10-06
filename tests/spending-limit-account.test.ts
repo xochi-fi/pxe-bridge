@@ -1,18 +1,32 @@
 import { describe, it, expect, beforeAll } from "vitest";
+import { existsSync, readFileSync } from "node:fs";
 import { GrumpkinScalar } from "@aztec/foundation/curves/grumpkin";
 import { Fr } from "@aztec/foundation/curves/bn254";
 import { AztecAddress } from "@aztec/aztec.js/addresses";
 import { CompleteAddress } from "@aztec/stdlib/contract";
-import { FunctionCall, FunctionSelector, FunctionType } from "@aztec/stdlib/abi";
+import {
+  FunctionCall,
+  FunctionSelector,
+  FunctionType,
+  isAztecAddressStruct,
+  isEthAddressStruct,
+  isFunctionSelectorStruct,
+  isWrappedFieldStruct,
+  loadContractArtifact,
+  type AbiType,
+  type FunctionAbi,
+} from "@aztec/stdlib/abi";
 import { ExecutionPayload } from "@aztec/stdlib/tx";
 import { GasSettings } from "@aztec/stdlib/gas";
 import {
   SpendingLimitAccountContract,
   TRANSFER_TO_PRIVATE_SELECTOR,
   TRANSFER_TO_PRIVATE_SIGNATURE,
+  spendingLimitEntrypointAbi,
   type SpendingLimitConfig,
 } from "../src/spending-limit-account.js";
 import { ALLOWLIST_TREE_HEIGHT, rootFromSiblingPath } from "../src/allowlist-tree.js";
+import { spendingLimitSignedHash } from "../src/spending-limit-account.js";
 
 /**
  * The entrypoint must declare what the payload actually transfers, and must
@@ -136,6 +150,29 @@ async function wrappedArgs(
   expect(call).toBeDefined();
   return call!.args;
 }
+
+/**
+ * CROSS-CHECK against the Noir contract.
+ *
+ * The account signs poseidon2([payload_hash, declared_amount,
+ * declared_recipient], DOM_SEP_SPENDING_LIMIT) and the circuit recomputes it
+ * independently in main.nr's entrypoint. The two never meet before a send, so
+ * a swapped argument or a changed separator is a signature the circuit rejects
+ * with nothing naming the cause. The identical value is pinned in main.nr's
+ * `signed_hash_matches_typescript`.
+ */
+describe("signed hash", () => {
+  it("matches the value pinned in main.nr", async () => {
+    const hash = await spendingLimitSignedHash(
+      new Fr(0x1234n),
+      1000n,
+      AztecAddress.fromStringUnsafe("0x" + "aaaa".padStart(64, "0")),
+    );
+    expect(hash.toString()).toBe(
+      "0x29633e282b0896a088906eac71a351befc3db5bfa33b01905c7cfee374e879bd",
+    );
+  });
+});
 
 describe("SpendingLimitAccountContract declaration binding", () => {
   const signingKey = GrumpkinScalar.fromString("0x" + "0".repeat(63) + "7");
@@ -325,5 +362,80 @@ describe("SpendingLimitAccountContract declaration binding", () => {
     await expect(
       requestArgs(unbuilt.getAccount(unbuiltAddress), await transferPayload()),
     ).rejects.toThrow("no allowlist tree");
+  });
+});
+
+const ARTIFACT =
+  "contracts/spending_limit_account/target/spending_limit_account_contract-SpendingLimitAccount.json";
+const HAVE_ARTIFACT = existsSync(ARTIFACT);
+
+/**
+ * The parts of an AbiType the SDK reads when deriving a selector or encoding
+ * arguments. Struct `path` is replaced by the suffix predicates the encoder
+ * dispatches on, because the hand-written ABI and the compiler spell the same
+ * structs differently (`authwit::aztec::protocol_types::address::AztecAddress`
+ * against `aztec::protocol_types::address::aztec_address::AztecAddress`) and
+ * nothing in @aztec/stdlib/abi compares paths whole for these types. Parameter
+ * `visibility` is dropped for the same reason: neither the encoder nor the
+ * signature decoder reads it.
+ */
+function encodingShape(type: AbiType): unknown {
+  switch (type.kind) {
+    case "struct":
+      return {
+        kind: "struct",
+        aztecAddress: isAztecAddressStruct(type),
+        ethAddress: isEthAddressStruct(type),
+        functionSelector: isFunctionSelectorStruct(type),
+        wrappedField: isWrappedFieldStruct(type),
+        fields: type.fields.map((f) => ({ name: f.name, type: encodingShape(f.type) })),
+      };
+    case "array":
+      return { kind: "array", length: type.length, type: encodingShape(type.type) };
+    default:
+      return type;
+  }
+}
+
+function signatureShape(abi: FunctionAbi): unknown {
+  return {
+    name: abi.name,
+    functionType: abi.functionType,
+    isInitializer: abi.isInitializer,
+    isOnlySelf: abi.isOnlySelf,
+    isStatic: abi.isStatic,
+    parameters: abi.parameters.map((p) => ({ name: p.name, type: encodingShape(p.type) })),
+    returnTypes: abi.returnTypes.map(encodingShape),
+  };
+}
+
+/**
+ * The entrypoint ABI is written by hand in src/ because the artifact is not
+ * committed. Drift from main.nr does not move the account address; it produces
+ * a wrong selector or misplaced arguments against the same address, which
+ * only shows up as a transaction failing on chain.
+ *
+ * The artifact is gitignored and built by CI's `contract` job, which runs this
+ * file after `aztec compile`. Elsewhere it is absent and the test skips.
+ */
+describe("SpendingLimitAccountContract entrypoint ABI", () => {
+  // The skip reason goes in the name: vitest drops console output written
+  // while collecting, so a warning here never reached the log.
+  const name = HAVE_ARTIFACT
+    ? "entrypoint ABI matches the compiled artifact"
+    : `entrypoint ABI matches the compiled artifact (skipped: ${ARTIFACT} absent; ` +
+      "run `aztec compile` in contracts/spending_limit_account)";
+  it.skipIf(!HAVE_ARTIFACT)(name, async () => {
+    const artifact = loadContractArtifact(JSON.parse(readFileSync(ARTIFACT, "utf8")));
+    const compiled = artifact.functions.find((f) => f.name === "entrypoint");
+    expect(compiled).toBeDefined();
+    const handWritten = spendingLimitEntrypointAbi();
+
+    expect(signatureShape(handWritten)).toEqual(signatureShape(compiled!));
+    const selector = (abi: FunctionAbi) =>
+      FunctionSelector.fromNameAndParameters(abi.name, abi.parameters);
+    expect((await selector(handWritten)).toString()).toBe(
+      (await selector(compiled!)).toString(),
+    );
   });
 });
