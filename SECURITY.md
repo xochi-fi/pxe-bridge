@@ -29,31 +29,56 @@ period they need.
 where additions waited 24h and removals were immediate. Under a Merkle
 allowlist the contract cannot tell the two apart: leaves are commitments, so
 adding, revoking and substituting are one operation on one leaf, and that
-indistinguishability is the privacy property. One policy therefore has to cover
-all three. The timelock is the half that had to go, because the notice it gave
-was legible only when the allowlist was public, while revocation latency is a
-cost that lands during an incident.
+indistinguishability is the privacy property, though repeated updates at one
+position erode it for observers (see "What is public"). One policy therefore
+has to cover all three. The timelock is the half that had to go, because the
+notice it gave was legible only when the allowlist was public, while
+revocation latency is a cost that lands during an incident.
 
 ### An attacker holding the admin key
 
-This is **not** recoverable, and the 24h notice was never the defence it looked
-like. `pause` and `update_recipient` are both immediate, and the entrypoint only
-pays an allowlisted recipient, so an attacker with the admin key stops the
-account or strips the allowlist before any notice period could elapse. The owner
-has nowhere to withdraw to and no lever to reach for.
+This is **not** recoverable on chain, and the 24h notice was never the defence
+it looked like. The owner's only way to move funds is a transfer to an
+allowlisted recipient, and the admin can stop that immediately with `pause`,
+which no other key can undo. The admin is fixed at construction with no
+rotation, so a compromised admin can close any escape window before a notice
+period could elapse, and keep it closed for good.
 
-What does bound the damage is that **the tree is a second factor**.
-`update_recipient` must supply a sibling path that verifies against the current
-root, and the salts that make the leaves are derived from a seed the admin holds
-off chain. An attacker who takes the admin key without also taking the seed and
-the recipient list cannot produce a valid path, so they cannot add a payee of
-their own. They can still pause, and they can still propose limits.
+What the admin key alone buys an attacker is a **freeze**, plus rewrites of any
+allowlist position whose path has already been published:
 
-They also cannot spend. Paying a newly added recipient needs the signing key,
-which is a different party under this model.
+| Attacker holds | Can do | Cannot do |
+| --- | --- | --- |
+| Admin key only | Pause indefinitely (freeze, ransom). Propose limits, which take effect after 24h. Rewrite any position touched by a published `update_recipient`, and that position's sibling (`index ^ 1`) | Change a position that is neither touched by a published update nor the sibling (`index ^ 1`) of one. Spend |
+| Admin key + signing key | Once any update is published: write `h(attacker, salt)` with a self-chosen salt into such a position and drain to it, within whatever limits are live. Seed not needed | Exceed the per-tx cap or daily window before a `propose_limits` matures |
+| Admin key + seed and recipient list | Add, revoke or substitute payees at any position | Spend without the signing key |
 
-Practically: admin key custody is the control, and the allowlist seed must be
-archived and protected separately from it. See "Losing the allowlist" below.
+`update_recipient` in the account contract is public, so every call publishes
+`index`, `old_leaf`, `new_leaf` and the full sibling path. `apply_leaf_update`
+checks only that the path verifies against the current root. Position `index`
+is rewritable with the published path and `new_leaf` as the old leaf, and
+position `index ^ 1` with leaf `sibling_path[0]` and path
+`[new_leaf, sibling_path[1..]]`. Later updates are public too, so the current
+path of any position ever touched, and of its sibling, stays computable from
+the update history: a later update does not close the window. The exposure is
+permanent and grows with each update; only making `update_recipient` private
+(#32) stops it. The entrypoint's `leaf_salt`, `leaf_index` and `sibling_path`
+are unsigned, so a leaf the attacker built with their own salt is spendable by
+the signing key.
+
+The admin key alone can rewrite any position touched by a published
+`update_recipient`, and that position's sibling (`index ^ 1`); the seed
+protects only positions that are neither (#32). Spending still needs the
+signing key.
+
+Practically: admin key custody is the control against a freeze, and against
+allowlist rewrites once any update has been published. The seed must still be
+archived and protected separately from the admin key; see "Losing the
+allowlist" below. The signing secret and the admin key must never share a host,
+an IAM principal, or an operator session: together they can drain to an
+attacker-built leaf within the live limits, with no seed required. Making `update_recipient` private is tracked in #32. A design
+that keeps an emergency pause without giving a single key a permanent freeze is
+tracked in #27.
 
 ## Declared-vs-actual amount binding
 
@@ -242,13 +267,23 @@ commitments `h(recipient, salt)` under a secret seed; the chain holds one root,
 membership is proven in private, and `update_recipient` moves one opaque leaf to
 another.
 
-What an observer can still learn from an admin update is the **position** that
-changed. Positions are therefore assigned randomly rather than filled left to
-right, or the first touch of position `k` would be visibly an addition. What
-they cannot learn is which address occupies it, whether the update added,
-revoked or substituted, or how full the tree is: empty positions hold
-`h(0, salt_i)` with that position's own salt, so they are not recognisable as
-empty and the canonical empty-subtree roots never appear in a sibling path.
+What an observer learns from an admin update is every argument of the public
+`update_recipient` call: `index`, `old_leaf`, `new_leaf` and the full sibling
+path. Positions are therefore assigned randomly rather than filled left to
+right, or the first touch of position `k` would be visibly an addition. The
+leaves are opaque commitments, so the observer does not learn which address
+occupies a position. Empty positions hold `h(0, salt_i)` with that position's
+own salt, so a never-touched position is not recognisable as empty and the
+canonical empty-subtree roots never appear in a sibling path.
+
+That opacity does not survive repeated updates at one position. Salts are fixed
+per position, and both addition and revocation pass through the same empty leaf
+`h(0, salt_i)`. After two updates at a position the observer has seen that
+leaf, so every later update there classifies as an addition or a revocation,
+and the position's occupancy is known. Re-adding a recipient at the same
+position republishes its old leaf, linking the two periods. The published path
+also lets the admin key rewrite that position and its sibling (`index ^ 1`)
+without the seed; see "An attacker holding the admin key". Tracked in #32.
 
 Anonymity is still bounded by how many recipients are actually allowlisted. A
 tree removes the mechanism's ceiling; it does not supply recipients. Run with
@@ -261,8 +296,10 @@ The account stores only a root. Unlike the public array it replaces, **the set
 cannot be recovered from the chain.** Losing either the seed
 (`PXE_BRIDGE_ALLOWLIST_SEED`) or the list of `(address, position)` pairs is
 terminal for allowlist management: no witness can be built, so no transfer can
-be sent, and no `update_recipient` can be constructed, so nothing can be
-repaired on chain.
+be sent, and no `update_recipient` can be constructed for a position whose path
+has never been published. Positions whose path is on chain stay rewritable by
+the admin key alone, which is the same exposure described in "An attacker
+holding the admin key", not a recovery path.
 
 Archive both with the same discipline as the contract artifact. This account
 already has permanent-brick modes -- `permitted_token` has no setter, and a zero

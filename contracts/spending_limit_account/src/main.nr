@@ -595,9 +595,13 @@ pub contract SpendingLimitAccount {
     // pause would hand them exactly the notice period they need to drain.
     //
     // A timelock on unpause is no better: it would freeze the account for a
-    // day after a false alarm. Both directions are already admin-gated, and an
-    // attacker who holds the admin key has propose_limits and does not need
-    // this.
+    // day after a false alarm. Both directions are already admin-gated.
+    //
+    // Against a compromised ADMIN key this is the attacker's lever, not ours:
+    // the admin is fixed at construction and nothing else can unpause, so an
+    // admin-key holder can freeze the account indefinitely. Admin key custody
+    // is the only control; a pause that no single key can hold forever is
+    // tracked in #27.
     //
     // This is now the ONLY immediate, untargeted stop. Under the array design
     // the alternative was removing every allowlist entry, one transaction per
@@ -635,14 +639,10 @@ pub contract SpendingLimitAccount {
     // proves that everything except position `index` is unchanged, without the
     // contract ever learning what any of it is.
     //
-    // It also means the caller must already know the tree. An attacker holding
-    // only the admin key cannot produce a valid sibling path, so the off-chain
-    // tree is a second factor on every allowlist change. That is the defence
-    // that replaces the 24h notice, and it is stronger: the notice assumed the
-    // account owner could react in time, and this account gives them nothing to
-    // react with (pause and revocation are both admin-gated, and the entrypoint
-    // only pays allowlisted recipients, so a compromised admin closes the
-    // escape window immediately).
+    // The caller must supply a valid sibling path, but every call publishes
+    // one. The admin key alone can rewrite any position touched by a
+    // published update_recipient, and that position's sibling (index ^ 1);
+    // the seed protects only positions that are neither (#32).
     //
     // UNTIMELOCKED, which is a deliberate change from propose/apply. The
     // timelock protected against a compromised admin adding an address they
