@@ -82,13 +82,17 @@ Building the image locally does not require the compiled Noir artifact. An
 image without it runs the default Schnorr configuration; enabling
 `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` needs the artifact under
 `contracts/spending_limit_account/target/`, built by the CI `contract` job or
-by `aztec compile` on an x86 host.
+locally with `HARDWARE_CONCURRENCY=1 aztec compile`.
 
 ### Local sandbox
 
 ```bash
 docker compose up          # anvil + aztec sandbox + bridge
 ```
+
+Compose pins no platform: both images are multi-arch, so Apple Silicon runs
+the native arm64 sandbox. If this machine pulled the images under the old
+`linux/amd64` pin, run `docker compose pull` once to replace them.
 
 ### From Source
 

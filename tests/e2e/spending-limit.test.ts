@@ -9,7 +9,9 @@ import {
   fundFeeJuice,
   mintOne,
   mintTo,
+  walletDataDirectory,
   FUNDER_KEY,
+  registerPublished,
 } from "./helpers.js";
 
 /**
@@ -82,7 +84,13 @@ describe("spending limit account (e2e)", () => {
     // A plain Schnorr client owns and mints the token. Keeping it separate
     // from the limit account matters: the limit account can only ever call
     // transfer_to_private on the pinned token, so it cannot mint to itself.
-    const funder = new AztecClient(config.nodeUrl, FUNDER_KEY);
+    const funder = new AztecClient(
+      config.nodeUrl,
+      FUNDER_KEY,
+      undefined,
+      undefined,
+      walletDataDirectory("limit-funder"),
+    );
     await funder.connect();
 
     funderWallet = (funder as unknown as { wallet: unknown }).wallet;
@@ -105,6 +113,7 @@ describe("spending limit account (e2e)", () => {
       config.secretKey,
       config.feeJuiceClaim,
       spendingLimitConfig,
+      walletDataDirectory("limit-account"),
     );
 
     // Deployment is the Info finding's subject. Capture rather than throw so
@@ -382,7 +391,13 @@ describe("spending limit account (e2e)", () => {
     // were lower ("maxFeesPerGas.feePerL2Gas must be greater than or equal to
     // gasFees.feePerL2Gas"). Nothing above this line should see fee conditions
     // it did not see before this test existed.
-    const outsiderClient = new AztecClient(config.nodeUrl, OUTSIDER_KEY);
+    const outsiderClient = new AztecClient(
+      config.nodeUrl,
+      OUTSIDER_KEY,
+      undefined,
+      undefined,
+      walletDataDirectory("limit-outsider"),
+    );
     await outsiderClient.connect();
     const outsiderWallet = (outsiderClient as unknown as { wallet: unknown }).wallet;
     const outsiderAddress = outsiderClient.getAddress()!;
@@ -442,6 +457,7 @@ async function simulateAccount(
   const slc = (client as unknown as {
     spendingLimitContract: { getContractArtifact: () => Promise<unknown> };
   }).spendingLimitContract;
+  await registerPublished(wallet, client.getAddress()!, await slc.getContractArtifact());
 
   const c = await (
     Contract as unknown as {
@@ -495,6 +511,7 @@ async function callAccount(
     spendingLimitContract: { getContractArtifact: () => Promise<unknown> };
   }).spendingLimitContract;
   const artifact = await slc.getContractArtifact();
+  await registerPublished(wallet, account, artifact);
   const c = await (
     Contract as unknown as {
       at: (a: unknown, art: unknown, w: unknown) => Promise<{
@@ -586,6 +603,7 @@ async function proveTransfer(
   };
   const wallet = inner.wallet;
   const from = inner.solverAddress;
+  await registerPublished(wallet, token, TokenContract.artifact);
 
   // Nothing is pushed in before the send any more. The entrypoint derives the
   // declared amount, the recipient AND the membership witness from the payload
@@ -704,6 +722,7 @@ async function revokeRecipient(
   const newLeaf = await allowlistLeaf(Fr.ZERO, new Fr(0x9abcn));
 
   const artifact = await slc.getContractArtifact();
+  await registerPublished(wallet, account, artifact);
   const c = await (
     Contract as unknown as {
       at: (a: unknown, art: unknown, w: unknown) => Promise<{
@@ -733,6 +752,7 @@ async function balanceOf(
   const { TokenContract } = await import("@aztec/noir-contracts.js/Token");
   const { AztecAddress } = await import("@aztec/aztec.js/addresses");
   const wallet = (client as unknown as { wallet: unknown }).wallet;
+  await registerPublished(wallet, token, TokenContract.artifact);
   const contract = await (
     TokenContract as unknown as {
       at: (a: unknown, w: unknown) => Promise<{

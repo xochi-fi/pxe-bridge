@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 import { EmbeddedWallet } from "@aztec/wallets/embedded";
 import { TokenContract } from "@aztec/noir-contracts.js/Token";
 import { SponsoredFPCContract } from "@aztec/noir-contracts.js/SponsoredFPC";
@@ -92,6 +93,60 @@ export const FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR =
   "names the limit account while the deploy is sent from the deployer, so no " +
   "fee payer is set. Use scripts/top-up-fee-juice.ts instead.";
 
+/**
+ * Where a wallet keeps its LMDB stores when the caller names none: the SDK's
+ * own default (`aztec-wallet-data`, relative to the working directory), written
+ * out so a single-wallet deployment keeps reading the stores it already has.
+ */
+export const DEFAULT_WALLET_DATA_DIRECTORY = "aztec-wallet-data";
+
+/** Absolute data directories held by a wallet created in this process. */
+const claimedWalletDirectories = new Set<string>();
+
+/**
+ * Reserves `dataDirectory` for one EmbeddedWallet in this process, or throws.
+ *
+ * Every EmbeddedWallet opens `<dataDirectory>/pxe_data-stores/...` and
+ * `<dataDirectory>/wallet_data-stores/...` as LMDB environments, and LMDB
+ * forbids opening one environment twice in a process. Two wallets on the same
+ * directory each hold a native handle to the same files; once one wallet is
+ * garbage-collected, the survivor's next transaction fails with
+ * `mdb_txn_begin: 22 - Invalid argument`. Nothing reports it at the time: the
+ * second wallet works until the first is collected. Reproduced against the
+ * 5.1.0 sandbox with two wallets, one dropped and `gc()` forced; on separate
+ * directories the survivor is unaffected (xochi-fi/xochi#513).
+ *
+ * So the second claim is refused up front, naming the directory. A claim is
+ * never released: the SDK wallet has no close, so its handles live until GC,
+ * and only a directory no wallet in this process has touched is known safe.
+ * Processes are not the problem -- LMDB's lock file coordinates those -- so
+ * the bridge and an operator script may share a directory.
+ *
+ * Returns the absolute path that was claimed.
+ */
+export function claimWalletDataDirectory(dataDirectory: string): string {
+  const absolute = resolve(dataDirectory);
+  if (claimedWalletDirectories.has(absolute)) {
+    throw new Error(
+      `Wallet data directory ${absolute} is already open in this process. Each ` +
+        "EmbeddedWallet needs its own directory: two LMDB handles on one store fail " +
+        "with mdb_txn_begin: 22 once either wallet is garbage-collected. Pass a " +
+        "distinct `dataDirectory` to each AztecClient.",
+    );
+  }
+  claimedWalletDirectories.add(absolute);
+  return absolute;
+}
+
+export interface AztecClientOptions {
+  /**
+   * Directory for this client's PXE and wallet LMDB stores. Defaults to
+   * {@link DEFAULT_WALLET_DATA_DIRECTORY}. Must differ from every other
+   * AztecClient's in the same process; see {@link claimWalletDataDirectory}.
+   */
+  dataDirectory?: string;
+}
+
 /** The slice of AztecNode createNote needs to read a tx effect back. */
 interface TxEffectFields {
   noteHashes?: { toString(): string }[];
@@ -178,11 +233,16 @@ export class AztecClient implements IAztecClient {
   private secretKey: string | null;
   private spendingLimitContract: SpendingLimitAccountContract | null = null;
 
+  private readonly dataDirectory: string;
+  /** Set once this client holds its directory; a retried connect() reuses it. */
+  private claimedDataDirectory: string | null = null;
+
   constructor(
     private readonly nodeUrl: string,
     secretKey: string,
     private readonly feeJuiceClaim?: FeeJuiceClaim,
     private readonly spendingLimitConfig?: SpendingLimitConfig,
+    options: AztecClientOptions = {},
   ) {
     // Refused here rather than in index.ts alone, so a library caller gets the
     // same answer. Left unchecked the combination fails deep in the SDK during
@@ -192,6 +252,7 @@ export class AztecClient implements IAztecClient {
       throw new Error(FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR);
     }
     this.secretKey = secretKey;
+    this.dataDirectory = options.dataDirectory ?? DEFAULT_WALLET_DATA_DIRECTORY;
   }
 
   async connect(): Promise<void> {
@@ -201,8 +262,13 @@ export class AztecClient implements IAztecClient {
 
     console.log(`[pxe-bridge] Connecting to ${this.nodeUrl}`);
 
+    // Claimed before the wallet opens anything, so a second client on the same
+    // directory fails here with the reason instead of later with EINVAL. Kept
+    // even if create() throws: it may already have opened a store, and that
+    // handle stays live until GC.
+    this.claimedDataDirectory ??= claimWalletDataDirectory(this.dataDirectory);
     this.wallet = await EmbeddedWallet.create(this.nodeUrl, {
-      pxe: { proverEnabled: true },
+      pxe: { proverEnabled: true, dataDirectory: this.claimedDataDirectory },
     });
     console.log("[pxe-bridge] EmbeddedWallet created");
 
@@ -726,6 +792,22 @@ export class AztecClient implements IAztecClient {
     if (cached) return cached;
 
     if (!this.wallet) throw new Error("Client not connected");
+
+    // The wallet's PXE runs only contracts registered with it, and
+    // TokenContract.at registers nothing. The token is deployed by someone
+    // else, so its published instance is read from the node and paired with
+    // the standard Token artifact. Nothing checks the pairing: a token of
+    // another class still fails at simulation, with "No artifact registered
+    // for contract class". Missing until xochi-fi/xochi#513 because every e2e
+    // wallet shared one store, where the funder's deploy had registered the
+    // token for the bridge too.
+    const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
+    const instance = await createAztecNodeClient(this.nodeUrl).getContract(address);
+    if (!instance) {
+      throw new Error(`Token ${address.toString()} is not published on the node`);
+    }
+    await this.wallet.registerContract(instance, TokenContract.artifact);
+
     const contract = await TokenContract.at(
       address as Parameters<typeof TokenContract.at>[0],
       this.wallet as unknown as Parameters<typeof TokenContract.at>[1],

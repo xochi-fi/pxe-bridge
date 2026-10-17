@@ -2,7 +2,6 @@ services:
   anvil:
     # Pinned: the zero base fee below relies on anvil holding 0 constant.
     image: ghcr.io/foundry-rs/foundry:v1.8.1
-    platform: linux/amd64
     # Base fee 0. The L2 min fee is mostly L1 base fee, which decays 12.5% per
     # near-empty sandbox L1 block, so each fee oracle refresh cut the L2 fee
     # 3-15x. Right after a checkpoint the node simulates against the previous
@@ -24,9 +23,22 @@ services:
     # Must track the SDK version in package.json. A 4.1.3 sandbox against a
     # 5.1.0 client exits 1 on startup, which is what made the e2e job green
     # without ever running a test.
+    #
+    # No `platform:` here or on anvil. Both images are published for amd64 and
+    # arm64, so Docker pulls the host's native variant. A `linux/amd64` pin ran
+    # the sandbox under emulation on Apple silicon, where it never reached
+    # healthy (xochi-fi/xochi#513). To force a platform, set
+    # DOCKER_DEFAULT_PLATFORM. A machine that pulled under the old pin still
+    # holds the amd64 image under this tag; `docker compose pull` replaces it.
     image: aztecprotocol/aztec:5.1.0
-    platform: linux/amd64
     command: ["start", "--local-network"]
+    # bb.js in 5.1.0 gives its native prover socket a fixed 5s from spawn to
+    # connect, measured across an event loop the node is busy blocking during
+    # startup. On an arm64 Mac it lost that race in about half of cold starts
+    # ("Timeout connecting to bb socket: unknown", exit 1, ~1s in, before any
+    # L1 deployment); a restart clears it. Bounded, so a real startup failure
+    # (an SDK/sandbox version mismatch, say) still stops and shows in the log.
+    restart: on-failure:3
     ports:
       - "8080:8080"
     environment:

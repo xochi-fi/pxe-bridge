@@ -84,8 +84,15 @@ export async function setup(): Promise<void> {
  */
 async function provisionTestToken(nodeUrl: string): Promise<void> {
   const { AztecClient } = await import("../../src/aztec-client.js");
-  const { getTestConfig, deployTestToken, fundFeeJuice, mintOne, mintTo, FUNDER_KEY } =
-    await import("./helpers.js");
+  const {
+    getTestConfig,
+    deployTestToken,
+    fundFeeJuice,
+    mintOne,
+    mintTo,
+    walletDataDirectory,
+    FUNDER_KEY,
+  } = await import("./helpers.js");
 
   try {
     console.log("[e2e] Provisioning test token...");
@@ -97,7 +104,13 @@ async function provisionTestToken(nodeUrl: string): Promise<void> {
     // A separate account mints and pays. The bridge account cannot mint to
     // itself: it is not the token admin, and making it one would mean the
     // default path under test differs from the deployed one.
-    const funder = new AztecClient(nodeUrl, FUNDER_KEY);
+    const funder = new AztecClient(
+      nodeUrl,
+      FUNDER_KEY,
+      undefined,
+      undefined,
+      walletDataDirectory("setup-funder"),
+    );
     await funder.connect();
     const funderWallet = (funder as unknown as { wallet: unknown }).wallet;
     const funderAddress = funder.getAddress()!;
@@ -106,7 +119,13 @@ async function provisionTestToken(nodeUrl: string): Promise<void> {
 
     // Deployed here so the suites recover the account rather than racing to
     // deploy it, and so the mint below has an address to credit.
-    const bridge = new AztecClient(nodeUrl, config.secretKey);
+    const bridge = new AztecClient(
+      nodeUrl,
+      config.secretKey,
+      undefined,
+      undefined,
+      walletDataDirectory("setup-bridge"),
+    );
     await bridge.connect();
     const bridgeAddress = bridge.getAddress()!;
 

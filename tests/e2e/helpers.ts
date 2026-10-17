@@ -1,3 +1,6 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { FeeJuiceClaim } from "../../src/types.js";
 import { FeeJuiceClaimSchema } from "../../src/types.js";
 import { topUpFeeJuice, type ClaimingWallet } from "../../src/fee-juice.js";
@@ -25,6 +28,44 @@ export const FUNDER_KEY = "0x000000000000000000000000000000000000000000000000000
 /** One resolution for the node URL, shared by getTestConfig and the fee helper. */
 export function resolveNodeUrl(): string {
   return process.env["AZTEC_NODE_URL"] ?? "http://localhost:8080";
+}
+
+/**
+ * A fresh wallet data directory for one AztecClient.
+ *
+ * Every client in the suite runs in one process (singleFork), and two
+ * EmbeddedWallets on one LMDB directory break each other once either is
+ * garbage-collected (`mdb_txn_begin: 22`, xochi-fi/xochi#513). AztecClient
+ * refuses a second client on a directory it already holds, so each client here
+ * gets its own, under the OS temp directory rather than the checkout.
+ */
+export function walletDataDirectory(label: string): { dataDirectory: string } {
+  return { dataDirectory: mkdtempSync(join(tmpdir(), `pxe-bridge-e2e-${label}-`)) };
+}
+
+/**
+ * Registers the published contract at `address` with `wallet`, so it can
+ * simulate and decode calls to it.
+ *
+ * A wallet's PXE knows only what was registered with it, and `Contract.at`
+ * registers nothing. While every client shared one store, whichever wallet
+ * deployed a contract had registered it for all of them; with a directory per
+ * wallet each one that calls a contract it did not deploy has to register it.
+ */
+export async function registerPublished(
+  wallet: unknown,
+  address: string,
+  artifact: unknown,
+): Promise<void> {
+  const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
+  const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+  const instance = await createAztecNodeClient(resolveNodeUrl()).getContract(
+    AztecAddress.fromStringUnsafe(address),
+  );
+  if (!instance) throw new Error(`${address} is not published on the node`);
+  await (wallet as {
+    registerContract: (i: unknown, a: unknown) => Promise<unknown>;
+  }).registerContract(instance, artifact);
 }
 
 export function getTestConfig(): E2EConfig {

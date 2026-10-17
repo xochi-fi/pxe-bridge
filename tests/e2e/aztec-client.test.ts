@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { AztecClient } from "../../src/aztec-client.js";
-import { getTestConfig, requireTestToken } from "./helpers.js";
+import { getTestConfig, requireTestToken, walletDataDirectory } from "./helpers.js";
 
 const config = getTestConfig();
 
@@ -8,7 +8,13 @@ describe("AztecClient (e2e)", () => {
   let client: AztecClient;
 
   beforeAll(async () => {
-    client = new AztecClient(config.nodeUrl, config.secretKey, config.feeJuiceClaim);
+    client = new AztecClient(
+      config.nodeUrl,
+      config.secretKey,
+      config.feeJuiceClaim,
+      undefined,
+      walletDataDirectory("client"),
+    );
     await client.connect();
   });
 
@@ -19,7 +25,13 @@ describe("AztecClient (e2e)", () => {
     });
 
     it("is idempotent with same key", async () => {
-      const second = new AztecClient(config.nodeUrl, config.secretKey);
+      const second = new AztecClient(
+        config.nodeUrl,
+        config.secretKey,
+        undefined,
+        undefined,
+        walletDataDirectory("client-second"),
+      );
       await expect(second.connect()).resolves.toBeUndefined();
     });
   });

@@ -133,9 +133,11 @@ holds by construction there and the circuit re-proves it rather than catching
 the client out. A payload without exactly one such call is refused before it
 costs a fee.
 
-Barretenberg SIGILLs on Apple Silicon (ARM), so the sandbox e2e runs only on
-x86 CI. `aztec compile` does not finish there either, since it generates
-verification keys through the same library; `aztec-nargo test` runs anywhere.
+Barretenberg SIGILLs under amd64 emulation on Apple Silicon, which is what the
+old `linux/amd64` pin in `docker-compose.yml` ran. Compose now pins no platform,
+so the sandbox runs the native arm64 image there (xochi-fi/xochi#513), and
+`aztec compile` (`HARDWARE_CONCURRENCY=1`) runs natively on arm64 too. CI on
+x86 remains the build of record for the artifact and `CLASS_ID`.
 
 The binding assumes `createNote`'s single-transfer shape. If the bridge later
 issues multi-call payloads, extend the helper to match and sum every
