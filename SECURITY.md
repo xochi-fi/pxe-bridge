@@ -14,11 +14,11 @@ application-level limits in `src/limits.ts`.
 
 The admin is a separate party from the signing key holder.
 
-| Lever | Direction | Timing |
-| --- | --- | --- |
-| `pause` / `unpause` | Stop everything | Immediate |
-| `update_recipient` | Add, revoke or substitute one payee | Immediate |
-| `propose_limits` + `apply_limits` | Change caps | 24h |
+| Lever                             | Direction                           | Timing    |
+| --------------------------------- | ----------------------------------- | --------- |
+| `pause` / `unpause`               | Stop everything                     | Immediate |
+| `update_recipient`                | Add, revoke or substitute one payee | Immediate |
+| `propose_limits` + `apply_limits` | Change caps                         | 24h       |
 
 `pause` is the response to a compromised signing key: it is checked in
 `check_spending_public`, so it stops a transaction however far through proving
@@ -101,10 +101,11 @@ Combined with the rest of this change set:
 ### Validation
 
 The binding depends on the `AppPayload` serialized layout (`[FunctionCall; 5]`
-+ `tx_nonce` = 31 fields, each call serialized in declaration order) pinned to
-Aztec v5.1.0. It is validated three ways:
 
-- `aztec-nargo test` unit tests in `contracts/spending_limit_account/src/main.nr`:
+- `tx_nonce` = 31 fields, each call serialized in declaration order) pinned to
+  Aztec v5.1.0. It is validated three ways:
+
+* `aztec-nargo test` unit tests in `contracts/spending_limit_account/src/main.nr`:
   `function_call_serialize_layout` asserts `args_hash`/`target_address` sit at
   the offsets the guard reads; `mismatched_transfer_reverts`,
   `hidden_second_call_reverts`, and `empty_payload_reverts` prove the guard
@@ -117,13 +118,13 @@ Aztec v5.1.0. It is validated three ways:
   `signed_hash_matches_typescript` pins the signed hash against
   `tests/spending-limit-account.test.ts`. The `contract` CI job runs these
   and `aztec compile`.
-- e2e tests in `tests/e2e/spending-limit.test.ts` reach what `aztec-nargo test`
+* e2e tests in `tests/e2e/spending-limit.test.ts` reach what `aztec-nargo test`
   cannot. The guard itself is private, so it runs in ACIR either way; what only
   the sandbox exercises is `check_spending_public` as transpiled AVM bytecode,
   plus everything that depends on `msg_sender` or a public read: the token pin,
   admin authorization, phase ordering, and revocation of an already-proven
   transfer.
-- The check is fail-closed: any mismatch reverts the transaction, so an error
+* The check is fail-closed: any mismatch reverts the transaction, so an error
   surfaces as a failing tx, never a silent bypass.
 
 On the TypeScript side, the entrypoint no longer accepts a declaration at all.
@@ -185,7 +186,9 @@ deployment with a message about fee payers.
 The contract enforces its limits against public state, and a public function's
 arguments are part of the transaction. Every transfer therefore publishes:
 
-- **The amount.** `declared_amount` is an argument to `check_spending_public`.
+- **The amount.** `declared_amount` is an argument to `check_spending_public`,
+  and `amount` is an argument to the token's public finalize call.
+- **The sender.** `from` is an argument to the token's public finalize call.
 - **The token.** Pinned at construction and visible as the call target.
 - **The allowlist root**, and the fact that a transfer proved membership against
   it. Not the recipient, and not the set.
@@ -206,9 +209,10 @@ not recipient privacy. Whether the recipient stays off the transcript depends on
 how the note is delivered: at aztec-packages v5.1.0 the PXE's default tagging
 strategy is a non-interactive handshake that announces the recipient under an
 address-derived tag, and this bridge installs no `resolveTaggingSecretStrategy`
-hook, so recipient privacy is **not** delivered today (xochi
-`shielded-execution.md` [U1] [P8]). The allowlist design below keeps the
-recipient out of the bridge's own public calls only.
+hook ([`src/aztec-client.ts`](src/aztec-client.ts); upstream
+[`resolve_tagging_secret_strategy.ts`](https://github.com/AztecProtocol/aztec-packages/blob/v5.1.0/yarn-project/pxe/src/hooks/resolve_tagging_secret_strategy.ts)),
+so recipient privacy is **not** delivered today. The allowlist design below
+keeps the recipient out of the bridge's own public calls only.
 
 The recipient is a different story since NM-1019 [Medium]. The array design
 published a candidate set of up to eight addresses per transfer, and the set was
@@ -245,8 +249,9 @@ already has permanent-brick modes -- `permitted_token` has no setter, and a zero
 admin is unrecoverable -- and this is one more.
 
 The seed is a secret, but a weaker one than the signing key: holding it lets
-someone test a candidate address against a leaf, which costs recipient privacy
-and not custody. It is warned about rather than refused when read from the
+someone test a candidate address against a leaf, which costs allowlist
+membership privacy (recipient privacy is not delivered today; see
+[What is public](#what-is-public)) and not custody. It is warned about rather than refused when read from the
 environment in production.
 
 The bridge checks its copy against the chain before every send, via

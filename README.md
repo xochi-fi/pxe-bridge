@@ -20,7 +20,8 @@ EVM intent solvers speak JSON-RPC and have no concept of private execution, PXEs
 
 pxe-bridge embeds a PXE wallet and wraps it in a JSON-RPC interface that solvers already understand. When a solver says "create a shielded note for this token," the bridge handles private execution, proof generation, and note encryption transparently. The solver gets back a transaction hash.
 
-> **What "shielded" covers.** The note's contents are private. The
+> **What "shielded" covers.** The note's owner and randomness are private; its
+> amount is public through the finalize call. The
 > transfer **amount and sender are public in both account modes**: the bridge
 > calls the token's `transfer_to_private`, which enqueues the public
 > `_finalize_transfer_to_private_unsafe(from, amount, partial_note)` call, which
@@ -34,8 +35,9 @@ pxe-bridge embeds a PXE wallet and wraps it in a JSON-RPC interface that solvers
 > how the note is delivered: at aztec-packages v5.1.0 the PXE's default tagging
 > strategy is a non-interactive handshake that announces the recipient under an
 > address-derived tag, and this bridge installs no
-> `resolveTaggingSecretStrategy` hook, so recipient privacy is **not** delivered
-> today (xochi `shielded-execution.md` [U1] [P8]). See
+> `resolveTaggingSecretStrategy` hook ([`src/aztec-client.ts`](src/aztec-client.ts);
+> upstream [`resolve_tagging_secret_strategy.ts`](https://github.com/AztecProtocol/aztec-packages/blob/v5.1.0/yarn-project/pxe/src/hooks/resolve_tagging_secret_strategy.ts)),
+> so recipient privacy is **not** delivered today. See
 > [SECURITY.md](SECURITY.md#what-is-public). Only a private-to-private
 > `transfer` from private inventory, which this bridge does not implement, keeps
 > the amount off the transcript.
@@ -52,14 +54,14 @@ EVM Solver --JSON-RPC--> pxe-bridge --Aztec SDK--> Aztec L2 Node
 
 ### Environment Variables
 
-| Variable                | Required | Default                 | Description                                    |
-| ----------------------- | -------- | ----------------------- | ---------------------------------------------- |
-| `PXE_BRIDGE_SECRET_KEY` | Yes      | --                      | 32-byte hex key, below the BN254 Fr modulus    |
-| `PXE_BRIDGE_API_KEY`    | No       | --                      | Bearer token for RPC auth (warns if unset)     |
-| `PXE_BRIDGE_ADMIN_KEY`  | No       | --                      | Bearer token for `POST /admin/resume`          |
-| `AZTEC_NODE_URL`        | No       | `http://localhost:8080` | Aztec L2 node RPC endpoint                     |
-| `PXE_BRIDGE_HOST`       | No       | `127.0.0.1`             | Bind address (localhost-only by default)       |
-| `PXE_BRIDGE_PORT`       | No       | `8547`                  | HTTP listen port (0-65535)                     |
+| Variable                | Required | Default                 | Description                                 |
+| ----------------------- | -------- | ----------------------- | ------------------------------------------- |
+| `PXE_BRIDGE_SECRET_KEY` | Yes      | --                      | 32-byte hex key, below the BN254 Fr modulus |
+| `PXE_BRIDGE_API_KEY`    | No       | --                      | Bearer token for RPC auth (warns if unset)  |
+| `PXE_BRIDGE_ADMIN_KEY`  | No       | --                      | Bearer token for `POST /admin/resume`       |
+| `AZTEC_NODE_URL`        | No       | `http://localhost:8080` | Aztec L2 node RPC endpoint                  |
+| `PXE_BRIDGE_HOST`       | No       | `127.0.0.1`             | Bind address (localhost-only by default)    |
+| `PXE_BRIDGE_PORT`       | No       | `8547`                  | HTTP listen port (0-65535)                  |
 
 The secret key is a BN254 scalar, not an arbitrary 32 bytes. About 81% of
 random 32-byte values are at or above the field modulus and are rejected at
@@ -116,10 +118,10 @@ Every transaction the bridge sends is paid for in fee juice, which is bridged
 in from L1 and cannot be bought, transferred or withdrawn on L2. How the bridge
 gets it depends on which account it runs:
 
-| Account | How it pays | How you fund it |
-| --- | --- | --- |
-| Plain Schnorr (default) | Claims during deployment | `npm run bridge-fee-juice`, then set `FEE_JUICE_CLAIM` |
-| Spending limit (`PXE_BRIDGE_SPENDING_LIMIT_ADMIN`) | Pre-existing balance only | `npm run top-up-fee-juice` |
+| Account                                            | How it pays               | How you fund it                                        |
+| -------------------------------------------------- | ------------------------- | ------------------------------------------------------ |
+| Plain Schnorr (default)                            | Claims during deployment  | `npm run bridge-fee-juice`, then set `FEE_JUICE_CLAIM` |
+| Spending limit (`PXE_BRIDGE_SPENDING_LIMIT_ADMIN`) | Pre-existing balance only | `npm run top-up-fee-juice`                             |
 
 The spending-limit account cannot claim for itself. Its entrypoint admits
 exactly one call and requires it to be `transfer_to_private` on the pinned
@@ -156,16 +158,16 @@ BRIDGE_AMOUNT=1000000000000000000 \
 npm run top-up-fee-juice
 ```
 
-| Variable | Required | Default | Description |
-| --- | --- | --- | --- |
-| `FEE_JUICE_RECIPIENT` | Yes | -- | Aztec address to credit |
-| `FEE_JUICE_PAYER_KEY` | Yes | -- | Secret key of the account that sends the claim |
-| `L1_PRIVATE_KEY` | Yes | -- | Ethereum key holding the Fee Juice ERC20 |
-| `AZTEC_NODE_URL` | No | `http://localhost:8080` | Aztec node |
-| `L1_RPC_URL` | No | `http://localhost:8545` | Ethereum RPC |
-| `L1_CHAIN_ID` | No | Anvil's | Required for any L1 other than the sandbox |
-| `BRIDGE_AMOUNT` | No | `1e18` | Fee juice in wei |
-| `FEE_JUICE_PAYER_SPONSORED` | No | -- | `true` pays via SponsoredFPC; sandbox and testnet only |
+| Variable                    | Required | Default                 | Description                                            |
+| --------------------------- | -------- | ----------------------- | ------------------------------------------------------ |
+| `FEE_JUICE_RECIPIENT`       | Yes      | --                      | Aztec address to credit                                |
+| `FEE_JUICE_PAYER_KEY`       | Yes      | --                      | Secret key of the account that sends the claim         |
+| `L1_PRIVATE_KEY`            | Yes      | --                      | Ethereum key holding the Fee Juice ERC20               |
+| `AZTEC_NODE_URL`            | No       | `http://localhost:8080` | Aztec node                                             |
+| `L1_RPC_URL`                | No       | `http://localhost:8545` | Ethereum RPC                                           |
+| `L1_CHAIN_ID`               | No       | Anvil's                 | Required for any L1 other than the sandbox             |
+| `BRIDGE_AMOUNT`             | No       | `1e18`                  | Fee juice in wei                                       |
+| `FEE_JUICE_PAYER_SPONSORED` | No       | --                      | `true` pays via SponsoredFPC; sandbox and testnet only |
 
 There is nothing to set on the bridge afterwards. The balance is on chain, and
 the account finds it on its next transaction.
@@ -200,13 +202,13 @@ Trade context fields (`tradeId`, `subTradeIndex`, `totalSubTrades`) must be prov
 
 **Returns:** `{ noteHashes, nullifiers, l2TxHash, noteCommitment, nullifierHash }`
 
-| Field            | Type       | Description                                                        |
-| ---------------- | ---------- | ------------------------------------------------------------------ |
-| `noteHashes`     | `string[]` | Every note hash the transaction emitted, in emission order          |
-| `nullifiers`     | `string[]` | Every nullifier the transaction emitted, in emission order          |
-| `l2TxHash`       | `string`   | Transaction hash on L2                                              |
-| `noteCommitment` | `string`   | Deprecated. `noteHashes[0]`                                         |
-| `nullifierHash`  | `string`   | Deprecated. `nullifiers[0]`, the protocol nullifier                 |
+| Field            | Type       | Description                                                |
+| ---------------- | ---------- | ---------------------------------------------------------- |
+| `noteHashes`     | `string[]` | Every note hash the transaction emitted, in emission order |
+| `nullifiers`     | `string[]` | Every nullifier the transaction emitted, in emission order |
+| `l2TxHash`       | `string`   | Transaction hash on L2                                     |
+| `noteCommitment` | `string`   | Deprecated. `noteHashes[0]`                                |
+| `nullifierHash`  | `string`   | Deprecated. `nullifiers[0]`, the protocol nullifier        |
 
 A `transfer_to_private` emits two note hashes and three nullifiers, so no single
 value identifies the note. `nullifiers[0]` in particular is the protocol
@@ -220,9 +222,11 @@ not. When the send deadline expires, or the transfer succeeds and only reading
 its effects back fails, the response is:
 
 ```json
-{ "code": -32603,
+{
+  "code": -32603,
   "message": "Transaction submitted, result unknown -- do not retry without reconciling",
-  "data": { "txHash": "0x..." } }
+  "data": { "txHash": "0x..." }
+}
 ```
 
 The transfer may be on L2. Look up `data.txHash` before deciding; a blind retry
