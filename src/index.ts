@@ -1,8 +1,4 @@
-import {
-  AztecClient,
-  FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR,
-  TX_TIMEOUT_MS,
-} from "./aztec-client.js";
+import { AztecClient, FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR, TX_TIMEOUT_MS } from "./aztec-client.js";
 import { createApp, RESPONSE_TIMEOUT_MS } from "./server.js";
 import { AllowlistRecipientsSchema, FeeJuiceClaimSchema } from "./types.js";
 import { TransactionLimits, type LimitsConfig } from "./limits.js";
@@ -89,18 +85,12 @@ function parsePositiveBigInt(name: string, raw: string): bigint {
 
 const MAX_AMOUNT_RAW = process.env["PXE_BRIDGE_MAX_AMOUNT"];
 if (MAX_AMOUNT_RAW) {
-  limitsConfig.maxAmount = parsePositiveBigInt(
-    "PXE_BRIDGE_MAX_AMOUNT",
-    MAX_AMOUNT_RAW,
-  );
+  limitsConfig.maxAmount = parsePositiveBigInt("PXE_BRIDGE_MAX_AMOUNT", MAX_AMOUNT_RAW);
 }
 
 const DAILY_LIMIT_RAW = process.env["PXE_BRIDGE_DAILY_LIMIT"];
 if (DAILY_LIMIT_RAW) {
-  limitsConfig.dailyLimit = parsePositiveBigInt(
-    "PXE_BRIDGE_DAILY_LIMIT",
-    DAILY_LIMIT_RAW,
-  );
+  limitsConfig.dailyLimit = parsePositiveBigInt("PXE_BRIDGE_DAILY_LIMIT", DAILY_LIMIT_RAW);
 }
 
 const COOLDOWN_THRESHOLD_RAW = process.env["PXE_BRIDGE_COOLDOWN_THRESHOLD"];
@@ -111,13 +101,8 @@ if (COOLDOWN_THRESHOLD_RAW && COOLDOWN_DELAY_RAW) {
     COOLDOWN_THRESHOLD_RAW,
   );
   limitsConfig.cooldownDelayMs = parseInt(COOLDOWN_DELAY_RAW, 10);
-  if (
-    isNaN(limitsConfig.cooldownDelayMs) ||
-    limitsConfig.cooldownDelayMs <= 0
-  ) {
-    console.error(
-      "[pxe-bridge] PXE_BRIDGE_COOLDOWN_DELAY_MS must be a positive integer",
-    );
+  if (isNaN(limitsConfig.cooldownDelayMs) || limitsConfig.cooldownDelayMs <= 0) {
+    console.error("[pxe-bridge] PXE_BRIDGE_COOLDOWN_DELAY_MS must be a positive integer");
     process.exit(1);
   }
   // The cooldown is spent BEFORE the send, so it and the transaction share one
@@ -187,9 +172,7 @@ const ALLOWLIST_RECIPIENTS_RAW = process.env["PXE_BRIDGE_ALLOWLIST_RECIPIENTS"];
 const IS_ZERO_ADDRESS = /^0x0{64}$/;
 if (SPENDING_LIMIT_ADMIN) {
   if (!/^0x[0-9a-fA-F]{64}$/.test(SPENDING_LIMIT_ADMIN)) {
-    console.error(
-      "[pxe-bridge] PXE_BRIDGE_SPENDING_LIMIT_ADMIN must be a 32-byte hex address",
-    );
+    console.error("[pxe-bridge] PXE_BRIDGE_SPENDING_LIMIT_ADMIN must be a 32-byte hex address");
     process.exit(1);
   }
   // Worth its own message rather than folding into the check above, because
@@ -238,7 +221,8 @@ if (SPENDING_LIMIT_ADMIN) {
     process.exit(1);
   }
   // Warned rather than refused. Unlike the signing key this cannot move funds:
-  // leaking it costs allowlist membership privacy, not custody. It is still a secret, and
+  // leaking it costs allowlist membership privacy, not custody. It is still a
+  // secret, and
   // it belongs in the same store the signing key comes from.
   if (process.env["NODE_ENV"] === "production") {
     console.warn(
@@ -263,9 +247,7 @@ if (SPENDING_LIMIT_ADMIN) {
   try {
     allowlistJson = JSON.parse(ALLOWLIST_RECIPIENTS_RAW);
   } catch {
-    console.error(
-      "[pxe-bridge] PXE_BRIDGE_ALLOWLIST_RECIPIENTS is not valid JSON",
-    );
+    console.error("[pxe-bridge] PXE_BRIDGE_ALLOWLIST_RECIPIENTS is not valid JSON");
     process.exit(1);
   }
   const allowlistParsed = AllowlistRecipientsSchema.safeParse(allowlistJson);
@@ -273,9 +255,7 @@ if (SPENDING_LIMIT_ADMIN) {
     console.error(
       "[pxe-bridge] PXE_BRIDGE_ALLOWLIST_RECIPIENTS must be an array of " +
         "{address: 32-byte hex, index: integer in [0, 1023]}: " +
-        allowlistParsed.error.issues
-          .map((i) => `${i.path.join(".")}: ${i.message}`)
-          .join("; "),
+        allowlistParsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
     );
     process.exit(1);
   }
@@ -293,10 +273,7 @@ if (SPENDING_LIMIT_ADMIN) {
   // defaulting these to 0n produced a config that could only fail, and it
   // failed as an in-circuit assert during deployment rather than as a startup
   // error naming the variable that was missing.
-  if (
-    limitsConfig.maxAmount === undefined ||
-    limitsConfig.dailyLimit === undefined
-  ) {
+  if (limitsConfig.maxAmount === undefined || limitsConfig.dailyLimit === undefined) {
     console.error(
       "[pxe-bridge] PXE_BRIDGE_MAX_AMOUNT and PXE_BRIDGE_DAILY_LIMIT are both required " +
         "when the spending limit account is enabled -- the contract rejects a zero limit",
@@ -336,18 +313,11 @@ async function main(): Promise<void> {
   // every restart a fresh daily budget and forgot every idempotency key, so a
   // retry that straddled a restart transferred a second time.
   if (AUDIT_LOG_PATH) {
-    const { spends, keys } = await replayAuditLog(
-      AUDIT_LOG_PATH,
-      Date.now() - DAY_MS,
-    );
+    const { spends, keys } = await replayAuditLog(AUDIT_LOG_PATH, Date.now() - DAY_MS);
     if (limits) {
-      console.log(
-        `[pxe-bridge] Restored ${limits.restore(spends)} spend(s) into the 24h window`,
-      );
+      console.log(`[pxe-bridge] Restored ${limits.restore(spends)} spend(s) into the 24h window`);
     }
-    console.log(
-      `[pxe-bridge] Restored ${idempotency.restore(keys)} idempotency key(s)`,
-    );
+    console.log(`[pxe-bridge] Restored ${idempotency.restore(keys)} idempotency key(s)`);
   } else if (process.env["NODE_ENV"] === "production") {
     // Refused rather than warned, for the same reason production refuses an
     // env-var secret key and a missing API key. Without a durable log the
@@ -369,12 +339,7 @@ async function main(): Promise<void> {
     );
   }
 
-  const client = new AztecClient(
-    AZTEC_NODE_URL,
-    secretKey,
-    feeJuiceClaim,
-    spendingLimitConfig,
-  );
+  const client = new AztecClient(AZTEC_NODE_URL, secretKey, feeJuiceClaim, spendingLimitConfig);
   const server = createApp(client, {
     apiKey: API_KEY,
     adminKey: ADMIN_KEY,
@@ -407,9 +372,7 @@ async function main(): Promise<void> {
     }
     console.log(`[pxe-bridge] Audit: ${AUDIT_LOG_PATH ?? "stdout"}`);
     console.log(`[pxe-bridge] Endpoints:`);
-    console.log(
-      `  POST /           -- JSON-RPC (aztec_createNote, aztec_getVersion)`,
-    );
+    console.log(`  POST /           -- JSON-RPC (aztec_createNote, aztec_getVersion)`);
     console.log(`  POST /api/rpc    -- JSON-RPC (alias)`);
     console.log(`  GET  /status     -- Health check`);
     console.log(
