@@ -192,8 +192,23 @@ arguments are part of the transaction. Every transfer therefore publishes:
 
 This is inherent to checking a value against public storage and is not
 remediated for the amount. Enforcing that privately would mean nullifier-based
-counters and a different contract. Callers who need the amount private cannot
-use the spending-limit account.
+counters and a different contract. Switching accounts does not help: no mode of
+this bridge is amount-private. The token's `transfer_to_private` enqueues the
+public `_finalize_transfer_to_private_unsafe(from, amount, partial_note)` call,
+which calls `_finalize_transfer_to_private`, regardless of account
+(aztec-packages v5.1.0, `token_contract/src/main.nr:311-321, 388-396, 402-411`),
+so the amount and the sender are on the transcript under a plain Schnorr account
+too. Only a private-to-private `transfer` from private inventory, which this
+bridge does not implement, keeps the amount off it.
+
+The recipient's address is placed in no public call in either mode, but that is
+not recipient privacy. Whether the recipient stays off the transcript depends on
+how the note is delivered: at aztec-packages v5.1.0 the PXE's default tagging
+strategy is a non-interactive handshake that announces the recipient under an
+address-derived tag, and this bridge installs no `resolveTaggingSecretStrategy`
+hook, so recipient privacy is **not** delivered today (xochi
+`shielded-execution.md` [U1] [P8]). The allowlist design below keeps the
+recipient out of the bridge's own public calls only.
 
 The recipient is a different story since NM-1019 [Medium]. The array design
 published a candidate set of up to eight addresses per transfer, and the set was
