@@ -191,7 +191,14 @@ failures above applies, and nothing runs through the spending-limit account's
 entrypoint. The deployer is derived from the bridge's own key, so this adds no
 key material and no trusted party; a deployer key compromise is a bridge key
 compromise already. What it holds afterwards is unspent fee juice, which cannot
-be transferred but can pay for top-up claims. Production runbook:
+be transferred but can pay for top-up claims. Without a deployer claim or a
+deployer balance, both deployments fall back to SponsoredFPC, a testing
+contract present only on sandbox and testnet. That fallback (also taken by an
+undeployed plain account with no `FEE_JUICE_CLAIM`) is refused under
+`NODE_ENV=production` unless `PXE_BRIDGE_ALLOW_SPONSORED_FPC=true`, and with
+`false` in any environment; the refusal names the account and stops startup
+before anything is sent. Any other value of the variable (including an empty
+one) is rejected at startup. Production runbook:
 
 1. Start the bridge once with the spending-limit configuration and no claim.
    It logs `Deployer address` and `Account address`, then stops at the
