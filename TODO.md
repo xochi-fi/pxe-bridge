@@ -81,7 +81,7 @@ validated at init and apply time (`daily_limit >= max_per_tx`, both non-zero,
 >
 > Practically this means three things. Every deliberate contract change updates
 > `contracts/spending_limit_account/CLASS_ID` in the same commit, re-baselined
-> from an x86 CI artifact, because `aztec compile` does not finish on ARM.
+> from the x86 CI artifact, the build of record.
 > `scripts/contract-class-id.js` fails the job on unexplained drift. And
 > anything on the deferred list below that touches `main.nr` (transaction
 > cancellation, for one) has to land before an address is fixed, not after.

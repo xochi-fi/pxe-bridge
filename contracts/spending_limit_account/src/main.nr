@@ -11,6 +11,32 @@ mod public_key_note;
 // Build: `aztec compile`. Not `aztec-nargo compile` -- aztec-nargo is a symlink
 // to plain nargo and emits transpiled=false, which loadContractArtifact rejects.
 // Artifact is gitignored and built by CI.
+//
+// Events (xochi-fi/xochi#513). Public events work on the pinned 5.1.0
+// toolchain and EmbeddedWallet, in the documented shape:
+//
+//     use aztec::macros::events::event;
+//     #[event]
+//     struct ObligationFilled { digest: Field, amount: u128 }
+//     ... in a public function: self.emit(ObligationFilled { digest, amount });
+//
+// That writes one public log, [compute_log_tag(event selector,
+// DOM_SEP__EVENT_LOG_TAG), digest, amount], which aztec.js `getPublicEvents`
+// decodes from the artifact. It is the log `self.context.emit_public_log_unsafe`
+// would write, with the tag derived from the event type rather than picked by
+// hand. `#[event]` adds no utility function: `sync_state` and
+// `offchain_receive` are generated for every contract, this one included.
+//
+// The W3 spike (xochi docs/architecture/w3) recorded `#[event]` + `self.emit`
+// here as failing with `mdb_txn_begin: 22` and fell back to a raw tagged log.
+// That error is two EmbeddedWallets on one LMDB directory, one of them
+// garbage-collected (see claimWalletDataDirectory in src/aztec-client.ts), not
+// the event. With a directory per wallet, the spike's fill-digest account
+// rebuilt with exactly the event above deployed, emitted ObligationFilled for
+// two fills, getPublicEvents decoded both, and a repeated fill reverted with
+// "Obligation already filled" (5.1.0 sandbox, arm64, 2026-10-17). Either shape
+// is supported; an event is the one an indexer can decode without a
+// hand-maintained tag.
 
 use aztec::macros::aztec;
 

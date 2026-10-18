@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import type { Server } from "node:http";
 import { AztecClient } from "../../src/aztec-client.js";
 import { createApp } from "../../src/server.js";
-import { getTestConfig, requireTestToken } from "./helpers.js";
+import { getTestConfig, requireTestToken, walletDataDirectory } from "./helpers.js";
 
 const config = getTestConfig();
 
@@ -12,7 +12,13 @@ describe("HTTP server (e2e)", () => {
   let baseUrl: string;
 
   beforeAll(async () => {
-    client = new AztecClient(config.nodeUrl, config.secretKey, config.feeJuiceClaim);
+    client = new AztecClient(
+      config.nodeUrl,
+      config.secretKey,
+      config.feeJuiceClaim,
+      undefined,
+      walletDataDirectory("server"),
+    );
     await client.connect();
 
     server = createApp(client);
