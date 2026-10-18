@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { mkdirSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { EmbeddedWallet } from "@aztec/wallets/embedded";
 import { TokenContract } from "@aztec/noir-contracts.js/Token";
@@ -100,7 +101,7 @@ export const FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR =
  */
 export const DEFAULT_WALLET_DATA_DIRECTORY = "aztec-wallet-data";
 
-/** Absolute data directories held by a wallet created in this process. */
+/** Canonical data directories held by a wallet created in this process. */
 const claimedWalletDirectories = new Set<string>();
 
 /**
@@ -122,20 +123,59 @@ const claimedWalletDirectories = new Set<string>();
  * Processes are not the problem -- LMDB's lock file coordinates those -- so
  * the bridge and an operator script may share a directory.
  *
- * Returns the absolute path that was claimed.
+ * The key is the canonical path: the directory is created if missing, then
+ * resolved with the OS realpath, so a symlink, `/tmp` against `/private/tmp`,
+ * or a different letter case on a case-insensitive volume all name one
+ * directory and one claim. The canonical path is also what the wallet opens,
+ * so the claim and the store cannot disagree.
+ *
+ * Returns the canonical path that was claimed.
  */
 export function claimWalletDataDirectory(dataDirectory: string): string {
-  const absolute = resolve(dataDirectory);
-  if (claimedWalletDirectories.has(absolute)) {
+  const requested = resolve(dataDirectory);
+  mkdirSync(requested, { recursive: true });
+  // .native: the JS realpath resolves symlinks but keeps the caller's letter
+  // case, so on a case-insensitive volume two spellings would be two claims.
+  const canonical = realpathSync.native(requested);
+  if (claimedWalletDirectories.has(canonical)) {
     throw new Error(
-      `Wallet data directory ${absolute} is already open in this process. Each ` +
+      `Wallet data directory ${canonical} is already open in this process. Each ` +
         "EmbeddedWallet needs its own directory: two LMDB handles on one store fail " +
         "with mdb_txn_begin: 22 once either wallet is garbage-collected. Pass a " +
         "distinct `dataDirectory` to each AztecClient.",
     );
   }
-  claimedWalletDirectories.add(absolute);
-  return absolute;
+  claimedWalletDirectories.add(canonical);
+  return canonical;
+}
+
+let tokenClassId: Promise<string> | null = null;
+
+/**
+ * Refuses a contract instance that is not the standard Token, before anything
+ * is registered for it.
+ *
+ * The token address on `createNote` is caller-supplied, and a PXE registration
+ * is persistent: registering whatever instance the node returns would let any
+ * caller grow the wallet's LMDB store with one entry per address it names.
+ * Only an instance currently running the class `TokenContract.artifact`
+ * produces is admitted, which is also the only class the bridge can call.
+ */
+export async function assertStandardTokenInstance(
+  address: { toString(): string },
+  instance: { currentContractClassId: { toString(): string } },
+): Promise<void> {
+  tokenClassId ??= import("@aztec/stdlib/contract")
+    .then(({ getContractClassFromArtifact }) => getContractClassFromArtifact(TokenContract.artifact))
+    .then((cls) => cls.id.toString());
+  const expected = await tokenClassId;
+  const actual = instance.currentContractClassId.toString();
+  if (actual !== expected) {
+    throw new Error(
+      `Token ${address.toString()} runs contract class ${actual}, not the standard ` +
+        `Token class ${expected}; refusing to register it`,
+    );
+  }
 }
 
 export interface AztecClientOptions {
@@ -796,16 +836,17 @@ export class AztecClient implements IAztecClient {
     // The wallet's PXE runs only contracts registered with it, and
     // TokenContract.at registers nothing. The token is deployed by someone
     // else, so its published instance is read from the node and paired with
-    // the standard Token artifact. Nothing checks the pairing: a token of
-    // another class still fails at simulation, with "No artifact registered
-    // for contract class". Missing until xochi-fi/xochi#513 because every e2e
-    // wallet shared one store, where the funder's deploy had registered the
-    // token for the bridge too.
+    // the standard Token artifact, after checking that the instance runs that
+    // artifact's class: the address is caller-supplied and a registration is
+    // permanent. Missing until xochi-fi/xochi#513 because every e2e wallet
+    // shared one store, where the funder's deploy had registered the token for
+    // the bridge too.
     const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
     const instance = await createAztecNodeClient(this.nodeUrl).getContract(address);
     if (!instance) {
       throw new Error(`Token ${address.toString()} is not published on the node`);
     }
+    await assertStandardTokenInstance(address, instance);
     await this.wallet.registerContract(instance, TokenContract.artifact);
 
     const contract = await TokenContract.at(
