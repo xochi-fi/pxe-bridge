@@ -1,0 +1,10 @@
+{
+  "name": "spike-633-recipient-schnorr",
+  "private": true,
+  "type": "module",
+  "description": "Throwaway compatibility spike for xochi-fi/xochi#633. Not part of the bridge.",
+  "dependencies": {
+    "@noble/curves": "1.9.7",
+    "@zkpassport/poseidon2": "0.6.2"
+  }
+}
