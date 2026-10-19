@@ -37,10 +37,10 @@
  * it checks its root against the account's before every transfer.
  *
  * Before sending, the admin this key derives to is checked against the admin
- * stored in the account, and a mismatch is refused. Under the Aztec 5.2.0
- * runtime a key whose admin account was deployed by a 5.1.0 runtime derives a
- * different address (the stock SchnorrAccount class changed), and the account's
- * admin is immutable. See SECURITY.md, "Upgrading to Aztec 5.2.0".
+ * stored in the account, and a mismatch is refused. An SDK that changes the
+ * stock SchnorrAccount class derives a different admin address from the same
+ * key, and the account's admin is immutable. See SECURITY.md, "Account address
+ * pinning".
  */
 
 import { AllowlistTree, allowlistLeaf } from "../src/allowlist-tree.js";

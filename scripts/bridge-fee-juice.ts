@@ -20,7 +20,7 @@
  *   PXE_BRIDGE_ACCOUNT_ADDRESS -- the bridge account's recorded address, as the
  *                             bridge reads it. When set, the address the key
  *                             derives to must equal it before anything is
- *                             bridged (SECURITY.md, "Upgrading to Aztec 5.2.0")
+ *                             bridged (SECURITY.md, "Account address pinning")
  */
 
 import { deriveAccountKeys } from "../src/aztec-client.js";

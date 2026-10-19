@@ -347,65 +347,37 @@ regenerated: the installer exposure above can change the build regardless. The
 CI job uploads it on every run, before the class ID check, so a drifted build is
 preserved for comparison.
 
-## Upgrading to Aztec 5.2.0
+## Account address pinning
 
 An Aztec address commits to the account contract's class as well as to its key
-and salt. `@aztec/accounts` 5.2.0 ships a different stock `SchnorrAccount`
-artifact, and its class moved from
-`0x0191cefaf68870dd09c29d402946976c9def479ee7f343061b6574fa401af98d` (5.1.0) to
-`0x0833459dfb3c430326e50f2367ec093e07b4ed37d23e85cc759ef4f9aa800edd` (5.2.0),
-both computed with `getContractClassFromArtifact` on the installed artifacts. The
-same key and salt therefore derive a **new, empty address** for every plain
-Schnorr account this repo derives:
+and salt, so an SDK upgrade that ships a different stock `SchnorrAccount`
+artifact moves every plain Schnorr address this repo derives even though no key
+changed: the bridge's own account (when `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` is
+unset), the spending-limit deployer (`ensureDeployer`), the fee juice payer
+(`scripts/top-up-fee-juice.ts`), and the spending-limit admin as
+`scripts/update-allowlist.ts` derives it. Aztec 5.2.0 did this: the class moved
+from `0x0191cefaf68870dd09c29d402946976c9def479ee7f343061b6574fa401af98d`
+(5.1.0) to `0x0833459dfb3c430326e50f2367ec093e07b4ed37d23e85cc759ef4f9aa800edd`
+(5.2.0). No bridge had been deployed on a 5.1.0 runtime, so nothing moved with
+it; the next SDK bump that changes the class will move them again.
 
-- the bridge's own account, when `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` is unset;
-- the spending-limit deployer (`ensureDeployer`);
-- the fee juice payer (`scripts/top-up-fee-juice.ts`);
-- the spending-limit admin, as `scripts/update-allowlist.ts` derives it from
-  `ALLOWLIST_ADMIN_KEY`.
-
-The spending-limit account itself does not move. Its class is the pinned
+A moved address is a new, empty account. Balances at the old one are out of
+reach (fee juice cannot be transferred at all), and the spending-limit `admin`
+is a `PublicImmutable` with no rotation path, so an admin that moved can no
+longer `pause`, `unpause`, `update_recipient` or change limits. The
+spending-limit account itself does not move: its class is the pinned
 `CLASS_ID`, compiled by the 5.1.0 toolchain, and it is deployed with a zero
-deployer, so the same constructor inputs give the same address: loading the
-5.1.0-built artifact through the 5.1.0 and the 5.2.0 SDK derives the same
-address for the same inputs.
-
-What that costs an existing deployment:
-
-- **Balances at the old Schnorr addresses are out of reach** of a 5.2.0
-  runtime. Tokens stay there. Fee juice cannot be transferred at all, so fee
-  juice at an old bridge account or payer is lost unless it is spent first.
-- **The spending-limit admin cannot be reproduced.** `admin` is a
-  `PublicImmutable` with no rotation path, and the 5.2.0 runtime signs as a
-  different address, so `pause`, `unpause`, `update_recipient` and the limit
-  changes all revert "Not admin". That removes the admin's independent lever
-  against a compromised signing key while the account stays live. Setting
-  `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` to the new admin address does not repair
-  it: the admin is a constructor input, so that derives a different account.
-
-Before upgrading a deployment that ran on a 5.1.0 runtime, from that runtime:
-
-1. Move token balances off every plain Schnorr account listed above, and spend
-   down or write off their fee juice.
-2. For a spending-limit account, there is no admin transition. Send its
-   balance to an allowlisted address you control, then pause it (a paused
-   account cannot transfer), and redeploy under 5.2.0 with an admin the 5.2.0
-   runtime derives; that is a new account at a new address. Archive the old
-   account's allowlist seed and set until it is empty.
-3. Then upgrade, start once with `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1`, record the
-   logged address as `PXE_BRIDGE_ACCOUNT_ADDRESS`, remove the flag, and record
-   the new payer as `FEE_JUICE_PAYER_ADDRESS`.
-
-Whether a 5.1.0 client can still transact against a node that already runs
-5.2.0 has not been verified here. Drain before the network you depend on
-upgrades if you can.
+deployer. Before an SDK upgrade that moves the Schnorr class on a live
+deployment, empty the plain Schnorr accounts and, for a spending-limit account,
+move its balance to an allowlisted address, pause it and redeploy with an admin
+the new runtime derives.
 
 ### What refuses
 
-The upgrade cannot be made safe by derivation, so it is made loud. Every place
-that derives a plain Schnorr account now checks it against a recorded or
-on-chain address before acting, and refuses with both addresses and the class
-change in the message (`src/account-identity.ts`):
+A moved address cannot be avoided by derivation, so it is made loud. Every place
+that derives a plain Schnorr account checks it against a recorded or on-chain
+address before acting, and refuses with both addresses and the class in the
+message (`src/account-identity.ts`):
 
 - **The bridge** (`connect()`) refuses an account that derives away from
   `PXE_BRIDGE_ACCOUNT_ADDRESS` before it deploys, serves or sets a sending

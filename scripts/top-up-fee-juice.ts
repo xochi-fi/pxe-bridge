@@ -22,9 +22,9 @@
  *                             the claim; needs its own fee juice
  *   FEE_JUICE_PAYER_ADDRESS -- the payer's recorded AztecAddress. The address
  *                             the key derives to must equal it, or nothing is
- *                             sent: under the Aztec 5.2.0 runtime a payer
- *                             deployed by a 5.1.0 runtime derives a different
- *                             address (SECURITY.md, "Upgrading to Aztec 5.2.0")
+ *                             sent: an SDK that changes the stock SchnorrAccount
+ *                             class derives a different payer address
+ *                             (SECURITY.md, "Account address pinning")
  *   L1_PRIVATE_KEY         -- Ethereum private key with a Fee Juice ERC20 balance
  *
  * Optional env:

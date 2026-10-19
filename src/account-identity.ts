@@ -121,10 +121,10 @@ export function assertAccountIdentity(check: AccountIdentityCheck): void {
       `but ${check.expectedSource} is ${check.expected}. Refusing to use, deploy or sign ` +
       "as any account other than the recorded one. An address commits to its contract " +
       "class as well as its key and salt (and, for the spending-limit account, its " +
-      "constructor inputs). Aztec 5.2.0 changed the stock SchnorrAccount class from " +
-      `${SCHNORR_CLASS_ID_5_1_0} to ${SCHNORR_CLASS_ID_5_2_0}, so a key whose account ` +
-      "was deployed under a 5.1.0 runtime now derives a different, empty address. " +
-      'See SECURITY.md, "Upgrading to Aztec 5.2.0".',
+      "constructor inputs), so an SDK whose stock SchnorrAccount class differs moves it: " +
+      `Aztec 5.2.0 changed that class from ${SCHNORR_CLASS_ID_5_1_0} to ` +
+      `${SCHNORR_CLASS_ID_5_2_0}. Do not re-record the derived address to make this start. ` +
+      'See SECURITY.md, "Account address pinning".',
   );
 }
 

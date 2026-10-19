@@ -81,7 +81,7 @@ anything else:
    production one of the two is required.
 3. If the bridge later refuses with "derives to ... but PXE_BRIDGE_ACCOUNT_ADDRESS
    is ...", do not change the variable to the new address to make it start.
-   Read SECURITY.md, "Upgrading to Aztec 5.2.0", first.
+   Read SECURITY.md, "Account address pinning", first.
 
 ### Docker
 
@@ -163,8 +163,8 @@ the bridge once with the payer's key and **without**
 `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` deploys a plain Schnorr account at the address
 the script derives from that key. Record that address as
 `FEE_JUICE_PAYER_ADDRESS`: the script refuses to send unless the key still
-derives to it, which under the Aztec 5.2.0 runtime a payer deployed by a 5.1.0
-runtime does not (SECURITY.md, "Upgrading to Aztec 5.2.0").
+derives to it, which it stops doing when an SDK upgrade changes the stock
+SchnorrAccount class (SECURITY.md, "Account address pinning").
 
 ```bash
 FEE_JUICE_RECIPIENT=0x...   \
