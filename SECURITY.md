@@ -101,8 +101,10 @@ Combined with the rest of this change set:
 ### Validation
 
 The binding depends on the `AppPayload` serialized layout (`[FunctionCall; 5]`
-+ `tx_nonce` = 31 fields, each call serialized in declaration order) pinned to
-Aztec v5.1.0. It is validated three ways:
++ `tx_nonce` = 31 fields, each call serialized in declaration order). The
+contract side is pinned to aztec-nr v5.1.0; the client side is encoded by
+`@aztec/entrypoints` from the Aztec 5.2.0 SDK, whose built code is identical to
+5.1.0's, so both sides still agree on the layout. It is validated three ways:
 
 - `aztec-nargo test` unit tests in `contracts/spending_limit_account/src/main.nr`:
   `function_call_serialize_layout` asserts `args_hash`/`target_address` sit at
@@ -282,6 +284,14 @@ The `contract` CI job installs the Aztec toolchain by piping
 `https://install.aztec.network` into bash. There is no published checksum to pin
 against, so the build trusts that endpoint. `aztec-up install 5.1.0` pins the
 toolchain version but not the installer that fetches it.
+
+That toolchain is the contract's compile toolchain only, and it is deliberately
+older than the 5.2.0 runtime (SDK, PXE, sandbox). The contract stays on aztec-nr
+v5.1.0 because its class ID, and with it the account address, derives from the
+compiled bytecode, and that bytecode is what NM-1019 audited. Moving the compile
+toolchain would move the address and put unaudited bytecode behind it. The
+committed `CLASS_ID` is checked against the 5.1.0-compiled artifact as loaded by
+the 5.2.0 SDK.
 
 **This has already bitten, benignly.** On 2026-08-26 every `contract` job began
 failing at install with `expected bundled binary 'forge' missing from
