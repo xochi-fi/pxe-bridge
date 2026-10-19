@@ -221,7 +221,8 @@ if (SPENDING_LIMIT_ADMIN) {
     process.exit(1);
   }
   // Warned rather than refused. Unlike the signing key this cannot move funds:
-  // leaking it costs recipient privacy, not custody. It is still a secret, and
+  // leaking it costs allowlist membership privacy, not custody. It is still a
+  // secret, and
   // it belongs in the same store the signing key comes from.
   if (process.env["NODE_ENV"] === "production") {
     console.warn(

@@ -20,13 +20,27 @@ EVM intent solvers speak JSON-RPC and have no concept of private execution, PXEs
 
 pxe-bridge embeds a PXE wallet and wraps it in a JSON-RPC interface that solvers already understand. When a solver says "create a shielded note for this token," the bridge handles private execution, proof generation, and note encryption transparently. The solver gets back a transaction hash.
 
-> **What "shielded" covers.** The note and its recipient are private. With the
-> on-chain spending-limit account enabled, the transfer **amount is public**.
-> Enforcing caps against public contract state requires putting the amount in a
-> public call's arguments. The recipient is not: membership in the allowlist is
-> proven in private against a Merkle root, and the public call sees only that
-> root. See [SECURITY.md](SECURITY.md#what-is-public). A plain Schnorr account,
-> the default, publishes neither.
+> **What "shielded" covers.** The note's owner and randomness are private; its
+> amount is public through the finalize call. The
+> transfer **amount and sender are public in both account modes**: the bridge
+> calls the token's `transfer_to_private`, which enqueues the public
+> `_finalize_transfer_to_private_unsafe(from, amount, partial_note)` call, which
+> in turn calls `_finalize_transfer_to_private` (aztec-packages v5.1.0,
+> `token_contract/src/main.nr:311-321, 388-396, 402-411`). With the on-chain
+> spending-limit account enabled, the transfer additionally publishes
+> `declared_amount` and the allowlist root through `check_spending_public`.
+> The recipient's address is placed in no public call in either mode: allowlist
+> membership is proven in private against a Merkle root, and the public call
+> sees only that root. Whether the recipient stays off the transcript depends on
+> how the note is delivered: at aztec-packages v5.1.0 the PXE's default tagging
+> strategy is a non-interactive handshake that announces the recipient under an
+> address-derived tag, and this bridge installs no
+> `resolveTaggingSecretStrategy` hook ([`src/aztec-client.ts`](src/aztec-client.ts);
+> upstream [`resolve_tagging_secret_strategy.ts`](https://github.com/AztecProtocol/aztec-packages/blob/v5.1.0/yarn-project/pxe/src/hooks/resolve_tagging_secret_strategy.ts)),
+> so recipient privacy is **not** delivered today. See
+> [SECURITY.md](SECURITY.md#what-is-public). Only a private-to-private
+> `transfer` from private inventory, which this bridge does not implement, keeps
+> the amount off the transcript.
 
 ```
 EVM Solver --JSON-RPC--> pxe-bridge --Aztec SDK--> Aztec L2 Node
