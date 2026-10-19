@@ -101,6 +101,7 @@ Twelve TypeScript source files plus a Noir contract, no framework -- plain `node
 
 - ESM-only (`"type": "module"`), all imports use `.js` extension
 - Strict tsconfig: `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`, `verbatimModuleSyntax`
-- Aztec SDK v5.1.0 -- dynamic imports for `@aztec/aztec.js/fields` and `@aztec/aztec.js/addresses` inside methods (tree-shaking friendly)
+- Aztec SDK/runtime v5.2.0 (`@aztec/*`, sandbox image); the spending-limit contract is compiled separately with 5.1.0 (see above) -- dynamic imports for `@aztec/aztec.js/fields` and `@aztec/aztec.js/addresses` inside methods (tree-shaking friendly)
+- The admitted Token class (`assertStandardTokenInstance`) and the SponsoredFPC address are derived from `@aztec/noir-contracts.js`, so they move with an SDK bump: under 5.2.0 the Token class is `0x00c2bb75...`, under 5.1.0 it was `0x0c228a68...`, and a token deployed from the 5.1.0 artifact is refused
 - Docker image requires trixie's libstdc++ for `@aztec/bb.js` GLIBCXX_3.4.32
 - CI pushes to `ghcr.io/xochi-fi/pxe-bridge` on semver tags only

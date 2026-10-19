@@ -309,7 +309,7 @@ export async function mintTo(
 /**
  * Deploys an 18-decimal test token with `admin` as its minter.
  *
- * v5.1.0 requires an explicit `from` on send(), and send() resolves to
+ * The SDK (since v5.1.0) requires an explicit `from` on send(), and send() resolves to
  * { contract, instance, receipt } after waiting -- not to the contract itself.
  * Both mismatches went unnoticed while this helper had no caller, which is what
  * E2E_TOKEN_ADDRESS being set nowhere used to mean.
