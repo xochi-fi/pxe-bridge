@@ -48,6 +48,8 @@ EVM Solver --JSON-RPC--> pxe-bridge --Aztec SDK--> Aztec L2 Node
 | `AZTEC_NODE_URL`        | No       | `http://localhost:8080` | Aztec L2 node RPC endpoint                     |
 | `PXE_BRIDGE_HOST`       | No       | `127.0.0.1`             | Bind address (localhost-only by default)       |
 | `PXE_BRIDGE_PORT`       | No       | `8547`                  | HTTP listen port (0-65535)                     |
+| `PXE_BRIDGE_ACCOUNT_ADDRESS` | Prod | --                   | The bridge account's recorded address; startup refuses any other |
+| `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY` | Prod, first deploy only | -- | `1` lets production start without a recorded address |
 
 The secret key is a BN254 scalar, not an arbitrary 32 bytes. About 81% of
 random 32-byte values are at or above the field modulus and are rejected at
@@ -59,6 +61,27 @@ const MODULUS = BigInt("0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f5
 let k; do { k = randomBytes(32).toString("hex"); } while (BigInt("0x" + k) >= MODULUS);
 console.log("0x" + k);'
 ```
+
+### Recording the account address
+
+The bridge's account address derives from its key **and** from the account
+contract's class, so an SDK upgrade that changes the class moves the address
+even though the key did not change. Aztec 5.2.0 does exactly that for the stock
+SchnorrAccount. A bridge that simply derived its address would come up at the
+new, empty address and deploy an account there while the funded one sat at the
+old address.
+
+So the address is recorded, and `connect()` refuses to deploy or serve as
+anything else:
+
+1. First deployment: start with `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1` (production
+   only; development needs nothing). The bridge logs
+   `[pxe-bridge] Account address: 0x...`.
+2. Set `PXE_BRIDGE_ACCOUNT_ADDRESS` to that address and remove the flag. In
+   production one of the two is required.
+3. If the bridge later refuses with "derives to ... but PXE_BRIDGE_ACCOUNT_ADDRESS
+   is ...", do not change the variable to the new address to make it start.
+   Read SECURITY.md, "Upgrading to Aztec 5.2.0", first.
 
 ### Docker
 
@@ -75,8 +98,10 @@ docker run -e PXE_BRIDGE_SECRET_KEY=0x... \
 binds inside the container and the published port reaches nothing.
 
 The image sets `NODE_ENV=production`, under which `PXE_BRIDGE_SECRET_KEY` is
-rejected and `PXE_BRIDGE_SECRET_ARN` is required. Pass `NODE_ENV=development`
-to use a raw key, which is what `docker-compose.yml` does.
+rejected and `PXE_BRIDGE_SECRET_ARN` is required, and so is
+`PXE_BRIDGE_ACCOUNT_ADDRESS` (or `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1` for a first
+deployment). Pass `NODE_ENV=development` to use a raw key, which is what
+`docker-compose.yml` does.
 
 Building the image locally does not require the compiled Noir artifact. An
 image without it runs the default Schnorr configuration; enabling
@@ -136,11 +161,15 @@ The bridge logs the address to fund on startup:
 The payer must already be deployed and able to pay for one transaction. Running
 the bridge once with the payer's key and **without**
 `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` deploys a plain Schnorr account at the address
-the script derives from that key.
+the script derives from that key. Record that address as
+`FEE_JUICE_PAYER_ADDRESS`: the script refuses to send unless the key still
+derives to it, which under the Aztec 5.2.0 runtime a payer deployed by a 5.1.0
+runtime does not (SECURITY.md, "Upgrading to Aztec 5.2.0").
 
 ```bash
 FEE_JUICE_RECIPIENT=0x...   \
 FEE_JUICE_PAYER_KEY=0x...   \
+FEE_JUICE_PAYER_ADDRESS=0x... \
 L1_PRIVATE_KEY=0x...        \
 AZTEC_NODE_URL=http://localhost:8080 \
 L1_RPC_URL=https://... L1_CHAIN_ID=1 \
@@ -152,6 +181,7 @@ npm run top-up-fee-juice
 | --- | --- | --- | --- |
 | `FEE_JUICE_RECIPIENT` | Yes | -- | Aztec address to credit |
 | `FEE_JUICE_PAYER_KEY` | Yes | -- | Secret key of the account that sends the claim |
+| `FEE_JUICE_PAYER_ADDRESS` | Yes | -- | The payer's recorded address; the key must derive to it |
 | `L1_PRIVATE_KEY` | Yes | -- | Ethereum key holding the Fee Juice ERC20 |
 | `AZTEC_NODE_URL` | No | `http://localhost:8080` | Aztec node |
 | `L1_RPC_URL` | No | `http://localhost:8545` | Ethereum RPC |
