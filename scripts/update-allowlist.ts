@@ -35,6 +35,12 @@
  * After a successful update, change PXE_BRIDGE_ALLOWLIST_RECIPIENTS to the set
  * this prints and restart the bridge. Until you do, the bridge refuses to send:
  * it checks its root against the account's before every transfer.
+ *
+ * Before sending, the admin this key derives to is checked against the admin
+ * stored in the account, and a mismatch is refused. Under the Aztec 5.2.0
+ * runtime a key whose admin account was deployed by a 5.1.0 runtime derives a
+ * different address (the stock SchnorrAccount class changed), and the account's
+ * admin is immutable. See SECURITY.md, "Upgrading to Aztec 5.2.0".
  */
 
 import { AllowlistTree, allowlistLeaf } from "../src/allowlist-tree.js";
@@ -123,10 +129,14 @@ async function main(): Promise<void> {
 
   const { Fr } = await import("@aztec/foundation/curves/bn254");
   const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+  const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
   const { EmbeddedWallet } = await import("@aztec/wallets/embedded");
   const { Contract } = await import("@aztec/aztec.js/contracts");
   const { SpendingLimitAccountContract } = await import("../src/spending-limit-account.js");
   const { deriveAccountKeys } = await import("../src/aztec-client.js");
+  const { assertAccountIdentity, readSpendingLimitAdmin } = await import(
+    "../src/account-identity.js"
+  );
 
   // The tree as it stands. The witness for the position being changed is what
   // proves to the contract that nothing else moved.
@@ -182,8 +192,26 @@ async function main(): Promise<void> {
     allowlistRecipients: current,
   }).getContractArtifact();
 
+  const accountAddress = AztecAddress.fromStringUnsafe(account);
+
+  // Refused before anything is sent. The contract would revert "Not admin"
+  // anyway, but only after the operator has paid for it and with nothing
+  // saying why the key no longer reaches the admin.
+  const onChainAdmin = await readSpendingLimitAdmin(
+    createAztecNodeClient(NODE_URL),
+    accountAddress,
+    artifact,
+  );
+  assertAccountIdentity({
+    role: "Admin signer",
+    derived: adminAddress.toString(),
+    derivedClassId: manager.getInstance().currentContractClassId.toString(),
+    expected: onChainAdmin,
+    expectedSource: `the admin stored in ${account}`,
+  });
+
   const contract = await Contract.at(
-    AztecAddress.fromStringUnsafe(account) as Parameters<typeof Contract.at>[0],
+    accountAddress as Parameters<typeof Contract.at>[0],
     artifact as Parameters<typeof Contract.at>[1],
     wallet as unknown as Parameters<typeof Contract.at>[2],
   );

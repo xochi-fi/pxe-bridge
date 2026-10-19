@@ -17,9 +17,14 @@
  *   L1_RPC_URL             -- Ethereum RPC (default: http://localhost:8545)
  *   L1_CHAIN_ID            -- L1 chain id (default: Anvil's, per the SDK)
  *   BRIDGE_AMOUNT          -- Fee Juice amount in wei (default: 1000000000000000000 = 1e18)
+ *   PXE_BRIDGE_ACCOUNT_ADDRESS -- the bridge account's recorded address, as the
+ *                             bridge reads it. When set, the address the key
+ *                             derives to must equal it before anything is
+ *                             bridged (SECURITY.md, "Upgrading to Aztec 5.2.0")
  */
 
 import { deriveAccountKeys } from "../src/aztec-client.js";
+import { assertAccountIdentity, resolveAccountIdentityConfig } from "../src/account-identity.js";
 
 async function main() {
   const SECRET_KEY = process.env["PXE_BRIDGE_SECRET_KEY"];
@@ -65,6 +70,27 @@ async function main() {
   const account = await accountManager.getAccount();
   const aztecAddress = account.getAddress();
   console.log(`Aztec account address: ${aztecAddress.toString()}`);
+
+  // The claim commits to its recipient on L1, so bridging to an address the
+  // bridge will refuse to run as leaves the fee juice claimable only by an
+  // account nobody operates.
+  try {
+    const { expectedAddress } = resolveAccountIdentityConfig({
+      PXE_BRIDGE_ACCOUNT_ADDRESS: process.env["PXE_BRIDGE_ACCOUNT_ADDRESS"],
+    });
+    if (expectedAddress) {
+      assertAccountIdentity({
+        role: "Bridge account",
+        derived: aztecAddress.toString(),
+        derivedClassId: accountManager.getInstance().currentContractClassId.toString(),
+        expected: expectedAddress,
+        expectedSource: "PXE_BRIDGE_ACCOUNT_ADDRESS",
+      });
+    }
+  } catch (err) {
+    console.error((err as Error).message);
+    process.exit(1);
+  }
 
   // Get L1 contract addresses from the node via JSON-RPC
   const nodeInfoRes = await fetch(AZTEC_NODE_URL, {
