@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# xochi-fi/xochi#633 recipient-account compatibility spike. Sandbox only.
+# xochi-fi/xochi#633 recipient-account compatibility spike. Sandbox only, on the
+# compose sandbox (aztecprotocol/aztec:5.2.0) with the root @aztec/* 5.2.0 SDK.
 # Run from the repo root after `npm ci` and `(cd spike/633-recipient-schnorr && npm ci)`.
+# Set L1_RPC_URL when anvil is not published on localhost:8545.
 set -euo pipefail
 
 S=spike/633-recipient-schnorr

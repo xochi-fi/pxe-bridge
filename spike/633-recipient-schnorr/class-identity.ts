@@ -86,6 +86,9 @@ async function main(): Promise<void> {
   // immutablesHash instead.
   const initless = await getContractClassFromArtifact(SchnorrInitializerlessAccountContractArtifact);
   console.log(`(not pinned) SchnorrInitializerlessAccount class id ${initless.id.toString()}`);
+  const refused = !initless.id.equals(cls.id);
+  console.log(`pin refuses SchnorrInitializerlessAccount: ${refused ? "PASS" : "FAIL"}`);
+  if (!refused) process.exitCode = 1;
 
   // ---------------------------------------------------------------- item 3
   console.log("\n== 3. functions (rotation check) ==");

@@ -6,7 +6,7 @@
  * @zkpassport/poseidon2 (BN254 Poseidon2, t = 4).
  *
  * Mirrors noir-lang/schnorr v0.4.0 `verify_signature`, the function the
- * SchnorrAccount artifact (aztec 5.1.0) calls from `is_valid_impl`:
+ * SchnorrAccount artifact (aztec 5.2.0) calls from `is_valid_impl`:
  *
  *   R = s*G + e*P,  accept iff P on curve, s != 0, e != 0, R != O and
  *   Poseidon2([SCHNORR_CHALLENGE_DST, R.x, P.x, P.y, message]) == e
