@@ -11,7 +11,6 @@
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
 
 import { SchnorrAccountContractArtifact } from "@aztec/accounts/schnorr";
 import { NO_FROM } from "@aztec/aztec.js/account";
@@ -22,7 +21,7 @@ import { keccak256 } from "@aztec/foundation/crypto/keccak";
 import { Schnorr, SchnorrSignature } from "@aztec/foundation/crypto/schnorr";
 import { TokenContract } from "@aztec/noir-contracts.js/Token";
 import { getContractClassFromArtifact } from "@aztec/stdlib/contract";
-import { TxHash, TxStatus } from "@aztec/stdlib/tx";
+import { TxHash } from "@aztec/stdlib/tx";
 
 import {
   assertEq,
@@ -97,7 +96,6 @@ switch (cmd) {
   case "deploy": {
     console.log(`[recipient] on node before deploy: ${(await node.getContract(me)) !== undefined}`);
     const deploy = await manager.getDeployMethod();
-    const started = Date.now();
     const { receipt } = await deploy.send({
       from: NO_FROM,
       fee: await sponsoredFee(wallet),
@@ -107,26 +105,8 @@ switch (cmd) {
     console.log(`[recipient] deploy tx ${receipt.txHash.toString()} status ${receipt.status}`);
     assertTxSucceeded("[recipient] deploy tx", receipt);
     writePublic({ recipientDeployTx: receipt.txHash.toString() });
-
-    // Wait for `finalized`, logging every status change, and report whether the
-    // sandbox ever gets there. Anvil reports `finalized` 64 L1 blocks behind
-    // head; at the 1s block time that should be a little over a minute.
-    let last = "";
-    const deadline = Date.now() + 10 * 60_000;
-    while (Date.now() < deadline) {
-      const r = await node.getTxReceipt(receipt.txHash);
-      const tips = await node.getChainTips();
-      const line =
-        `status=${r.status} block=${r.blockNumber} tips proposed=${tips.proposed.number} ` +
-        `checkpointed=${tips.checkpointed.block.number} proven=${tips.proven.block.number} ` +
-        `finalized=${tips.finalized.block.number}`;
-      if (line !== last) {
-        console.log(`[recipient] +${Math.round((Date.now() - started) / 1000)}s ${line}`);
-        last = line;
-      }
-      if (r.status === TxStatus.FINALIZED) break;
-      await sleep(3_000);
-    }
+    // Finality (proven, then L1 mined, then finalized) is finality.ts's job;
+    // run.sh runs it on this tx next and fails the run if it never finalizes.
     break;
   }
   case "receive": {

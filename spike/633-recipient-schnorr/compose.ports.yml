@@ -1,0 +1,11 @@
+# Spike-only override of the repo-root docker-compose.yml host ports, so a
+# local anvil or a concurrent run does not collide. run.sh sets both variables
+# and derives L1_RPC_URL / AZTEC_NODE_URL from them. `!override` replaces the
+# root `ports` list instead of appending to it (Compose >= 2.24.4).
+services:
+  anvil:
+    ports: !override
+      - "127.0.0.1:${SPIKE_L1_PORT:?}:8545"
+  aztec-sandbox:
+    ports: !override
+      - "127.0.0.1:${SPIKE_NODE_PORT:?}:8080"

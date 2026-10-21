@@ -6,7 +6,6 @@
  * nothing but public material (addresses, the descriptor, a signature).
  */
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { EmbeddedWallet } from "@aztec/wallets/embedded";
@@ -19,7 +18,9 @@ import { MinedTxStatuses, TxExecutionResult, type TxStatus } from "@aztec/stdlib
 import { headroomGasSettings } from "../../src/aztec-client.js";
 
 export const NODE_URL = process.env["AZTEC_NODE_URL"] ?? "http://localhost:8080";
-export const STATE_DIR = process.env["SPIKE_STATE_DIR"] ?? join(tmpdir(), "spike-633");
+/** Required (run.sh makes a fresh one per run). Empty would resolve to the cwd. */
+export const STATE_DIR = process.env["SPIKE_STATE_DIR"] ?? "";
+if (STATE_DIR === "") throw new Error("SPIKE_STATE_DIR must be set to a non-empty directory");
 const PUBLIC_FILE = join(STATE_DIR, "public.json");
 
 /** A private directory for one party: its PXE store and its secrets. */
