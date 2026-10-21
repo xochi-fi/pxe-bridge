@@ -9,8 +9,12 @@
  *      one secret and salt give two addresses, and the address is recomputed
  *      from the public descriptor by hand, without a wallet or PXE;
  *   3. the function list of the artifact and every access to the signing-key
- *      storage in its source, held to expected.ts, to show there is no
- *      function that changes the signing key.
+ *      storage in its source, held to expected.ts, to show the pinned class
+ *      has no function that changes the signing key. This is a property of the
+ *      CLASS, not the instance: a class upgrade via
+ *      ContractInstanceRegistry.update is not prevented (the entrypoint
+ *      executes arbitrary calls) and must be re-checked at use, current class
+ *      and any scheduled update (check-descriptor.ts does so once).
  *
  * Any drift from expected.ts sets a nonzero exit code.
  *
@@ -109,7 +113,7 @@ async function main(): Promise<void> {
   expectEq("initializerless class id == pinned class id", initless.id.equals(cls.id), false);
 
   // ---------------------------------------------------------------- item 3
-  console.log("\n== 3. functions (rotation check) ==");
+  console.log("\n== 3. functions (no key-rotation function in the pinned class) ==");
   for (const f of SchnorrAccountContractArtifact.functions) {
     const params = f.parameters.map((p) => p.name).join(", ");
     console.log(
@@ -117,7 +121,7 @@ async function main(): Promise<void> {
     );
   }
   expectEq(
-    "function surface",
+    "pinned class function surface",
     SchnorrAccountContractArtifact.functions.map(
       (f) => `${f.functionType} ${f.name}${f.isInitializer ? " init" : ""}`,
     ),
@@ -143,7 +147,7 @@ async function main(): Promise<void> {
     const fns = [...source.slice(0, m.index).matchAll(/\bfn (\w+)/g)];
     return `${fns.at(-1)?.[1] ?? "<none>"}: ${m[1]}`;
   });
-  expectEq("signing_public_key accesses", accesses, pin.SIGNING_KEY_ACCESSES);
+  expectEq("pinned class signing_public_key accesses (one write: constructor initialize)", accesses, pin.SIGNING_KEY_ACCESSES);
   // The declaration plus the accesses above: no other mention (e.g. passing the
   // state variable to a helper) can hide a write.
   expectEq(
@@ -155,6 +159,11 @@ async function main(): Promise<void> {
     (f) => f.functionType === FunctionType.PUBLIC,
   );
   expectEq("public functions", publicFns.map((f) => f.name), ["public_dispatch"]);
+  console.log(
+    "scope: the pinned CLASS has no key-rotation function. A class upgrade via " +
+      "ContractInstanceRegistry.update is not prevented and must be re-checked at use " +
+      "(current class and any scheduled update; check-descriptor.ts).",
+  );
 
   // ---------------------------------------------------------------- item 2
   console.log("\n== 2. address derivation ==");

@@ -6,10 +6,20 @@
  * initializationHash is the one the constructor args produce. Only then
  * re-derive the address (derive.ts) and confirm against the node that
  *   - an instance exists at that address, with exactly the descriptor's class
- *     id, initialization hash, salt, deployer, immutables hash and public keys;
- *   - the class the node has registered under that id has the artifactHash,
- *     private-functions root and public-bytecode commitment we compute from the
- *     shipped SchnorrAccount artifact.
+ *     id, initialization hash, salt, deployer, immutables hash and public keys,
+ *     and with currentContractClassId == originalContractClassId == the pin;
+ *   - the ContractInstanceRegistry holds no scheduled class update for it at
+ *     the latest block (its DelayedPublicMutable update slots are empty);
+ *   - the node's record of the instance's current class (artifactHash,
+ *     private-functions root, served public bytecode) recomputes to the pin.
+ *     This run published the class itself (skipClassPublication: false), so
+ *     this proves the node's record matches, not that it predated the run.
+ *
+ * The pinned class has no rotation function (class-identity.ts), but a class
+ * upgrade via ContractInstanceRegistry.update is not prevented: SchnorrAccount's
+ * entrypoint executes arbitrary calls, so the account can schedule its own
+ * class change. The current class and any scheduled update must be re-checked
+ * at use; this script checks both once, at the latest block.
  *
  *   npx tsx spike/633-recipient-schnorr/check-descriptor.ts [--mutate <case>]
  *
@@ -25,11 +35,13 @@ import { SchnorrAccountContractArtifact } from "@aztec/accounts/schnorr";
 import { AztecAddress } from "@aztec/aztec.js/addresses";
 import { Fr } from "@aztec/aztec.js/fields";
 import { createAztecNodeClient } from "@aztec/aztec.js/node";
+import { ProtocolContractAddress } from "@aztec/aztec.js/protocol";
 import {
   computeContractClassId,
   computePublicBytecodeCommitment,
   getContractClassFromArtifact,
 } from "@aztec/stdlib/contract";
+import { DelayedPublicMutableValues, DelayedPublicMutableValuesWithHash } from "@aztec/stdlib/delayed-public-mutable";
 import { PublicKeys } from "@aztec/stdlib/keys";
 import { z } from "zod";
 
@@ -188,8 +200,9 @@ const node = createAztecNodeClient(NODE_URL);
 const instance = await node.getContract(address);
 check("instance published on node", instance !== undefined);
 if (instance) {
-  check("node instance originalContractClassId", instance.originalContractClassId.equals(local.id), instance.originalContractClassId.toString());
-  check("node instance currentContractClassId", instance.currentContractClassId.equals(local.id), instance.currentContractClassId.toString());
+  check("node instance originalContractClassId == pin", instance.originalContractClassId.equals(local.id), instance.originalContractClassId.toString());
+  check("node instance currentContractClassId == pin", instance.currentContractClassId.equals(local.id), instance.currentContractClassId.toString());
+  check("node instance currentContractClassId == originalContractClassId", instance.currentContractClassId.equals(instance.originalContractClassId));
   check("node instance initializationHash", instance.initializationHash.equals(initializationHash), instance.initializationHash.toString());
   check("node instance salt", instance.salt.equals(descriptor.salt));
   check("node instance deployer", instance.deployer.equals(descriptor.deployer), instance.deployer.toString());
@@ -197,8 +210,25 @@ if (instance) {
   check("node instance publicKeys", instance.publicKeys.equals(descriptor.publicKeys));
 }
 
-const published = await node.getContractClass(local.id);
-check("class registered on node", published !== undefined);
+// ContractInstanceRegistry.update(new_class_id) schedules a class change for
+// msg.sender in `updated_class_ids[address]`, a DelayedPublicMutable. Read it
+// as the PXE's kernel oracle does: all-zero means no update was ever
+// scheduled. A pending one would not show in currentContractClassId yet.
+const { delayedPublicMutableSlot } = await DelayedPublicMutableValuesWithHash.getContractUpdateSlots(address);
+const { svc } = await DelayedPublicMutableValues.readFromTree(delayedPublicMutableSlot, (slot) =>
+  node.getPublicStorageAt("latest", ProtocolContractAddress.ContractInstanceRegistry, slot),
+);
+check(
+  "no class update scheduled or applied in ContractInstanceRegistry (latest block)",
+  svc.isEmpty(),
+  `slot ${delayedPublicMutableSlot} previous=${svc.previous.join(",")} post=${svc.post.join(",")} at=${svc.timestampOfChange}`,
+);
+
+// The node's record of the instance's current class. This run published that
+// class itself, so this shows the record recomputes to the pin, not that the
+// node had it beforehand.
+const published = instance && (await node.getContractClass(instance.currentContractClassId));
+check("node has a class record for the instance's current class id", published !== undefined);
 if (published) {
   check("node class artifactHash", published.artifactHash.equals(local.artifactHash), published.artifactHash.toString());
   check("node class privateFunctionsRoot", published.privateFunctionsRoot.equals(local.privateFunctionsRoot), published.privateFunctionsRoot.toString());
@@ -211,7 +241,7 @@ if (published) {
     privateFunctionsRoot: published.privateFunctionsRoot,
     publicBytecodeCommitment: commitment,
   });
-  check("class id recomputed from node's preimage == pinned class id", nodeClassId.equals(local.id), nodeClassId.toString());
+  check("instance's class id recomputed from the node's record == pinned class id", nodeClassId.equals(local.id), nodeClassId.toString());
 }
 
 // Contrast: a descriptor with only the signing key swapped is a different account.

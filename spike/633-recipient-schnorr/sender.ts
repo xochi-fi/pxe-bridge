@@ -15,12 +15,14 @@ import { join } from "node:path";
 import { NO_FROM } from "@aztec/aztec.js/account";
 import { AztecAddress } from "@aztec/aztec.js/addresses";
 import { Fr, GrumpkinScalar } from "@aztec/aztec.js/fields";
+import { createAztecNodeClient } from "@aztec/aztec.js/node";
 import { TokenContract } from "@aztec/noir-contracts.js/Token";
 
 import {
   assertEq,
   assertTxSucceeded,
   json,
+  NODE_URL,
   openWallet,
   partyDir,
   readPublic,
@@ -28,6 +30,7 @@ import {
   sponsoredFee,
   writePublic,
 } from "./common.js";
+import { PINNED_CLASS_ID } from "./expected.js";
 
 const cmd = process.argv[2];
 const secretFile = join(partyDir("sender"), "secret.json");
@@ -58,6 +61,11 @@ const pub = readPublic();
 
 switch (cmd) {
   case "setup": {
+    // Logged, not asserted: this is the first spike tx, and it publishes the
+    // SchnorrAccount class too, so this is the only point that tells whether
+    // the node had the pinned class before the spike touched it.
+    const preexisting = await createAztecNodeClient(NODE_URL).getContractClass(Fr.fromString(PINNED_CLASS_ID));
+    console.log(`[sender] pinned class ${PINNED_CLASS_ID} on node before any spike tx: ${preexisting !== undefined}`);
     const deploy = await manager.getDeployMethod();
     await deploy.send({
       from: NO_FROM,
