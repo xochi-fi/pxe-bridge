@@ -18,13 +18,25 @@
  *   L1_CHAIN_ID            -- L1 chain id (default: Anvil's, per the SDK)
  *   BRIDGE_AMOUNT          -- Fee Juice amount in wei (default: 1000000000000000000 = 1e18)
  *   PXE_BRIDGE_ACCOUNT_ADDRESS -- the bridge account's recorded address, as the
- *                             bridge reads it. When set, the address the key
- *                             derives to must equal it before anything is
- *                             bridged (SECURITY.md, "Account address pinning")
+ *                             bridge reads it. The address the key derives to
+ *                             must equal it before anything is bridged
+ *                             (SECURITY.md, "Account address pinning")
+ *   PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY -- `1` instead of the address, for a first
+ *                             deployment whose address is not yet known; the
+ *                             derived address is logged, record it
+ *
+ * One of the last two is required: the L1 message commits to the recipient,
+ * so a bridge to an unchecked address cannot be taken back.
  */
 
 import { deriveAccountKeys } from "../src/aztec-client.js";
-import { assertAccountIdentity, resolveAccountIdentityConfig } from "../src/account-identity.js";
+import {
+  ACCOUNT_ADDRESS_ENV,
+  ALLOW_ACCOUNT_DEPLOY_ENV,
+  assertAccountIdentity,
+  resolveAccountIdentityConfig,
+} from "../src/account-identity.js";
+import type { AccountIdentityConfig } from "../src/account-identity.js";
 
 async function main() {
   const SECRET_KEY = process.env["PXE_BRIDGE_SECRET_KEY"];
@@ -57,6 +69,28 @@ async function main() {
     process.exit(1);
   }
 
+  // Resolved before connecting, so a missing record stops the script before it
+  // touches the node or L1.
+  let identity: AccountIdentityConfig;
+  try {
+    identity = resolveAccountIdentityConfig({
+      [ACCOUNT_ADDRESS_ENV]: process.env[ACCOUNT_ADDRESS_ENV],
+      [ALLOW_ACCOUNT_DEPLOY_ENV]: process.env[ALLOW_ACCOUNT_DEPLOY_ENV],
+    });
+  } catch (err) {
+    console.error((err as Error).message);
+    process.exit(1);
+  }
+  if (identity.expectedAddress === undefined && !identity.allowDeploy) {
+    console.error(
+      `${ACCOUNT_ADDRESS_ENV} is required: the L1 bridge commits to the recipient and ` +
+        "cannot be undone, so the address this key derives to is checked against the " +
+        `recorded one first. For a first deployment, whose address is not yet known, set ` +
+        `${ALLOW_ACCOUNT_DEPLOY_ENV}=1 instead.`,
+    );
+    process.exit(1);
+  }
+
   // Shared with AztecClient.connect, not reimplemented. The copy that used to
   // live here built the salt with Fr.fromBuffer and omitted the signing key, so
   // it threw for most keys and derived a different address for the rest.
@@ -74,22 +108,24 @@ async function main() {
   // The claim commits to its recipient on L1, so bridging to an address the
   // bridge will refuse to run as leaves the fee juice claimable only by an
   // account nobody operates.
-  try {
-    const { expectedAddress } = resolveAccountIdentityConfig({
-      PXE_BRIDGE_ACCOUNT_ADDRESS: process.env["PXE_BRIDGE_ACCOUNT_ADDRESS"],
-    });
-    if (expectedAddress) {
+  if (identity.expectedAddress !== undefined) {
+    try {
       assertAccountIdentity({
         role: "Bridge account",
         derived: aztecAddress.toString(),
         derivedClassId: accountManager.getInstance().currentContractClassId.toString(),
-        expected: expectedAddress,
-        expectedSource: "PXE_BRIDGE_ACCOUNT_ADDRESS",
+        expected: identity.expectedAddress,
+        expectedSource: ACCOUNT_ADDRESS_ENV,
       });
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
     }
-  } catch (err) {
-    console.error((err as Error).message);
-    process.exit(1);
+  } else {
+    console.log(
+      `${ALLOW_ACCOUNT_DEPLOY_ENV}=1: bridging to the derived address ` +
+        `${aztecAddress.toString()}. Record it as ${ACCOUNT_ADDRESS_ENV}.`,
+    );
   }
 
   // Get L1 contract addresses from the node via JSON-RPC
