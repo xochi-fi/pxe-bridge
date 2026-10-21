@@ -12,9 +12,12 @@
  *   Poseidon2([SCHNORR_CHALLENGE_DST, R.x, P.x, P.y, message]) == e
  *
  * Deliberately STRICTER than the circuit on encodings, never looser: it
- * refuses s >= n, e >= r and message >= r, which the honest signer never
- * produces. (In-circuit, s and s + n both verify; do not use signature bytes
- * as an identifier.)
+ * refuses s >= n, e >= r, message >= r and coordinates >= r, which the honest
+ * signer never produces. Reading lib.nr: in-circuit, s feeds multi_scalar_mul
+ * mod n, so s and s + n give the same R and both verify; e is compared to the
+ * challenge as lo + hi * 2^128 in Field, so e + r passes that comparison but
+ * also changes e*P. Do not use signature bytes as an identifier. Every strict
+ * branch is a case in cases.ts, with bb.js's verdict on the same input.
  */
 import { weierstrassN } from "@noble/curves/abstract/weierstrass";
 import { poseidon2Hash } from "@zkpassport/poseidon2";
@@ -22,7 +25,7 @@ import { poseidon2Hash } from "@zkpassport/poseidon2";
 /** BN254 scalar field r = Grumpkin base field = Noir `Field`. */
 export const FIELD_MODULUS = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001n;
 /** BN254 base field q = Grumpkin group order. */
-const GRUMPKIN_ORDER = 0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47n;
+export const GRUMPKIN_ORDER = 0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47n;
 
 /** y^2 = x^3 - 17 over Fr, generator (1, sqrt(-16)) = Noir EmbeddedCurvePoint::generator(). */
 export const Grumpkin = weierstrassN({
@@ -86,9 +89,11 @@ export function verifySchnorrGrumpkin(
 /**
  * PROVISIONAL reduction of a 32-byte digest (e.g. an EIP-712 digest) into the
  * message field: big-endian integer mod r. Matches Fr.fromBufferReduce in
- * @aztec/foundation, which is what the spike's signer used.
+ * @aztec/foundation, which is what the spike's signer used. Throws unless the
+ * digest is exactly 32 bytes, so 00 || d never maps to the same field as d.
  */
 export function digestToField(digest: Uint8Array): bigint {
+  if (digest.length !== 32) throw new Error(`digest must be 32 bytes, got ${digest.length}`);
   let v = 0n;
   for (const b of digest) v = (v << 8n) | BigInt(b);
   return v % FIELD_MODULUS;
