@@ -32,9 +32,20 @@
  * Optional env:
  *   AZTEC_NODE_URL  -- Aztec node (default: http://localhost:8080)
  *
- * After a successful update, change PXE_BRIDGE_ALLOWLIST_RECIPIENTS to the set
- * this prints and restart the bridge. Until you do, the bridge refuses to send:
- * it checks its root against the account's before every transfer.
+ * After a successful update the bridge refuses to send until it runs on the
+ * set this prints as PXE_BRIDGE_ALLOWLIST_RECIPIENTS: it checks its root
+ * against the account's before every transfer.
+ *
+ * A bridge with PXE_BRIDGE_ACCOUNT_ADDRESS recorded (required in production)
+ * also refuses to RESTART on the new set. The allowlist root, like
+ * PXE_BRIDGE_MAX_AMOUNT and PXE_BRIDGE_DAILY_LIMIT, is a constructor argument
+ * of the spending-limit account, so a new set derives a different address and
+ * connect() refuses it. Until the deployment record (xochi-fi/pxe-bridge#42)
+ * fixes the constructor inputs, such a bridge cannot send after this script
+ * runs. Do NOT unset PXE_BRIDGE_ACCOUNT_ADDRESS or set
+ * PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1 to bring it up: without the recorded
+ * address the bridge derives the new address and deploys a fresh, empty
+ * account there. See SECURITY.md, "Account address pinning".
  *
  * Before sending, the admin this key derives to is checked against the admin
  * stored in the account, and a mismatch is refused. An SDK that changes the
@@ -231,7 +242,16 @@ async function main(): Promise<void> {
       : current.filter((r) => r.index !== plan.index);
 
   console.log("[update-allowlist] done");
-  console.log("[update-allowlist] set PXE_BRIDGE_ALLOWLIST_RECIPIENTS to this and restart:");
+  console.warn(
+    "[update-allowlist] The bridge refuses to send until it runs on the set below. " +
+      "With PXE_BRIDGE_ACCOUNT_ADDRESS recorded it also refuses to restart on it: the " +
+      "allowlist root is a constructor argument, so the new set derives a different " +
+      "account address. Until xochi-fi/pxe-bridge#42 lands there is no supported " +
+      "restart. Do NOT unset PXE_BRIDGE_ACCOUNT_ADDRESS or set " +
+      "PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1 to bring it up: that deploys a fresh, empty " +
+      'account at the new address. See SECURITY.md, "Account address pinning".',
+  );
+  console.log("[update-allowlist] new PXE_BRIDGE_ALLOWLIST_RECIPIENTS:");
   console.log(JSON.stringify(nextConfig));
 }
 

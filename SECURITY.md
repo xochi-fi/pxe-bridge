@@ -374,10 +374,13 @@ the new runtime derives.
 
 ### What refuses
 
-A moved address cannot be avoided by derivation, so it is made loud. Every place
-that derives a plain Schnorr account checks it against a recorded or on-chain
-address before acting, and refuses with both addresses and the class in the
-message (`src/account-identity.ts`):
+A moved address cannot be avoided by derivation, so it is made loud. The
+call sites below check the derived account against a recorded or on-chain
+address before acting, and refuse with both addresses and the class in the
+message (`src/account-identity.ts`). Two derivations are not checked: the
+spending-limit deployer (`ensureDeployer` in `src/aztec-client.ts`, the same
+key under salt + 1) and `scripts/test-deploy.ts`, which constructs
+`AztecClient` without `expectedAccountAddress`.
 
 - **The bridge** (`connect()`) refuses an account that derives away from
   `PXE_BRIDGE_ACCOUNT_ADDRESS` before it deploys, serves or sets a sending
@@ -393,8 +396,11 @@ message (`src/account-identity.ts`):
   that derives to anyone else, before sending.
 - **`top-up-fee-juice.ts`** requires `FEE_JUICE_PAYER_ADDRESS` and refuses a
   payer key that derives elsewhere, before the L1 write.
-- **`bridge-fee-juice.ts`** checks `PXE_BRIDGE_ACCOUNT_ADDRESS` when set, before
-  bridging, since the L1 message commits to the recipient.
+- **`bridge-fee-juice.ts`** requires `PXE_BRIDGE_ACCOUNT_ADDRESS` and refuses a
+  key that derives elsewhere, before bridging, since the L1 message commits to
+  the recipient. The only way to run it without the address is
+  `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1`, for a first deployment; it then logs the
+  derived address it bridges to.
 
 In spending-limit mode the bridge's address also moves when the constructor
 inputs do (limits, admin, token, allowlist root), so with an address recorded a

@@ -83,6 +83,23 @@ anything else:
    is ...", do not change the variable to the new address to make it start.
    Read SECURITY.md, "Account address pinning", first.
 
+In spending-limit mode the address also commits to the account's constructor
+inputs: admin, token, `PXE_BRIDGE_MAX_AMOUNT`, `PXE_BRIDGE_DAILY_LIMIT` and the
+allowlist root. Changing any of them, including through
+`npm run update-allowlist`, moves the derived address, so a bridge with
+`PXE_BRIDGE_ACCOUNT_ADDRESS` recorded refuses to restart on the new values
+until the deployment record (xochi-fi/pxe-bridge#42) lands. Do not unset
+`PXE_BRIDGE_ACCOUNT_ADDRESS` or set `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1` to bring
+it up: without the recorded address the bridge deploys a fresh, empty account at
+the new address.
+
+Upgrading without the old logs, you can see the address this key derives to
+without deploying anything. Set `PXE_BRIDGE_ACCOUNT_ADDRESS` to the address you
+believe is funded (or any nonzero 32-byte placeholder) and start the bridge.
+`connect()` logs `[pxe-bridge] Account address: 0x...` and, on a mismatch,
+refuses before deploying, with an error naming the derived address. If the
+address is not the funded one, do not record it; see step 3.
+
 ### Docker
 
 ```bash
@@ -135,7 +152,7 @@ gets it depends on which account it runs:
 
 | Account | How it pays | How you fund it |
 | --- | --- | --- |
-| Plain Schnorr (default) | Claims during deployment | `npm run bridge-fee-juice`, then set `FEE_JUICE_CLAIM` |
+| Plain Schnorr (default) | Claims during deployment | `npm run bridge-fee-juice` (with `PXE_BRIDGE_ACCOUNT_ADDRESS`, or `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1` before the first deployment), then set `FEE_JUICE_CLAIM` |
 | Spending limit (`PXE_BRIDGE_SPENDING_LIMIT_ADMIN`) | Pre-existing balance only | `npm run top-up-fee-juice` |
 
 The spending-limit account cannot claim for itself. Its entrypoint admits
