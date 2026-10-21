@@ -38,11 +38,19 @@ jobs:
   # the previously committed artifact was broken.
   contract:
     runs-on: ubuntu-latest
-    # The one place the toolchain version is written. It has to match the
-    # aztec-nr dependency in contracts/spending_limit_account/Nargo.toml and the
-    # Aztec SDK in package.json, and it is asserted below rather than assumed.
+    # The one place the COMPILE toolchain version is written. It has to match
+    # the aztec-nr dependency in contracts/spending_limit_account/Nargo.toml, and
+    # it is asserted below rather than assumed.
+    #
+    # It is deliberately NOT the runtime version. The runtime (the @aztec/* SDK
+    # in package.json and the sandbox image in docker-compose.yml) is 5.2.0; the
+    # contract stays on aztec-nr v5.1.0 compiled by 5.1.0, because the class ID
+    # and so the account address derive from this build's bytecode, which is
+    # what NM-1019 audited. The class ID check below loads this 5.1.0 artifact
+    # through the 5.2.0 SDK, so it also checks that the runtime derives the
+    # committed class ID from it.
     env:
-      AZTEC_VERSION: "5.1.0"
+      AZTEC_COMPILE_VERSION: "5.1.0"
     steps:
       - uses: actions/checkout@v4
       # Needed by the class ID check below, which loads the artifact through
@@ -77,7 +85,7 @@ jobs:
           # red build over something we do not use; failing on a missing
           # `aztec` or `aztec-nargo` is real and still fails below.
           set +e
-          aztec-up install "$AZTEC_VERSION"
+          aztec-up install "$AZTEC_COMPILE_VERSION"
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
@@ -91,9 +99,9 @@ jobs:
           # nargo 1.0.0-beta.25, under which aztec-nr 5.1.0's own test helpers
           # do not compile. The job failed with 277 errors inside
           # macros/oracle_testing.nr and none in this contract.
-          root="$HOME/.aztec/versions/$AZTEC_VERSION"
+          root="$HOME/.aztec/versions/$AZTEC_COMPILE_VERSION"
           if [ ! -d "$root" ]; then
-            echo "$AZTEC_VERSION is not installed (aztec-up exited $status); tree under ~/.aztec:"
+            echo "$AZTEC_COMPILE_VERSION is not installed (aztec-up exited $status); tree under ~/.aztec:"
             find "$HOME/.aztec" -maxdepth 3
             exit 1
           fi
@@ -122,8 +130,8 @@ jobs:
         run: |
           aztec-nargo --version
           found=$(aztec --version)
-          if [ "$found" != "$AZTEC_VERSION" ]; then
-            echo "::error::toolchain drifted: aztec --version reports $found, expected $AZTEC_VERSION"
+          if [ "$found" != "$AZTEC_COMPILE_VERSION" ]; then
+            echo "::error::toolchain drifted: aztec --version reports $found, expected $AZTEC_COMPILE_VERSION"
             echo "PATH resolves aztec to: $(command -v aztec)"
             exit 1
           fi

@@ -7,6 +7,7 @@ import { SponsoredFPCContract } from "@aztec/noir-contracts.js/SponsoredFPC";
 import type { AztecAddress } from "@aztec/aztec.js/addresses";
 import type { GasFees } from "@aztec/stdlib/gas";
 import { PostSubmissionError } from "./types.js";
+import { ACCOUNT_ADDRESS_ENV, assertAccountIdentity } from "./account-identity.js";
 import type { CreateNoteParams, CreateNoteResult, FeeJuiceClaim, IAztecClient } from "./types.js";
 import {
   SpendingLimitAccountContract,
@@ -185,6 +186,13 @@ export interface AztecClientOptions {
    * AztecClient's in the same process; see {@link claimWalletDataDirectory}.
    */
   dataDirectory?: string;
+  /**
+   * The address the operator recorded for this bridge's account
+   * (PXE_BRIDGE_ACCOUNT_ADDRESS). When set, connect() refuses an account that
+   * derives anywhere else before deploying or using it. index.ts requires it
+   * in production; see resolveAccountIdentityConfig.
+   */
+  expectedAccountAddress?: string;
 }
 
 /** The slice of AztecNode createNote needs to read a tx effect back. */
@@ -274,6 +282,7 @@ export class AztecClient implements IAztecClient {
   private spendingLimitContract: SpendingLimitAccountContract | null = null;
 
   private readonly dataDirectory: string;
+  private readonly expectedAccountAddress: string | undefined;
   /** Set once this client holds its directory; a retried connect() reuses it. */
   private claimedDataDirectory: string | null = null;
 
@@ -293,6 +302,7 @@ export class AztecClient implements IAztecClient {
     }
     this.secretKey = secretKey;
     this.dataDirectory = options.dataDirectory ?? DEFAULT_WALLET_DATA_DIRECTORY;
+    this.expectedAccountAddress = options.expectedAccountAddress;
   }
 
   async connect(): Promise<void> {
@@ -322,11 +332,27 @@ export class AztecClient implements IAztecClient {
 
     const account = await accountManager.getAccount();
     const address = account.getAddress();
-    this.solverAddress = address;
     // Logged because the operator needs it: the spending-limit account cannot
     // obtain fee juice for itself, and topping it up means naming this address
     // to scripts/top-up-fee-juice.ts. Public on chain either way.
     console.log(`[pxe-bridge] Account address: ${address.toString()}`);
+
+    // Before anything is deployed at, or served from, the derived address, and
+    // before solverAddress is set, so a caller that catches this cannot go on
+    // to send from the wrong account. A key whose account was deployed by a
+    // 5.1.0 runtime derives a different address under 5.2.0, and deploying
+    // there would put a fresh, empty account where the operator believes the
+    // funded one is.
+    if (this.expectedAccountAddress !== undefined) {
+      assertAccountIdentity({
+        role: "Bridge account",
+        derived: address.toString(),
+        derivedClassId: accountManager.getInstance().currentContractClassId.toString(),
+        expected: this.expectedAccountAddress,
+        expectedSource: ACCOUNT_ADDRESS_ENV,
+      });
+    }
+    this.solverAddress = address;
 
     // Deploy account contract if not already on-chain.
     // Cannot rely on wallet.getAccounts() since the local WalletDB is

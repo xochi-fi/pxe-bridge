@@ -1,6 +1,12 @@
 import { AztecClient, FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR, TX_TIMEOUT_MS } from "./aztec-client.js";
 import { createApp, RESPONSE_TIMEOUT_MS } from "./server.js";
 import { AllowlistRecipientsSchema, FeeJuiceClaimSchema } from "./types.js";
+import {
+  ACCOUNT_ADDRESS_ENV,
+  ALLOW_ACCOUNT_DEPLOY_ENV,
+  resolveAccountIdentityConfig,
+  type AccountIdentityConfig,
+} from "./account-identity.js";
 import { TransactionLimits, type LimitsConfig } from "./limits.js";
 import { AuditLogger, replayAuditLog } from "./audit.js";
 import { IdempotencyStore } from "./idempotency.js";
@@ -152,6 +158,18 @@ if (limits && !ADMIN_KEY) {
     "[pxe-bridge] WARNING: PXE_BRIDGE_ADMIN_KEY not set -- a tripped circuit " +
       "breaker can only be cleared by restarting the process",
   );
+}
+
+// The bridge account's recorded address, checked in connect() against what the
+// key derives to before anything is deployed or served. Required in
+// production; see resolveAccountIdentityConfig for why and for the first-deploy
+// flag.
+let accountIdentity: AccountIdentityConfig;
+try {
+  accountIdentity = resolveAccountIdentityConfig(process.env);
+} catch (err) {
+  console.error(`[pxe-bridge] ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
 }
 
 // On-chain spending limit account (Phase 2).
@@ -338,7 +356,11 @@ async function main(): Promise<void> {
     );
   }
 
-  const client = new AztecClient(AZTEC_NODE_URL, secretKey, feeJuiceClaim, spendingLimitConfig);
+  const client = new AztecClient(AZTEC_NODE_URL, secretKey, feeJuiceClaim, spendingLimitConfig, {
+    ...(accountIdentity.expectedAddress
+      ? { expectedAccountAddress: accountIdentity.expectedAddress }
+      : {}),
+  });
   const server = createApp(client, {
     apiKey: API_KEY,
     adminKey: ADMIN_KEY,
@@ -348,6 +370,18 @@ async function main(): Promise<void> {
   });
 
   await client.connect();
+
+  // Printed on every unrecorded start, not just the first, so a missed first
+  // print is not the end of it.
+  if (!accountIdentity.expectedAddress) {
+    console.warn(
+      `[pxe-bridge] WARNING: ${ACCOUNT_ADDRESS_ENV} is not set. Record this account's ` +
+        `address as ${ACCOUNT_ADDRESS_ENV}=${client.getAddress()}` +
+        (accountIdentity.allowDeploy ? ` and remove ${ALLOW_ACCOUNT_DEPLOY_ENV}` : "") +
+        ". Until then a change of key, SDK or account class moves the bridge to a " +
+        "different, empty account without an error.",
+    );
+  }
 
   server.listen(PORT, HOST, () => {
     console.log(`[pxe-bridge] Listening on ${HOST}:${PORT}`);

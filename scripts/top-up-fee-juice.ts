@@ -20,6 +20,11 @@
  *                             as "[pxe-bridge] Account address:")
  *   FEE_JUICE_PAYER_KEY    -- 32-byte hex secret key of the account that sends
  *                             the claim; needs its own fee juice
+ *   FEE_JUICE_PAYER_ADDRESS -- the payer's recorded AztecAddress. The address
+ *                             the key derives to must equal it, or nothing is
+ *                             sent: an SDK that changes the stock SchnorrAccount
+ *                             class derives a different payer address
+ *                             (SECURITY.md, "Account address pinning")
  *   L1_PRIVATE_KEY         -- Ethereum private key with a Fee Juice ERC20 balance
  *
  * Optional env:
@@ -32,6 +37,7 @@
  */
 
 import { deriveAccountKeys } from "../src/aztec-client.js";
+import { assertAccountIdentity } from "../src/account-identity.js";
 import { assertAztecAddress, assertBridgeAmount, topUpFeeJuice } from "../src/fee-juice.js";
 import type { ClaimingWallet } from "../src/fee-juice.js";
 
@@ -62,6 +68,7 @@ function parseBigInt(name: string, raw: string): bigint {
 async function main(): Promise<void> {
   const RECIPIENT = required("FEE_JUICE_RECIPIENT");
   const PAYER_KEY = required("FEE_JUICE_PAYER_KEY");
+  const PAYER_ADDRESS = required("FEE_JUICE_PAYER_ADDRESS");
   const L1_PRIVATE_KEY = required("L1_PRIVATE_KEY");
   // Cleared for the same reason AztecClient nulls its own reference: neither
   // key has any further use once the account and the L1 client exist.
@@ -79,6 +86,7 @@ async function main(): Promise<void> {
   // running them again is about the ordering, not about the checks.
   try {
     assertAztecAddress("FEE_JUICE_RECIPIENT", RECIPIENT);
+    assertAztecAddress("FEE_JUICE_PAYER_ADDRESS", PAYER_ADDRESS);
     assertBridgeAmount(AMOUNT);
   } catch (err) {
     console.error((err as Error).message);
@@ -101,6 +109,21 @@ async function main(): Promise<void> {
   const manager = await wallet.createSchnorrAccount(secret, salt, signingKey);
   const payer = (await manager.getAccount()).getAddress();
   console.log(`Payer account: ${payer.toString()}`);
+
+  // Before the L1 write. A payer that derives elsewhere is not the account
+  // the operator funded, and the fee juice at the recorded one cannot be moved.
+  try {
+    assertAccountIdentity({
+      role: "Fee juice payer",
+      derived: payer.toString(),
+      derivedClassId: manager.getInstance().currentContractClassId.toString(),
+      expected: PAYER_ADDRESS,
+      expectedSource: "FEE_JUICE_PAYER_ADDRESS",
+    });
+  } catch (err) {
+    console.error((err as Error).message);
+    process.exit(1);
+  }
 
   // Asked of the node, not the PXE. createSchnorrAccount registers the instance
   // locally whether or not anything was ever deployed, so a PXE-side lookup

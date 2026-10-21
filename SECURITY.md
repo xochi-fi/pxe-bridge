@@ -101,8 +101,10 @@ Combined with the rest of this change set:
 ### Validation
 
 The binding depends on the `AppPayload` serialized layout (`[FunctionCall; 5]`
-+ `tx_nonce` = 31 fields, each call serialized in declaration order) pinned to
-Aztec v5.1.0. It is validated three ways:
++ `tx_nonce` = 31 fields, each call serialized in declaration order). The
+contract side is pinned to aztec-nr v5.1.0; the client side is encoded by
+`@aztec/entrypoints` from the Aztec 5.2.0 SDK, whose built code is identical to
+5.1.0's, so both sides still agree on the layout. It is validated three ways:
 
 - `aztec-nargo test` unit tests in `contracts/spending_limit_account/src/main.nr`:
   `function_call_serialize_layout` asserts `args_hash`/`target_address` sit at
@@ -283,6 +285,14 @@ The `contract` CI job installs the Aztec toolchain by piping
 against, so the build trusts that endpoint. `aztec-up install 5.1.0` pins the
 toolchain version but not the installer that fetches it.
 
+That toolchain is the contract's compile toolchain only, and it is deliberately
+older than the 5.2.0 runtime (SDK, PXE, sandbox). The contract stays on aztec-nr
+v5.1.0 because its class ID, and with it the account address, derives from the
+compiled bytecode, and that bytecode is what NM-1019 audited. Moving the compile
+toolchain would move the address and put unaudited bytecode behind it. The
+committed `CLASS_ID` is checked against the 5.1.0-compiled artifact as loaded by
+the 5.2.0 SDK.
+
 **This has already bitten, benignly.** On 2026-08-26 every `contract` job began
 failing at install with `expected bundled binary 'forge' missing from
 ~/.aztec/versions/5.1.0/internal-bin`. The commit that passed on 19 Aug fails the
@@ -336,6 +346,70 @@ The artifact a deployment was made against should still be archived rather than
 regenerated: the installer exposure above can change the build regardless. The
 CI job uploads it on every run, before the class ID check, so a drifted build is
 preserved for comparison.
+
+## Account address pinning
+
+An Aztec address commits to the account contract's class as well as to its key
+and salt, so an SDK upgrade that ships a different stock `SchnorrAccount`
+artifact moves every plain Schnorr address this repo derives even though no key
+changed: the bridge's own account (when `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` is
+unset), the spending-limit deployer (`ensureDeployer`), the fee juice payer
+(`scripts/top-up-fee-juice.ts`), and the spending-limit admin as
+`scripts/update-allowlist.ts` derives it. Aztec 5.2.0 did this: the class moved
+from `0x0191cefaf68870dd09c29d402946976c9def479ee7f343061b6574fa401af98d`
+(5.1.0) to `0x0833459dfb3c430326e50f2367ec093e07b4ed37d23e85cc759ef4f9aa800edd`
+(5.2.0). No bridge had been deployed on a 5.1.0 runtime, so nothing moved with
+it; the next SDK bump that changes the class will move them again.
+
+A moved address is a new, empty account. Balances at the old one are out of
+reach (fee juice cannot be transferred at all), and the spending-limit `admin`
+is a `PublicImmutable` with no rotation path, so an admin that moved can no
+longer `pause`, `unpause`, `update_recipient` or change limits. The
+spending-limit account itself does not move: its class is the pinned
+`CLASS_ID`, compiled by the 5.1.0 toolchain, and it is deployed with a zero
+deployer. Before an SDK upgrade that moves the Schnorr class on a live
+deployment, empty the plain Schnorr accounts and, for a spending-limit account,
+move its balance to an allowlisted address, pause it and redeploy with an admin
+the new runtime derives.
+
+### What refuses
+
+A moved address cannot be avoided by derivation, so it is made loud. The
+call sites below check the derived account against a recorded or on-chain
+address before acting, and refuse with both addresses and the class in the
+message (`src/account-identity.ts`). Two derivations are not checked: the
+spending-limit deployer (`ensureDeployer` in `src/aztec-client.ts`, the same
+key under salt + 1) and `scripts/test-deploy.ts`, which constructs
+`AztecClient` without `expectedAccountAddress`.
+
+- **The bridge** (`connect()`) refuses an account that derives away from
+  `PXE_BRIDGE_ACCOUNT_ADDRESS` before it deploys, serves or sets a sending
+  address. In production `PXE_BRIDGE_ACCOUNT_ADDRESS` is required; the only way
+  to start without it is `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1`, named for the
+  first deployment, which cannot know its address in advance. An upgraded
+  deployment that sets nothing therefore stops at startup instead of deploying
+  a fresh account. Setting the flag on an upgraded deployment is consent to a
+  new account; it is not a way past the check when an address is recorded.
+- **`update-allowlist.ts`** reads the admin stored in the account (the
+  contract has no getter, so it reads the `admin` slot from public storage,
+  after checking the instance runs the spending-limit class) and refuses a key
+  that derives to anyone else, before sending.
+- **`top-up-fee-juice.ts`** requires `FEE_JUICE_PAYER_ADDRESS` and refuses a
+  payer key that derives elsewhere, before the L1 write.
+- **`bridge-fee-juice.ts`** requires `PXE_BRIDGE_ACCOUNT_ADDRESS` and refuses a
+  key that derives elsewhere, before bridging, since the L1 message commits to
+  the recipient. The only way to run it without the address is
+  `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1`, for a first deployment; it then logs the
+  derived address it bridges to.
+
+In spending-limit mode the bridge's address also moves when the constructor
+inputs do (limits, admin, token, allowlist root), so with an address recorded a
+restart after `update-allowlist` or new limits refuses rather than deploying an
+empty account. The deployment record in PR #42 (`PXE_BRIDGE_ACCOUNT_DEPLOYMENT`)
+fixes the inputs and removes that refusal. When it lands the two compose: in
+spending-limit mode the record's `address` satisfies the production
+requirement, a separately set `PXE_BRIDGE_ACCOUNT_ADDRESS` must equal it, and
+`PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY` keeps one meaning in both.
 
 ## Application-level limits
 

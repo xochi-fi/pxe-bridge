@@ -32,9 +32,26 @@
  * Optional env:
  *   AZTEC_NODE_URL  -- Aztec node (default: http://localhost:8080)
  *
- * After a successful update, change PXE_BRIDGE_ALLOWLIST_RECIPIENTS to the set
- * this prints and restart the bridge. Until you do, the bridge refuses to send:
- * it checks its root against the account's before every transfer.
+ * After a successful update the bridge refuses to send until it runs on the
+ * set this prints as PXE_BRIDGE_ALLOWLIST_RECIPIENTS: it checks its root
+ * against the account's before every transfer.
+ *
+ * A bridge with PXE_BRIDGE_ACCOUNT_ADDRESS recorded (required in production)
+ * also refuses to RESTART on the new set. The allowlist root, like
+ * PXE_BRIDGE_MAX_AMOUNT and PXE_BRIDGE_DAILY_LIMIT, is a constructor argument
+ * of the spending-limit account, so a new set derives a different address and
+ * connect() refuses it. Until the deployment record (xochi-fi/pxe-bridge#42)
+ * fixes the constructor inputs, such a bridge cannot send after this script
+ * runs. Do NOT unset PXE_BRIDGE_ACCOUNT_ADDRESS or set
+ * PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1 to bring it up: without the recorded
+ * address the bridge derives the new address and deploys a fresh, empty
+ * account there. See SECURITY.md, "Account address pinning".
+ *
+ * Before sending, the admin this key derives to is checked against the admin
+ * stored in the account, and a mismatch is refused. An SDK that changes the
+ * stock SchnorrAccount class derives a different admin address from the same
+ * key, and the account's admin is immutable. See SECURITY.md, "Account address
+ * pinning".
  */
 
 import { AllowlistTree, allowlistLeaf } from "../src/allowlist-tree.js";
@@ -123,10 +140,14 @@ async function main(): Promise<void> {
 
   const { Fr } = await import("@aztec/foundation/curves/bn254");
   const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+  const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
   const { EmbeddedWallet } = await import("@aztec/wallets/embedded");
   const { Contract } = await import("@aztec/aztec.js/contracts");
   const { SpendingLimitAccountContract } = await import("../src/spending-limit-account.js");
   const { deriveAccountKeys } = await import("../src/aztec-client.js");
+  const { assertAccountIdentity, readSpendingLimitAdmin } = await import(
+    "../src/account-identity.js"
+  );
 
   // The tree as it stands. The witness for the position being changed is what
   // proves to the contract that nothing else moved.
@@ -182,8 +203,26 @@ async function main(): Promise<void> {
     allowlistRecipients: current,
   }).getContractArtifact();
 
+  const accountAddress = AztecAddress.fromStringUnsafe(account);
+
+  // Refused before anything is sent. The contract would revert "Not admin"
+  // anyway, but only after the operator has paid for it and with nothing
+  // saying why the key no longer reaches the admin.
+  const onChainAdmin = await readSpendingLimitAdmin(
+    createAztecNodeClient(NODE_URL),
+    accountAddress,
+    artifact,
+  );
+  assertAccountIdentity({
+    role: "Admin signer",
+    derived: adminAddress.toString(),
+    derivedClassId: manager.getInstance().currentContractClassId.toString(),
+    expected: onChainAdmin,
+    expectedSource: `the admin stored in ${account}`,
+  });
+
   const contract = await Contract.at(
-    AztecAddress.fromStringUnsafe(account) as Parameters<typeof Contract.at>[0],
+    accountAddress as Parameters<typeof Contract.at>[0],
     artifact as Parameters<typeof Contract.at>[1],
     wallet as unknown as Parameters<typeof Contract.at>[2],
   );
@@ -203,7 +242,16 @@ async function main(): Promise<void> {
       : current.filter((r) => r.index !== plan.index);
 
   console.log("[update-allowlist] done");
-  console.log("[update-allowlist] set PXE_BRIDGE_ALLOWLIST_RECIPIENTS to this and restart:");
+  console.warn(
+    "[update-allowlist] The bridge refuses to send until it runs on the set below. " +
+      "With PXE_BRIDGE_ACCOUNT_ADDRESS recorded it also refuses to restart on it: the " +
+      "allowlist root is a constructor argument, so the new set derives a different " +
+      "account address. Until xochi-fi/pxe-bridge#42 lands there is no supported " +
+      "restart. Do NOT unset PXE_BRIDGE_ACCOUNT_ADDRESS or set " +
+      "PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1 to bring it up: that deploys a fresh, empty " +
+      'account at the new address. See SECURITY.md, "Account address pinning".',
+  );
+  console.log("[update-allowlist] new PXE_BRIDGE_ALLOWLIST_RECIPIENTS:");
   console.log(JSON.stringify(nextConfig));
 }
 

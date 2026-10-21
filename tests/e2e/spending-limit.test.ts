@@ -1,6 +1,13 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect, beforeAll } from "vitest";
+import { loadContractArtifact } from "@aztec/stdlib/abi";
 import { AztecClient } from "../../src/aztec-client.js";
 import type { SpendingLimitConfig } from "../../src/spending-limit-account.js";
+import {
+  SCHNORR_CLASS_ID_5_2_0,
+  assertAccountIdentity,
+  readSpendingLimitAdmin,
+} from "../../src/account-identity.js";
 import {
   getTestConfig,
   deployTestToken,
@@ -435,6 +442,52 @@ describe("spending limit account (e2e)", () => {
       await callAccount(client, accountAddress, funderWallet, adminAddress, "cancel_limits", []),
     ).toBe("success");
   }, 600_000);
+
+  // UPGRADE GUARD -- the admin is immutable, and a key whose admin account was
+  // deployed under a 5.1.0 runtime derives a different address under 5.2.0.
+  // scripts/update-allowlist.ts composes exactly these two calls before it
+  // sends anything; this is the only place they meet a real account.
+  it("reads the stored admin and refuses any other admin signer", async (ctx) => {
+    if (deployFailure) return ctx.skip();
+    const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
+    const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+    const node = createAztecNodeClient(config.nodeUrl);
+    // The artifact the account was deployed from: the e2e job downloads the
+    // contract job's build into target/.
+    const artifact = loadContractArtifact(
+      JSON.parse(
+        readFileSync(
+          "contracts/spending_limit_account/target/spending_limit_account_contract-SpendingLimitAccount.json",
+          "utf8",
+        ),
+      ),
+    );
+
+    const stored = await readSpendingLimitAdmin(
+      node,
+      AztecAddress.fromStringUnsafe(accountAddress),
+      artifact,
+    );
+    expect(stored.toLowerCase()).toBe(adminAddress.toLowerCase());
+
+    const asSigner = (derived: string) =>
+      assertAccountIdentity({
+        role: "Admin signer",
+        derived,
+        derivedClassId: SCHNORR_CLASS_ID_5_2_0,
+        expected: stored,
+        expectedSource: `the admin stored in ${accountAddress}`,
+      });
+    expect(() => asSigner(adminAddress)).not.toThrow();
+    expect(() => asSigner(UNLISTED_RECIPIENT)).toThrow(
+      new RegExp(`Admin signer derives to ${UNLISTED_RECIPIENT}`),
+    );
+
+    // A slot read from any other contract means nothing, so it is refused.
+    await expect(
+      readSpendingLimitAdmin(node, AztecAddress.fromStringUnsafe(tokenAddress), artifact),
+    ).rejects.toThrow(/not the spending-limit account class/);
+  });
 });
 
 /**
