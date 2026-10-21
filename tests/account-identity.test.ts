@@ -52,6 +52,12 @@ describe("resolveAccountIdentityConfig", () => {
     );
   });
 
+  it("rejects a set-but-empty recorded address rather than reading it as unset", () => {
+    expect(() =>
+      resolveAccountIdentityConfig({ NODE_ENV: "development", [ACCOUNT_ADDRESS_ENV]: "" }),
+    ).toThrow(new RegExp(`${ACCOUNT_ADDRESS_ENV} is set but empty`));
+  });
+
   it("rejects a zero recorded address", () => {
     expect(() =>
       resolveAccountIdentityConfig({ [ACCOUNT_ADDRESS_ENV]: "0x" + "0".repeat(64) }),

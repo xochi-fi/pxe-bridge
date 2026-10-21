@@ -71,6 +71,14 @@ export function resolveAccountIdentityConfig(env: NodeJS.ProcessEnv): AccountIde
   const allowDeploy = env[ALLOW_ACCOUNT_DEPLOY_ENV] === "1";
 
   if (expectedAddress !== undefined) {
+    // Fail-closed like any other bad value, but named: `VAR=` in an env file
+    // reads as "unset" to an operator and as "malformed" to the regex below.
+    if (expectedAddress === "") {
+      throw new Error(
+        `${ACCOUNT_ADDRESS_ENV} is set but empty. Unset it, or set it to the recorded ` +
+          "account address.",
+      );
+    }
     if (!HEX32.test(expectedAddress)) {
       throw new Error(`${ACCOUNT_ADDRESS_ENV} must be a 32-byte hex AztecAddress`);
     }
@@ -116,14 +124,24 @@ export interface AccountIdentityCheck {
  */
 export function assertAccountIdentity(check: AccountIdentityCheck): void {
   if (check.derived.toLowerCase() === check.expected.toLowerCase()) return;
+  // The SDK class change explains a mismatch only when the derived instance is
+  // the stock 5.2.0 SchnorrAccount. The spending-limit account's class is
+  // pinned, so its address moves with its constructor inputs instead.
+  const cause =
+    check.derivedClassId.toLowerCase() === SCHNORR_CLASS_ID_5_2_0
+      ? "An address commits to its contract class as well as its key and salt, so an " +
+        "SDK whose stock SchnorrAccount class differs moves it: Aztec 5.2.0 changed that " +
+        `class from ${SCHNORR_CLASS_ID_5_1_0} to ${SCHNORR_CLASS_ID_5_2_0}. `
+      : "An address commits to its contract class and to the account's constructor " +
+        "inputs (for the spending-limit account: signing key, admin, token, " +
+        "PXE_BRIDGE_MAX_AMOUNT, PXE_BRIDGE_DAILY_LIMIT and the allowlist root), so one " +
+        "of those differs from the deployment's. ";
   throw new Error(
     `${check.role} derives to ${check.derived} (contract class ${check.derivedClassId}), ` +
       `but ${check.expectedSource} is ${check.expected}. Refusing to use, deploy or sign ` +
-      "as any account other than the recorded one. An address commits to its contract " +
-      "class as well as its key and salt (and, for the spending-limit account, its " +
-      "constructor inputs), so an SDK whose stock SchnorrAccount class differs moves it: " +
-      `Aztec 5.2.0 changed that class from ${SCHNORR_CLASS_ID_5_1_0} to ` +
-      `${SCHNORR_CLASS_ID_5_2_0}. Do not re-record the derived address to make this start. ` +
+      "as any account other than the recorded one. " +
+      cause +
+      "Do not re-record the derived address to make this start. " +
       'See SECURITY.md, "Account address pinning".',
   );
 }
