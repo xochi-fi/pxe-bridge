@@ -14,6 +14,7 @@ import { SponsoredFPCContract } from "@aztec/noir-contracts.js/SponsoredFPC";
 import { SponsoredFeePaymentMethod } from "@aztec/aztec.js/fee/testing";
 import { Fr } from "@aztec/aztec.js/fields";
 import { getContractInstanceFromInstantiationParams } from "@aztec/stdlib/contract";
+import { MinedTxStatuses, TxExecutionResult, type TxStatus } from "@aztec/stdlib/tx";
 
 import { headroomGasSettings } from "../../src/aztec-client.js";
 
@@ -62,4 +63,22 @@ export async function simulateFee() {
 
 export function json(value: unknown): string {
   return JSON.stringify(value, (_k, v) => (typeof v === "bigint" ? v.toString() : v), 2);
+}
+
+/** Enforces one observed value: the first mismatch throws, failing the step. */
+export function assertEq(label: string, actual: unknown, expected: unknown): void {
+  if (String(actual) !== String(expected)) {
+    throw new Error(`FAIL ${label}: got ${String(actual)}, expected ${String(expected)}`);
+  }
+  console.log(`PASS ${label}  ${String(actual)}`);
+}
+
+/** A tx that is in a block and did not revert. */
+export function assertTxSucceeded(
+  label: string,
+  receipt: { status: TxStatus; executionResult?: TxExecutionResult | undefined },
+): void {
+  assertEq(`${label} executionResult`, receipt.executionResult, TxExecutionResult.SUCCESS);
+  const mined = (MinedTxStatuses as readonly TxStatus[]).includes(receipt.status);
+  assertEq(`${label} status is mined (${receipt.status})`, mined, true);
 }

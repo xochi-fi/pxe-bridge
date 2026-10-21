@@ -25,6 +25,8 @@ import { getContractClassFromArtifact } from "@aztec/stdlib/contract";
 import { TxHash, TxStatus } from "@aztec/stdlib/tx";
 
 import {
+  assertEq,
+  assertTxSucceeded,
   json,
   NODE_URL,
   openWallet,
@@ -103,6 +105,7 @@ switch (cmd) {
       skipInstancePublication: false,
     });
     console.log(`[recipient] deploy tx ${receipt.txHash.toString()} status ${receipt.status}`);
+    assertTxSucceeded("[recipient] deploy tx", receipt);
     writePublic({ recipientDeployTx: receipt.txHash.toString() });
 
     // Wait for `finalized`, logging every status change, and report whether the
@@ -139,9 +142,9 @@ switch (cmd) {
     const { result } = await token.methods
       .balance_of_private(me)
       .simulate({ from: me, fee: await simulateFee() });
-    console.log(`[recipient] private balance ${result} (expected ${pub["paidAmount"]})`);
+    assertEq("[recipient] private balance == paidAmount", result, pub["paidAmount"]);
     const r = await node.getTxReceipt(TxHash.fromString(String(pub["payTxHash"])));
-    console.log(`[recipient] pay tx ${pub["payTxHash"]} status ${r.status}`);
+    assertTxSucceeded(`[recipient] pay tx ${pub["payTxHash"]} (node receipt)`, r);
     break;
   }
   case "spend": {
@@ -163,11 +166,9 @@ switch (cmd) {
     const after = (
       await token.methods.balance_of_private(me).simulate({ from: me, fee: await simulateFee() })
     ).result;
-    console.log(
-      `[recipient] spend tx ${receipt.txHash.toString()} status ${receipt.status} ` +
-        `execution ${receipt.executionResult}`,
-    );
-    console.log(`[recipient] private balance ${before} -> ${after} (spent ${amount})`);
+    console.log(`[recipient] spend tx ${receipt.txHash.toString()}`);
+    assertTxSucceeded("[recipient] spend tx", receipt);
+    assertEq(`[recipient] private balance delta (${before} -> ${after}) == spend amount`, before - after, amount);
     writePublic({ spendTxHash: receipt.txHash.toString(), spentAmount: amount.toString() });
     break;
   }

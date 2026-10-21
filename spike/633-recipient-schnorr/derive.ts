@@ -28,15 +28,20 @@ export interface Descriptor {
   publicKeys: PublicKeys;
 }
 
+/** The SchnorrAccount constructor's initialization hash for a signing key. */
+export async function initializationHashFor(constructorArgs: [Fr, Fr]): Promise<Fr> {
+  const ctor = SchnorrAccountContractArtifact.functions.find((f) => f.name === "constructor")!;
+  const selector = await FunctionSelector.fromNameAndParameters(ctor.name, ctor.parameters);
+  return poseidon2HashWithSeparator(
+    [selector.toField(), await computeVarArgsHash(constructorArgs)],
+    DomainSeparator.INITIALIZER,
+  );
+}
+
 export async function addressFromDescriptor(
   d: Descriptor,
 ): Promise<{ initializationHash: Fr; address: AztecAddress }> {
-  const ctor = SchnorrAccountContractArtifact.functions.find((f) => f.name === "constructor")!;
-  const selector = await FunctionSelector.fromNameAndParameters(ctor.name, ctor.parameters);
-  const initializationHash = await poseidon2HashWithSeparator(
-    [selector.toField(), await computeVarArgsHash(d.constructorArgs)],
-    DomainSeparator.INITIALIZER,
-  );
+  const initializationHash = await initializationHashFor(d.constructorArgs);
   const salted = await poseidon2HashWithSeparator(
     [d.salt, initializationHash, d.deployer.toField(), d.immutablesHash],
     DomainSeparator.SALTED_INITIALIZATION_HASH,

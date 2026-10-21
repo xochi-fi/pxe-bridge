@@ -18,6 +18,8 @@ import { Fr, GrumpkinScalar } from "@aztec/aztec.js/fields";
 import { TokenContract } from "@aztec/noir-contracts.js/Token";
 
 import {
+  assertEq,
+  assertTxSucceeded,
   json,
   openWallet,
   partyDir,
@@ -70,9 +72,14 @@ switch (cmd) {
       fee: await sponsoredFee(wallet),
     });
     console.log(`[sender] token ${contract.address.toString()}`);
-    await contract.methods.mint_to_public(me, 1_000_000n).send({ from: me, fee: await sponsoredFee(wallet) });
-    console.log("[sender] minted 1000000 to own public balance");
-    writePublic({ sender: me.toString(), token: contract.address.toString() });
+    const minted = 1_000_000n;
+    await contract.methods.mint_to_public(me, minted).send({ from: me, fee: await sponsoredFee(wallet) });
+    console.log(`[sender] minted ${minted} to own public balance`);
+    writePublic({
+      sender: me.toString(),
+      token: contract.address.toString(),
+      mintedAmount: minted.toString(),
+    });
     break;
   }
   case "pay": {
@@ -84,6 +91,7 @@ switch (cmd) {
       .send({ from: me, fee: await sponsoredFee(wallet) });
     console.log(`[sender] transfer_to_private(${recipient.toString()}, ${amount}) receipt:`);
     console.log(json(result.receipt));
+    assertTxSucceeded("[sender] pay tx", result.receipt);
     writePublic({ paidAmount: amount.toString(), payTxHash: result.receipt.txHash.toString() });
     break;
   }
@@ -92,7 +100,14 @@ switch (cmd) {
     const opts = { from: me, fee: await simulateFee() };
     const { result: priv } = await token.methods.balance_of_private(me).simulate(opts);
     const { result: pubBal } = await token.methods.balance_of_public(me).simulate(opts);
-    console.log(`[sender] private balance ${priv} public balance ${pubBal}`);
+    // The sender starts with only its public mint; it pays `paidAmount` out of
+    // public into the recipient's private balance, and gets `spentAmount` back
+    // privately from the recipient.
+    const minted = BigInt(String(pub["mintedAmount"]));
+    const paid = BigInt(String(pub["paidAmount"]));
+    const spent = BigInt(String(pub["spentAmount"]));
+    assertEq("[sender] private balance == spentAmount", priv, spent);
+    assertEq("[sender] public balance == mintedAmount - paidAmount", pubBal, minted - paid);
     break;
   }
   case "tick": {

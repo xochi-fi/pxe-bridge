@@ -1,14 +1,18 @@
 /**
  * Offline half of the xochi-fi/xochi#633 compatibility spike. Needs no node.
  *
- *   1. class identity of @aztec/accounts 5.1.0 `SchnorrAccount`, computed from
- *      the shipped artifact (class id, Aztec artifactHash, sha256 of the file);
+ *   1. class identity of @aztec/accounts 5.2.0 `SchnorrAccount`, computed from
+ *      the shipped artifact (class id, Aztec artifactHash, sha256 of the file)
+ *      and held to the pin in expected.ts;
  *   2. the signing key is a constructor argument, so it is in the
  *      initialization hash and therefore the address: two signing keys under
  *      one secret and salt give two addresses, and the address is recomputed
  *      from the public descriptor by hand, without a wallet or PXE;
- *   3. the function list of the artifact, to show there is no function that
- *      changes the signing key.
+ *   3. the function list of the artifact and every access to the signing-key
+ *      storage in its source, held to expected.ts, to show there is no
+ *      function that changes the signing key.
+ *
+ * Any drift from expected.ts sets a nonzero exit code.
  *
  * Run: npx tsx spike/633-recipient-schnorr/class-identity.ts
  */
@@ -33,6 +37,7 @@ import {
 import { deriveKeys } from "@aztec/stdlib/keys";
 
 import { addressFromDescriptor } from "./derive.js";
+import * as pin from "./expected.js";
 
 const require = createRequire(import.meta.url);
 
@@ -41,6 +46,15 @@ const SECRET = new Fr(0x633a11cen);
 const SALT = new Fr(0x5a17n);
 const SIGNING_KEY_A = GrumpkinScalar.fromString("0x" + "0a".repeat(31));
 const SIGNING_KEY_B = GrumpkinScalar.fromString("0x" + "0b".repeat(31));
+
+/** Compares a value with its pinned expectation; drift fails the run. */
+function expectEq(label: string, actual: unknown, expected: unknown): void {
+  const a = JSON.stringify(actual);
+  const e = JSON.stringify(expected);
+  const pass = a === e;
+  console.log(`${pass ? "PASS" : "FAIL"} ${label}  ${a}${pass ? "" : ` (expected ${e})`}`);
+  if (!pass) process.exitCode = 1;
+}
 
 async function main(): Promise<void> {
   console.log("== versions ==");
@@ -56,7 +70,7 @@ async function main(): Promise<void> {
     const entry = require.resolve(p);
     const root = entry.slice(0, entry.lastIndexOf("/dest/"));
     const version = JSON.parse(readFileSync(`${root}/package.json`, "utf8")).version;
-    console.log(`${p.split("/").slice(0, 2).join("/")} ${version}`);
+    expectEq(`${p.split("/").slice(0, 2).join("/")} version`, version, pin.AZTEC_VERSION);
   }
 
   // ---------------------------------------------------------------- item 1
@@ -66,18 +80,20 @@ async function main(): Promise<void> {
     .replace(/\/dest\/.*$/, "/artifacts/SchnorrAccount.json");
   const raw = JSON.parse(readFileSync(artifactPath, "utf8"));
   console.log(`artifact file        ${artifactPath.replace(/^.*node_modules\//, "")}`);
-  console.log(`artifact name        ${raw.name}`);
-  console.log(`artifact aztec_ver   ${raw.aztec_version}`);
-  console.log(`artifact noir_ver    ${raw.noir_version}`);
-  console.log(
-    `artifact sha256      ${createHash("sha256").update(readFileSync(artifactPath)).digest("hex")}`,
+  expectEq("artifact name", raw.name, pin.ARTIFACT_NAME);
+  expectEq("artifact aztec_version", raw.aztec_version, pin.AZTEC_VERSION);
+  expectEq("artifact noir_version", raw.noir_version, pin.ARTIFACT_NOIR_VERSION);
+  expectEq(
+    "artifact sha256",
+    createHash("sha256").update(readFileSync(artifactPath)).digest("hex"),
+    pin.ARTIFACT_SHA256,
   );
 
   const cls = await getContractClassFromArtifact(SchnorrAccountContractArtifact);
   const artifactHash = await computeArtifactHash(SchnorrAccountContractArtifact);
-  console.log(`class id             ${cls.id.toString()}`);
-  console.log(`artifactHash         ${cls.artifactHash.toString()}`);
-  console.log(`artifactHash (recmp) ${artifactHash.toString()}`);
+  expectEq("class id", cls.id.toString(), pin.PINNED_CLASS_ID);
+  expectEq("artifactHash", cls.artifactHash.toString(), pin.PINNED_ARTIFACT_HASH);
+  expectEq("artifactHash (recomputed)", artifactHash.toString(), pin.PINNED_ARTIFACT_HASH);
   console.log(`privateFunctionsRoot ${cls.privateFunctionsRoot.toString()}`);
   console.log(`publicBytecodeCommit ${cls.publicBytecodeCommitment.toString()}`);
 
@@ -85,10 +101,12 @@ async function main(): Promise<void> {
   // It is NOT the class we pin: it has no initializer and binds the key through
   // immutablesHash instead.
   const initless = await getContractClassFromArtifact(SchnorrInitializerlessAccountContractArtifact);
-  console.log(`(not pinned) SchnorrInitializerlessAccount class id ${initless.id.toString()}`);
-  const refused = !initless.id.equals(cls.id);
-  console.log(`pin refuses SchnorrInitializerlessAccount: ${refused ? "PASS" : "FAIL"}`);
-  if (!refused) process.exitCode = 1;
+  expectEq(
+    "(not pinned) SchnorrInitializerlessAccount class id",
+    initless.id.toString(),
+    pin.INITIALIZERLESS_CLASS_ID,
+  );
+  expectEq("initializerless class id == pinned class id", initless.id.equals(cls.id), false);
 
   // ---------------------------------------------------------------- item 3
   console.log("\n== 3. functions (rotation check) ==");
@@ -98,19 +116,45 @@ async function main(): Promise<void> {
       `${f.functionType.padEnd(8)} ${f.isInitializer ? "init " : "     "}${f.name}(${params})`,
     );
   }
-  console.log(`storage: ${Object.keys(SchnorrAccountContractArtifact.storageLayout).join(", ")}`);
+  expectEq(
+    "function surface",
+    SchnorrAccountContractArtifact.functions.map(
+      (f) => `${f.functionType} ${f.name}${f.isInitializer ? " init" : ""}`,
+    ),
+    pin.FUNCTION_SURFACE,
+  );
+  expectEq(
+    "storage slots",
+    Object.keys(SchnorrAccountContractArtifact.storageLayout),
+    pin.STORAGE_SLOTS,
+  );
   const source = Object.values(raw.file_map as Record<string, { path: string; source: string }>).find(
     (f) => f.path.endsWith("schnorr_account_contract/src/main.nr"),
   )!.source;
   // Every write to the key is a call on the storage variable. There must be
-  // exactly one, in the constructor, and the variable must be immutable.
-  const writes = [...source.matchAll(/signing_public_key\.(\w+)\(/g)].map((m) => m[1]);
-  console.log(`signing_public_key state var: ${/signing_public_key: (\w+)</.exec(source)![1]}`);
-  console.log(`signing_public_key accesses: ${writes.join(", ")}`);
+  // exactly one, `initialize` in the constructor, and the variable must be
+  // immutable. Each access is attributed to the nearest preceding `fn`.
+  expectEq(
+    "signing_public_key state var",
+    /signing_public_key: (\w+)</.exec(source)?.[1],
+    pin.SIGNING_KEY_STATE_VAR,
+  );
+  const accesses = [...source.matchAll(/signing_public_key\.(\w+)\(/g)].map((m) => {
+    const fns = [...source.slice(0, m.index).matchAll(/\bfn (\w+)/g)];
+    return `${fns.at(-1)?.[1] ?? "<none>"}: ${m[1]}`;
+  });
+  expectEq("signing_public_key accesses", accesses, pin.SIGNING_KEY_ACCESSES);
+  // The declaration plus the accesses above: no other mention (e.g. passing the
+  // state variable to a helper) can hide a write.
+  expectEq(
+    "signing_public_key mentions",
+    [...source.matchAll(/signing_public_key/g)].length,
+    1 + pin.SIGNING_KEY_ACCESSES.length,
+  );
   const publicFns = SchnorrAccountContractArtifact.functions.filter(
     (f) => f.functionType === FunctionType.PUBLIC,
   );
-  console.log(`public functions: ${publicFns.map((f) => f.name).join(", ")}`);
+  expectEq("public functions", publicFns.map((f) => f.name), ["public_dispatch"]);
 
   // ---------------------------------------------------------------- item 2
   console.log("\n== 2. address derivation ==");
