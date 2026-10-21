@@ -26,6 +26,17 @@ WORKER_URL="http://127.0.0.1:$WORKER_PORT"
 WORKER_PID=""
 echo "state: $SPIKE_STATE_DIR  compose project: $PROJECT  L1: $L1_RPC_URL  node: $AZTEC_NODE_URL  worker: $WORKER_URL"
 
+# Refuse a host port something already listens on. Docker Desktop published
+# 127.0.0.1:8545 for the sandbox's anvil while a local anvil was listening on
+# it, with no error, so a client could reach the local anvil instead (and
+# finality.ts would mine it).
+for port in "$SPIKE_L1_PORT" "$SPIKE_NODE_PORT" "$WORKER_PORT"; do
+  if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+    echo "FAIL host port $port is already in use; set SPIKE_L1_PORT / SPIKE_NODE_PORT / WORKER_PORT"
+    exit 1
+  fi
+done
+
 field() { node -e "console.log(require('$SPIKE_STATE_DIR/public.json')['$1'])"; }
 
 stop_worker() {
