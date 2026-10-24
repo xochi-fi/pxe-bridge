@@ -1,0 +1,19 @@
+{
+  "name": "spike-633-recipient-schnorr-testnet",
+  "private": true,
+  "type": "module",
+  "description": "Throwaway compatibility spike for xochi-fi/xochi#633 against the Aztec public testnet. Not part of the bridge.",
+  "dependencies": {
+    "@aztec-labs/accounts": "6.0.0",
+    "@aztec-labs/aztec.js": "6.0.0",
+    "@aztec-labs/constants": "6.0.0",
+    "@aztec-labs/foundation": "6.0.0",
+    "@aztec-labs/noir-contracts.js": "6.0.0",
+    "@aztec-labs/stdlib": "6.0.0",
+    "@aztec-labs/wallets": "6.0.0",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "tsx": "4.20.6"
+  }
+}
