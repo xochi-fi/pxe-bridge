@@ -42,27 +42,33 @@ jobs:
     # the aztec-nr dependency in contracts/spending_limit_account/Nargo.toml, and
     # it is asserted below rather than assumed.
     #
-    # It is deliberately NOT the runtime version. The runtime (the @aztec/* SDK
-    # in package.json and the sandbox image in docker-compose.yml) is 5.2.0; the
-    # contract stays on aztec-nr v5.1.0 compiled by 5.1.0, because the class ID
-    # and so the account address derive from this build's bytecode, which is
-    # what NM-1019 audited. The class ID check below loads this 5.1.0 artifact
-    # through the 5.2.0 SDK, so it also checks that the runtime derives the
-    # committed class ID from it.
+    # It is pinned separately from the runtime (the @aztec-labs/* SDK in
+    # package.json and the sandbox image in docker-compose.yml), because the
+    # class ID and so the account address derive from this build's bytecode.
+    # Both are 6.0.0 for the testnet tracer (xochi-fi/pxe-bridge#55); the
+    # contract was compiled by 5.1.0 before that, which is what NM-1019
+    # audited. The class ID check below loads this artifact through the SDK,
+    # so it also checks that the runtime derives the committed class ID from
+    # it. This job's x86 build is the artifact of record: CLASS_ID holds what
+    # it produces.
     env:
-      AZTEC_COMPILE_VERSION: "5.1.0"
+      AZTEC_COMPILE_VERSION: "6.0.0"
     steps:
       - uses: actions/checkout@v4
       # Needed by the class ID check below, which loads the artifact through
-      # @aztec/stdlib rather than reading JSON fields.
+      # @aztec-labs/stdlib rather than reading JSON fields. 24.15.0, not 22:
+      # the 6.0.0 installer refuses an older Node ("Minimum Node.js version
+      # 24.15.0 not found") before it installs anything.
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24.15.0
           cache: npm
       - run: npm ci
+      # install.aztec.network now 301s here; aztec-up itself fetches from
+      # install.aztec-labs.com.
       - name: Install Aztec toolchain
         run: |
-          curl -fsSL https://install.aztec.network | bash
+          curl -fsSL https://install.aztec-labs.com | bash
           echo "$HOME/.aztec/bin" >> "$GITHUB_PATH"
       - name: Pin toolchain and expose it on PATH
         run: |

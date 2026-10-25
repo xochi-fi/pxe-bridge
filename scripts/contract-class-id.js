@@ -16,8 +16,8 @@
  *   node scripts/contract-class-id.js --check <file>  # compare, exit 1 on drift
  */
 import { readFileSync } from "node:fs";
-import { loadContractArtifact } from "@aztec/stdlib/abi";
-import { getContractClassFromArtifact } from "@aztec/stdlib/contract";
+import { loadContractArtifact } from "@aztec-labs/stdlib/abi";
+import { getContractClassFromArtifact } from "@aztec-labs/stdlib/contract";
 
 const ARTIFACT =
   "contracts/spending_limit_account/target/spending_limit_account_contract-SpendingLimitAccount.json";

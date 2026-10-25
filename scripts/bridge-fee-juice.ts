@@ -94,7 +94,7 @@ async function main() {
   // Shared with AztecClient.connect, not reimplemented. The copy that used to
   // live here built the salt with Fr.fromBuffer and omitted the signing key, so
   // it threw for most keys and derived a different address for the rest.
-  const { EmbeddedWallet } = await import("@aztec/wallets/embedded");
+  const { EmbeddedWallet } = await import("@aztec-labs/wallets/embedded");
   const { secret, salt, signingKey } = await deriveAccountKeys(SECRET_KEY);
 
   console.log(`Connecting to Aztec node at ${AZTEC_NODE_URL}...`);
@@ -156,8 +156,8 @@ async function main() {
   console.log(`Fee Juice Token:  ${feeJuiceAddress}`);
 
   // Create L1 client
-  const { createExtendedL1Client } = await import("@aztec/ethereum/client");
-  const { createEthereumChain } = await import("@aztec/ethereum/chain");
+  const { createExtendedL1Client } = await import("@aztec-labs/ethereum/client");
+  const { createEthereumChain } = await import("@aztec-labs/ethereum/chain");
 
   // Same resolution as src/fee-juice.ts. viem's `mainnet` was hardcoded here,
   // so the chain was mainnet whatever L1_RPC_URL pointed at. Undefined falls
@@ -176,8 +176,8 @@ async function main() {
   console.log(`L1 wallet: ${l1Client.account.address}`);
 
   // Bridge Fee Juice
-  const { L1FeeJuicePortalManager } = await import("@aztec/aztec.js/ethereum");
-  const { EthAddress } = await import("@aztec/foundation/eth-address");
+  const { L1FeeJuicePortalManager } = await import("@aztec-labs/aztec.js/ethereum");
+  const { EthAddress } = await import("@aztec-labs/foundation/eth-address");
 
   const portalManager = new L1FeeJuicePortalManager(
     EthAddress.fromString(feeJuicePortalAddress),

@@ -23,19 +23,19 @@
  *   const manager = await AccountManager.create(wallet, secret, contract, salt);
  */
 
-import type { Fr as FrType } from "@aztec/foundation/curves/bn254";
-import type { GrumpkinScalar as GrumpkinScalarType } from "@aztec/foundation/curves/grumpkin";
-import type { ContractArtifact, FunctionAbi } from "@aztec/stdlib/abi";
+import type { Fr as FrType } from "@aztec-labs/foundation/curves/bn254";
+import type { GrumpkinScalar as GrumpkinScalarType } from "@aztec-labs/foundation/curves/grumpkin";
+import type { ContractArtifact, FunctionAbi } from "@aztec-labs/stdlib/abi";
 import type {
   AuthWitnessProvider,
   EntrypointInterface,
   ChainInfo,
-} from "@aztec/entrypoints/interfaces";
-import type { DefaultAccountEntrypointOptions } from "@aztec/entrypoints/account";
-import type { GasSettings } from "@aztec/stdlib/gas";
-import type { CompleteAddress } from "@aztec/stdlib/contract";
-import type { AztecAddress } from "@aztec/stdlib/aztec-address";
-import { BaseAccount, type Account, type AccountContract } from "@aztec/aztec.js/account";
+} from "@aztec-labs/entrypoints/interfaces";
+import type { DefaultAccountEntrypointOptions } from "@aztec-labs/entrypoints/account";
+import type { GasSettings } from "@aztec-labs/stdlib/gas";
+import type { CompleteAddress } from "@aztec-labs/stdlib/contract";
+import type { AztecAddress } from "@aztec-labs/stdlib/aztec-address";
+import { BaseAccount, type Account, type AccountContract } from "@aztec-labs/aztec.js/account";
 import {
   ALLOWLIST_TREE_HEIGHT,
   AllowlistTree,
@@ -60,8 +60,8 @@ export async function spendingLimitSignedHash(
   amount: bigint,
   recipient: AztecAddress,
 ): Promise<FrType> {
-  const { Fr } = await import("@aztec/foundation/curves/bn254");
-  const { poseidon2HashWithSeparator } = await import("@aztec/foundation/crypto/poseidon");
+  const { Fr } = await import("@aztec-labs/foundation/curves/bn254");
+  const { poseidon2HashWithSeparator } = await import("@aztec-labs/foundation/crypto/poseidon");
   return poseidon2HashWithSeparator(
     [payloadHash, new Fr(amount), recipient.toField()],
     DOM_SEP_SPENDING_LIMIT,
@@ -168,7 +168,7 @@ export class SpendingLimitAccountContract implements AccountContract {
     // loadContractArtifact also rejects an untranspiled artifact outright,
     // which is the check that catches a build done with plain nargo instead of
     // `aztec compile`.
-    const { loadContractArtifact } = await import("@aztec/stdlib/abi");
+    const { loadContractArtifact } = await import("@aztec-labs/stdlib/abi");
     const artifact = await import(ARTIFACT_PATH, {
       with: { type: "json" },
     });
@@ -179,8 +179,8 @@ export class SpendingLimitAccountContract implements AccountContract {
     constructorName: string;
     constructorArgs: unknown[];
   }> {
-    const { Schnorr } = await import("@aztec/foundation/crypto/schnorr");
-    const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+    const { Schnorr } = await import("@aztec-labs/foundation/crypto/schnorr");
+    const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
 
     const schnorr = new Schnorr();
     const pubKey = await schnorr.computePublicKey(this.signingPrivateKey);
@@ -230,9 +230,9 @@ class SpendingLimitAuthWitnessProvider implements AuthWitnessProvider {
 
   async createAuthWit(
     messageHash: FrType,
-  ): Promise<import("@aztec/stdlib/auth-witness").AuthWitness> {
-    const { Schnorr } = await import("@aztec/foundation/crypto/schnorr");
-    const { AuthWitness } = await import("@aztec/stdlib/auth-witness");
+  ): Promise<import("@aztec-labs/stdlib/auth-witness").AuthWitness> {
+    const { Schnorr } = await import("@aztec-labs/foundation/crypto/schnorr");
+    const { AuthWitness } = await import("@aztec-labs/stdlib/auth-witness");
 
     const schnorr = new Schnorr();
     const signature = await schnorr.constructSignature(
@@ -264,7 +264,7 @@ class SpendingLimitAuthWitnessProvider implements AuthWitnessProvider {
  */
 class SpendingLimitEntrypoint implements EntrypointInterface {
   constructor(
-    private address: import("@aztec/stdlib/aztec-address").AztecAddress,
+    private address: import("@aztec-labs/stdlib/aztec-address").AztecAddress,
     private auth: AuthWitnessProvider,
     /** Shared with the contract and every sibling entrypoint. Never reassign. */
     private treeRef: { tree: AllowlistTree | null },
@@ -287,10 +287,10 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
    * catch us out.
    */
   private async deriveDeclaration(
-    calls: readonly import("@aztec/stdlib/abi").FunctionCall[],
-  ): Promise<{ amount: bigint; recipient: import("@aztec/stdlib/aztec-address").AztecAddress }> {
-    const { FunctionSelector } = await import("@aztec/stdlib/abi");
-    const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+    calls: readonly import("@aztec-labs/stdlib/abi").FunctionCall[],
+  ): Promise<{ amount: bigint; recipient: import("@aztec-labs/stdlib/aztec-address").AztecAddress }> {
+    const { FunctionSelector } = await import("@aztec-labs/stdlib/abi");
+    const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
 
     const transferSelector = await FunctionSelector.fromSignature(TRANSFER_TO_PRIVATE_SIGNATURE);
     const transfers = calls.filter((c) => c.selector.equals(transferSelector));
@@ -355,7 +355,7 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
    * runs in the non-revertible setup phase so that failure costs money.
    */
   private async witnessFor(
-    recipient: import("@aztec/stdlib/aztec-address").AztecAddress,
+    recipient: import("@aztec-labs/stdlib/aztec-address").AztecAddress,
   ): Promise<import("./allowlist-tree.js").AllowlistWitness> {
     // No recipient means no transfer: a private view simulation routed through
     // the entrypoint. The arguments still have to encode. See deriveDeclaration.
@@ -389,20 +389,20 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
    * another.
    */
   private async buildEntrypointArgs(
-    exec: import("@aztec/stdlib/tx").ExecutionPayload,
+    exec: import("@aztec-labs/stdlib/tx").ExecutionPayload,
     chainInfo: ChainInfo,
     options: DefaultAccountEntrypointOptions,
   ): Promise<{
-    encodedCalls: import("@aztec/entrypoints/encoding").EncodedAppEntrypointCalls;
+    encodedCalls: import("@aztec-labs/entrypoints/encoding").EncodedAppEntrypointCalls;
     encodedArgs: FrType[];
-    functionSelector: import("@aztec/stdlib/abi").FunctionSelector;
+    functionSelector: import("@aztec-labs/stdlib/abi").FunctionSelector;
     abi: FunctionAbi;
-    authWitness: import("@aztec/stdlib/auth-witness").AuthWitness;
+    authWitness: import("@aztec-labs/stdlib/auth-witness").AuthWitness;
   }> {
-    const { Fr } = await import("@aztec/foundation/curves/bn254");
-    const { FunctionSelector, encodeArguments } = await import("@aztec/stdlib/abi");
-    const { computeOuterAuthWitHash } = await import("@aztec/stdlib/auth-witness");
-    const { EncodedAppEntrypointCalls } = await import("@aztec/entrypoints/encoding");
+    const { Fr } = await import("@aztec-labs/foundation/curves/bn254");
+    const { FunctionSelector, encodeArguments } = await import("@aztec-labs/stdlib/abi");
+    const { computeOuterAuthWitHash } = await import("@aztec-labs/stdlib/auth-witness");
+    const { EncodedAppEntrypointCalls } = await import("@aztec-labs/entrypoints/encoding");
 
     const { cancellable, txNonce, feePaymentMethodOptions } = options;
 
@@ -450,13 +450,13 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
   }
 
   async createTxExecutionRequest(
-    exec: import("@aztec/stdlib/tx").ExecutionPayload,
+    exec: import("@aztec-labs/stdlib/tx").ExecutionPayload,
     gasSettings: GasSettings,
     chainInfo: ChainInfo,
     options: DefaultAccountEntrypointOptions,
-  ): Promise<import("@aztec/stdlib/tx").TxExecutionRequest> {
-    const { Fr } = await import("@aztec/foundation/curves/bn254");
-    const { HashedValues, TxContext, TxExecutionRequest } = await import("@aztec/stdlib/tx");
+  ): Promise<import("@aztec-labs/stdlib/tx").TxExecutionRequest> {
+    const { Fr } = await import("@aztec-labs/foundation/curves/bn254");
+    const { HashedValues, TxContext, TxExecutionRequest } = await import("@aztec-labs/stdlib/tx");
 
     const { authWitnesses, capsules, extraHashedArgs } = exec;
     const { encodedCalls, encodedArgs, functionSelector, authWitness } =
@@ -480,12 +480,14 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
   }
 
   async wrapExecutionPayload(
-    exec: import("@aztec/stdlib/tx").ExecutionPayload,
+    exec: import("@aztec-labs/stdlib/tx").ExecutionPayload,
     chainInfo: ChainInfo,
     options: DefaultAccountEntrypointOptions,
-  ): Promise<import("@aztec/stdlib/tx").ExecutionPayload> {
-    const { FunctionCall: FunctionCallCls } = await import("@aztec/stdlib/abi");
-    const { ExecutionPayload } = await import("@aztec/stdlib/tx");
+  ): Promise<import("@aztec-labs/stdlib/tx").ExecutionPayload> {
+    const { FunctionCall: FunctionCallCls, getFunctionReturnType } = await import(
+      "@aztec-labs/stdlib/abi"
+    );
+    const { ExecutionPayload } = await import("@aztec-labs/stdlib/tx");
 
     const { authWitnesses, capsules, extraHashedArgs, feePayer } = exec;
     const { encodedCalls, encodedArgs, functionSelector, abi, authWitness } =
@@ -499,7 +501,7 @@ class SpendingLimitEntrypoint implements EntrypointInterface {
       hideMsgSender: false,
       isStatic: abi.isStatic,
       args: encodedArgs,
-      returnTypes: abi.returnTypes,
+      returnType: getFunctionReturnType(abi),
     });
 
     return new ExecutionPayload(

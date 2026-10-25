@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from "vitest";
-import { Fr } from "@aztec/foundation/curves/bn254";
-import { poseidon2HashWithSeparator } from "@aztec/foundation/crypto/poseidon";
+import { Fr } from "@aztec-labs/foundation/curves/bn254";
+import { poseidon2HashWithSeparator } from "@aztec-labs/foundation/crypto/poseidon";
 import {
   ALLOWLIST_CAPACITY,
   ALLOWLIST_TREE_HEIGHT,

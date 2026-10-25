@@ -12,7 +12,7 @@
  * tests in `tests/allowlist-tree.test.ts` are what catch it.
  */
 
-import type { Fr as FrType } from "@aztec/foundation/curves/bn254";
+import type { Fr as FrType } from "@aztec-labs/foundation/curves/bn254";
 
 /** Must match ALLOWLIST_TREE_HEIGHT in main.nr. Part of the entrypoint ABI. */
 export const ALLOWLIST_TREE_HEIGHT = 10;
@@ -65,20 +65,20 @@ const ADDRESS_RE = /^0x[0-9a-fA-F]{64}$/;
  * which is what stops an observer recognising them as empty.
  */
 async function deriveSalt(seed: FrType, index: number): Promise<FrType> {
-  const { Fr } = await import("@aztec/foundation/curves/bn254");
-  const { poseidon2HashWithSeparator } = await import("@aztec/foundation/crypto/poseidon");
+  const { Fr } = await import("@aztec-labs/foundation/curves/bn254");
+  const { poseidon2HashWithSeparator } = await import("@aztec-labs/foundation/crypto/poseidon");
   return poseidon2HashWithSeparator([seed, new Fr(BigInt(index))], DOM_SEP_ALLOWLIST_SALT);
 }
 
 /** Leaf commitment. Pairs with `allowlist_leaf` in main.nr. */
 export async function allowlistLeaf(recipient: FrType, salt: FrType): Promise<FrType> {
-  const { poseidon2HashWithSeparator } = await import("@aztec/foundation/crypto/poseidon");
+  const { poseidon2HashWithSeparator } = await import("@aztec-labs/foundation/crypto/poseidon");
   return poseidon2HashWithSeparator([recipient, salt], DOM_SEP_ALLOWLIST_LEAF);
 }
 
 /** Internal node hash. Pairs with `merkle_hash` in Aztec's protocol types. */
 async function nodeHash(left: FrType, right: FrType): Promise<FrType> {
-  const { poseidon2HashWithSeparator } = await import("@aztec/foundation/crypto/poseidon");
+  const { poseidon2HashWithSeparator } = await import("@aztec-labs/foundation/crypto/poseidon");
   return poseidon2HashWithSeparator([left, right], DOM_SEP_MERKLE_HASH);
 }
 
@@ -141,7 +141,7 @@ export class AllowlistTree {
     seed: string,
     recipients: readonly AllowlistRecipient[],
   ): Promise<AllowlistTree> {
-    const { Fr } = await import("@aztec/foundation/curves/bn254");
+    const { Fr } = await import("@aztec-labs/foundation/curves/bn254");
 
     if (!ADDRESS_RE.test(seed)) {
       throw new Error("Allowlist seed must be 32-byte hex");
@@ -267,7 +267,7 @@ export class AllowlistTree {
    * non-zero recipient, and the root it produces will not match storage.
    */
   static async zeroWitness(): Promise<AllowlistWitness> {
-    const { Fr } = await import("@aztec/foundation/curves/bn254");
+    const { Fr } = await import("@aztec-labs/foundation/curves/bn254");
     return {
       leafSalt: Fr.ZERO,
       leafIndex: 0,

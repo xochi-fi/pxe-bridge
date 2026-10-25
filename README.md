@@ -66,10 +66,10 @@ console.log("0x" + k);'
 
 The bridge's account address derives from its key **and** from the account
 contract's class, so an SDK upgrade that changes the class moves the address
-even though the key did not change. Aztec 5.2.0 does exactly that for the stock
-SchnorrAccount. A bridge that simply derived its address would come up at the
-new, empty address and deploy an account there while the funded one sat at the
-old address.
+even though the key did not change. Aztec 5.2.0 and 6.0.0 both did exactly that
+for the stock SchnorrAccount. A bridge that simply derived its address would
+come up at the new, empty address and deploy an account there while the funded
+one sat at the old address.
 
 So the address is recorded, and `connect()` refuses to deploy or serve as
 anything else:
