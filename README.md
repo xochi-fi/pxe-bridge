@@ -460,10 +460,13 @@ Prerequisites:
      `admin: <address>`, then stops with "SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM is required" if
      the account is not deployed yet. Nothing is sent, and the wallet it opens
      lives in `os.tmpdir()` and is deleted on exit.
-  2. `npm run bridge-fee-juice -- --recipient <admin address>`, with
-     `L1_PRIVATE_KEY` set and no `PXE_BRIDGE_SECRET_KEY`. It prints the claim
-     as `FEE_JUICE_CLAIM`; the deposit file, `--wait` and `--recover` work as
-     in "Deploying the spending-limit account in production" above.
+  2. `npm run bridge-fee-juice -- --admin --recipient <admin address>`, with
+     `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` set to the same address (the script
+     refuses a recipient that differs from it), `L1_PRIVATE_KEY` set and no
+     `PXE_BRIDGE_SECRET_KEY`. It prints the claim as
+     `SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM`; the deposit file, `--wait` and
+     `--recover` (with `--admin`) work as in "Deploying the spending-limit
+     account in production" above.
   3. `npm run admin -- deploy` again, with `SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM` set to the
      printed claim JSON. This is not `FEE_JUICE_CLAIM`, the bridge's own claim.
      `deploy` sends nothing if the admin is already deployed.
@@ -497,7 +500,7 @@ npm run update-allowlist -- --revoke 0x<addr>
 | --- | --- | --- | --- |
 | `SPENDING_LIMIT_ACCOUNT` | All but `deploy` | -- | Address of the spending-limit account |
 | `SPENDING_LIMIT_ADMIN_KEY` | All but `status` | -- | Secret key of the admin |
-| `SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM` | `deploy` | -- | Claim JSON from `npm run bridge-fee-juice -- --recipient <admin address>`. Not needed if already deployed |
+| `SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM` | `deploy` | -- | Claim JSON from `npm run bridge-fee-juice -- --admin --recipient <admin address>`. Not needed if already deployed |
 | `PXE_BRIDGE_ALLOWLIST_SEED` | `update-allowlist` | -- | The bridge's allowlist seed. Optional for `status`, see below |
 | `PXE_BRIDGE_ALLOWLIST_RECIPIENTS` | `update-allowlist` | -- | The current set, as the bridge has it. Optional for `status` |
 | `AZTEC_NODE_URL` | No | `http://localhost:8080` | Aztec node |

@@ -13,7 +13,7 @@
  * Env:
  *   SPENDING_LIMIT_ACCOUNT           -- AztecAddress of the account (all but deploy)
  *   SPENDING_LIMIT_ADMIN_KEY         -- 32-byte hex secret key of the admin (all but status)
- *   SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM -- deploy: claim JSON from bridge-fee-juice to the admin
+ *   SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM -- deploy: claim JSON from bridge-fee-juice --admin
  *   PXE_BRIDGE_ALLOWLIST_SEED        -- status: with RECIPIENTS, the expected root
  *   PXE_BRIDGE_ALLOWLIST_RECIPIENTS     when --expect-root is not given
  *   AZTEC_NODE_URL                   -- Aztec node (default: http://localhost:8080)

@@ -663,6 +663,8 @@ key under salt + 1) and `scripts/test-deploy.ts`, which constructs
   address is `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1`, for a first deployment; it
   then logs the address it bridges to. `--deployer` bridges to the
   spending-limit deployer, which has no recorded address and is not checked.
+  `--admin` bridges to the spending-limit admin and refuses a `--recipient`
+  other than `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` (required with it).
 
 In spending-limit mode the bridge's address also moves when the constructor
 inputs do (limits, admin, token, allowlist root). The deployment record

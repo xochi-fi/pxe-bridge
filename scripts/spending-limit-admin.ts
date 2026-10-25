@@ -644,7 +644,7 @@ export async function deployAdmin(
     return false;
   }
   if (!claim) {
-    throw new Error(`SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM is required: npm run bridge-fee-juice -- --recipient ${admin.toString()}`);
+    throw new Error(`SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM is required: npm run bridge-fee-juice -- --admin --recipient ${admin.toString()} (with PXE_BRIDGE_SPENDING_LIMIT_ADMIN=${admin.toString()})`);
   }
 
   const paymentMethod = new FeeJuicePaymentMethodWithClaim(admin, {

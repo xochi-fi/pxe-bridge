@@ -170,7 +170,8 @@ describe("operator scripts (e2e)", () => {
     const refused = await runCli("admin", ["deploy"], { SPENDING_LIMIT_ADMIN_KEY: ADMIN_KEY });
     expect(refused.code, refused.output).toBe(1);
     expect(refused.output).toContain(
-      `SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM is required: npm run bridge-fee-juice -- --recipient ${adminAddress}`,
+      `SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM is required: npm run bridge-fee-juice -- --admin --recipient ${adminAddress} ` +
+        `(with PXE_BRIDGE_SPENDING_LIMIT_ADMIN=${adminAddress})`,
     );
     expect(refused.storesLeft).toEqual([]);
 

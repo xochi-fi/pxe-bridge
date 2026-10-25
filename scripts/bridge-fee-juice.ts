@@ -2,7 +2,7 @@
  * Bridges Fee Juice from Ethereum L1 to an Aztec L2 account and prints the
  * claim JSON the bridge consumes when it deploys that account.
  *
- * Two targets, which decide the variable the claim is printed under:
+ * Three targets, which decide the variable the claim is printed under:
  *
  *   default     The solver account, for a plain Schnorr bridge. Prints
  *               FEE_JUICE_CLAIM. The spending-limit account cannot use this
@@ -14,6 +14,11 @@
  *               with the claim and pays the spending-limit account's deployment
  *               out of what is left, so bridge enough for both. The account's
  *               transfers are funded separately, by scripts/top-up-fee-juice.ts.
+ *   --admin     The spending-limit admin, which self-deploys with the claim
+ *               (npm run admin -- deploy). Prints
+ *               SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM. Needs --recipient and
+ *               PXE_BRIDGE_SPENDING_LIMIT_ADMIN, which it must equal: the
+ *               admin key is separate, so key mode cannot derive it.
  *
  * Two ways to name the recipient:
  *
@@ -41,9 +46,9 @@
  * resume with --wait <messageHash> rather than bridging again.
  *
  * Usage:
- *   npx tsx scripts/bridge-fee-juice.ts [--deployer] --recipient 0x<address>
+ *   npx tsx scripts/bridge-fee-juice.ts [--deployer|--admin] --recipient 0x<address>
  *   npx tsx scripts/bridge-fee-juice.ts [--deployer] [--address-only]   (dev, key mode)
- *   npx tsx scripts/bridge-fee-juice.ts [--deployer] --recipient 0x<address> --recover <file>|0x<secretHash>
+ *   npx tsx scripts/bridge-fee-juice.ts [--deployer|--admin] --recipient 0x<address> --recover <file>|0x<secretHash>
  *   npx tsx scripts/bridge-fee-juice.ts --wait 0x<messageHash>
  *
  * Env:
@@ -107,8 +112,11 @@ import type { PendingFeeJuiceDeposit } from "../src/fee-juice.js";
 import type { BridgedFeeJuiceClaim } from "../src/types.js";
 
 const USAGE =
-  "Usage: bridge-fee-juice [--deployer] --recipient 0x<address> [--recover <file>|0x<secretHash>] | " +
+  "Usage: bridge-fee-juice [--deployer|--admin] --recipient 0x<address> [--recover <file>|0x<secretHash>] | " +
   "[--deployer] [--address-only] (dev, PXE_BRIDGE_SECRET_KEY) | --wait 0x<messageHash>";
+
+/** The spending-limit admin, as the bridge reads it; `--admin` checks the recipient against it. */
+const ADMIN_ADDRESS_ENV = "PXE_BRIDGE_SPENDING_LIMIT_ADMIN";
 
 const HASH_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 const KEY_PATTERN = /^(0x)?[0-9a-fA-F]{64}$/;
@@ -130,6 +138,7 @@ function parseBigInt(name: string, raw: string): bigint {
 async function main(): Promise<void> {
   let values: {
     deployer?: boolean;
+    admin?: boolean;
     "address-only"?: boolean;
     recipient?: string;
     recover?: string;
@@ -139,6 +148,7 @@ async function main(): Promise<void> {
     ({ values } = parseArgs({
       options: {
         deployer: { type: "boolean" },
+        admin: { type: "boolean" },
         "address-only": { type: "boolean" },
         recipient: { type: "string" },
         recover: { type: "string" },
@@ -156,6 +166,7 @@ async function main(): Promise<void> {
   if (values.wait !== undefined) {
     if (
       values.deployer ||
+      values.admin ||
       values["address-only"] ||
       values.recipient !== undefined ||
       values.recover !== undefined
@@ -170,6 +181,7 @@ async function main(): Promise<void> {
   }
 
   const toDeployer = values.deployer === true;
+  const toAdmin = values.admin === true;
   const addressOnly = values["address-only"] === true;
   const recoverArg = values.recover;
   // A deposit file, or a secret hash whose file is in the working directory.
@@ -191,6 +203,16 @@ async function main(): Promise<void> {
   delete process.env["PXE_BRIDGE_SECRET_KEY"];
   delete process.env["L1_PRIVATE_KEY"];
   delete process.env["FEE_JUICE_CLAIM_SECRET"];
+
+  // The admin is a separate key, never PXE_BRIDGE_SECRET_KEY, so key mode
+  // cannot derive it: the address is named, and checked against the admin
+  // the bridge is configured with before anything is bridged.
+  if (toAdmin) {
+    if (toDeployer) fail(`--admin and --deployer are exclusive. ${USAGE}`);
+    if (recipientArg === undefined) {
+      fail(`--admin needs --recipient <admin address>: key mode cannot derive the admin. ${USAGE}`);
+    }
+  }
 
   let recipient: string;
   if (recipientArg !== undefined) {
@@ -237,7 +259,24 @@ async function main(): Promise<void> {
   // refuse to run as leaves the fee juice claimable only by an account nobody
   // operates. The deployer has no recorded address, so --deployer is not
   // checked here.
-  if (!toDeployer) {
+  if (toAdmin) {
+    // The claim commits to the admin address, and the account's admin is fixed
+    // at construction, so juice bridged to any other address cannot deploy the
+    // admin the account recognises.
+    const expectedAdmin = process.env[ADMIN_ADDRESS_ENV];
+    if (!expectedAdmin) {
+      fail(
+        `--admin needs ${ADMIN_ADDRESS_ENV}, the admin address the bridge is configured with, ` +
+          "to check --recipient against before bridging.",
+      );
+    }
+    if (recipient.toLowerCase() !== expectedAdmin.toLowerCase()) {
+      fail(
+        `--recipient ${recipient} is not ${ADMIN_ADDRESS_ENV} ${expectedAdmin}. Refusing to ` +
+          "bridge to an admin other than the configured one.",
+      );
+    }
+  } else if (!toDeployer) {
     let identity: AccountIdentityConfig;
     try {
       identity = resolveAccountIdentityConfig({
@@ -348,14 +387,18 @@ async function main(): Promise<void> {
     fail("L1_PRIVATE_KEY is required (Ethereum key with Fee Juice)");
   }
 
-  const envName = toDeployer ? DEPLOYER_FEE_JUICE_CLAIM_ENV : "FEE_JUICE_CLAIM";
+  const envName = toDeployer
+    ? DEPLOYER_FEE_JUICE_CLAIM_ENV
+    : toAdmin
+      ? "SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM"
+      : "FEE_JUICE_CLAIM";
   let pending: PendingFeeJuiceDeposit | undefined;
   let bridged: BridgedFeeJuiceClaim | undefined;
   // Kept until the message has synced; the claim is added to it once printed.
   let depositFile = recoverFile?.path;
 
   const recoverCommand = (file: string): string =>
-    `  npm run bridge-fee-juice -- ${toDeployer ? "--deployer " : ""}--recipient ${recipient} ` +
+    `  npm run bridge-fee-juice -- ${toDeployer ? "--deployer " : toAdmin ? "--admin " : ""}--recipient ${recipient} ` +
     `--recover ${file}`;
 
   // Printed before the wait: the L1 deposit is done and cannot be undone,
@@ -443,7 +486,9 @@ async function main(): Promise<void> {
     toDeployer
       ? "Message synced. The bridge consumes the claim on first startup, when the deployer " +
           "deploys itself and then the spending-limit account."
-      : "Message synced. The bridge consumes the claim on first startup (account deployment).",
+      : toAdmin
+        ? "Message synced. npm run admin -- deploy consumes the claim (admin self-deploy)."
+        : "Message synced. The bridge consumes the claim on first startup (account deployment).",
   );
 }
 
