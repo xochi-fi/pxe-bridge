@@ -18,6 +18,7 @@ describe("AztecClient (e2e)", () => {
       config.secretKey,
       config.feeJuiceClaim,
       undefined,
+      undefined,
       walletDataDirectory("client"),
     );
     await client.connect();
@@ -35,13 +36,14 @@ describe("AztecClient (e2e)", () => {
         config.secretKey,
         undefined,
         undefined,
+        undefined,
         walletDataDirectory("client-second"),
       );
       await expect(second.connect()).resolves.toBeUndefined();
     });
 
     it("starts when the derived address is the recorded one", async () => {
-      const recorded = new AztecClient(config.nodeUrl, config.secretKey, undefined, undefined, {
+      const recorded = new AztecClient(config.nodeUrl, config.secretKey, undefined, undefined, undefined, {
         ...walletDataDirectory("client-recorded"),
         expectedAccountAddress: client.getAddress()!,
       });
@@ -53,7 +55,7 @@ describe("AztecClient (e2e)", () => {
     // (5.1.0, 5.2.0) derives a different address under 6.0.0. The bridge must
     // stop there, not deploy an empty account and serve from it.
     it("refuses, before deploying, a key that derives away from the recorded address", async () => {
-      const other = new AztecClient(config.nodeUrl, UNRECORDED_KEY, undefined, undefined, {
+      const other = new AztecClient(config.nodeUrl, UNRECORDED_KEY, undefined, undefined, undefined, {
         ...walletDataDirectory("client-unrecorded"),
         expectedAccountAddress: client.getAddress()!,
       });

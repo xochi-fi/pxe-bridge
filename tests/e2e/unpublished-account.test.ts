@@ -60,7 +60,7 @@ describe("account deployed unpublished by v0.1.2 (e2e)", () => {
       expect(metadata.initializationStatus).toBe(ContractInitializationStatus.INITIALIZED);
       expect(metadata.isContractPublished).toBe(false);
 
-      const client = new AztecClient(config.nodeUrl, UNPUBLISHED_KEY, undefined, undefined, {
+      const client = new AztecClient(config.nodeUrl, UNPUBLISHED_KEY, undefined, undefined, undefined, {
         allowSponsoredFpc: false,
       });
       const log = vi.spyOn(console, "log");

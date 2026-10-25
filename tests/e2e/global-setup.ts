@@ -109,6 +109,7 @@ async function provisionTestToken(nodeUrl: string): Promise<void> {
       FUNDER_KEY,
       undefined,
       undefined,
+      undefined,
       walletDataDirectory("setup-funder"),
     );
     await funder.connect();
@@ -122,6 +123,7 @@ async function provisionTestToken(nodeUrl: string): Promise<void> {
     const bridge = new AztecClient(
       nodeUrl,
       config.secretKey,
+      undefined,
       undefined,
       undefined,
       walletDataDirectory("setup-bridge"),

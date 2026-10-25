@@ -96,6 +96,7 @@ describe("spending limit account (e2e)", () => {
       FUNDER_KEY,
       undefined,
       undefined,
+      undefined,
       walletDataDirectory("limit-funder"),
     );
     await funder.connect();
@@ -120,6 +121,7 @@ describe("spending limit account (e2e)", () => {
       config.secretKey,
       config.feeJuiceClaim,
       spendingLimitConfig,
+      undefined,
       walletDataDirectory("limit-account"),
     );
 
@@ -401,6 +403,7 @@ describe("spending limit account (e2e)", () => {
     const outsiderClient = new AztecClient(
       config.nodeUrl,
       OUTSIDER_KEY,
+      undefined,
       undefined,
       undefined,
       walletDataDirectory("limit-outsider"),

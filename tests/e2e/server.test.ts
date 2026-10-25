@@ -17,6 +17,7 @@ describe("HTTP server (e2e)", () => {
       config.secretKey,
       config.feeJuiceClaim,
       undefined,
+      undefined,
       walletDataDirectory("server"),
     );
     await client.connect();
