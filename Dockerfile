@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install newer libstdc++ from trixie for GLIBCXX_3.4.32 (needed by @aztec/bb.js)
+# Install newer libstdc++ from trixie for GLIBCXX_3.4.32 (needed by @aztec-foundation/bb.js)
 RUN echo "deb http://deb.debian.org/debian trixie main" > /etc/apt/sources.list.d/trixie.list \
     && apt-get update \
     && apt-get install -y -t trixie libstdc++6 \

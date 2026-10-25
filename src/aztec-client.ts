@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import { EmbeddedWallet } from "@aztec/wallets/embedded";
-import { TokenContract } from "@aztec/noir-contracts.js/Token";
-import { SponsoredFPCContract } from "@aztec/noir-contracts.js/SponsoredFPC";
-import type { AztecAddress } from "@aztec/aztec.js/addresses";
-import type { GasFees } from "@aztec/stdlib/gas";
+import { EmbeddedWallet } from "@aztec-labs/wallets/embedded";
+import { TokenContract } from "@aztec-labs/noir-contracts.js/Token";
+import { SponsoredFPCContract } from "@aztec-labs/noir-contracts.js/SponsoredFPC";
+import type { AztecAddress } from "@aztec-labs/aztec.js/addresses";
+import type { GasFees } from "@aztec-labs/stdlib/gas";
 import { PostSubmissionError } from "./types.js";
 import { ACCOUNT_ADDRESS_ENV, assertAccountIdentity } from "./account-identity.js";
 import type { CreateNoteParams, CreateNoteResult, FeeJuiceClaim, IAztecClient } from "./types.js";
@@ -48,8 +48,8 @@ const FEE_HEADROOM = 10n;
  * two that drift, the same reason fee-juice.ts was promoted out of the helpers.
  */
 export async function headroomGasSettings(nodeUrl: string): Promise<{ maxFeesPerGas: GasFees }> {
-  const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
-  const { GasFees, ManaUsageEstimate } = await import("@aztec/stdlib/gas");
+  const { createAztecNodeClient } = await import("@aztec-labs/aztec.js/node");
+  const { GasFees, ManaUsageEstimate } = await import("@aztec-labs/stdlib/gas");
 
   const node = createAztecNodeClient(nodeUrl);
   const predicted = await node.getPredictedMinFees(ManaUsageEstimate.Limit);
@@ -166,7 +166,7 @@ export async function assertStandardTokenInstance(
   address: { toString(): string },
   instance: { currentContractClassId: { toString(): string } },
 ): Promise<void> {
-  tokenClassId ??= import("@aztec/stdlib/contract")
+  tokenClassId ??= import("@aztec-labs/stdlib/contract")
     .then(({ getContractClassFromArtifact }) => getContractClassFromArtifact(TokenContract.artifact))
     .then((cls) => cls.id.toString());
   const expected = await tokenClassId;
@@ -212,10 +212,10 @@ class TimeoutError extends Error {}
 
 /** What the account derivation produces, named so callers cannot swap two Frs. */
 export interface AccountKeys {
-  secret: import("@aztec/aztec.js/fields").Fr;
-  salt: import("@aztec/aztec.js/fields").Fr;
+  secret: import("@aztec-labs/aztec.js/fields").Fr;
+  salt: import("@aztec-labs/aztec.js/fields").Fr;
   signingKey: ReturnType<
-    typeof import("@aztec/stdlib/keys").deriveMasterMessageSigningSecretKey
+    typeof import("@aztec-labs/stdlib/keys").deriveMasterMessageSigningSecretKey
   >;
 }
 
@@ -232,8 +232,8 @@ export interface AccountKeys {
  * key internally -- SDK-owned memory cannot be zeroed.
  */
 export async function deriveAccountKeys(secretKey: string): Promise<AccountKeys> {
-  const { Fr } = await import("@aztec/aztec.js/fields");
-  const { deriveMasterMessageSigningSecretKey } = await import("@aztec/stdlib/keys");
+  const { Fr } = await import("@aztec-labs/aztec.js/fields");
+  const { deriveMasterMessageSigningSecretKey } = await import("@aztec-labs/stdlib/keys");
 
   const rawKey = Buffer.from(secretKey.replace(/^0x/, ""), "hex");
   const keyBytes = Buffer.alloc(32);
@@ -339,10 +339,10 @@ export class AztecClient implements IAztecClient {
 
     // Before anything is deployed at, or served from, the derived address, and
     // before solverAddress is set, so a caller that catches this cannot go on
-    // to send from the wrong account. A key whose account was deployed by a
-    // 5.1.0 runtime derives a different address under 5.2.0, and deploying
-    // there would put a fresh, empty account where the operator believes the
-    // funded one is.
+    // to send from the wrong account. A key whose account was deployed by an
+    // older runtime (5.1.0, 5.2.0) derives a different address under 6.0.0,
+    // and deploying there would put a fresh, empty account where the operator
+    // believes the funded one is.
     if (this.expectedAccountAddress !== undefined) {
       assertAccountIdentity({
         role: "Bridge account",
@@ -362,7 +362,7 @@ export class AztecClient implements IAztecClient {
     if (!alreadyDeployed) {
       console.log("[pxe-bridge] Deploying solver account...");
 
-      const { NO_FROM } = await import("@aztec/aztec.js/account");
+      const { NO_FROM } = await import("@aztec-labs/aztec.js/account");
       const paymentMethod = await this.buildFeePaymentMethod(address);
 
       // The spending-limit account cannot deploy itself. Self-deployment routes
@@ -435,11 +435,11 @@ export class AztecClient implements IAztecClient {
    * approximate gas estimates; the built-in gas padding covers the delta.
    */
   private async createSpendingLimitAccount(
-    secret: import("@aztec/aztec.js/fields").Fr,
-    salt: import("@aztec/aztec.js/fields").Fr,
-  ): Promise<import("@aztec/aztec.js/wallet").AccountManager> {
-    const { AccountManager } = await import("@aztec/aztec.js/wallet");
-    const { deriveMasterMessageSigningSecretKey } = await import("@aztec/stdlib/keys");
+    secret: import("@aztec-labs/aztec.js/fields").Fr,
+    salt: import("@aztec-labs/aztec.js/fields").Fr,
+  ): Promise<import("@aztec-labs/aztec.js/wallet").AccountManager> {
+    const { AccountManager } = await import("@aztec-labs/aztec.js/wallet");
+    const { deriveMasterMessageSigningSecretKey } = await import("@aztec-labs/stdlib/keys");
 
     const signingKey = deriveMasterMessageSigningSecretKey(secret);
 
@@ -556,12 +556,12 @@ export class AztecClient implements IAztecClient {
    * entrypoint has no single-call restriction.
    */
   private async ensureDeployer(
-    secret: import("@aztec/aztec.js/fields").Fr,
-    baseSalt: import("@aztec/aztec.js/fields").Fr,
+    secret: import("@aztec-labs/aztec.js/fields").Fr,
+    baseSalt: import("@aztec-labs/aztec.js/fields").Fr,
   ): Promise<AztecAddress> {
-    const { NO_FROM } = await import("@aztec/aztec.js/account");
-    const { deriveMasterMessageSigningSecretKey } = await import("@aztec/stdlib/keys");
-    const { Fr } = await import("@aztec/aztec.js/fields");
+    const { NO_FROM } = await import("@aztec-labs/aztec.js/account");
+    const { deriveMasterMessageSigningSecretKey } = await import("@aztec-labs/stdlib/keys");
+    const { Fr } = await import("@aztec-labs/aztec.js/fields");
 
     const deployerSalt = new Fr(baseSalt.toBigInt() + 1n);
     const manager = await this.wallet!.createSchnorrAccount(
@@ -601,7 +601,7 @@ export class AztecClient implements IAztecClient {
       throw new Error("Client not connected");
     }
 
-    const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+    const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
 
     const tokenAddress = AztecAddress.fromStringUnsafe(params.token);
     const recipientAddress = AztecAddress.fromStringUnsafe(params.recipient);
@@ -755,7 +755,7 @@ export class AztecClient implements IAztecClient {
     if (!this.wallet || !this.solverAddress || !this.spendingLimitContract) {
       throw new Error("Spending limit account not initialized");
     }
-    const { Contract } = await import("@aztec/aztec.js/contracts");
+    const { Contract } = await import("@aztec-labs/aztec.js/contracts");
     const artifact = await this.spendingLimitContract.getContractArtifact();
     const account = await Contract.at(
       this.solverAddress as Parameters<typeof Contract.at>[0],
@@ -803,7 +803,7 @@ export class AztecClient implements IAztecClient {
    * account this client had deployed.
    */
   private async isContractDeployed(address: AztecAddress): Promise<boolean> {
-    const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
+    const { createAztecNodeClient } = await import("@aztec-labs/aztec.js/node");
     const node = createAztecNodeClient(this.nodeUrl);
     const instance = await node.getContract(address);
     return instance !== undefined;
@@ -820,7 +820,7 @@ export class AztecClient implements IAztecClient {
 
   private async buildFeePaymentMethod(
     accountAddress: AztecAddress,
-  ): Promise<import("@aztec/aztec.js/fee").FeePaymentMethod> {
+  ): Promise<import("@aztec-labs/aztec.js/fee").FeePaymentMethod> {
     // A claim commits to its L2 recipient in the message hash, so it can only
     // pay for the account it was bridged to. The deployer is a different
     // account; handing it the solver's claim fails the message lookup with
@@ -830,8 +830,8 @@ export class AztecClient implements IAztecClient {
 
     if (this.feeJuiceClaim && claimIsForThisAccount) {
       console.log("[pxe-bridge] Using Fee Juice claim for deployment fee");
-      const { FeeJuicePaymentMethodWithClaim } = await import("@aztec/aztec.js/fee");
-      const { Fr } = await import("@aztec/aztec.js/fields");
+      const { FeeJuicePaymentMethodWithClaim } = await import("@aztec-labs/aztec.js/fee");
+      const { Fr } = await import("@aztec-labs/aztec.js/fields");
       return new FeeJuicePaymentMethodWithClaim(accountAddress, {
         claimAmount: BigInt(this.feeJuiceClaim.claimAmount),
         claimSecret: Fr.fromString(this.feeJuiceClaim.claimSecret),
@@ -840,9 +840,9 @@ export class AztecClient implements IAztecClient {
     }
 
     console.log("[pxe-bridge] Using SponsoredFPC for deployment fee");
-    const { SponsoredFeePaymentMethod } = await import("@aztec/aztec.js/fee/testing");
-    const { getContractInstanceFromInstantiationParams } = await import("@aztec/stdlib/contract");
-    const { Fr } = await import("@aztec/aztec.js/fields");
+    const { SponsoredFeePaymentMethod } = await import("@aztec-labs/aztec.js/fee/testing");
+    const { getContractInstanceFromInstantiationParams } = await import("@aztec-labs/stdlib/contract");
+    const { Fr } = await import("@aztec-labs/aztec.js/fields");
 
     const sponsoredFPCInstance = await getContractInstanceFromInstantiationParams(
       SponsoredFPCContract.artifact,
@@ -867,7 +867,7 @@ export class AztecClient implements IAztecClient {
     // permanent. Missing until xochi-fi/xochi#513 because every e2e wallet
     // shared one store, where the funder's deploy had registered the token for
     // the bridge too.
-    const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
+    const { createAztecNodeClient } = await import("@aztec-labs/aztec.js/node");
     const instance = await createAztecNodeClient(this.nodeUrl).getContract(address);
     if (!instance) {
       throw new Error(`Token ${address.toString()} is not published on the node`);

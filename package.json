@@ -39,10 +39,10 @@
   },
   "dependencies": {
     "@aws-sdk/client-secrets-manager": "^3.1032.0",
-    "@aztec/accounts": "5.2.0",
-    "@aztec/aztec.js": "5.2.0",
-    "@aztec/noir-contracts.js": "5.2.0",
-    "@aztec/wallets": "5.2.0",
+    "@aztec-labs/accounts": "6.0.0",
+    "@aztec-labs/aztec.js": "6.0.0",
+    "@aztec-labs/noir-contracts.js": "6.0.0",
+    "@aztec-labs/wallets": "6.0.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {

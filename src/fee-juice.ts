@@ -22,13 +22,13 @@
  * L2 balance cannot be moved between accounts.
  */
 
-import { FeeJuiceContract } from "@aztec/noir-contracts.js/FeeJuice";
-import type { FeePaymentMethod } from "@aztec/aztec.js/fee";
-import type { AztecNode } from "@aztec/aztec.js/node";
+import { FeeJuiceContract } from "@aztec-labs/aztec.js/protocol";
+import type { FeePaymentMethod } from "@aztec-labs/aztec.js/fee";
+import type { AztecNode } from "@aztec-labs/aztec.js/node";
 import type { FeeJuiceClaim } from "./types.js";
 
-/** The wallet slice needed to send a claim. Matches what `Contract.at` takes. */
-export type ClaimingWallet = Parameters<typeof FeeJuiceContract.at>[1];
+/** The wallet slice needed to send a claim. Matches what `withWallet` takes. */
+export type ClaimingWallet = Parameters<typeof FeeJuiceContract.withWallet>[0];
 
 /** Rounds of waiting for the L1 to L2 message before giving up. */
 const DEFAULT_WAIT_ATTEMPTS = 60;
@@ -146,12 +146,12 @@ export async function bridgeFeeJuice(opts: BridgeFeeJuiceOptions): Promise<FeeJu
 
   const log = opts.log ?? (() => {});
 
-  const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
-  const { L1FeeJuicePortalManager } = await import("@aztec/aztec.js/ethereum");
-  const { createExtendedL1Client } = await import("@aztec/ethereum/client");
-  const { createEthereumChain } = await import("@aztec/ethereum/chain");
-  const { createLogger } = await import("@aztec/aztec.js/log");
-  const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+  const { createAztecNodeClient } = await import("@aztec-labs/aztec.js/node");
+  const { L1FeeJuicePortalManager } = await import("@aztec-labs/aztec.js/ethereum");
+  const { createExtendedL1Client } = await import("@aztec-labs/ethereum/client");
+  const { createEthereumChain } = await import("@aztec-labs/ethereum/chain");
+  const { createLogger } = await import("@aztec-labs/aztec.js/log");
+  const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
 
   const node = createAztecNodeClient(opts.nodeUrl);
   // Undefined falls through to the SDK's own Anvil default, so the sandbox
@@ -206,11 +206,12 @@ export async function claimFeeJuiceFor(opts: ClaimFeeJuiceOptions): Promise<void
 
   const log = opts.log ?? (() => {});
 
-  const { AztecAddress } = await import("@aztec/aztec.js/addresses");
-  const { ProtocolContractAddress } = await import("@aztec/protocol-contracts");
-  const { Fr } = await import("@aztec/aztec.js/fields");
+  const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
+  const { Fr } = await import("@aztec-labs/aztec.js/fields");
 
-  const feeJuice = await FeeJuiceContract.at(ProtocolContractAddress.FeeJuice, opts.wallet);
+  // 6.0.0 binds the canonical protocol instance itself; there is no address to
+  // pass, and noir-contracts.js no longer ships a FeeJuice wrapper.
+  const feeJuice = FeeJuiceContract.withWallet(opts.wallet);
 
   log(`Claiming ${opts.claim.claimAmount} for ${opts.recipient} from ${opts.payer}`);
   await feeJuice.methods
@@ -234,7 +235,7 @@ async function waitForL1ToL2Message(
   messageHash: string,
   opts: Pick<BridgeFeeJuiceOptions, "onBlockNeeded" | "attempts">,
 ): Promise<void> {
-  const { Fr } = await import("@aztec/aztec.js/fields");
+  const { Fr } = await import("@aztec-labs/aztec.js/fields");
   const message = Fr.fromString(messageHash);
   const attempts = opts.attempts ?? DEFAULT_WAIT_ATTEMPTS;
   const advance =

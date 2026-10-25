@@ -5,13 +5,16 @@ compiler_version = ">=0.25.0"
 type = "contract"
 
 [dependencies]
-aztec = { git = "https://github.com/AztecProtocol/aztec-packages", tag = "v5.1.0", directory = "noir-projects/aztec-nr/aztec" }
+aztec = { git = "https://github.com/aztec-labs-eng/aztec-nr", tag = "v6.0.0", directory = "aztec" }
 schnorr = { tag = "v0.4.0", git = "https://github.com/noir-lang/schnorr" }
 
-# Tag must match the COMPILE toolchain (aztec 5.1.0, AZTEC_COMPILE_VERSION in
-# .github/workflows/ci.yml), not the Aztec SDK/runtime, which is 5.2.0. The split
-# is deliberate: the contract class ID, and with it the account address, derives
-# from this build's bytecode, and that bytecode is what NM-1019 audited. Moving
-# this tag or the compile toolchain moves CLASS_ID; neither moves with the SDK.
+# Tag must match the COMPILE toolchain (aztec 6.0.0, AZTEC_COMPILE_VERSION in
+# .github/workflows/ci.yml). Runtime and compile toolchain are both 6.0.0 for
+# the testnet tracer (xochi-fi/pxe-bridge#55); they are still pinned separately
+# because the contract class ID, and with it the account address, derives from
+# this build's bytecode. Moving this tag or the compile toolchain moves
+# CLASS_ID; neither moves with the SDK.
+# aztec-nr moved from AztecProtocol/aztec-packages (tags stop at v5) to its
+# own repo, aztec-labs-eng/aztec-nr, with the crate at `aztec/`.
 # The schnorr dependency tracks the noir-lang/schnorr repo independently;
-# v5.1.0's reference schnorr_account_contract pins schnorr v0.4.0.
+# v6.0.0's reference schnorr_account_contract still pins schnorr v0.4.0.

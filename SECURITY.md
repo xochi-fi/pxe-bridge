@@ -102,9 +102,11 @@ Combined with the rest of this change set:
 
 The binding depends on the `AppPayload` serialized layout (`[FunctionCall; 5]`
 + `tx_nonce` = 31 fields, each call serialized in declaration order). The
-contract side is pinned to aztec-nr v5.1.0; the client side is encoded by
-`@aztec/entrypoints` from the Aztec 5.2.0 SDK, whose built code is identical to
-5.1.0's, so both sides still agree on the layout. It is validated three ways:
+contract side is pinned to aztec-nr v6.0.0 (`aztec-labs-eng/aztec-nr`); the
+client side is encoded by `@aztec-labs/entrypoints` 6.0.0. Both sides still
+agree on the layout: aztec-nr's `authwit/entrypoint/` is unchanged from v5.1.0,
+which NM-1019 reviewed against, and the SDK's `encoding.ts` differs from 5.2.0
+only in import paths. It is validated three ways:
 
 - `aztec-nargo test` unit tests in `contracts/spending_limit_account/src/main.nr`:
   `function_call_serialize_layout` asserts `args_hash`/`target_address` sit at
@@ -281,17 +283,21 @@ are encoded positionally, so removing it would shift every argument after it.
 ## Build supply chain
 
 The `contract` CI job installs the Aztec toolchain by piping
-`https://install.aztec.network` into bash. There is no published checksum to pin
-against, so the build trusts that endpoint. `aztec-up install 5.1.0` pins the
-toolchain version but not the installer that fetches it.
+`https://install.aztec-labs.com` (formerly `install.aztec.network`, which now
+301s there) into bash. There is no published checksum to pin against, so the
+build trusts that endpoint. `aztec-up install 6.0.0` pins the toolchain version
+but not the installer that fetches it.
 
-That toolchain is the contract's compile toolchain only, and it is deliberately
-older than the 5.2.0 runtime (SDK, PXE, sandbox). The contract stays on aztec-nr
-v5.1.0 because its class ID, and with it the account address, derives from the
-compiled bytecode, and that bytecode is what NM-1019 audited. Moving the compile
-toolchain would move the address and put unaudited bytecode behind it. The
-committed `CLASS_ID` is checked against the 5.1.0-compiled artifact as loaded by
-the 5.2.0 SDK.
+That toolchain is the contract's compile toolchain only, and it is pinned
+separately from the runtime (SDK, PXE, sandbox) because the class ID, and with
+it the account address, derives from the compiled bytecode. Until
+xochi-fi/pxe-bridge#55 the contract was compiled by aztec 5.1.0 against aztec-nr
+v5.1.0, the bytecode NM-1019 audited, under a 5.2.0 runtime. For the testnet
+tracer both are now 6.0.0 (aztec-nr v6.0.0 from `aztec-labs-eng/aztec-nr`).
+`main.nr` and `public_key_note.nr` did not change, but the bytecode did, since
+the aztec-nr library and the noir compiler it is built with changed; see
+"6.0.0 artifact of record" below. The committed `CLASS_ID` is checked against
+the 6.0.0-compiled artifact as loaded by the 6.0.0 SDK.
 
 **This has already bitten, benignly.** On 2026-08-26 every `contract` job began
 failing at install with `expected bundled binary 'forge' missing from
@@ -347,6 +353,50 @@ regenerated: the installer exposure above can change the build regardless. The
 CI job uploads it on every run, before the class ID check, so a drifted build is
 preserved for comparison.
 
+### 6.0.0 artifact of record
+
+Recompiled for the testnet tracer (xochi-fi/pxe-bridge#55), unchanged
+`main.nr` and `public_key_note.nr`, aztec 6.0.0 / noir
+`1.0.0-rc.3+5a7ee9bf5ed8973076df7bb0d2b723024db09ae7`, aztec-nr `v6.0.0`
+(`aztec-labs-eng/aztec-nr`, tag object `46d118ff`, commit `04720122`):
+
+| | |
+|---|---|
+| contract class id (`CLASS_ID`) | `0x0d41b7399377b559a969acf04429432b81ac1efda31b0f6a713b5550e27a063a` |
+| artifact hash | `0x18e3b0cb986f20b7288dd461ac00ec23c3a38420ee3c9a9c7808a6a54b3d2a0a` |
+| private functions root | `0x11015efca77d653def2c97bbb78009f3114be24dfd45ef251109d23d04b475ea` |
+| public bytecode commitment | `0x274f0b212e6dedb4ef9e46a8bea713a6900fc145ff72388c781b4894adb62340` |
+| artifact digest (`ARTIFACT_SHA256`, `scripts/artifact-digest.js`) | `7ecfad1190cd2bbdd40e6e020d982ccbcaca119ba2c17e4444bc7e2faae922f7` |
+| raw file sha256 (arm64 build at `/tmp/pxe-bridge-6`, path-dependent) | `397f2453f47307a77079bf6e61c52c7136c91a036ad3d2f3a85473b1a764a0b2` |
+
+`ARTIFACT_SHA256` pins the whole file, ABI, storage layout and metadata
+included, which the class ID does not cover. It is a sha256 with each
+`file_map` path cut to the part below the checkout or the nargo cache, because
+`file_map` records absolute build paths: the raw file hash moves with the
+runner's checkout directory and `$HOME` even when nothing else does. The CI
+`contract` job checks it after the class ID, before anything is published.
+
+These values come from a native arm64 build (macOS, 2026-10-25). It was
+byte-identical at `HARDWARE_CONCURRENCY=1` and at 8 threads with an emptied
+`vk_cache`, so bb 6.0.0 did not show the 5.1.0 VK race here. That is one
+sample, so CI keeps `HARDWARE_CONCURRENCY=1`.
+
+An x86 build was attempted the same day in a `linux/amd64` container
+(`node:24.15.0-bookworm`, the CI installer, `aztec-up install 6.0.0`,
+`HARDWARE_CONCURRENCY=1 aztec compile`). The nargo stage completed and its
+output has the same normalised digest as the arm64 nargo stage
+(`64f42aa295c5c57706b9090cd6179102d92956593d9584119a71a65c9347df0f`), so the
+compiled bytecode, ABI and layout agree across architectures. The bb
+postprocess (transpile and verification keys) then failed in a child process
+and left the artifact untranspiled. The emulated CPU reports no AVX2, which is
+consistent with the barretenberg-under-emulation limitation recorded above;
+the exact error was not captured. So the post-bb x86 values are unobserved.
+The x86 `contract` job remains the build of
+record: `CLASS_ID` and `ARTIFACT_SHA256` hold the arm64 values, and the first
+x86 run either confirms both or fails naming the computed ones, which then
+replace them. The artifact a deployment is made against is the one that run
+uploads.
+
 ## Account address pinning
 
 An Aztec address commits to the account contract's class as well as to its key
@@ -358,19 +408,23 @@ unset), the spending-limit deployer (`ensureDeployer`), the fee juice payer
 `scripts/update-allowlist.ts` derives it. Aztec 5.2.0 did this: the class moved
 from `0x0191cefaf68870dd09c29d402946976c9def479ee7f343061b6574fa401af98d`
 (5.1.0) to `0x0833459dfb3c430326e50f2367ec093e07b4ed37d23e85cc759ef4f9aa800edd`
-(5.2.0). No bridge had been deployed on a 5.1.0 runtime, so nothing moved with
-it; the next SDK bump that changes the class will move them again.
+(5.2.0). 6.0.0 did it again, to
+`0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15`. 6.0.0
+also changed the address derivation itself (`DOM_SEP__CONTRACT_ADDRESS_V2` to
+`_V3`), so under 6.0.0 every address moves whatever its class. No bridge had
+been deployed on a 5.1.0 runtime when 5.2.0 landed; the testnet tracer's bridge
+is first deployed on 6.0.0, so it has no older deployment to strand.
 
 A moved address is a new, empty account. Balances at the old one are out of
 reach (fee juice cannot be transferred at all), and the spending-limit `admin`
 is a `PublicImmutable` with no rotation path, so an admin that moved can no
 longer `pause`, `unpause`, `update_recipient` or change limits. The
-spending-limit account itself does not move: its class is the pinned
-`CLASS_ID`, compiled by the 5.1.0 toolchain, and it is deployed with a zero
-deployer. Before an SDK upgrade that moves the Schnorr class on a live
-deployment, empty the plain Schnorr accounts and, for a spending-limit account,
-move its balance to an allowlisted address, pause it and redeploy with an admin
-the new runtime derives.
+spending-limit account moves only when its pinned `CLASS_ID`, its constructor
+inputs or the protocol's address derivation change; it is deployed with a zero
+deployer. Under 6.0.0 the first and last both changed. Before an SDK upgrade
+that moves either on a live deployment, empty the plain Schnorr accounts and,
+for a spending-limit account, move its balance to an allowlisted address,
+pause it and redeploy with an admin the new runtime derives.
 
 ### What refuses
 

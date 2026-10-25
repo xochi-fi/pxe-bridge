@@ -1,11 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { SchnorrAccountContractArtifact } from "@aztec/accounts/schnorr";
-import { getContractClassFromArtifact } from "@aztec/stdlib/contract";
+import { SchnorrAccountContractArtifact } from "@aztec-labs/accounts/schnorr";
+import { getContractClassFromArtifact } from "@aztec-labs/stdlib/contract";
 import {
   ACCOUNT_ADDRESS_ENV,
   ALLOW_ACCOUNT_DEPLOY_ENV,
   SCHNORR_CLASS_ID_5_1_0,
   SCHNORR_CLASS_ID_5_2_0,
+  SCHNORR_CLASS_ID_6_0_0,
   assertAccountIdentity,
   resolveAccountIdentityConfig,
 } from "../src/account-identity.js";
@@ -70,7 +71,7 @@ describe("assertAccountIdentity", () => {
     assertAccountIdentity({
       role: "Bridge account",
       derived,
-      derivedClassId: SCHNORR_CLASS_ID_5_2_0,
+      derivedClassId: SCHNORR_CLASS_ID_6_0_0,
       expected,
       expectedSource: ACCOUNT_ADDRESS_ENV,
     });
@@ -92,9 +93,30 @@ describe("assertAccountIdentity", () => {
     }
     expect(message).toContain(`Bridge account derives to ${DERIVED}`);
     expect(message).toContain(`${ACCOUNT_ADDRESS_ENV} is ${RECORDED}`);
-    expect(message).toContain(`contract class ${SCHNORR_CLASS_ID_5_2_0}`);
+    expect(message).toContain(`contract class ${SCHNORR_CLASS_ID_6_0_0}`);
+    expect(message).toContain(SCHNORR_CLASS_ID_5_2_0);
     expect(message).toContain(SCHNORR_CLASS_ID_5_1_0);
     expect(message).toMatch(/Refusing to use, deploy or sign/);
+  });
+
+  it("refuses a mismatch under a class it does not recognise, blaming the constructor inputs", () => {
+    // A derived class that is not this runtime's stock SchnorrAccount (here the
+    // superseded 5.2.0 one) is still refused; only the explanation changes.
+    let message = "";
+    try {
+      assertAccountIdentity({
+        role: "Bridge account",
+        derived: DERIVED,
+        derivedClassId: SCHNORR_CLASS_ID_5_2_0,
+        expected: RECORDED,
+        expectedSource: ACCOUNT_ADDRESS_ENV,
+      });
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toMatch(/Refusing to use, deploy or sign/);
+    expect(message).toMatch(/constructor inputs/);
+    expect(message).not.toContain(`changed it again to ${SCHNORR_CLASS_ID_6_0_0}`);
   });
 });
 
@@ -102,8 +124,8 @@ describe("SchnorrAccount class", () => {
   // The refusal message names the class the runtime derives to. Pinned here so
   // the next SDK bump that moves it again fails a test instead of shipping a
   // message about the wrong class, and so the move is noticed at all.
-  it("is the 5.2.0 class the identity error names", async () => {
+  it("is the 6.0.0 class the identity error names", async () => {
     const cls = await getContractClassFromArtifact(SchnorrAccountContractArtifact);
-    expect(cls.id.toString()).toBe(SCHNORR_CLASS_ID_5_2_0);
+    expect(cls.id.toString()).toBe(SCHNORR_CLASS_ID_6_0_0);
   });
 });

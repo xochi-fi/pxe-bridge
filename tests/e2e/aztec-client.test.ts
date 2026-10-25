@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { AztecClient } from "../../src/aztec-client.js";
-import { ACCOUNT_ADDRESS_ENV, SCHNORR_CLASS_ID_5_2_0 } from "../../src/account-identity.js";
+import { ACCOUNT_ADDRESS_ENV, SCHNORR_CLASS_ID_6_0_0 } from "../../src/account-identity.js";
 import { getTestConfig, requireTestToken, walletDataDirectory } from "./helpers.js";
 
 // Never deployed by this suite: the guard refuses before connect() reaches the
@@ -49,9 +49,9 @@ describe("AztecClient (e2e)", () => {
       expect(recorded.getAddress()).toBe(client.getAddress());
     });
 
-    // UPGRADE GUARD -- a key whose account was deployed under a 5.1.0 runtime
-    // derives a different address under 5.2.0. The bridge must stop there,
-    // not deploy an empty account and serve from it.
+    // UPGRADE GUARD -- a key whose account was deployed under an older runtime
+    // (5.1.0, 5.2.0) derives a different address under 6.0.0. The bridge must
+    // stop there, not deploy an empty account and serve from it.
     it("refuses, before deploying, a key that derives away from the recorded address", async () => {
       const other = new AztecClient(config.nodeUrl, UNRECORDED_KEY, undefined, undefined, {
         ...walletDataDirectory("client-unrecorded"),
@@ -62,7 +62,7 @@ describe("AztecClient (e2e)", () => {
         (err: unknown) => (err instanceof Error ? err.message : String(err)),
       );
       const match = new RegExp(
-        `^Bridge account derives to (0x[0-9a-f]{64}) \\(contract class ${SCHNORR_CLASS_ID_5_2_0}\\), ` +
+        `^Bridge account derives to (0x[0-9a-f]{64}) \\(contract class ${SCHNORR_CLASS_ID_6_0_0}\\), ` +
           `but ${ACCOUNT_ADDRESS_ENV} is ${client.getAddress()}`,
       ).exec(refusal ?? "");
       expect(match, `connect() should have refused; got: ${refusal}`).not.toBeNull();
@@ -70,8 +70,8 @@ describe("AztecClient (e2e)", () => {
       expect(other.getAddress()).toBeNull();
 
       // And nothing was deployed at the address it refused.
-      const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
-      const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+      const { createAztecNodeClient } = await import("@aztec-labs/aztec.js/node");
+      const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
       const derived = AztecAddress.fromStringUnsafe(match![1]!);
       expect(await createAztecNodeClient(config.nodeUrl).getContract(derived)).toBeUndefined();
     });

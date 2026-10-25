@@ -138,11 +138,11 @@ async function main(): Promise<void> {
   const current = parsed.data;
   const plan = parseArgs(process.argv.slice(2), current);
 
-  const { Fr } = await import("@aztec/foundation/curves/bn254");
-  const { AztecAddress } = await import("@aztec/aztec.js/addresses");
-  const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
-  const { EmbeddedWallet } = await import("@aztec/wallets/embedded");
-  const { Contract } = await import("@aztec/aztec.js/contracts");
+  const { Fr } = await import("@aztec-labs/foundation/curves/bn254");
+  const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
+  const { createAztecNodeClient } = await import("@aztec-labs/aztec.js/node");
+  const { EmbeddedWallet } = await import("@aztec-labs/wallets/embedded");
+  const { Contract } = await import("@aztec-labs/aztec.js/contracts");
   const { SpendingLimitAccountContract } = await import("../src/spending-limit-account.js");
   const { deriveAccountKeys } = await import("../src/aztec-client.js");
   const { assertAccountIdentity, readSpendingLimitAdmin } = await import(

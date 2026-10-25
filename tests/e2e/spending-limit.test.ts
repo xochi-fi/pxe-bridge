@@ -1,10 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, it, expect, beforeAll } from "vitest";
-import { loadContractArtifact } from "@aztec/stdlib/abi";
+import { loadContractArtifact } from "@aztec-labs/stdlib/abi";
 import { AztecClient } from "../../src/aztec-client.js";
 import type { SpendingLimitConfig } from "../../src/spending-limit-account.js";
 import {
-  SCHNORR_CLASS_ID_5_2_0,
+  SCHNORR_CLASS_ID_6_0_0,
   assertAccountIdentity,
   readSpendingLimitAdmin,
 } from "../../src/account-identity.js";
@@ -444,13 +444,13 @@ describe("spending limit account (e2e)", () => {
   }, 600_000);
 
   // UPGRADE GUARD -- the admin is immutable, and a key whose admin account was
-  // deployed under a 5.1.0 runtime derives a different address under 5.2.0.
+  // deployed under an older runtime derives a different address under 6.0.0.
   // scripts/update-allowlist.ts composes exactly these two calls before it
   // sends anything; this is the only place they meet a real account.
   it("reads the stored admin and refuses any other admin signer", async (ctx) => {
     if (deployFailure) return ctx.skip();
-    const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
-    const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+    const { createAztecNodeClient } = await import("@aztec-labs/aztec.js/node");
+    const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
     const node = createAztecNodeClient(config.nodeUrl);
     // The artifact the account was deployed from: the e2e job downloads the
     // contract job's build into target/.
@@ -474,7 +474,7 @@ describe("spending limit account (e2e)", () => {
       assertAccountIdentity({
         role: "Admin signer",
         derived,
-        derivedClassId: SCHNORR_CLASS_ID_5_2_0,
+        derivedClassId: SCHNORR_CLASS_ID_6_0_0,
         expected: stored,
         expectedSource: `the admin stored in ${accountAddress}`,
       });
@@ -505,8 +505,8 @@ async function simulateAccount(
   method: string,
   args: unknown[],
 ): Promise<unknown> {
-  const { Contract } = await import("@aztec/aztec.js/contracts");
-  const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+  const { Contract } = await import("@aztec-labs/aztec.js/contracts");
+  const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
   const slc = (client as unknown as {
     spendingLimitContract: { getContractArtifact: () => Promise<unknown> };
   }).spendingLimitContract;
@@ -558,8 +558,8 @@ async function callAccount(
   method: string,
   args: unknown[],
 ): Promise<string> {
-  const { Contract } = await import("@aztec/aztec.js/contracts");
-  const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+  const { Contract } = await import("@aztec-labs/aztec.js/contracts");
+  const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
   const slc = (client as unknown as {
     spendingLimitContract: { getContractArtifact: () => Promise<unknown> };
   }).spendingLimitContract;
@@ -644,8 +644,8 @@ async function proveTransfer(
   recipient: string,
   amount: bigint,
 ): Promise<ProvenTransfer> {
-  const { TokenContract } = await import("@aztec/noir-contracts.js/Token");
-  const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+  const { TokenContract } = await import("@aztec-labs/noir-contracts.js/Token");
+  const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
 
   const inner = client as unknown as {
     wallet: WalletInternals;
@@ -750,9 +750,9 @@ async function revokeRecipient(
   recipient: string,
   admin: string,
 ): Promise<void> {
-  const { Contract } = await import("@aztec/aztec.js/contracts");
-  const { AztecAddress } = await import("@aztec/aztec.js/addresses");
-  const { Fr } = await import("@aztec/foundation/curves/bn254");
+  const { Contract } = await import("@aztec-labs/aztec.js/contracts");
+  const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
+  const { Fr } = await import("@aztec-labs/foundation/curves/bn254");
   const { allowlistLeaf } = await import("../../src/allowlist-tree.js");
 
   const slc = (client as unknown as {
@@ -802,8 +802,8 @@ async function balanceOf(
   token: string,
   owner: string,
 ): Promise<bigint> {
-  const { TokenContract } = await import("@aztec/noir-contracts.js/Token");
-  const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+  const { TokenContract } = await import("@aztec-labs/noir-contracts.js/Token");
+  const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
   const wallet = (client as unknown as { wallet: unknown }).wallet;
   await registerPublished(wallet, token, TokenContract.artifact);
   const contract = await (

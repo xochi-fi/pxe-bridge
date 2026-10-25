@@ -2,9 +2,9 @@ import { describe, it, expect } from "vitest";
 import { existsSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { TokenContract } from "@aztec/noir-contracts.js/Token";
-import { SponsoredFPCContract } from "@aztec/noir-contracts.js/SponsoredFPC";
-import { getContractClassFromArtifact } from "@aztec/stdlib/contract";
+import { TokenContract } from "@aztec-labs/noir-contracts.js/Token";
+import { SponsoredFPCContract } from "@aztec-labs/noir-contracts.js/SponsoredFPC";
+import { getContractClassFromArtifact } from "@aztec-labs/stdlib/contract";
 import {
   AztecClient,
   DEFAULT_WALLET_DATA_DIRECTORY,

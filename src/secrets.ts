@@ -125,7 +125,7 @@ async function validateKey(raw: string): Promise<string> {
     throw new Error("Secret key must be 32 bytes (64 hex chars)");
   }
 
-  const { Fr } = await import("@aztec/aztec.js/fields");
+  const { Fr } = await import("@aztec-labs/aztec.js/fields");
   if (BigInt(`0x${normalized}`) >= Fr.MODULUS) {
     throw new Error(
       "Secret key is not a valid BN254 field element: it must be below the Fr " +

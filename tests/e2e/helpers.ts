@@ -57,8 +57,8 @@ export async function registerPublished(
   address: string,
   artifact: unknown,
 ): Promise<void> {
-  const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
-  const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+  const { createAztecNodeClient } = await import("@aztec-labs/aztec.js/node");
+  const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
   const instance = await createAztecNodeClient(resolveNodeUrl()).getContract(
     AztecAddress.fromStringUnsafe(address),
   );
@@ -140,7 +140,7 @@ export async function waitForNode(url: string, timeoutMs = 120_000): Promise<voi
  * Sends only. Simulations want `gasWithHeadroom` instead.
  */
 export async function feeWithHeadroom(wallet: unknown): Promise<{
-  paymentMethod: import("@aztec/aztec.js/fee").FeePaymentMethod;
+  paymentMethod: import("@aztec-labs/aztec.js/fee").FeePaymentMethod;
   gasSettings: Awaited<ReturnType<typeof headroomGasSettings>>;
 }> {
   return {
@@ -181,11 +181,11 @@ export async function gasWithHeadroom(): Promise<{
  */
 export async function sponsoredFee(
   wallet: unknown,
-): Promise<import("@aztec/aztec.js/fee").FeePaymentMethod> {
-  const { SponsoredFPCContract } = await import("@aztec/noir-contracts.js/SponsoredFPC");
-  const { SponsoredFeePaymentMethod } = await import("@aztec/aztec.js/fee/testing");
-  const { getContractInstanceFromInstantiationParams } = await import("@aztec/stdlib/contract");
-  const { Fr } = await import("@aztec/aztec.js/fields");
+): Promise<import("@aztec-labs/aztec.js/fee").FeePaymentMethod> {
+  const { SponsoredFPCContract } = await import("@aztec-labs/noir-contracts.js/SponsoredFPC");
+  const { SponsoredFeePaymentMethod } = await import("@aztec-labs/aztec.js/fee/testing");
+  const { getContractInstanceFromInstantiationParams } = await import("@aztec-labs/stdlib/contract");
+  const { Fr } = await import("@aztec-labs/aztec.js/fields");
 
   const instance = await getContractInstanceFromInstantiationParams(
     SponsoredFPCContract.artifact,
@@ -248,8 +248,8 @@ export async function mintOne(
   token: string,
   minter: string,
 ): Promise<void> {
-  const { TokenContract } = await import("@aztec/noir-contracts.js/Token");
-  const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+  const { TokenContract } = await import("@aztec-labs/noir-contracts.js/Token");
+  const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
   const minterAddress = AztecAddress.fromStringUnsafe(minter);
   const contract = await (
     TokenContract as unknown as {
@@ -284,8 +284,8 @@ export async function mintTo(
   amount: bigint,
   minter: string,
 ): Promise<void> {
-  const { TokenContract } = await import("@aztec/noir-contracts.js/Token");
-  const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+  const { TokenContract } = await import("@aztec-labs/noir-contracts.js/Token");
+  const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
   const contract = await (
     TokenContract as unknown as {
       at: (a: unknown, w: unknown) => Promise<{
@@ -315,8 +315,8 @@ export async function mintTo(
  * E2E_TOKEN_ADDRESS being set nowhere used to mean.
  */
 export async function deployTestToken(wallet: unknown, admin: string): Promise<string> {
-  const { TokenContract } = await import("@aztec/noir-contracts.js/Token");
-  const { AztecAddress } = await import("@aztec/aztec.js/addresses");
+  const { TokenContract } = await import("@aztec-labs/noir-contracts.js/Token");
+  const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
   const adminAddress = AztecAddress.fromStringUnsafe(admin);
 
   const { contract } = await (

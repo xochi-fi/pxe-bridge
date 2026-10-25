@@ -1,13 +1,14 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
-import { GrumpkinScalar } from "@aztec/foundation/curves/grumpkin";
-import { Fr } from "@aztec/foundation/curves/bn254";
-import { AztecAddress } from "@aztec/aztec.js/addresses";
-import { CompleteAddress } from "@aztec/stdlib/contract";
+import { GrumpkinScalar } from "@aztec-labs/foundation/curves/grumpkin";
+import { Fr } from "@aztec-labs/foundation/curves/bn254";
+import { AztecAddress } from "@aztec-labs/aztec.js/addresses";
+import { CompleteAddress } from "@aztec-labs/stdlib/contract";
 import {
   FunctionCall,
   FunctionSelector,
   FunctionType,
+  getFunctionReturnType,
   isAztecAddressStruct,
   isEthAddressStruct,
   isFunctionSelectorStruct,
@@ -15,9 +16,9 @@ import {
   loadContractArtifact,
   type AbiType,
   type FunctionAbi,
-} from "@aztec/stdlib/abi";
-import { ExecutionPayload } from "@aztec/stdlib/tx";
-import { GasSettings } from "@aztec/stdlib/gas";
+} from "@aztec-labs/stdlib/abi";
+import { ExecutionPayload } from "@aztec-labs/stdlib/tx";
+import { GasSettings } from "@aztec-labs/stdlib/gas";
 import {
   SpendingLimitAccountContract,
   TRANSFER_TO_PRIVATE_SELECTOR,
@@ -92,7 +93,8 @@ async function transferCall(recipient: string, amount: bigint): Promise<Function
     // (to: AztecAddress, amount: u128) encodes as two fields, a u128 packing
     // into one.
     args: [Fr.fromString(recipient), new Fr(amount)],
-    returnTypes: [],
+    // No return value: 6.0.0 replaced `returnTypes: []` with an absent
+    // `returnType`.
   });
 }
 
@@ -121,7 +123,7 @@ const ENTRYPOINT_OPTIONS = {
  * wrapExecutionPayload would leave the production path uncovered.
  */
 async function requestArgs(
-  account: import("@aztec/aztec.js/account").Account,
+  account: import("@aztec-labs/aztec.js/account").Account,
   exec: ExecutionPayload,
 ): Promise<Fr[]> {
   const request = await account.createTxExecutionRequest(
@@ -138,7 +140,7 @@ async function requestArgs(
 
 /** The same, through the wrapping path, which the class still has to satisfy. */
 async function wrappedArgs(
-  account: import("@aztec/aztec.js/account").Account,
+  account: import("@aztec-labs/aztec.js/account").Account,
   exec: ExecutionPayload,
 ): Promise<Fr[]> {
   const payload = await account.wrapExecutionPayload(
@@ -375,7 +377,7 @@ const HAVE_ARTIFACT = existsSync(ARTIFACT);
  * dispatches on, because the hand-written ABI and the compiler spell the same
  * structs differently (`authwit::aztec::protocol_types::address::AztecAddress`
  * against `aztec::protocol_types::address::aztec_address::AztecAddress`) and
- * nothing in @aztec/stdlib/abi compares paths whole for these types. Parameter
+ * nothing in @aztec-labs/stdlib/abi compares paths whole for these types. Parameter
  * `visibility` is dropped for the same reason: neither the encoder nor the
  * signature decoder reads it.
  */
@@ -398,6 +400,7 @@ function encodingShape(type: AbiType): unknown {
 }
 
 function signatureShape(abi: FunctionAbi): unknown {
+  const returnType = getFunctionReturnType(abi);
   return {
     name: abi.name,
     functionType: abi.functionType,
@@ -405,7 +408,7 @@ function signatureShape(abi: FunctionAbi): unknown {
     isOnlySelf: abi.isOnlySelf,
     isStatic: abi.isStatic,
     parameters: abi.parameters.map((p) => ({ name: p.name, type: encodingShape(p.type) })),
-    returnTypes: abi.returnTypes.map(encodingShape),
+    returnType: returnType === undefined ? null : encodingShape(returnType),
   };
 }
 

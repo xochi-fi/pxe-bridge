@@ -43,7 +43,7 @@ import type { ClaimingWallet } from "../src/fee-juice.js";
 
 /** Whatever EmbeddedWallet.create hands back, without naming the node variant. */
 type PayerWallet = Awaited<
-  ReturnType<typeof import("@aztec/wallets/embedded").EmbeddedWallet.create>
+  ReturnType<typeof import("@aztec-labs/wallets/embedded").EmbeddedWallet.create>
 >;
 
 function required(name: string): string {
@@ -99,8 +99,8 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const { EmbeddedWallet } = await import("@aztec/wallets/embedded");
-  const { createAztecNodeClient } = await import("@aztec/aztec.js/node");
+  const { EmbeddedWallet } = await import("@aztec-labs/wallets/embedded");
+  const { createAztecNodeClient } = await import("@aztec-labs/aztec.js/node");
 
   console.log(`Connecting to Aztec node at ${AZTEC_NODE_URL}`);
   const wallet = await EmbeddedWallet.create(AZTEC_NODE_URL);
@@ -165,11 +165,11 @@ async function main(): Promise<void> {
  */
 async function sponsoredFee(
   wallet: PayerWallet,
-): Promise<import("@aztec/aztec.js/fee").FeePaymentMethod> {
-  const { SponsoredFPCContract } = await import("@aztec/noir-contracts.js/SponsoredFPC");
-  const { SponsoredFeePaymentMethod } = await import("@aztec/aztec.js/fee/testing");
-  const { getContractInstanceFromInstantiationParams } = await import("@aztec/stdlib/contract");
-  const { Fr } = await import("@aztec/aztec.js/fields");
+): Promise<import("@aztec-labs/aztec.js/fee").FeePaymentMethod> {
+  const { SponsoredFPCContract } = await import("@aztec-labs/noir-contracts.js/SponsoredFPC");
+  const { SponsoredFeePaymentMethod } = await import("@aztec-labs/aztec.js/fee/testing");
+  const { getContractInstanceFromInstantiationParams } = await import("@aztec-labs/stdlib/contract");
+  const { Fr } = await import("@aztec-labs/aztec.js/fields");
 
   const instance = await getContractInstanceFromInstantiationParams(SponsoredFPCContract.artifact, {
     salt: new Fr(0),

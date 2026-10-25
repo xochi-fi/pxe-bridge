@@ -1,7 +1,12 @@
 services:
   anvil:
     # Pinned: the zero base fee below relies on anvil holding 0 constant.
-    image: ghcr.io/foundry-rs/foundry:v1.8.1
+    # 1.8.5 is the foundry the 6.0.0 toolchain bundles (its `versions` file).
+    # With 1.8.1 (and the then `--block-time 1`) the 6.0.0 sandbox's L1 deploy
+    # stalled: anvil mined the first 14 of forge's 33 transactions, dropped the
+    # rest from its pool, and forge timed out after 120s (2026-10-25, arm64).
+    # 1.8.1 under automine was not tried.
+    image: ghcr.io/foundry-rs/foundry:v1.8.5
     # Base fee 0. The L2 min fee is mostly L1 base fee, which decays 12.5% per
     # near-empty sandbox L1 block, so each fee oracle refresh cut the L2 fee
     # 3-15x. Right after a checkpoint the node simulates against the previous
@@ -9,8 +14,14 @@ services:
     # send priced off the prediction failed "maxFeesPerGas.feePerL2Gas must be
     # greater than or equal to gasFees.feePerL2Gas". At 0 the L2 fee is the
     # proving cost floor and constant.
+    #
+    # No `--block-time`: anvil automines, which is what the 6.0.0 local network
+    # runs against (`aztec start --local-network` starts a bare `anvil`). Its
+    # automine sequencer drives L1 time itself. Under `--block-time 1` its
+    # checkpoint proposals reverted `Rollup__SlotAlreadyInChain` in a loop,
+    # and startup failed with "Timeout awaiting isMined".
     entrypoint:
-      ["anvil", "--host", "0.0.0.0", "--chain-id", "31337", "--block-time", "1", "--block-base-fee-per-gas", "0"]
+      ["anvil", "--host", "0.0.0.0", "--chain-id", "31337", "--block-base-fee-per-gas", "0"]
     ports:
       - "8545:8545"
     healthcheck:
@@ -29,13 +40,18 @@ services:
     # the sandbox under emulation on Apple silicon, where it never reached
     # healthy (xochi-fi/xochi#513). To force a platform, set
     # DOCKER_DEFAULT_PLATFORM.
-    image: aztecprotocol/aztec:5.2.0
+    #
+    # 6.0.0 images are published under `azteclabs/aztec`, the Docker Hub
+    # counterpart of the npm move to `@aztec-labs`; `aztecprotocol/aztec` has
+    # no 6.0.0 release tag. 6.0.0 is what the Aztec public testnet reports.
+    image: azteclabs/aztec:6.0.0
     command: ["start", "--local-network"]
     # No restart policy. 5.1.0 needed `on-failure:3`: its bb.js gave the native
     # prover socket a fixed 5s to connect, and about half of arm64 cold starts
     # lost that race ("Timeout connecting to bb socket: unknown"). bb.js 5.2.0
     # waits as long as the bb process is alive (60s backstop), and 6 of 6 arm64
-    # cold starts reached healthy without a restart (2026-10-19).
+    # cold starts reached healthy without a restart (2026-10-19). The one 6.0.0
+    # arm64 cold start with the anvil above did too (2026-10-25).
     ports:
       - "8080:8080"
     environment:
