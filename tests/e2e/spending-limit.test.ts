@@ -1,6 +1,4 @@
-import { readFileSync } from "node:fs";
 import { describe, it, expect, beforeAll } from "vitest";
-import { loadContractArtifact } from "@aztec-labs/stdlib/abi";
 import { AztecClient, deriveAccountKeys } from "../../src/aztec-client.js";
 import {
   SpendingLimitAccountContract,
@@ -8,11 +6,7 @@ import {
 } from "../../src/spending-limit-account.js";
 import { AllowlistTree } from "../../src/allowlist-tree.js";
 import type { AccountDeployment } from "../../src/types.js";
-import {
-  SCHNORR_CLASS_ID_6_0_0,
-  assertAccountIdentity,
-  readSpendingLimitAdmin,
-} from "../../src/account-identity.js";
+import { SCHNORR_CLASS_ID_6_0_0, assertAccountIdentity } from "../../src/account-identity.js";
 import {
   getTestConfig,
   deployTestToken,
@@ -551,29 +545,14 @@ describe("spending limit account (e2e)", () => {
 
   // UPGRADE GUARD -- the admin is immutable, and a key whose admin account was
   // deployed under an older runtime derives a different address under 6.0.0.
-  // scripts/update-allowlist.ts composes exactly these two calls before it
-  // sends anything; this is the only place they meet a real account.
+  // scripts/spending-limit-admin.ts composes exactly these two calls
+  // (readAccountState, then connectAdmin's assertAccountIdentity) before
+  // update-allowlist or admin.ts sends anything; this is the only place they
+  // meet a real account.
   it("reads the stored admin and refuses any other admin signer", async (ctx) => {
     if (deployFailure) return ctx.skip();
-    const { createAztecNodeClient } = await import("@aztec-labs/aztec.js/node");
-    const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
-    const node = createAztecNodeClient(config.nodeUrl);
-    // The artifact the account was deployed from: the e2e job downloads the
-    // contract job's build into target/.
-    const artifact = loadContractArtifact(
-      JSON.parse(
-        readFileSync(
-          "contracts/spending_limit_account/target/spending_limit_account_contract-SpendingLimitAccount.json",
-          "utf8",
-        ),
-      ),
-    );
-
-    const stored = await readSpendingLimitAdmin(
-      node,
-      AztecAddress.fromStringUnsafe(accountAddress),
-      artifact,
-    );
+    const { state } = await readAccountState(config.nodeUrl, accountAddress);
+    const stored = state.admin;
     expect(stored.toLowerCase()).toBe(adminAddress.toLowerCase());
 
     const asSigner = (derived: string) =>
@@ -582,7 +561,7 @@ describe("spending limit account (e2e)", () => {
         derived,
         derivedClassId: SCHNORR_CLASS_ID_6_0_0,
         expected: stored,
-        expectedSource: `the admin stored in ${accountAddress}`,
+        expectedSource: "the account's stored admin",
       });
     expect(() => asSigner(adminAddress)).not.toThrow();
     expect(() => asSigner(UNLISTED_RECIPIENT)).toThrow(
@@ -590,9 +569,9 @@ describe("spending limit account (e2e)", () => {
     );
 
     // A slot read from any other contract means nothing, so it is refused.
-    await expect(
-      readSpendingLimitAdmin(node, AztecAddress.fromStringUnsafe(tokenAddress), artifact),
-    ).rejects.toThrow(/not the spending-limit account class/);
+    await expect(readAccountState(config.nodeUrl, tokenAddress)).rejects.toThrow(
+      /contract class mismatch/,
+    );
   });
 });
 
