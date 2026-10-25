@@ -2,6 +2,13 @@
 
 JSON-RPC bridge from EVM intent solvers to Aztec shielded settlement via embedded PXE.
 
+> **Network.** This release targets the **Aztec 6.0.0 public testnet** (L1
+> chain id 11155111, rollup version 679261766) through the `@aztec-labs/*`
+> 6.0.0 SDK. It does **not** serve Aztec mainnet, which runs 5.2.0: a 6.0.0
+> client against a 5.2.0 node is unsupported, and every account address this
+> release derives differs from its 5.2.0 counterpart. Run it only against a
+> 6.0.0 node.
+
 ## What is PXE?
 
 PXE (Private eXecution Environment) is an Aztec-specific runtime that executes the private half of transactions locally on your machine, not on the network.

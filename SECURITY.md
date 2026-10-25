@@ -366,15 +366,36 @@ Recompiled for the testnet tracer (xochi-fi/pxe-bridge#55), unchanged
 | artifact hash | `0x18e3b0cb986f20b7288dd461ac00ec23c3a38420ee3c9a9c7808a6a54b3d2a0a` |
 | private functions root | `0x11015efca77d653def2c97bbb78009f3114be24dfd45ef251109d23d04b475ea` |
 | public bytecode commitment | `0x274f0b212e6dedb4ef9e46a8bea713a6900fc145ff72388c781b4894adb62340` |
-| sha256 of `target/spending_limit_account_contract-SpendingLimitAccount.json` | `397f2453f47307a77079bf6e61c52c7136c91a036ad3d2f3a85473b1a764a0b2` |
+| artifact digest (`ARTIFACT_SHA256`, `scripts/artifact-digest.js`) | `7ecfad1190cd2bbdd40e6e020d982ccbcaca119ba2c17e4444bc7e2faae922f7` |
+| raw file sha256 (arm64 build at `/tmp/pxe-bridge-6`, path-dependent) | `397f2453f47307a77079bf6e61c52c7136c91a036ad3d2f3a85473b1a764a0b2` |
+
+`ARTIFACT_SHA256` pins the whole file, ABI, storage layout and metadata
+included, which the class ID does not cover. It is a sha256 with each
+`file_map` path cut to the part below the checkout or the nargo cache, because
+`file_map` records absolute build paths: the raw file hash moves with the
+runner's checkout directory and `$HOME` even when nothing else does. The CI
+`contract` job checks it after the class ID, before anything is published.
 
 These values come from a native arm64 build (macOS, 2026-10-25). It was
 byte-identical at `HARDWARE_CONCURRENCY=1` and at 8 threads with an emptied
 `vk_cache`, so bb 6.0.0 did not show the 5.1.0 VK race here. That is one
-sample, so CI keeps `HARDWARE_CONCURRENCY=1`. The x86 `contract` job is still
-the build of record. `CLASS_ID` holds the arm64 value, and the first x86 run
-either confirms it or fails the class ID check naming both values. The
-artifact a deployment is made against is the one that run uploads.
+sample, so CI keeps `HARDWARE_CONCURRENCY=1`.
+
+An x86 build was attempted the same day in a `linux/amd64` container
+(`node:24.15.0-bookworm`, the CI installer, `aztec-up install 6.0.0`,
+`HARDWARE_CONCURRENCY=1 aztec compile`). The nargo stage completed and its
+output has the same normalised digest as the arm64 nargo stage
+(`64f42aa295c5c57706b9090cd6179102d92956593d9584119a71a65c9347df0f`), so the
+compiled bytecode, ABI and layout agree across architectures. The bb
+postprocess (transpile and verification keys) then failed in a child process
+and left the artifact untranspiled. The emulated CPU reports no AVX2, which is
+consistent with the barretenberg-under-emulation limitation recorded above;
+the exact error was not captured. So the post-bb x86 values are unobserved.
+The x86 `contract` job remains the build of
+record: `CLASS_ID` and `ARTIFACT_SHA256` hold the arm64 values, and the first
+x86 run either confirms both or fails naming the computed ones, which then
+replace them. The artifact a deployment is made against is the one that run
+uploads.
 
 ## Account address pinning
 
