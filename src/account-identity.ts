@@ -37,7 +37,7 @@ export const ALLOW_ACCOUNT_DEPLOY_ENV = "PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY";
 export const SCHNORR_CLASS_ID_5_1_0 =
   "0x0191cefaf68870dd09c29d402946976c9def479ee7f343061b6574fa401af98d";
 
-/** SchnorrAccount class under the `@aztec/*` 5.2.0 SDK (mainnet's line). */
+/** SchnorrAccount class under the `@aztec-labs/*` 5.2.0 SDK (mainnet's line). */
 export const SCHNORR_CLASS_ID_5_2_0 =
   "0x0833459dfb3c430326e50f2367ec093e07b4ed37d23e85cc759ef4f9aa800edd";
 
