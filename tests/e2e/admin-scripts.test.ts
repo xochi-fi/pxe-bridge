@@ -18,6 +18,7 @@ import {
   deployTestToken,
   mintOne,
   FUNDER_KEY,
+  walletDataDirectory,
 } from "./helpers.js";
 
 /**
@@ -142,7 +143,7 @@ describe("operator scripts (e2e)", () => {
   const accountState = async () => (await readAccountState(config.nodeUrl, account)).state;
 
   beforeAll(async () => {
-    const funder = new AztecClient(config.nodeUrl, FUNDER_KEY);
+    const funder = new AztecClient(config.nodeUrl, FUNDER_KEY, undefined, undefined, undefined, walletDataDirectory("admin-funder"));
     await funder.connect();
     funderWallet = (funder as unknown as { wallet: unknown }).wallet;
     funderAddress = funder.getAddress()!;
@@ -160,7 +161,7 @@ describe("operator scripts (e2e)", () => {
       token,
       allowlistSeed: ALLOWLIST_SEED,
       allowlistRecipients: RECIPIENTS,
-    });
+    }, undefined, walletDataDirectory("admin-limit"));
     await limit.connect();
     account = limit.getAddress()!;
   }, 600_000);

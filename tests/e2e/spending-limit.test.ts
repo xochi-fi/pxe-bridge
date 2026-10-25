@@ -181,7 +181,7 @@ describe("spending limit account (e2e)", () => {
     const restarted = new AztecClient(config.nodeUrl, config.secretKey, undefined, {
       ...changedConfig(),
       deployment: await deployedRecord(),
-    });
+    }, undefined, walletDataDirectory("limit-restarted"));
     await restarted.connect();
     expect(restarted.getAddress()).toBe(accountAddress);
   }, 600_000);
@@ -193,7 +193,7 @@ describe("spending limit account (e2e)", () => {
     const drifted = new AztecClient(config.nodeUrl, config.secretKey, undefined, {
       ...changedConfig(),
       deployment: { ...record, dailyLimit: (DAILY_LIMIT + 1n).toString() },
-    });
+    }, undefined, walletDataDirectory("limit-drifted"));
     await expect(drifted.connect()).rejects.toThrow(
       `Deployment record names account ${accountAddress}`,
     );
@@ -218,7 +218,7 @@ describe("spending limit account (e2e)", () => {
     const recorded = new AztecClient(config.nodeUrl, UNDEPLOYED_KEY, undefined, {
       ...base,
       deployment: await contract.deploymentRecord(address),
-    });
+    }, undefined, walletDataDirectory("limit-recorded"));
     await expect(recorded.connect()).rejects.toThrow("no initialized contract exists there");
   }, 600_000);
 

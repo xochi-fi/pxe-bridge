@@ -12,6 +12,7 @@ import {
   mintTo,
   requireTestToken,
   FUNDER_KEY,
+  walletDataDirectory,
 } from "./helpers.js";
 
 /**
@@ -35,7 +36,7 @@ describe("account deployed unpublished by v0.1.2 (e2e)", () => {
   let accountAddress: string;
 
   beforeAll(async () => {
-    const funder = new AztecClient(config.nodeUrl, FUNDER_KEY);
+    const funder = new AztecClient(config.nodeUrl, FUNDER_KEY, undefined, undefined, undefined, walletDataDirectory("unpublished-funder"));
     await funder.connect();
     funderWallet = (funder as unknown as { wallet: EmbeddedWallet }).wallet;
     funderAddress = funder.getAddress()!;
@@ -61,6 +62,7 @@ describe("account deployed unpublished by v0.1.2 (e2e)", () => {
       expect(metadata.isContractPublished).toBe(false);
 
       const client = new AztecClient(config.nodeUrl, UNPUBLISHED_KEY, undefined, undefined, undefined, {
+        ...walletDataDirectory("unpublished"),
         allowSponsoredFpc: false,
       });
       const log = vi.spyOn(console, "log");

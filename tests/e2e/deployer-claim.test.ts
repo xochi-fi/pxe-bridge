@@ -44,6 +44,7 @@ import {
   sponsoredFee,
   FUNDER_KEY,
   L1_RPC,
+  walletDataDirectory,
 } from "./helpers.js";
 
 /**
@@ -107,7 +108,7 @@ async function connectLogged(client: AztecClient): Promise<string[]> {
 }
 
 async function connectFunder(): Promise<{ wallet: EmbeddedWallet; address: string }> {
-  const funder = new AztecClient(config.nodeUrl, FUNDER_KEY);
+  const funder = new AztecClient(config.nodeUrl, FUNDER_KEY, undefined, undefined, undefined, walletDataDirectory("deployer-funder-1"));
   await funder.connect();
   return {
     wallet: (funder as unknown as { wallet: EmbeddedWallet }).wallet,
@@ -155,7 +156,7 @@ describe("spending limit account deployed from a funded deployer (e2e)", () => {
   let limits: SpendingLimitConfig;
 
   beforeAll(async () => {
-    const funder = new AztecClient(config.nodeUrl, FUNDER_KEY);
+    const funder = new AztecClient(config.nodeUrl, FUNDER_KEY, undefined, undefined, undefined, walletDataDirectory("deployer-funder-2"));
     await funder.connect();
     funderWallet = (funder as unknown as { wallet: unknown }).wallet;
     adminAddress = funder.getAddress()!;
@@ -213,6 +214,7 @@ describe("spending limit account deployed from a funded deployer (e2e)", () => {
       expect(await node.getContract(expectedAccount)).toBeUndefined();
 
       const client = new AztecClient(config.nodeUrl, DEPLOYER_PATH_KEY, undefined, limits, claim, {
+        ...walletDataDirectory("deployer-path"),
         allowSponsoredFpc: false,
       });
       await client.connect();
@@ -261,6 +263,7 @@ describe("spending limit account deployed from a funded deployer (e2e)", () => {
       const before = await getFeeJuiceBalance(deployer, node);
 
       const client = new AztecClient(config.nodeUrl, DEPLOYER_PATH_KEY, undefined, relimited, claim, {
+        ...walletDataDirectory("deployer-relimited"),
         allowSponsoredFpc: false,
       });
       await client.connect();
@@ -281,6 +284,7 @@ describe("spending limit account deployed from a funded deployer (e2e)", () => {
       const node = createAztecNodeClient(config.nodeUrl);
 
       const client = new AztecClient(config.nodeUrl, REFUSED_PATH_KEY, undefined, limits, undefined, {
+        ...walletDataDirectory("deployer-refused"),
         allowSponsoredFpc: false,
       });
       await expect(client.connect()).rejects.toThrow(SPONSORED_FPC_REFUSED_ERROR);
@@ -422,6 +426,7 @@ describe("deployer funded by a top-up, no claim configured (e2e)", () => {
       expect(await node.getContract(AztecAddress.fromStringUnsafe(expectedAccount))).toBeUndefined();
 
       const client = new AztecClient(config.nodeUrl, FUNDED_PATH_KEY, undefined, limits, undefined, {
+        ...walletDataDirectory("deployer-funded"),
         allowSponsoredFpc: false,
       });
       const lines = await connectLogged(client);
@@ -474,6 +479,7 @@ describe("uninitialized deployer whose claim is already spent (e2e)", () => {
       const expectedAccount = await limitAccountAddress(funderWallet, SPENT_CLAIM_KEY, limits);
 
       const client = new AztecClient(config.nodeUrl, SPENT_CLAIM_KEY, undefined, limits, claim, {
+        ...walletDataDirectory("deployer-spent"),
         allowSponsoredFpc: false,
       });
       const lines = await connectLogged(client);
@@ -523,6 +529,7 @@ describe("deployer holding dust, SponsoredFPC permitted (e2e)", () => {
       const expectedAccount = await limitAccountAddress(funderWallet, DUST_KEY, limits);
 
       const client = new AztecClient(config.nodeUrl, DUST_KEY, undefined, limits, undefined, {
+        ...walletDataDirectory("deployer-dust"),
         allowSponsoredFpc: true,
       });
       const lines = await connectLogged(client);
