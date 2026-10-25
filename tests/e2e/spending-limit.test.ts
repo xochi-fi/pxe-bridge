@@ -20,6 +20,7 @@ import {
   FUNDER_KEY,
   registerPublished,
 } from "./helpers.js";
+import { readAccountState, statusExitCode } from "../../scripts/spending-limit-admin.js";
 
 /**
  * The first e2e coverage of the on-chain spending-limit account.
@@ -421,6 +422,13 @@ describe("spending limit account (e2e)", () => {
       ]),
     ).toBe("success");
 
+    // The only check of `status` slot decoding against real storage.
+    const proposed = await readAccountState(config.nodeUrl, accountAddress);
+    expect(proposed.state.admin).toBe(adminAddress.toLowerCase());
+    expect(proposed.state.maxAmountPerTx).toBe(MAX_PER_TX);
+    expect(proposed.state.pendingMaxAmount).toBe(MAX_PER_TX * 2n);
+    expect(statusExitCode(proposed.state)).toBe(4);
+
     const outsider = await callAccount(
       client,
       accountAddress,
@@ -444,6 +452,10 @@ describe("spending limit account (e2e)", () => {
     expect(
       await callAccount(client, accountAddress, funderWallet, adminAddress, "cancel_limits", []),
     ).toBe("success");
+
+    const cancelled = await readAccountState(config.nodeUrl, accountAddress);
+    expect(cancelled.state.pendingMaxAmount).toBe(0n);
+    expect(statusExitCode(cancelled.state)).toBe(0);
   }, 600_000);
 
   // UPGRADE GUARD -- the admin is immutable, and a key whose admin account was

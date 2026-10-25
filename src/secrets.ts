@@ -119,7 +119,7 @@ function parseSecretValue(raw: string): string {
  * The key is rejected, never reduced: reducing operator-supplied key material
  * would map distinct keys onto one account and silently accept a typo.
  */
-async function validateKey(raw: string): Promise<string> {
+export async function validateKey(raw: string): Promise<string> {
   const normalized = raw.replace(/^0x/, "");
   if (!/^[0-9a-fA-F]{64}$/.test(normalized)) {
     throw new Error("Secret key must be 32 bytes (64 hex chars)");
