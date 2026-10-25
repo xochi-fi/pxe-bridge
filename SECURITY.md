@@ -515,19 +515,30 @@ preserved for comparison.
 
 ### 6.0.0 artifact of record
 
-Recompiled for the testnet tracer (xochi-fi/pxe-bridge#55), unchanged
-`main.nr` and `public_key_note.nr`, aztec 6.0.0 / noir
+**Status: arm64, pending x86 CI confirmation.**
+
+Recompiled for the testnet tracer (xochi-fi/pxe-bridge#55) after the
+fee-payment pin (xochi-fi/pxe-bridge#44) changed `main.nr`; `public_key_note.nr`
+is unchanged. aztec 6.0.0 / noir
 `1.0.0-rc.3+5a7ee9bf5ed8973076df7bb0d2b723024db09ae7`, aztec-nr `v6.0.0`
 (`aztec-labs-eng/aztec-nr`, tag object `46d118ff`, commit `04720122`):
 
 | | |
 |---|---|
-| contract class id (`CLASS_ID`) | `0x0d41b7399377b559a969acf04429432b81ac1efda31b0f6a713b5550e27a063a` |
-| artifact hash | `0x18e3b0cb986f20b7288dd461ac00ec23c3a38420ee3c9a9c7808a6a54b3d2a0a` |
-| private functions root | `0x11015efca77d653def2c97bbb78009f3114be24dfd45ef251109d23d04b475ea` |
+| contract class id (`CLASS_ID`) | `0x0bbe87edad6b55ba6a0a8baa982c6b52a48b817a630fe28c7ca1ac6b2d8b0009` |
+| artifact hash | `0x23175c2477ef7185293e060b672df9bb97be41037400af95a7e3114e3e36b197` |
+| private functions root | `0x01d57d9fd9ad35dceaa51b65ce8345b4535c8488233a2c9fec23e04dde34a76f` |
 | public bytecode commitment | `0x274f0b212e6dedb4ef9e46a8bea713a6900fc145ff72388c781b4894adb62340` |
-| artifact digest (`ARTIFACT_SHA256`, `scripts/artifact-digest.js`) | `7ecfad1190cd2bbdd40e6e020d982ccbcaca119ba2c17e4444bc7e2faae922f7` |
-| raw file sha256 (arm64 build at `/tmp/pxe-bridge-6`, path-dependent) | `397f2453f47307a77079bf6e61c52c7136c91a036ad3d2f3a85473b1a764a0b2` |
+| artifact digest (`ARTIFACT_SHA256`, `scripts/artifact-digest.js`) | `38ca99d673e5cf4c81fae00f942dd51a33ff3a78b9983ce0d7b7f42ef1d135f8` |
+| raw file sha256 (arm64 build at `/tmp/pxe-bridge-6`, path-dependent) | `6cc1287c1338d7bf393cfa7b77cc4c64912bcc6a2b71ebaa2d9f2bd7f5784c1a` |
+
+The public bytecode commitment is the pre-#44 value: #44 changed only the
+private entrypoint, so only the private functions root, and with it the class
+id, moved. The pre-#44 6.0.0 build pinned class id
+`0x0d41b7399377b559a969acf04429432b81ac1efda31b0f6a713b5550e27a063a` and digest
+`7ecfad1190cd2bbdd40e6e020d982ccbcaca119ba2c17e4444bc7e2faae922f7`. A
+spending-limit account deployed against that class derives elsewhere under this
+one, and a bridge with `PXE_BRIDGE_ACCOUNT_ADDRESS` recorded refuses to start.
 
 `ARTIFACT_SHA256` pins the whole file, ABI, storage layout and metadata
 included, which the class ID does not cover. It is a sha256 with each
@@ -538,24 +549,26 @@ runner's checkout directory and `$HOME` even when nothing else does. The CI
 
 These values come from a native arm64 build (macOS, 2026-10-25). It was
 byte-identical at `HARDWARE_CONCURRENCY=1` and at 8 threads with an emptied
-`vk_cache`, so bb 6.0.0 did not show the 5.1.0 VK race here. That is one
-sample, so CI keeps `HARDWARE_CONCURRENCY=1`.
+`vk_cache`, as the pre-#44 build was, so bb 6.0.0 did not show the 5.1.0 VK
+race here. That is two samples, so CI keeps `HARDWARE_CONCURRENCY=1`.
 
-An x86 build was attempted the same day in a `linux/amd64` container
-(`node:24.15.0-bookworm`, the CI installer, `aztec-up install 6.0.0`,
-`HARDWARE_CONCURRENCY=1 aztec compile`). The nargo stage completed and its
-output has the same normalised digest as the arm64 nargo stage
-(`64f42aa295c5c57706b9090cd6179102d92956593d9584119a71a65c9347df0f`), so the
-compiled bytecode, ABI and layout agree across architectures. The bb
+An x86 build of the pre-#44 sources was attempted the same day in a
+`linux/amd64` container (`node:24.15.0-bookworm`, the CI installer,
+`aztec-up install 6.0.0`, `HARDWARE_CONCURRENCY=1 aztec compile`). The nargo
+stage completed and its output had the same normalised digest as the arm64
+nargo stage (`64f42aa295c5c57706b9090cd6179102d92956593d9584119a71a65c9347df0f`),
+so the compiled bytecode, ABI and layout agreed across architectures. The bb
 postprocess (transpile and verification keys) then failed in a child process
 and left the artifact untranspiled. The emulated CPU reports no AVX2, which is
 consistent with the barretenberg-under-emulation limitation recorded above;
-the exact error was not captured. So the post-bb x86 values are unobserved.
-The x86 `contract` job remains the build of
-record: `CLASS_ID` and `ARTIFACT_SHA256` hold the arm64 values, and the first
-x86 run either confirms both or fails naming the computed ones, which then
-replace them. The artifact a deployment is made against is the one that run
-uploads.
+the exact error was not captured. That comparison was not repeated for the
+post-#44 sources, so no x86 value, pre- or post-bb, is observed for them. The
+x86 `contract` job remains the build of record: `CLASS_ID` and
+`ARTIFACT_SHA256` hold the arm64 values, and the first x86 run either confirms
+both or fails naming the computed ones, which then replace them (and
+`TIMELOCK_CHECKED_AT_CLASS_ID` in `tests/spending-limit-admin.test.ts`, which
+follows `CLASS_ID`). The artifact a deployment is made against is the one that
+run uploads.
 
 ## Account address pinning
 

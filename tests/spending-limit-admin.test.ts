@@ -221,7 +221,7 @@ describe("allowlistSentNotice", () => {
 // to main.nr moves CLASS_ID and fails this until the constants are re-checked
 // and this is updated to match.
 const TIMELOCK_CHECKED_AT_CLASS_ID =
-  "0x0d41b7399377b559a969acf04429432b81ac1efda31b0f6a713b5550e27a063a";
+  "0x0bbe87edad6b55ba6a0a8baa982c6b52a48b817a630fe28c7ca1ac6b2d8b0009";
 
 describe("timelock constants", () => {
   it("were checked against the pinned contract class", async () => {
