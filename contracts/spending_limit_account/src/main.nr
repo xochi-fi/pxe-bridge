@@ -350,18 +350,20 @@ pub contract SpendingLimitAccount {
             "Invalid signature",
         );
 
-        // --- Fee handling (same as standard Schnorr account) ---
-        if fee_payment_method
-            == AccountFeePaymentMethodOptions.PREEXISTING_FEE_JUICE
-        {
-            self.context.set_as_fee_payer();
-            self.context.end_setup();
-        }
-        if fee_payment_method
-            == AccountFeePaymentMethodOptions.FEE_JUICE_WITH_CLAIM
-        {
-            self.context.set_as_fee_payer();
-        }
+        // --- Fee handling ---
+        // Pinned to PREEXISTING_FEE_JUICE, unlike the stock Schnorr account.
+        // fee_payment_method is not in the signed hash, so the branches the
+        // stock account takes on it were chosen by whoever built the request,
+        // not by the signer. Only PREEXISTING_FEE_JUICE calls end_setup(); the
+        // others left execute_calls and the check_spending_public enqueue in
+        // the non-revertible setup phase, so phase ordering -- what makes an
+        // over-limit transfer revert with no note -- rested on an unsigned
+        // byte. Asserting it removes that dependency without changing what
+        // gets signed. See assert_pays_from_preexisting_fee_juice for why no
+        // legitimate path is lost.
+        assert_pays_from_preexisting_fee_juice(fee_payment_method);
+        self.context.set_as_fee_payer();
+        self.context.end_setup();
 
         // --- Bind declared spending to the actual transfer ---
         // Proves the payload's real transfer matches declared_amount/recipient
@@ -621,9 +623,13 @@ pub contract SpendingLimitAccount {
     // pause would hand them exactly the notice period they need to drain.
     //
     // A timelock on unpause is no better: it would freeze the account for a
-    // day after a false alarm. Both directions are already admin-gated, and an
-    // attacker who holds the admin key has propose_limits and does not need
-    // this.
+    // day after a false alarm. Both directions are already admin-gated.
+    //
+    // Against a compromised ADMIN key this is the attacker's lever, not ours:
+    // the admin is fixed at construction and nothing else can unpause, so an
+    // admin-key holder can freeze the account indefinitely. Admin key custody
+    // is the only control; a pause that no single key can hold forever is
+    // tracked in #27.
     //
     // This is now the ONLY immediate, untargeted stop. Under the array design
     // the alternative was removing every allowlist entry, one transaction per
@@ -661,14 +667,10 @@ pub contract SpendingLimitAccount {
     // proves that everything except position `index` is unchanged, without the
     // contract ever learning what any of it is.
     //
-    // It also means the caller must already know the tree. An attacker holding
-    // only the admin key cannot produce a valid sibling path, so the off-chain
-    // tree is a second factor on every allowlist change. That is the defence
-    // that replaces the 24h notice, and it is stronger: the notice assumed the
-    // account owner could react in time, and this account gives them nothing to
-    // react with (pause and revocation are both admin-gated, and the entrypoint
-    // only pays allowlisted recipients, so a compromised admin closes the
-    // escape window immediately).
+    // The caller must supply a valid sibling path, but every call publishes
+    // one. The admin key alone can rewrite any position touched by a
+    // published update_recipient, and that position's sibling (index ^ 1);
+    // the seed protects only positions that are neither (#32).
     //
     // UNTIMELOCKED, which is a deliberate change from propose/apply. The
     // timelock protected against a compromised admin adding an address they
@@ -984,6 +986,30 @@ pub contract SpendingLimitAccount {
         assert(!admin.is_zero(), "Admin must not be zero");
     }
 
+    // The entrypoint's fee handling, pinned. Extracted so `nargo test` can
+    // reach the assert; the entrypoint itself needs a private context.
+    //
+    // No legitimate path passes anything else (Aztec SDK v5.1.0, and 6.0.0,
+    // whose BaseWallet.completeFeeOptions makes the same choice):
+    //   - Sends and their simulations: completeFeeOptions picks
+    //     PREEXISTING_FEE_JUICE whenever the payload names no fee payer, and
+    //     createNote attaches no payment method. Simulation runs this real
+    //     entrypoint, since the bridge keeps the account out of the stub
+    //     overrides.
+    //   - FEE_JUICE_WITH_CLAIM and EXTERNAL both mean a fee payment method
+    //     merged its own call into app_payload, which the single-call guard
+    //     rejects anyway. So does a self-deploy, which is why the account is
+    //     deployed from a separate account and this entrypoint never runs.
+    //   - Utility views go through executeUtility, and third-party authwit
+    //     checks call verify_private_authwit directly; neither reaches here.
+    #[contract_library_method]
+    fn assert_pays_from_preexisting_fee_juice(fee_payment_method: u8) {
+        assert(
+            fee_payment_method == AccountFeePaymentMethodOptions.PREEXISTING_FEE_JUICE,
+            "Spending limit account pays only from preexisting fee juice",
+        );
+    }
+
     // ================================================================
     // Tests (run with `nargo test`; no sandbox or proving required)
     // ================================================================
@@ -1036,6 +1062,35 @@ pub contract SpendingLimitAccount {
         serialized[1] = TRANSFER_TO_PRIVATE_SELECTOR;
         serialized[2] = TEST_TOKEN;
         serialized
+    }
+
+    #[test]
+    fn preexisting_fee_juice_is_accepted() {
+        assert_pays_from_preexisting_fee_juice(
+            AccountFeePaymentMethodOptions.PREEXISTING_FEE_JUICE,
+        );
+    }
+
+    // EXTERNAL would skip set_as_fee_payer and end_setup both, leaving the
+    // transfer and the spending check in the non-revertible setup phase.
+    #[test(should_fail_with = "Spending limit account pays only from preexisting fee juice")]
+    fn external_fee_payment_reverts() {
+        assert_pays_from_preexisting_fee_juice(AccountFeePaymentMethodOptions.EXTERNAL);
+    }
+
+    // FEE_JUICE_WITH_CLAIM sets the fee payer but leaves end_setup to a claim
+    // call that the single-call guard can never admit.
+    #[test(should_fail_with = "Spending limit account pays only from preexisting fee juice")]
+    fn fee_juice_with_claim_reverts() {
+        assert_pays_from_preexisting_fee_juice(
+            AccountFeePaymentMethodOptions.FEE_JUICE_WITH_CLAIM,
+        );
+    }
+
+    // The parameter is a raw u8, so values outside the enum must fail too.
+    #[test(should_fail_with = "Spending limit account pays only from preexisting fee juice")]
+    fn unknown_fee_payment_method_reverts() {
+        assert_pays_from_preexisting_fee_juice(3);
     }
 
     // A payload with exactly one non-empty call whose args_hash matches the

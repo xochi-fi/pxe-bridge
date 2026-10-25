@@ -100,6 +100,17 @@ export const FeeJuiceClaimSchema = z.object({
 export type FeeJuiceClaim = z.infer<typeof FeeJuiceClaimSchema>;
 
 /**
+ * A claim plus the hash of the L1 to L2 message behind it: what resuming a
+ * top-up needs once the L1 deposit is done. The hash is what the wait polls
+ * for, and the claim alone does not carry it.
+ */
+export const BridgedFeeJuiceClaimSchema = FeeJuiceClaimSchema.extend({
+  messageHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/, "Must be 32-byte hex"),
+});
+
+export type BridgedFeeJuiceClaim = z.infer<typeof BridgedFeeJuiceClaimSchema>;
+
+/**
  * One allowlisted recipient and the tree position it occupies.
  *
  * The index is not decorative. The account stores only a root, so the bridge
@@ -117,6 +128,41 @@ export const AllowlistRecipientSchema = z.object({
 });
 
 export const AllowlistRecipientsSchema = z.array(AllowlistRecipientSchema);
+
+const HEX32 = /^0x[0-9a-fA-F]{64}$/;
+const POSITIVE_INTEGER = /^[1-9]\d*$/;
+
+/**
+ * The spending-limit account's deployment record: the constructor inputs it was
+ * deployed with, and the address they produced.
+ *
+ * Constructor args feed address derivation, so deriving them from live
+ * configuration meant every legitimate change moved the account. Rotating a
+ * recipient with `update_recipient`, or applying new limits and updating the
+ * env to match, gave the next restart a different address with nothing at it,
+ * and the bridge deployed a fresh empty account there and logged "Ready" over
+ * the funded one. Once this is set the address derives from it alone, and the
+ * live values go back to their own jobs: recipients and seed build the witness
+ * tree, the limit env vars drive the application-level limits.
+ *
+ * Amounts are decimal strings because JSON has no bigint. `allowlistRoot` is
+ * the root at construction, not the current one: every `update_recipient`
+ * moves the stored root, and none of them moves the address.
+ */
+export const AccountDeploymentSchema = z
+  .object({
+    address: z.string().regex(HEX32, "Must be a 32-byte hex AztecAddress"),
+    maxAmountPerTx: z.string().regex(POSITIVE_INTEGER, "Must be a positive integer"),
+    dailyLimit: z.string().regex(POSITIVE_INTEGER, "Must be a positive integer"),
+    admin: z.string().regex(HEX32, "Must be a 32-byte hex AztecAddress"),
+    token: z.string().regex(HEX32, "Must be a 32-byte hex AztecAddress"),
+    allowlistRoot: z.string().regex(HEX32, "Must be a 32-byte hex field element"),
+  })
+  // Strict, so a misspelt key fails here instead of being dropped and turning
+  // up later as an address mismatch with no clue which field was wrong.
+  .strict();
+
+export type AccountDeployment = z.infer<typeof AccountDeploymentSchema>;
 
 /**
  * Raised when createNote fails at a point where the transfer may already be on
@@ -147,6 +193,15 @@ export interface IAztecClient {
   connect(): Promise<void>;
   createNote(params: CreateNoteParams): Promise<CreateNoteResult>;
   getVersion(): Promise<string>;
+  /**
+   * The only token the account can move, or undefined when it is not pinned.
+   * Checked in rpc.ts before any budget is reserved: the contract enforces
+   * the token only in public, and the send proves without simulating public,
+   * so a mismatched token is otherwise proven, sent, reverted, and paid for.
+   */
+  pinnedToken(): string | undefined;
+  /** Fee juice held by the solver account, which pays every transfer. */
+  getFeeJuiceBalance(): Promise<bigint>;
 }
 
 /**

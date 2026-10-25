@@ -20,7 +20,8 @@
  *     admin: adminAddress,
  *     token: tokenAddress,
  *   });
- *   const manager = await AccountManager.create(wallet, secret, contract, salt);
+ *   // Derives from `deployment` when set, and refuses one it cannot reproduce.
+ *   const manager = await contract.accountManager(wallet, secret, salt);
  */
 
 import type { Fr as FrType } from "@aztec-labs/foundation/curves/bn254";
@@ -36,11 +37,13 @@ import type { GasSettings } from "@aztec-labs/stdlib/gas";
 import type { CompleteAddress } from "@aztec-labs/stdlib/contract";
 import type { AztecAddress } from "@aztec-labs/stdlib/aztec-address";
 import { BaseAccount, type Account, type AccountContract } from "@aztec-labs/aztec.js/account";
+import type { AccountManager } from "@aztec-labs/aztec.js/wallet";
 import {
   ALLOWLIST_TREE_HEIGHT,
   AllowlistTree,
   type AllowlistRecipient,
 } from "./allowlist-tree.js";
+import type { AccountDeployment } from "./types.js";
 
 // Must match DOM_SEP__SPENDING_LIMIT in the Noir contract (main.nr)
 export const DOM_SEP_SPENDING_LIMIT = 10042;
@@ -80,6 +83,27 @@ export const TRANSFER_TO_PRIVATE_SELECTOR = "0x89758b40";
 const ARTIFACT_PATH =
   "../contracts/spending_limit_account/target/spending_limit_account_contract-SpendingLimitAccount.json";
 
+/**
+ * The compiled account artifact. Standalone so the operator scripts can address
+ * the account without the signing key and limits the class needs.
+ */
+export async function loadSpendingLimitArtifact(): Promise<ContractArtifact> {
+  // Must go through loadContractArtifact. The file on disk is raw nargo
+  // output -- functions are named __aztec_nr_internals__* with their ABI
+  // nested under `abi` -- and casting it straight to ContractArtifact left
+  // consumers reading fields that do not exist, failing with "Cannot read
+  // properties of undefined (reading 'map')" during deployment.
+  //
+  // loadContractArtifact also rejects an untranspiled artifact outright,
+  // which is the check that catches a build done with plain nargo instead of
+  // `aztec compile`.
+  const { loadContractArtifact } = await import("@aztec-labs/stdlib/abi");
+  const artifact = await import(ARTIFACT_PATH, {
+    with: { type: "json" },
+  });
+  return loadContractArtifact(artifact.default as Parameters<typeof loadContractArtifact>[0]);
+}
+
 export interface SpendingLimitConfig {
   maxAmountPerTx: bigint;
   dailyLimit: bigint;
@@ -107,6 +131,15 @@ export interface SpendingLimitConfig {
    * further addition waited out a 24h timelock.
    */
   allowlistRecipients: readonly AllowlistRecipient[];
+  /**
+   * What the account was deployed with. When set, the constructor args, and
+   * so the address, come from here and nothing else; see AccountDeploymentSchema.
+   *
+   * Absent only for a first deployment, which derives the inputs from the
+   * fields above. Every later start should carry the record that deployment
+   * logged, or the next legitimate change to those fields moves the address.
+   */
+  deployment?: AccountDeployment;
 }
 
 // ============================================================
@@ -134,7 +167,53 @@ export class SpendingLimitAccountContract implements AccountContract {
   constructor(
     private signingPrivateKey: GrumpkinScalarType,
     private config: SpendingLimitConfig,
-  ) {}
+  ) {
+    // Admin and token have no setter on chain, so a record naming different
+    // ones is configuration for some other account. Refused here rather than
+    // trusted: these two fields are otherwise read only on a first deploy, and
+    // a mismatch left silent would only show up when that path ran again.
+    const record = config.deployment;
+    if (record) {
+      for (const field of ["admin", "token"] as const) {
+        if (record[field].toLowerCase() !== config[field].toLowerCase()) {
+          throw new Error(
+            `Spending limit ${field} ${config[field]} does not match the deployment ` +
+              `record's ${record[field]}. The ${field} is fixed at construction, so this ` +
+              `configuration is not for the recorded account.`,
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * The AccountManager for this account, refusing a deployment record the
+   * derivation does not reproduce.
+   *
+   * A mismatch means the record was edited, the secret key is not the one the
+   * account was deployed with, or the contract class moved (see CLASS_ID).
+   * Whichever it is, the derived address is not the funded account, and
+   * carrying on would deploy a fresh one there.
+   */
+  async accountManager(
+    wallet: Parameters<typeof AccountManager.create>[0],
+    secret: FrType,
+    salt: FrType,
+  ): Promise<AccountManager> {
+    const { AccountManager: Manager } = await import("@aztec-labs/aztec.js/wallet");
+    const manager = await Manager.create(wallet, secret, this, { salt });
+    const record = this.config.deployment;
+    if (record && manager.address.toString().toLowerCase() !== record.address.toLowerCase()) {
+      throw new Error(
+        `Deployment record names account ${record.address}, but the secret key and the ` +
+          `record's constructor inputs derive ${manager.address.toString()}. Either the record ` +
+          `was edited, the secret key is not the one this account was deployed with, or the ` +
+          `contract class changed (see contracts/spending_limit_account/CLASS_ID). Refusing ` +
+          `to start rather than deploy a new account away from the funded one.`,
+      );
+    }
+    return manager;
+  }
 
   /**
    * Build the tree once and cache it.
@@ -158,21 +237,57 @@ export class SpendingLimitAccountContract implements AccountContract {
     return undefined;
   }
 
-  async getContractArtifact(): Promise<ContractArtifact> {
-    // Must go through loadContractArtifact. The file on disk is raw nargo
-    // output -- functions are named __aztec_nr_internals__* with their ABI
-    // nested under `abi` -- and casting it straight to ContractArtifact left
-    // consumers reading fields that do not exist, failing with "Cannot read
-    // properties of undefined (reading 'map')" during deployment.
-    //
-    // loadContractArtifact also rejects an untranspiled artifact outright,
-    // which is the check that catches a build done with plain nargo instead of
-    // `aztec compile`.
-    const { loadContractArtifact } = await import("@aztec-labs/stdlib/abi");
-    const artifact = await import(ARTIFACT_PATH, {
-      with: { type: "json" },
-    });
-    return loadContractArtifact(artifact.default as Parameters<typeof loadContractArtifact>[0]);
+  getContractArtifact(): Promise<ContractArtifact> {
+    return loadSpendingLimitArtifact();
+  }
+
+  /**
+   * The constructor's inputs: from the deployment record when there is one,
+   * otherwise from live configuration, which is right only for a first deploy.
+   */
+  private async constructorInputs(): Promise<{
+    maxAmountPerTx: bigint;
+    dailyLimit: bigint;
+    admin: string;
+    token: string;
+    allowlistRoot: FrType;
+  }> {
+    const record = this.config.deployment;
+    if (record) {
+      const { Fr } = await import("@aztec-labs/foundation/curves/bn254");
+      return {
+        maxAmountPerTx: BigInt(record.maxAmountPerTx),
+        dailyLimit: BigInt(record.dailyLimit),
+        admin: record.admin,
+        token: record.token,
+        allowlistRoot: Fr.fromString(record.allowlistRoot),
+      };
+    }
+    const tree = await this.allowlistTree();
+    return {
+      maxAmountPerTx: this.config.maxAmountPerTx,
+      dailyLimit: this.config.dailyLimit,
+      admin: this.config.admin,
+      token: this.config.token,
+      allowlistRoot: tree.root,
+    };
+  }
+
+  /**
+   * The record an operator persists after the first deployment, for the
+   * account at `address`. Only meaningful when `address` is the one these
+   * inputs derive, which is how AztecClient calls it.
+   */
+  async deploymentRecord(address: string): Promise<AccountDeployment> {
+    const inputs = await this.constructorInputs();
+    return {
+      address,
+      maxAmountPerTx: inputs.maxAmountPerTx.toString(),
+      dailyLimit: inputs.dailyLimit.toString(),
+      admin: inputs.admin,
+      token: inputs.token,
+      allowlistRoot: inputs.allowlistRoot.toString(),
+    };
   }
 
   async getInitializationFunctionAndArgs(): Promise<{
@@ -184,21 +299,22 @@ export class SpendingLimitAccountContract implements AccountContract {
 
     const schnorr = new Schnorr();
     const pubKey = await schnorr.computePublicKey(this.signingPrivateKey);
-    const tree = await this.allowlistTree();
+    // Every one of these feeds address derivation. Only the record's values
+    // are stable across restarts: the live limits and allowlist are meant to
+    // change after deployment, and deriving from them moved the account.
+    const inputs = await this.constructorInputs();
 
     return {
       constructorName: "constructor",
       constructorArgs: [
         pubKey.x,
         pubKey.y,
-        this.config.maxAmountPerTx,
-        this.config.dailyLimit,
-        AztecAddress.fromStringUnsafe(this.config.admin),
-        AztecAddress.fromStringUnsafe(this.config.token),
-        // The whole allowlist, as one root. This value feeds address
-        // derivation through the constructor args, so a different seed or a
-        // different set is a different account.
-        tree.root,
+        inputs.maxAmountPerTx,
+        inputs.dailyLimit,
+        AztecAddress.fromStringUnsafe(inputs.admin),
+        AztecAddress.fromStringUnsafe(inputs.token),
+        // The whole allowlist, as one root, as it stood at construction.
+        inputs.allowlistRoot,
       ],
     };
   }

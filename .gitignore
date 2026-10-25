@@ -16,3 +16,7 @@ aztec-wallet-data/
 # it is ~2MB of machine-generated JSON and must match the toolchain, not the
 # tree.
 contracts/**/target/
+
+# Pending fee juice deposits written by the bridge scripts. Each holds a claim
+# secret until the claim is printed.
+fee-juice-deposit-*.json

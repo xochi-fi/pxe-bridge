@@ -1,6 +1,20 @@
-import { AztecClient, FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR, TX_TIMEOUT_MS } from "./aztec-client.js";
+import {
+  AztecClient,
+  DEPLOYER_CLAIM_WITHOUT_SPENDING_LIMIT_ERROR,
+  DEPLOYER_FEE_JUICE_CLAIM_ENV,
+  FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR,
+  TX_TIMEOUT_MS,
+  sponsoredFpcSetting,
+  type SponsoredFpcSetting,
+} from "./aztec-client.js";
 import { createApp, RESPONSE_TIMEOUT_MS } from "./server.js";
-import { AllowlistRecipientsSchema, FeeJuiceClaimSchema } from "./types.js";
+import {
+  AccountDeploymentSchema,
+  AllowlistRecipientsSchema,
+  FeeJuiceClaimSchema,
+  type AccountDeployment,
+  type FeeJuiceClaim,
+} from "./types.js";
 import {
   ACCOUNT_ADDRESS_ENV,
   ALLOW_ACCOUNT_DEPLOY_ENV,
@@ -51,24 +65,61 @@ if (!API_KEY) {
   );
 }
 
-let feeJuiceClaim: import("./types.js").FeeJuiceClaim | undefined;
-const FEE_JUICE_CLAIM_RAW = process.env["FEE_JUICE_CLAIM"];
-if (FEE_JUICE_CLAIM_RAW) {
+/**
+ * Parses a fee juice claim env var, exiting with a message naming it on any
+ * malformation. FEE_JUICE_CLAIM and the deployer claim share one shape, since
+ * both are printed by `npm run bridge-fee-juice`.
+ */
+function parseFeeJuiceClaim(name: string): FeeJuiceClaim | undefined {
+  const raw = process.env[name];
+  // The claim secret spends the bridged fee juice; keep it out of the
+  // environment child processes and crash dumps inherit.
+  delete process.env[name];
+  if (!raw) return undefined;
   let json: unknown;
   try {
-    json = JSON.parse(FEE_JUICE_CLAIM_RAW);
+    json = JSON.parse(raw);
   } catch {
-    console.error("[pxe-bridge] FEE_JUICE_CLAIM is not valid JSON");
+    console.error(`[pxe-bridge] ${name} is not valid JSON`);
     process.exit(1);
   }
   const parsed = FeeJuiceClaimSchema.safeParse(json);
   if (!parsed.success) {
-    console.error(
-      "[pxe-bridge] FEE_JUICE_CLAIM must be: {claimAmount, claimSecret, messageLeafIndex}",
-    );
+    console.error(`[pxe-bridge] ${name} must be: {claimAmount, claimSecret, messageLeafIndex}`);
     process.exit(1);
   }
-  feeJuiceClaim = parsed.data;
+  return parsed.data;
+}
+
+const feeJuiceClaim = parseFeeJuiceClaim("FEE_JUICE_CLAIM");
+const deployerFeeJuiceClaim = parseFeeJuiceClaim(DEPLOYER_FEE_JUICE_CLAIM_ENV);
+
+// SponsoredFPC deployment fee fallback. Validated here so a malformed value is
+// named at startup, and announced because otherwise nothing mentions it until
+// an undeployed account reaches it. Enforced in AztecClient rather than here:
+// whether it is used depends on whether the account is already on chain, and
+// refusing on configuration alone would stop every restart of a deployed
+// production account that no longer carries a claim. AztecClient reads the
+// same env itself, so its log names the variable that decided.
+let sponsoredFpc: SponsoredFpcSetting;
+try {
+  sponsoredFpc = sponsoredFpcSetting(process.env);
+} catch (err) {
+  console.error(`[pxe-bridge] ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+}
+if (sponsoredFpc.allowed) {
+  console.warn(
+    "[pxe-bridge] SponsoredFPC deployment fee fallback ENABLED (sandbox and testnet only; " +
+      `${sponsoredFpc.reason}): an undeployed account not covered by FEE_JUICE_CLAIM, and a ` +
+      `spending-limit account without ${DEPLOYER_FEE_JUICE_CLAIM_ENV}, pay their deployment via SponsoredFPC`,
+  );
+} else {
+  console.log(
+    `[pxe-bridge] SponsoredFPC deployment fee fallback disabled (${sponsoredFpc.reason}): an ` +
+      "undeployed plain Schnorr account needs FEE_JUICE_CLAIM, and an undeployed spending-limit " +
+      `account needs ${DEPLOYER_FEE_JUICE_CLAIM_ENV}`,
+  );
 }
 
 // Transaction limits
@@ -98,6 +149,14 @@ const DAILY_LIMIT_RAW = process.env["PXE_BRIDGE_DAILY_LIMIT"];
 if (DAILY_LIMIT_RAW) {
   limitsConfig.dailyLimit = parsePositiveBigInt("PXE_BRIDGE_DAILY_LIMIT", DAILY_LIMIT_RAW);
 }
+
+// Unlike the limits above, a floor on the bridge's own fee juice. The
+// spending-limit account cannot refill itself, so running dry means every
+// transfer fails; this surfaces it on /status before that happens.
+const MIN_FEE_JUICE_RAW = process.env["PXE_BRIDGE_MIN_FEE_JUICE"];
+const minFeeJuice = MIN_FEE_JUICE_RAW
+  ? parsePositiveBigInt("PXE_BRIDGE_MIN_FEE_JUICE", MIN_FEE_JUICE_RAW)
+  : undefined;
 
 const COOLDOWN_THRESHOLD_RAW = process.env["PXE_BRIDGE_COOLDOWN_THRESHOLD"];
 const COOLDOWN_DELAY_RAW = process.env["PXE_BRIDGE_COOLDOWN_DELAY_MS"];
@@ -160,27 +219,31 @@ if (limits && !ADMIN_KEY) {
   );
 }
 
-// The bridge account's recorded address, checked in connect() against what the
-// key derives to before anything is deployed or served. Required in
-// production; see resolveAccountIdentityConfig for why and for the first-deploy
-// flag.
-let accountIdentity: AccountIdentityConfig;
-try {
-  accountIdentity = resolveAccountIdentityConfig(process.env);
-} catch (err) {
-  console.error(`[pxe-bridge] ${err instanceof Error ? err.message : String(err)}`);
-  process.exit(1);
-}
-
 // On-chain spending limit account (Phase 2).
 // When PXE_BRIDGE_SPENDING_LIMIT_ADMIN is set, deploys a custom Noir account
 // contract that enforces per-tx caps, daily volume limits, and a recipient
-// allowlist on-chain. Uses the same limit values as application-level limits.
+// allowlist on-chain. A first deployment takes its limits from the
+// application-level ones; after that PXE_BRIDGE_ACCOUNT_DEPLOYMENT pins what it
+// was deployed with, and the two are free to diverge.
 let spendingLimitConfig: SpendingLimitConfig | undefined;
 const SPENDING_LIMIT_ADMIN = process.env["PXE_BRIDGE_SPENDING_LIMIT_ADMIN"];
 const SPENDING_LIMIT_TOKEN = process.env["PXE_BRIDGE_SPENDING_LIMIT_TOKEN"];
 const ALLOWLIST_SEED = process.env["PXE_BRIDGE_ALLOWLIST_SEED"];
 const ALLOWLIST_RECIPIENTS_RAW = process.env["PXE_BRIDGE_ALLOWLIST_RECIPIENTS"];
+const ACCOUNT_DEPLOYMENT_RAW = process.env["PXE_BRIDGE_ACCOUNT_DEPLOYMENT"];
+// The same flag, and the same meaning, as the first-deploy exemption from the
+// recorded address (resolveAccountIdentityConfig): both are a first deployment
+// that cannot know its address or record in advance.
+const ALLOW_ACCOUNT_DEPLOY = process.env[ALLOW_ACCOUNT_DEPLOY_ENV] === "1";
+// A record with nothing to apply it to would otherwise be ignored, and the
+// bridge would come up as a plain Schnorr account at a different address.
+if (ACCOUNT_DEPLOYMENT_RAW && !SPENDING_LIMIT_ADMIN) {
+  console.error(
+    "[pxe-bridge] PXE_BRIDGE_ACCOUNT_DEPLOYMENT is set but PXE_BRIDGE_SPENDING_LIMIT_ADMIN " +
+      "is not. The record only applies to the spending limit account.",
+  );
+  process.exit(1);
+}
 // `0x00...0` satisfies the 32-byte hex pattern, so every address below is
 // checked against it separately. The contract asserts all three are non-zero,
 // and without this the mistake surfaces as an in-circuit assert part-way
@@ -312,6 +375,42 @@ if (SPENDING_LIMIT_ADMIN) {
     console.error(`[pxe-bridge] ${FEE_CLAIM_WITH_SPENDING_LIMIT_ERROR}`);
     process.exit(1);
   }
+  // The deployment record. Parsed here, checked against the derivation in
+  // connect(): only that can say whether it describes this key's account.
+  let deployment: AccountDeployment | undefined;
+  if (ACCOUNT_DEPLOYMENT_RAW) {
+    let deploymentJson: unknown;
+    try {
+      deploymentJson = JSON.parse(ACCOUNT_DEPLOYMENT_RAW);
+    } catch {
+      console.error("[pxe-bridge] PXE_BRIDGE_ACCOUNT_DEPLOYMENT is not valid JSON");
+      process.exit(1);
+    }
+    const deploymentParsed = AccountDeploymentSchema.safeParse(deploymentJson);
+    if (!deploymentParsed.success) {
+      console.error(
+        "[pxe-bridge] PXE_BRIDGE_ACCOUNT_DEPLOYMENT must be the record the bridge printed " +
+          "after deploying, {address, maxAmountPerTx, dailyLimit, admin, token, " +
+          "allowlistRoot}: " +
+          deploymentParsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
+      );
+      process.exit(1);
+    }
+    deployment = deploymentParsed.data;
+  } else if (process.env["NODE_ENV"] === "production" && !ALLOW_ACCOUNT_DEPLOY) {
+    // Refused rather than warned. Without a record the address derives from
+    // the live limits and allowlist, so a production restart after an
+    // allowlist update or a limit change deploys an empty account at a new
+    // address and serves from it, while the funds sit at the old one. A first
+    // deployment is the one legitimate reason to start without a record, and
+    // it is rare enough to ask for by name.
+    console.error(
+      "[pxe-bridge] PXE_BRIDGE_ACCOUNT_DEPLOYMENT is required when NODE_ENV=production. " +
+        "For a first deployment set PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1, then persist the " +
+        "record the bridge prints and remove the flag.",
+    );
+    process.exit(1);
+  }
   spendingLimitConfig = {
     maxAmountPerTx: limitsConfig.maxAmount,
     dailyLimit: limitsConfig.dailyLimit,
@@ -319,7 +418,51 @@ if (SPENDING_LIMIT_ADMIN) {
     token: SPENDING_LIMIT_TOKEN,
     allowlistSeed: ALLOWLIST_SEED,
     allowlistRecipients: allowlistParsed.data,
+    ...(deployment ? { deployment } : {}),
   };
+}
+
+// The bridge account's recorded address, checked in connect() against what the
+// key derives to before anything is deployed or served. Required in
+// production; see resolveAccountIdentityConfig for why and for the first-deploy
+// flag. In spending-limit mode the deployment record's `address` records the
+// same account, so it satisfies that requirement on its own, and a separately
+// set PXE_BRIDGE_ACCOUNT_ADDRESS must equal it.
+const recordedAddress = spendingLimitConfig?.deployment?.address;
+let accountIdentity: AccountIdentityConfig;
+try {
+  accountIdentity = resolveAccountIdentityConfig(
+    recordedAddress !== undefined && process.env[ACCOUNT_ADDRESS_ENV] === undefined
+      ? { ...process.env, [ACCOUNT_ADDRESS_ENV]: recordedAddress }
+      : process.env,
+  );
+} catch (err) {
+  console.error(`[pxe-bridge] ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+}
+// Two records of one address. Each would fail the derivation check in
+// connect() on its own, but refusing here names both, since one of them was
+// copied from a different deployment and the derivation alone cannot say
+// which.
+if (
+  recordedAddress !== undefined &&
+  accountIdentity.expectedAddress !== undefined &&
+  accountIdentity.expectedAddress.toLowerCase() !== recordedAddress.toLowerCase()
+) {
+  console.error(
+    `[pxe-bridge] PXE_BRIDGE_ACCOUNT_DEPLOYMENT names account ${recordedAddress}, but ` +
+      `${ACCOUNT_ADDRESS_ENV} is ${accountIdentity.expectedAddress}. Both record the same ` +
+      "account; one of them is from another deployment. Refusing to start.",
+  );
+  process.exit(1);
+}
+
+// The deployer exists only to deploy the spending-limit account; see
+// DEPLOYER_CLAIM_WITHOUT_SPENDING_LIMIT_ERROR. AztecClient refuses this too,
+// but here the message names the cause before the secret key is fetched.
+if (deployerFeeJuiceClaim && !spendingLimitConfig) {
+  console.error(`[pxe-bridge] ${DEPLOYER_CLAIM_WITHOUT_SPENDING_LIMIT_ERROR}`);
+  process.exit(1);
 }
 
 async function main(): Promise<void> {
@@ -356,17 +499,25 @@ async function main(): Promise<void> {
     );
   }
 
-  const client = new AztecClient(AZTEC_NODE_URL, secretKey, feeJuiceClaim, spendingLimitConfig, {
-    ...(accountIdentity.expectedAddress
-      ? { expectedAccountAddress: accountIdentity.expectedAddress }
-      : {}),
-  });
+  const client = new AztecClient(
+    AZTEC_NODE_URL,
+    secretKey,
+    feeJuiceClaim,
+    spendingLimitConfig,
+    deployerFeeJuiceClaim,
+    {
+      ...(accountIdentity.expectedAddress
+        ? { expectedAccountAddress: accountIdentity.expectedAddress }
+        : {}),
+    },
+  );
   const server = createApp(client, {
     apiKey: API_KEY,
     adminKey: ADMIN_KEY,
     limits,
     audit,
     idempotency,
+    minFeeJuice,
   });
 
   await client.connect();

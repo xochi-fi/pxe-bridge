@@ -1,13 +1,12 @@
-import { readFileSync } from "node:fs";
 import { describe, it, expect, beforeAll } from "vitest";
-import { loadContractArtifact } from "@aztec-labs/stdlib/abi";
-import { AztecClient } from "../../src/aztec-client.js";
-import type { SpendingLimitConfig } from "../../src/spending-limit-account.js";
+import { AztecClient, deriveAccountKeys } from "../../src/aztec-client.js";
 import {
-  SCHNORR_CLASS_ID_6_0_0,
-  assertAccountIdentity,
-  readSpendingLimitAdmin,
-} from "../../src/account-identity.js";
+  SpendingLimitAccountContract,
+  type SpendingLimitConfig,
+} from "../../src/spending-limit-account.js";
+import { AllowlistTree } from "../../src/allowlist-tree.js";
+import type { AccountDeployment } from "../../src/types.js";
+import { SCHNORR_CLASS_ID_6_0_0, assertAccountIdentity } from "../../src/account-identity.js";
 import {
   getTestConfig,
   deployTestToken,
@@ -20,6 +19,7 @@ import {
   FUNDER_KEY,
   registerPublished,
 } from "./helpers.js";
+import { readAccountState, statusExitCode } from "../../scripts/spending-limit-admin.js";
 
 /**
  * The first e2e coverage of the on-chain spending-limit account.
@@ -32,9 +32,12 @@ import {
  * Three of them are load-bearing for the audit response and are marked so:
  *
  *   PHASE ORDERING -- an over-limit transfer must revert AND leave no note.
- *   If end_setup() ever moves below execute_calls the transfer lands in the
- *   non-revertible phase, every limit silently becomes advisory, and all 54
- *   Noir tests still pass. Nothing but this test can catch that.
+ *   If end_setup() ever moves below execute_calls, or stops running
+ *   unconditionally (the entrypoint asserts fee_payment_method ==
+ *   PREEXISTING_FEE_JUICE because that unsigned byte used to decide whether it
+ *   ran at all), the transfer lands in the non-revertible phase, every limit
+ *   silently becomes advisory, and every Noir test still passes. Nothing but
+ *   this test can catch that.
  *
  *   L2 REVOCATION -- an immediate removal must stop further transfers to that
  *   recipient, and must also invalidate a transaction that was already PROVEN.
@@ -59,6 +62,10 @@ const config = getTestConfig();
 // that reduction. The two keys above happen to land in range and would pass
 // either way.
 const OUTSIDER_KEY = "0x000000000000000000000000000000000000000000000000000000000000d00d";
+
+// Never deployed. Used for a deployment record that derives correctly but
+// names an address with nothing at it.
+const UNDEPLOYED_KEY = "0x000000000000000000000000000000000000000000000000000000000000f00d";
 
 const MAX_PER_TX = 1_000_000_000_000_000_000_000n; // 1000 tokens at 18 decimals
 const DAILY_LIMIT = 5_000_000_000_000_000_000_000n; // 5000 tokens
@@ -96,6 +103,7 @@ describe("spending limit account (e2e)", () => {
       FUNDER_KEY,
       undefined,
       undefined,
+      undefined,
       walletDataDirectory("limit-funder"),
     );
     await funder.connect();
@@ -120,6 +128,7 @@ describe("spending limit account (e2e)", () => {
       config.secretKey,
       config.feeJuiceClaim,
       spendingLimitConfig,
+      undefined,
       walletDataDirectory("limit-account"),
     );
 
@@ -154,6 +163,85 @@ describe("spending limit account (e2e)", () => {
     }
     expect(accountAddress).toMatch(/^0x[0-9a-f]{64}$/i);
   });
+
+  // The restart the allowlist runbook prescribes. The address used to derive
+  // from live configuration, so this client, with a different set and
+  // different limits, came up at a new address with nothing there and
+  // deployed an empty account over the funded one. Under the deployment
+  // record it must land on the same account and deploy nothing.
+  it("restarts at the recorded address after the allowlist and limits change", async (ctx) => {
+    if (deployFailure) return ctx.skip();
+
+    const restarted = new AztecClient(config.nodeUrl, config.secretKey, undefined, {
+      ...changedConfig(),
+      deployment: await deployedRecord(),
+    }, undefined, walletDataDirectory("limit-restarted"));
+    await restarted.connect();
+    expect(restarted.getAddress()).toBe(accountAddress);
+  }, 600_000);
+
+  it("refuses a deployment record that does not derive its address", async (ctx) => {
+    if (deployFailure) return ctx.skip();
+
+    const record = await deployedRecord();
+    const drifted = new AztecClient(config.nodeUrl, config.secretKey, undefined, {
+      ...changedConfig(),
+      deployment: { ...record, dailyLimit: (DAILY_LIMIT + 1n).toString() },
+    }, undefined, walletDataDirectory("limit-drifted"));
+    await expect(drifted.connect()).rejects.toThrow(
+      `Deployment record names account ${accountAddress}`,
+    );
+  }, 600_000);
+
+  // A record that derives correctly but names an account nobody deployed. The
+  // bridge must refuse rather than deploy it: with a record set, an empty
+  // address means the record or the node is wrong, never "first run".
+  it("refuses to deploy over a recorded address", async (ctx) => {
+    if (deployFailure) return ctx.skip();
+
+    const base: SpendingLimitConfig = {
+      ...changedConfig(),
+      maxAmountPerTx: MAX_PER_TX,
+      dailyLimit: DAILY_LIMIT,
+    };
+    const { secret, salt, signingKey } = await deriveAccountKeys(UNDEPLOYED_KEY);
+    const contract = new SpendingLimitAccountContract(signingKey, base);
+    const manager = await contract.accountManager(undefined as never, secret, salt);
+    const address = manager.address.toString();
+
+    const recorded = new AztecClient(config.nodeUrl, UNDEPLOYED_KEY, undefined, {
+      ...base,
+      deployment: await contract.deploymentRecord(address),
+    }, undefined, walletDataDirectory("limit-recorded"));
+    await expect(recorded.connect()).rejects.toThrow("no initialized contract exists there");
+  }, 600_000);
+
+  /** The record an operator would have persisted from the deployment above. */
+  async function deployedRecord(): Promise<AccountDeployment> {
+    const tree = await AllowlistTree.build(ALLOWLIST_SEED, [
+      { address: SEED_RECIPIENT, index: SEED_RECIPIENT_INDEX },
+    ]);
+    return {
+      address: accountAddress,
+      maxAmountPerTx: MAX_PER_TX.toString(),
+      dailyLimit: DAILY_LIMIT.toString(),
+      admin: adminAddress,
+      token: tokenAddress,
+      allowlistRoot: tree.root.toString(),
+    };
+  }
+
+  /** Everything an operator legitimately changes after deployment. */
+  function changedConfig(): SpendingLimitConfig {
+    return {
+      maxAmountPerTx: MAX_PER_TX / 2n,
+      dailyLimit: DAILY_LIMIT * 2n,
+      admin: adminAddress,
+      token: tokenAddress,
+      allowlistSeed: ALLOWLIST_SEED,
+      allowlistRecipients: [{ address: UNLISTED_RECIPIENT, index: 511 }],
+    };
+  }
 
   it("transfers within the per-tx limit", async (ctx) => {
     if (deployFailure) return ctx.skip();
@@ -403,6 +491,7 @@ describe("spending limit account (e2e)", () => {
       OUTSIDER_KEY,
       undefined,
       undefined,
+      undefined,
       walletDataDirectory("limit-outsider"),
     );
     await outsiderClient.connect();
@@ -417,6 +506,13 @@ describe("spending limit account (e2e)", () => {
         DAILY_LIMIT * 2n,
       ]),
     ).toBe("success");
+
+    // The only check of `status` slot decoding against real storage.
+    const proposed = await readAccountState(config.nodeUrl, accountAddress);
+    expect(proposed.state.admin).toBe(adminAddress.toLowerCase());
+    expect(proposed.state.maxAmountPerTx).toBe(MAX_PER_TX);
+    expect(proposed.state.pendingMaxAmount).toBe(MAX_PER_TX * 2n);
+    expect(statusExitCode(proposed.state)).toBe(4);
 
     const outsider = await callAccount(
       client,
@@ -441,33 +537,22 @@ describe("spending limit account (e2e)", () => {
     expect(
       await callAccount(client, accountAddress, funderWallet, adminAddress, "cancel_limits", []),
     ).toBe("success");
+
+    const cancelled = await readAccountState(config.nodeUrl, accountAddress);
+    expect(cancelled.state.pendingMaxAmount).toBe(0n);
+    expect(statusExitCode(cancelled.state)).toBe(0);
   }, 600_000);
 
   // UPGRADE GUARD -- the admin is immutable, and a key whose admin account was
   // deployed under an older runtime derives a different address under 6.0.0.
-  // scripts/update-allowlist.ts composes exactly these two calls before it
-  // sends anything; this is the only place they meet a real account.
+  // scripts/spending-limit-admin.ts composes exactly these two calls
+  // (readAccountState, then connectAdmin's assertAccountIdentity) before
+  // update-allowlist or admin.ts sends anything; this is the only place they
+  // meet a real account.
   it("reads the stored admin and refuses any other admin signer", async (ctx) => {
     if (deployFailure) return ctx.skip();
-    const { createAztecNodeClient } = await import("@aztec-labs/aztec.js/node");
-    const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
-    const node = createAztecNodeClient(config.nodeUrl);
-    // The artifact the account was deployed from: the e2e job downloads the
-    // contract job's build into target/.
-    const artifact = loadContractArtifact(
-      JSON.parse(
-        readFileSync(
-          "contracts/spending_limit_account/target/spending_limit_account_contract-SpendingLimitAccount.json",
-          "utf8",
-        ),
-      ),
-    );
-
-    const stored = await readSpendingLimitAdmin(
-      node,
-      AztecAddress.fromStringUnsafe(accountAddress),
-      artifact,
-    );
+    const { state } = await readAccountState(config.nodeUrl, accountAddress);
+    const stored = state.admin;
     expect(stored.toLowerCase()).toBe(adminAddress.toLowerCase());
 
     const asSigner = (derived: string) =>
@@ -476,7 +561,7 @@ describe("spending limit account (e2e)", () => {
         derived,
         derivedClassId: SCHNORR_CLASS_ID_6_0_0,
         expected: stored,
-        expectedSource: `the admin stored in ${accountAddress}`,
+        expectedSource: "the account's stored admin",
       });
     expect(() => asSigner(adminAddress)).not.toThrow();
     expect(() => asSigner(UNLISTED_RECIPIENT)).toThrow(
@@ -484,9 +569,9 @@ describe("spending limit account (e2e)", () => {
     );
 
     // A slot read from any other contract means nothing, so it is refused.
-    await expect(
-      readSpendingLimitAdmin(node, AztecAddress.fromStringUnsafe(tokenAddress), artifact),
-    ).rejects.toThrow(/not the spending-limit account class/);
+    await expect(readAccountState(config.nodeUrl, tokenAddress)).rejects.toThrow(
+      /contract class mismatch/,
+    );
   });
 });
 

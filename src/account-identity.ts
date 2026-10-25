@@ -18,11 +18,6 @@
  * check catches.
  */
 
-import type { ContractArtifact } from "@aztec-labs/stdlib/abi";
-import type { AztecAddress } from "@aztec-labs/stdlib/aztec-address";
-import type { Fr } from "@aztec-labs/foundation/curves/bn254";
-import { getContractClassFromArtifact } from "@aztec-labs/stdlib/contract";
-
 /** The bridge account's recorded address. Required in production. */
 export const ACCOUNT_ADDRESS_ENV = "PXE_BRIDGE_ACCOUNT_ADDRESS";
 
@@ -37,7 +32,7 @@ export const ALLOW_ACCOUNT_DEPLOY_ENV = "PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY";
 export const SCHNORR_CLASS_ID_5_1_0 =
   "0x0191cefaf68870dd09c29d402946976c9def479ee7f343061b6574fa401af98d";
 
-/** SchnorrAccount class under the `@aztec/*` 5.2.0 SDK (mainnet's line). */
+/** SchnorrAccount class under the `@aztec-labs/*` 5.2.0 SDK (mainnet's line). */
 export const SCHNORR_CLASS_ID_5_2_0 =
   "0x0833459dfb3c430326e50f2367ec093e07b4ed37d23e85cc759ef4f9aa800edd";
 
@@ -157,52 +152,4 @@ export function assertAccountIdentity(check: AccountIdentityCheck): void {
       "Do not re-record the derived address to make this start. " +
       'See SECURITY.md, "Account address pinning".',
   );
-}
-
-/** The slice of AztecNode reading the admin needs. */
-export interface ContractStateReader {
-  getContract(address: AztecAddress): Promise<{ currentContractClassId: Fr } | undefined>;
-  getPublicStorageAt(block: "latest", contract: AztecAddress, slot: Fr): Promise<Fr>;
-}
-
-/**
- * Reads a spending-limit account's admin from public storage.
- *
- * The contract has no admin getter and its bytecode is fixed (CLASS_ID), so
- * this reads the slot directly. `admin` is a PublicImmutable<AztecAddress>,
- * stored as aztec-nr's WithHash: the packed value at the variable's slot (one
- * field for an address) and its hash after it. The slot comes from the
- * artifact's storage layout rather than a literal.
- *
- * The instance's class is checked first. A slot read from any other contract
- * is a number with no meaning, and treating it as the admin would let a wrong
- * SPENDING_LIMIT_ACCOUNT pass or fail the check by accident.
- */
-export async function readSpendingLimitAdmin(
-  node: ContractStateReader,
-  account: AztecAddress,
-  artifact: ContractArtifact,
-): Promise<string> {
-  const instance = await node.getContract(account);
-  if (!instance) {
-    throw new Error(`No contract is published at ${account.toString()}`);
-  }
-  const expectedClass = (await getContractClassFromArtifact(artifact)).id.toString();
-  const actualClass = instance.currentContractClassId.toString();
-  if (actualClass !== expectedClass) {
-    throw new Error(
-      `${account.toString()} runs contract class ${actualClass}, not the spending-limit ` +
-        `account class ${expectedClass}; refusing to read an admin from it`,
-    );
-  }
-
-  const slot = artifact.storageLayout["admin"]?.slot;
-  if (!slot) {
-    throw new Error("Spending-limit artifact has no `admin` in its storage layout");
-  }
-  const admin = await node.getPublicStorageAt("latest", account, slot);
-  if (admin.isZero()) {
-    throw new Error(`${account.toString()} has no admin in storage; is it initialized?`);
-  }
-  return admin.toString();
 }

@@ -25,35 +25,130 @@ The admin is a separate party from the signing key holder.
 it already is. A timelock on it would hand an attacker exactly the notice
 period they need.
 
+`pause` is checked only in `check_spending_public`, never in the private
+entrypoint, so a compromised signing key can still submit against a paused
+account and burn its fee juice on each public revert.
+
 `update_recipient` is untimelocked, and that is a change from the array design,
 where additions waited 24h and removals were immediate. Under a Merkle
 allowlist the contract cannot tell the two apart: leaves are commitments, so
 adding, revoking and substituting are one operation on one leaf, and that
-indistinguishability is the privacy property. One policy therefore has to cover
-all three. The timelock is the half that had to go, because the notice it gave
-was legible only when the allowlist was public, while revocation latency is a
-cost that lands during an incident.
+indistinguishability is the privacy property, though repeated updates at one
+position erode it for observers (see "What is public"). One policy therefore
+has to cover all three. The timelock is the half that had to go, because the
+notice it gave was legible only when the allowlist was public, while
+revocation latency is a cost that lands during an incident.
 
 ### An attacker holding the admin key
 
-This is **not** recoverable, and the 24h notice was never the defence it looked
-like. `pause` and `update_recipient` are both immediate, and the entrypoint only
-pays an allowlisted recipient, so an attacker with the admin key stops the
-account or strips the allowlist before any notice period could elapse. The owner
-has nowhere to withdraw to and no lever to reach for.
+This is **not** recoverable on chain, and the 24h notice was never the defence
+it looked like. The owner's only way to move funds is a transfer to an
+allowlisted recipient, and the admin can stop that immediately with `pause`,
+which no other key can undo. The admin is fixed at construction with no
+rotation, so a compromised admin can close any escape window before a notice
+period could elapse, and keep it closed for good.
 
-What does bound the damage is that **the tree is a second factor**.
-`update_recipient` must supply a sibling path that verifies against the current
-root, and the salts that make the leaves are derived from a seed the admin holds
-off chain. An attacker who takes the admin key without also taking the seed and
-the recipient list cannot produce a valid path, so they cannot add a payee of
-their own. They can still pause, and they can still propose limits.
+What the admin key alone buys an attacker is a **freeze**, plus rewrites of any
+allowlist position whose path has already been published:
 
-They also cannot spend. Paying a newly added recipient needs the signing key,
-which is a different party under this model.
+| Attacker holds | Can do | Cannot do |
+| --- | --- | --- |
+| Admin key only | Pause indefinitely (freeze, ransom). Propose limits, which take effect after 24h. Rewrite any position touched by a published `update_recipient`, and that position's sibling (`index ^ 1`) | Change a position that is neither touched by a published update nor the sibling (`index ^ 1`) of one. Spend |
+| Admin key + signing key | Once any update is published: write `h(attacker, salt)` with a self-chosen salt into such a position and drain to it, within whatever limits are live. Seed not needed | Exceed the per-tx cap or daily window before a `propose_limits` matures |
+| Admin key + seed and recipient list | Add, revoke or substitute payees at any position | Spend without the signing key |
 
-Practically: admin key custody is the control, and the allowlist seed must be
-archived and protected separately from it. See "Losing the allowlist" below.
+`update_recipient` in the account contract is public, so every call publishes
+`index`, `old_leaf`, `new_leaf` and the full sibling path. `apply_leaf_update`
+checks only that the path verifies against the current root. Position `index`
+is rewritable with the published path and `new_leaf` as the old leaf, and
+position `index ^ 1` with leaf `sibling_path[0]` and path
+`[new_leaf, sibling_path[1..]]`. Later updates are public too, so the current
+path of any position ever touched, and of its sibling, stays computable from
+the update history: a later update does not close the window. The exposure is
+permanent and grows with each update; only making `update_recipient` private
+(#32) stops it. The entrypoint's `leaf_salt`, `leaf_index` and `sibling_path`
+are unsigned, so a leaf the attacker built with their own salt is spendable by
+the signing key.
+
+Practically: admin key custody is the control against a freeze, and against
+allowlist rewrites once any update has been published. The seed must still be
+archived and protected separately from the admin key; see "Losing the
+allowlist" below. The signing secret and the admin key must never share a host,
+an IAM principal, or an operator session: together they can drain to an
+attacker-built leaf within the live limits, with no seed required. Making
+`update_recipient` private is tracked in #32. A design that keeps an emergency pause without giving a single key a permanent freeze is
+tracked in #27.
+
+## Incident runbook
+
+Commands are in `README.md` under "Account administration". Every admin
+command except `status` needs `SPENDING_LIMIT_ADMIN_KEY`.
+
+Prerequisite: the admin account is deployed and funded, and stays funded. It
+pays for `pause` from its own fee juice; an admin that cannot cover the
+declared fee limit cannot pause. Monitor it with `--min-fee-juice`.
+
+### Signing key compromised
+
+1. `npm run admin -- pause`. Every transfer included after it reverts.
+2. Stop the bridge.
+3. `npm run admin -- status` and confirm `paused: true`.
+4. Switch cron to `status --expect-paused`, so an unpause alerts.
+
+The signing key is set once at construction, so the account keeps it. `unpause`
+re-enables whoever holds it, within the on-chain limits and allowlist.
+
+### Admin key compromised
+
+`pause` does not help here: the attacker holds the same key and can `unpause`,
+or pause the account themselves to hold it hostage. Nothing on chain outranks
+the admin, and the admin key cannot be rotated.
+
+1. Stop the bridge, so it signs nothing against an allowlist the attacker may
+   be rewriting.
+2. Consider moving the balance out while it can still move: one
+   `aztec_createNote` to a recipient you control and know is allowlisted,
+   with the bridge brought back up for that call only, before the attacker
+   pauses the account or rewrites that position. Run
+   `npm run admin -- status --expect-root <root>` first: if the root has
+   changed, the bridge refuses to send and the transfer would revert anyway.
+3. Escalate. There is no on-chain recovery path for this account (see
+   "An attacker holding the admin key" above and the recovery work tracked in
+   issues #27 and #32); treat the account as lost once funds are out or frozen.
+
+### Monitoring
+
+Run `npm run admin -- status --min-fee-juice <n>` from cron and alert on any
+non-zero exit. It needs no key. Give it the expected root, as `--expect-root`
+or by setting `PXE_BRIDGE_ALLOWLIST_SEED` and `PXE_BRIDGE_ALLOWLIST_RECIPIENTS`;
+without one, the immediate `update_recipient` goes unseen. `--expect-root`
+keeps the seed off the monitoring host. The exit code is a bitmask:
+
+- `2`: pause state is not the expected one. Paused outside an incident, or
+  unpaused under `--expect-paused`: an attacker holding the admin key undoing
+  an incident pause.
+- `4`: a limit proposal is pending. If the operator did not make it, the admin
+  key is compromised; see "Admin key compromised". `cancel-limits` withdraws
+  it, and an attacker holding the key can propose again.
+- `8`: `allowlist_root` is not the expected root. `update_recipient` is
+  immediate, so this is the only notice of an allowlist rewrite. Unless the
+  operator just ran `update-allowlist`, the admin key is compromised; see
+  "Admin key compromised". If an `update-allowlist` run stopped before its
+  receipt, this bit is how to tell whether it landed.
+- `16`: admin fee juice is below `--min-fee-juice`. Top it up before it is
+  needed for `pause`.
+- `1`: the account could not be read, or its class ID is not the artifact's.
+  Treat as unmonitored.
+- `>= 128`: interrupted by a signal (129 SIGHUP, 130 SIGINT, 143 SIGTERM), not
+  bits. Treat as unmonitored.
+
+A proposal sits 24h before `apply-limits` can take it, and that window is the
+notice `status` exists to read. `pause`, `unpause` and `update_recipient` give
+none: `status` sees them only after inclusion, at the next run.
+
+`status` reads public storage from one node without a public-data witness. A
+compromised or lying node can report a clean account. Run it against a node
+you operate, over https, independent of the bridge's.
 
 ## Declared-vs-actual amount binding
 
@@ -157,6 +252,17 @@ folds into the same `AppPayload` the entrypoint receives. `PREEXISTING_FEE_JUICE
 is the only branch left, and it is also the only one that calls `end_setup()`,
 which is the phase boundary the limit checks depend on.
 
+The entrypoint asserts `fee_payment_method == PREEXISTING_FEE_JUICE`
+and then calls `set_as_fee_payer()` and `end_setup()` unconditionally. The byte
+is not in the signed hash, so before the assert whoever built the request chose
+whether `end_setup()` ran, and any other value left the transfer and the
+`check_spending_public` enqueue in the non-revertible setup phase. Every path
+the Aztec SDK v5.1.0 takes through this entrypoint already encodes
+`PREEXISTING_FEE_JUICE` (sends and their simulations name no fee payer, so
+`completeFeeOptions` picks it), and the other two values only arise alongside a
+merged fee call that the single-call guard rejects, so the assert removes no
+working path.
+
 Somebody else therefore has to put a balance there. `scripts/top-up-fee-juice.ts`
 bridges from L1 naming the bridge as recipient and then sends
 `FeeJuice.claim(to = bridge, ...)` from a separate payer account, which works
@@ -186,6 +292,48 @@ sender's entrypoint gets `EXTERNAL` and sets no fee payer at all. Since
 would have none. Failing at startup with the reason beats failing during
 deployment with a message about fee payers.
 
+The deployment is paid differently. `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM` is a
+claim bridged to the deployer, the plain Schnorr account at the account salt
+plus one that sends the spending-limit account's deployment. The deployer
+self-deploys with `FeeJuicePaymentMethodWithClaim`, the path a plain account
+already uses, and then sends the account's deployment with no payment method,
+so `completeFeeOptions` gives it `PREEXISTING_FEE_JUICE` and it pays from the
+balance its claim created. The sender is the fee payer, so none of the three
+failures above applies, and nothing runs through the spending-limit account's
+entrypoint. The deployer is derived from the bridge's own key, so this adds no
+key material and no trusted party; a deployer key compromise is a bridge key
+compromise already. What it holds afterwards is unspent fee juice, which cannot
+be transferred but can pay for top-up claims. Production runbook:
+
+1. Start the bridge once with the spending-limit configuration and no claim.
+   It logs `Deployer address` and `Account address`, then stops at the
+   SponsoredFPC refusal before sending anything. Neither address is secret.
+2. `npm run bridge-fee-juice -- --deployer --recipient <Deployer address>`
+   bridges to it and prints the claim and its message hash. No bridge key is
+   involved: the L1 deposit needs only the address, and the message commits to
+   it, so the claim cannot pay for anything else. If the wait times out,
+   `--wait <messageHash>` resumes it; rerunning the bridge step deposits twice.
+   The claim secret is written to an owner-only file in the working directory
+   before the L1 write, so a run that dies after broadcasting is recovered
+   with `--recover <file>`, not rerun. Once the deposit lands the claim is
+   added to the file, which is deleted only after the message has synced.
+   Anyone who reads it before the claim is consumed can consume it, though
+   only to credit the deployer.
+3. Start the bridge with the claim. It deploys the deployer, then the account,
+   and reaches `Ready` with SponsoredFPC refused. If the deployer is already
+   deployed and its balance cannot cover the account deploy, bridge a fresh
+   claim to the deployer (step 2) and restart with it.
+4. Top up the spending-limit account before its first transfer with
+   `npm run top-up-fee-juice`, paid by a separate payer (`FEE_JUICE_PAYER_KEY`)
+   bootstrapped as a plain Schnorr bridge with its own `FEE_JUICE_CLAIM`. That
+   key can pay fees and nothing else on the bridge's behalf. Paying from the
+   deployer instead (`FEE_JUICE_PAYER_DEPLOYER=true`) is refused under
+   `NODE_ENV=production`: the deployer's key is the bridge's signing key, and
+   using it would copy the key that authorizes every transfer onto the
+   operator's machine. Outside production it is allowed; the wallet stores
+   holding it are created under `os.tmpdir()` and deleted on exit, SIGINT,
+   SIGTERM and SIGHUP, and SIGKILL or a crash leaves them.
+
 ## What is public
 
 The contract enforces its limits against public state, and a public function's
@@ -209,13 +357,23 @@ commitments `h(recipient, salt)` under a secret seed; the chain holds one root,
 membership is proven in private, and `update_recipient` moves one opaque leaf to
 another.
 
-What an observer can still learn from an admin update is the **position** that
-changed. Positions are therefore assigned randomly rather than filled left to
-right, or the first touch of position `k` would be visibly an addition. What
-they cannot learn is which address occupies it, whether the update added,
-revoked or substituted, or how full the tree is: empty positions hold
-`h(0, salt_i)` with that position's own salt, so they are not recognisable as
-empty and the canonical empty-subtree roots never appear in a sibling path.
+What an observer learns from an admin update is every argument of the public
+`update_recipient` call: `index`, `old_leaf`, `new_leaf` and the full sibling
+path. Positions are therefore assigned randomly rather than filled left to
+right, or the first touch of position `k` would be visibly an addition. The
+leaves are opaque commitments, so the observer does not learn which address
+occupies a position. Empty positions hold `h(0, salt_i)` with that position's
+own salt, so a never-touched position is not recognisable as empty and the
+canonical empty-subtree roots never appear in a sibling path.
+
+That opacity does not survive repeated updates at one position. Salts are fixed
+per position, and both addition and revocation pass through the same empty leaf
+`h(0, salt_i)`. After two updates at a position the observer has seen that
+leaf, so every later update there classifies as an addition or a revocation,
+and the position's occupancy is known. Re-adding a recipient at the same
+position republishes its old leaf, linking the two periods. The published path
+also lets the admin key rewrite that position and its sibling (`index ^ 1`)
+without the seed; see "An attacker holding the admin key". Tracked in #32.
 
 Anonymity is still bounded by how many recipients are actually allowlisted. A
 tree removes the mechanism's ceiling; it does not supply recipients. Run with
@@ -228,12 +386,15 @@ The account stores only a root. Unlike the public array it replaces, **the set
 cannot be recovered from the chain.** Losing either the seed
 (`PXE_BRIDGE_ALLOWLIST_SEED`) or the list of `(address, position)` pairs is
 terminal for allowlist management: no witness can be built, so no transfer can
-be sent, and no `update_recipient` can be constructed, so nothing can be
-repaired on chain.
+be sent, and no `update_recipient` can be constructed for a position whose path
+has never been published. Positions whose path is on chain stay rewritable by
+the admin key alone, which is the same exposure described in "An attacker
+holding the admin key", not a recovery path.
 
-Archive both with the same discipline as the contract artifact. This account
-already has permanent-brick modes -- `permitted_token` has no setter, and a zero
-admin is unrecoverable -- and this is one more.
+Archive both with the same discipline as the contract artifact, together with
+the deployment record (`PXE_BRIDGE_ACCOUNT_DEPLOYMENT`). This account already
+has permanent-brick modes -- `permitted_token` has no setter, and a zero admin
+is unrecoverable -- and this is one more.
 
 The seed is a secret, but a weaker one than the signing key: holding it lets
 someone test a candidate address against a leaf, which costs recipient privacy
@@ -245,6 +406,34 @@ The bridge checks its copy against the chain before every send, via
 a secret set monitorable: the root commits to exactly the set that produces it,
 so an operator can verify a published set against the chain and a compromised
 admin cannot publish one set while committing another.
+
+## The account address is pinned by a deployment record
+
+The account's address derives from its constructor arguments, and those include
+the per-tx cap, the daily limit and the allowlist root. All three are meant to
+change after deployment: `update_recipient` moves the root, `apply_limits`
+moves the caps. The bridge used to rebuild the constructor arguments from live
+configuration on every start, so following the runbook after an allowlist
+update (set the new recipients, restart) derived a different address. Nothing
+was deployed there, so the bridge deployed a fresh, empty account, logged
+"Ready", and left the funded one orphaned.
+
+The constructor arguments now come from `PXE_BRIDGE_ACCOUNT_DEPLOYMENT`, a
+record of what the account was deployed with and the address that produced.
+Live configuration keeps its other jobs: recipients and seed build the witness
+tree, which is checked against the chain's current root before every send, and
+the limit variables drive `src/limits.ts`. With a record set the bridge never
+deploys, and it refuses to start when the record does not reproduce its own
+address, when nothing is initialized at that address, or when the configured
+admin or token differ from it. Each of those is a configuration for some other
+account, and the safe response to that is to stop.
+
+A first deployment has no record, and has to derive from live configuration.
+Production refuses to do that unless `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1` is
+set, so a lost or unset record fails startup instead of quietly deploying a new
+account. Outside production the bridge deploys and prints the record on every
+start that lacks one. The trade is one more value to archive, and one more
+operator step on the first deployment.
 
 ## Transaction cancellation is not supported
 
@@ -355,19 +544,30 @@ preserved for comparison.
 
 ### 6.0.0 artifact of record
 
-Recompiled for the testnet tracer (xochi-fi/pxe-bridge#55), unchanged
-`main.nr` and `public_key_note.nr`, aztec 6.0.0 / noir
+**Status: arm64, pending x86 CI confirmation.**
+
+Recompiled for the testnet tracer (xochi-fi/pxe-bridge#55) after the
+fee-payment pin (xochi-fi/pxe-bridge#44) changed `main.nr`; `public_key_note.nr`
+is unchanged. aztec 6.0.0 / noir
 `1.0.0-rc.3+5a7ee9bf5ed8973076df7bb0d2b723024db09ae7`, aztec-nr `v6.0.0`
 (`aztec-labs-eng/aztec-nr`, tag object `46d118ff`, commit `04720122`):
 
 | | |
 |---|---|
-| contract class id (`CLASS_ID`) | `0x0d41b7399377b559a969acf04429432b81ac1efda31b0f6a713b5550e27a063a` |
-| artifact hash | `0x18e3b0cb986f20b7288dd461ac00ec23c3a38420ee3c9a9c7808a6a54b3d2a0a` |
-| private functions root | `0x11015efca77d653def2c97bbb78009f3114be24dfd45ef251109d23d04b475ea` |
+| contract class id (`CLASS_ID`) | `0x0bbe87edad6b55ba6a0a8baa982c6b52a48b817a630fe28c7ca1ac6b2d8b0009` |
+| artifact hash | `0x23175c2477ef7185293e060b672df9bb97be41037400af95a7e3114e3e36b197` |
+| private functions root | `0x01d57d9fd9ad35dceaa51b65ce8345b4535c8488233a2c9fec23e04dde34a76f` |
 | public bytecode commitment | `0x274f0b212e6dedb4ef9e46a8bea713a6900fc145ff72388c781b4894adb62340` |
-| artifact digest (`ARTIFACT_SHA256`, `scripts/artifact-digest.js`) | `7ecfad1190cd2bbdd40e6e020d982ccbcaca119ba2c17e4444bc7e2faae922f7` |
-| raw file sha256 (arm64 build at `/tmp/pxe-bridge-6`, path-dependent) | `397f2453f47307a77079bf6e61c52c7136c91a036ad3d2f3a85473b1a764a0b2` |
+| artifact digest (`ARTIFACT_SHA256`, `scripts/artifact-digest.js`) | `38ca99d673e5cf4c81fae00f942dd51a33ff3a78b9983ce0d7b7f42ef1d135f8` |
+| raw file sha256 (arm64 build at `/tmp/pxe-bridge-6`, path-dependent) | `6cc1287c1338d7bf393cfa7b77cc4c64912bcc6a2b71ebaa2d9f2bd7f5784c1a` |
+
+The public bytecode commitment is the pre-#44 value: #44 changed only the
+private entrypoint, so only the private functions root, and with it the class
+id, moved. The pre-#44 6.0.0 build pinned class id
+`0x0d41b7399377b559a969acf04429432b81ac1efda31b0f6a713b5550e27a063a` and digest
+`7ecfad1190cd2bbdd40e6e020d982ccbcaca119ba2c17e4444bc7e2faae922f7`. A
+spending-limit account deployed against that class derives elsewhere under this
+one, and a bridge with `PXE_BRIDGE_ACCOUNT_ADDRESS` recorded refuses to start.
 
 `ARTIFACT_SHA256` pins the whole file, ABI, storage layout and metadata
 included, which the class ID does not cover. It is a sha256 with each
@@ -378,24 +578,26 @@ runner's checkout directory and `$HOME` even when nothing else does. The CI
 
 These values come from a native arm64 build (macOS, 2026-10-25). It was
 byte-identical at `HARDWARE_CONCURRENCY=1` and at 8 threads with an emptied
-`vk_cache`, so bb 6.0.0 did not show the 5.1.0 VK race here. That is one
-sample, so CI keeps `HARDWARE_CONCURRENCY=1`.
+`vk_cache`, as the pre-#44 build was, so bb 6.0.0 did not show the 5.1.0 VK
+race here. That is two samples, so CI keeps `HARDWARE_CONCURRENCY=1`.
 
-An x86 build was attempted the same day in a `linux/amd64` container
-(`node:24.15.0-bookworm`, the CI installer, `aztec-up install 6.0.0`,
-`HARDWARE_CONCURRENCY=1 aztec compile`). The nargo stage completed and its
-output has the same normalised digest as the arm64 nargo stage
-(`64f42aa295c5c57706b9090cd6179102d92956593d9584119a71a65c9347df0f`), so the
-compiled bytecode, ABI and layout agree across architectures. The bb
+An x86 build of the pre-#44 sources was attempted the same day in a
+`linux/amd64` container (`node:24.15.0-bookworm`, the CI installer,
+`aztec-up install 6.0.0`, `HARDWARE_CONCURRENCY=1 aztec compile`). The nargo
+stage completed and its output had the same normalised digest as the arm64
+nargo stage (`64f42aa295c5c57706b9090cd6179102d92956593d9584119a71a65c9347df0f`),
+so the compiled bytecode, ABI and layout agreed across architectures. The bb
 postprocess (transpile and verification keys) then failed in a child process
 and left the artifact untranspiled. The emulated CPU reports no AVX2, which is
 consistent with the barretenberg-under-emulation limitation recorded above;
-the exact error was not captured. So the post-bb x86 values are unobserved.
-The x86 `contract` job remains the build of
-record: `CLASS_ID` and `ARTIFACT_SHA256` hold the arm64 values, and the first
-x86 run either confirms both or fails naming the computed ones, which then
-replace them. The artifact a deployment is made against is the one that run
-uploads.
+the exact error was not captured. That comparison was not repeated for the
+post-#44 sources, so no x86 value, pre- or post-bb, is observed for them. The
+x86 `contract` job remains the build of record: `CLASS_ID` and
+`ARTIFACT_SHA256` hold the arm64 values, and the first x86 run either confirms
+both or fails naming the computed ones, which then replace them (and
+`TIMELOCK_CHECKED_AT_CLASS_ID` in `tests/spending-limit-admin.test.ts`, which
+follows `CLASS_ID`). The artifact a deployment is made against is the one that
+run uploads.
 
 ## Account address pinning
 
@@ -438,32 +640,43 @@ key under salt + 1) and `scripts/test-deploy.ts`, which constructs
 
 - **The bridge** (`connect()`) refuses an account that derives away from
   `PXE_BRIDGE_ACCOUNT_ADDRESS` before it deploys, serves or sets a sending
-  address. In production `PXE_BRIDGE_ACCOUNT_ADDRESS` is required; the only way
+  address. In production `PXE_BRIDGE_ACCOUNT_ADDRESS` is required (in
+  spending-limit mode the deployment record's `address` satisfies it); the only way
   to start without it is `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1`, named for the
   first deployment, which cannot know its address in advance. An upgraded
   deployment that sets nothing therefore stops at startup instead of deploying
   a fresh account. Setting the flag on an upgraded deployment is consent to a
   new account; it is not a way past the check when an address is recorded.
-- **`update-allowlist.ts`** reads the admin stored in the account (the
-  contract has no getter, so it reads the `admin` slot from public storage,
-  after checking the instance runs the spending-limit class) and refuses a key
-  that derives to anyone else, before sending.
-- **`top-up-fee-juice.ts`** requires `FEE_JUICE_PAYER_ADDRESS` and refuses a
-  payer key that derives elsewhere, before the L1 write.
-- **`bridge-fee-juice.ts`** requires `PXE_BRIDGE_ACCOUNT_ADDRESS` and refuses a
-  key that derives elsewhere, before bridging, since the L1 message commits to
-  the recipient. The only way to run it without the address is
-  `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1`, for a first deployment; it then logs the
-  derived address it bridges to.
+- **`update-allowlist.ts`** and **`admin.ts`** read the admin stored in the
+  account (the contract has no getter, so `readAccountState` reads the `admin`
+  slot from public storage, after checking the instance runs the pinned class)
+  and refuse, through `assertAccountIdentity`, a key that derives to anyone
+  else, before sending.
+- **`top-up-fee-juice.ts`** requires `FEE_JUICE_PAYER_ADDRESS` with
+  `FEE_JUICE_PAYER_KEY` (and checks it for the deployer payer when set) and
+  refuses a payer key that derives elsewhere, before the L1 write.
+- **`bridge-fee-juice.ts`**, bridging to the bridge account (no `--deployer`),
+  requires `PXE_BRIDGE_ACCOUNT_ADDRESS` and refuses a recipient that differs
+  from it: a `--recipient` that is not the recorded address, or a key-mode
+  address that derives elsewhere. The L1 message commits to the recipient, so
+  this runs before anything is bridged. The only way to run it without the
+  address is `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1`, for a first deployment; it
+  then logs the address it bridges to. `--deployer` bridges to the
+  spending-limit deployer, which has no recorded address and is not checked.
+  `--admin` bridges to the spending-limit admin and refuses a `--recipient`
+  other than `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` (required with it).
 
 In spending-limit mode the bridge's address also moves when the constructor
-inputs do (limits, admin, token, allowlist root), so with an address recorded a
-restart after `update-allowlist` or new limits refuses rather than deploying an
-empty account. The deployment record in PR #42 (`PXE_BRIDGE_ACCOUNT_DEPLOYMENT`)
-fixes the inputs and removes that refusal. When it lands the two compose: in
-spending-limit mode the record's `address` satisfies the production
-requirement, a separately set `PXE_BRIDGE_ACCOUNT_ADDRESS` must equal it, and
-`PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY` keeps one meaning in both.
+inputs do (limits, admin, token, allowlist root). The deployment record
+(`PXE_BRIDGE_ACCOUNT_DEPLOYMENT`, "The account address is pinned by a deployment record" above) fixes the inputs, so with it set a
+restart after `update-allowlist` or new limits keeps the address. The two
+compose, and each fails closed on its own: the record's `address` satisfies the
+production requirement for `PXE_BRIDGE_ACCOUNT_ADDRESS`, a separately set
+`PXE_BRIDGE_ACCOUNT_ADDRESS` must equal it (`index.ts` refuses a disagreement
+before connecting, naming both), `connect()` checks the derived address against
+both, and `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY` keeps one meaning in both. Without
+the record, a recorded address still refuses a restart on moved inputs rather
+than deploying an empty account.
 
 ## Application-level limits
 

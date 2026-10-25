@@ -19,6 +19,7 @@ import {
 } from "@aztec-labs/stdlib/abi";
 import { ExecutionPayload } from "@aztec-labs/stdlib/tx";
 import { GasSettings } from "@aztec-labs/stdlib/gas";
+import { deriveMasterMessageSigningSecretKey } from "@aztec-labs/stdlib/keys";
 import {
   SpendingLimitAccountContract,
   TRANSFER_TO_PRIVATE_SELECTOR,
@@ -26,6 +27,7 @@ import {
   spendingLimitEntrypointAbi,
   type SpendingLimitConfig,
 } from "../src/spending-limit-account.js";
+import { AccountDeploymentSchema, type AccountDeployment } from "../src/types.js";
 import { ALLOWLIST_TREE_HEIGHT, rootFromSiblingPath } from "../src/allowlist-tree.js";
 import { spendingLimitSignedHash } from "../src/spending-limit-account.js";
 
@@ -442,3 +444,114 @@ describe("SpendingLimitAccountContract entrypoint ABI", () => {
     );
   });
 });
+
+// Everything an operator legitimately changes after deployment: the set, and
+// both limits.
+const changed: SpendingLimitConfig = {
+  ...config,
+  maxAmountPerTx: config.maxAmountPerTx / 2n,
+  dailyLimit: config.dailyLimit * 2n,
+  allowlistRecipients: [{ address: UNLISTED, index: 511 }],
+};
+
+/**
+ * The account's address derives from its constructor args. Those used to be
+ * built from live configuration, so the restart the runbook prescribes after
+ * an update_recipient, or after apply_limits plus the matching env change,
+ * derived a different address, and connect() deployed an empty account there.
+ */
+describe("SpendingLimitAccountContract deployment record", () => {
+  const signingKey = GrumpkinScalar.fromString("0x" + "0".repeat(63) + "7");
+
+  async function constructorArgs(c: SpendingLimitConfig): Promise<string[]> {
+    const { constructorArgs } = await new SpendingLimitAccountContract(
+      signingKey,
+      c,
+    ).getInitializationFunctionAndArgs();
+    return constructorArgs.map((a) => String(a));
+  }
+
+  async function recordFor(c: SpendingLimitConfig, address: string): Promise<AccountDeployment> {
+    return new SpendingLimitAccountContract(signingKey, c).deploymentRecord(address);
+  }
+
+  it("takes constructor args from the record, not live configuration", async () => {
+    const deployed = await constructorArgs(config);
+    // Through JSON and the env schema, the way the operator carries it from
+    // the deploy log to PXE_BRIDGE_ACCOUNT_DEPLOYMENT.
+    const logged = JSON.stringify(await recordFor(config, "0x" + "0c".repeat(32)));
+    const record = AccountDeploymentSchema.parse(JSON.parse(logged));
+
+    // Without the record the changed configuration is a different account,
+    // which is the bug. Asserted so the equality below cannot pass vacuously.
+    expect(await constructorArgs(changed)).not.toEqual(deployed);
+    expect(await constructorArgs({ ...changed, deployment: record })).toEqual(deployed);
+  });
+
+  // Both have no setter on chain, so a record naming different ones is for
+  // another account.
+  it.each(["admin", "token"] as const)("refuses a record whose %s differs", async (field) => {
+    const record = await recordFor(config, "0x" + "0c".repeat(32));
+    expect(
+      () =>
+        new SpendingLimitAccountContract(signingKey, {
+          ...config,
+          [field]: "0x" + "0d".repeat(32),
+          deployment: record,
+        }),
+    ).toThrow(`Spending limit ${field} 0x${"0d".repeat(32)} does not match the deployment record`);
+  });
+});
+
+// Real SDK address derivation needs the class ID, which needs the compiled
+// artifact (ARTIFACT above). It is gitignored and built by CI's `contract`
+// job, so these skip without it.
+
+describe.skipIf(!HAVE_ARTIFACT)(
+  "SpendingLimitAccountContract address pinning (needs contracts/spending_limit_account/target; skipped when absent)",
+  () => {
+    const secret = new Fr(0x1234n);
+    const salt = new Fr(0x5678n);
+    const signingKey = deriveMasterMessageSigningSecretKey(secret);
+    // AccountManager.create does not touch the wallet; it only stores it.
+    const noWallet = undefined as never;
+
+    async function addressOf(c: SpendingLimitConfig): Promise<string> {
+      const manager = await new SpendingLimitAccountContract(signingKey, c).accountManager(
+        noWallet,
+        secret,
+        salt,
+      );
+      return manager.address.toString();
+    }
+
+    let deployedAddress: string;
+    let record: AccountDeployment;
+
+    beforeAll(async () => {
+      deployedAddress = await addressOf(config);
+      record = await new SpendingLimitAccountContract(signingKey, config).deploymentRecord(
+        deployedAddress,
+      );
+    });
+
+    it("keeps the address when the allowlist and limits change under a record", async () => {
+      expect(await addressOf(changed)).not.toBe(deployedAddress);
+      expect(await addressOf({ ...changed, deployment: record })).toBe(deployedAddress);
+    });
+
+    it("refuses a record whose inputs do not derive its address", async () => {
+      const drifted = { ...record, dailyLimit: (BigInt(record.dailyLimit) + 1n).toString() };
+      await expect(addressOf({ ...config, deployment: drifted })).rejects.toThrow(
+        `Deployment record names account ${deployedAddress}`,
+      );
+    });
+
+    it("refuses a record for a different address", async () => {
+      const elsewhere = { ...record, address: "0x" + "0e".repeat(32) };
+      await expect(addressOf({ ...config, deployment: elsewhere })).rejects.toThrow(
+        "Deployment record names account 0x" + "0e".repeat(32),
+      );
+    });
+  },
+);

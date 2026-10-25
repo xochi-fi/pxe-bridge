@@ -73,7 +73,7 @@ describe("wallet data directory (xochi-fi/xochi#513)", () => {
     const dir = freshDirectory();
     claimWalletDataDirectory(dir);
 
-    const client = new AztecClient(UNREACHABLE_NODE, KEY, undefined, undefined, {
+    const client = new AztecClient(UNREACHABLE_NODE, KEY, undefined, undefined, undefined, {
       dataDirectory: dir,
     });
     await expect(client.connect()).rejects.toThrow(realpathSync.native(dir));
