@@ -68,6 +68,37 @@ describe("CreateNoteV1Schema", () => {
     const { validUntil: _v, ...rest } = v1Params();
     expect(CreateNoteV1Schema.safeParse(rest).success).toBe(false);
   });
+
+  // D-C: the NetworkIdentity value rules of @xochi/spec shielded.json.
+  it.each([
+    ["a zero Aztec chain id", { aztecChainId: "0" }],
+    ["a zero protocol version", { protocolVersion: "0" }],
+    [
+      "a protocol version at the field modulus",
+      { protocolVersion: "21888242871839275222246405745257275088548364400416034343698204186575808495617" },
+    ],
+    ["a zero L1 chain id", { l1ChainId: "0" }],
+    ["a zero rollup address", { rollupAddress: "0x" + "0".repeat(40) }],
+    ["a zero network digest", { genesisOrNetworkDigest: "0x" + "0".repeat(64) }],
+  ])("refuses %s", (_name, override) => {
+    const network = { ...(v1Params()["network"] as object), ...override };
+    expect(CreateNoteV1Schema.safeParse(v1Params({ network })).success).toBe(false);
+  });
+
+  it("admits a zero descriptor digest: @xochi/spec types it as any bytes32", () => {
+    const zero = "0x" + "0".repeat(64);
+    expect(CreateNoteV1Schema.safeParse(v1Params({ recipientDescriptorDigest: zero })).success).toBe(true);
+  });
+
+  it.each([
+    ["recipient", "0xzz"],
+    ["amount", "1.5"],
+    ["network", { ...(v1Params()["network"] as object), aztecChainId: "12a" }],
+    ["network", { ...(v1Params()["network"] as object), rollupAddress: "0xnothex" }],
+  ])("fails, never throws, on malformed %s", (field, value) => {
+    expect(() => CreateNoteV1Schema.safeParse(v1Params({ [field]: value }))).not.toThrow();
+    expect(CreateNoteV1Schema.safeParse(v1Params({ [field]: value })).success).toBe(false);
+  });
 });
 
 describe("isLegacyCreateNoteParams", () => {

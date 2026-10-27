@@ -26,29 +26,58 @@ export const MAX_AMOUNT = (1n << 128n) - 1n;
 const BN254_FR_MODULUS =
   0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001n;
 
+// Each refinement re-tests its pattern first: zod runs refinements after a
+// failed `.regex`, and `BigInt` of a malformed string throws out of
+// `safeParse` instead of failing it.
 const field = (what: string) =>
   z
     .string()
     .regex(HEX32, `${what} must be 32-byte hex`)
-    .refine((s) => BigInt(s) !== 0n, `${what} must be nonzero`)
-    .refine((s) => BigInt(s) < BN254_FR_MODULUS, `${what} must be below the BN254 field modulus`);
+    .refine((s) => !HEX32.test(s) || BigInt(s) !== 0n, `${what} must be nonzero`)
+    .refine(
+      (s) => !HEX32.test(s) || BigInt(s) < BN254_FR_MODULUS,
+      `${what} must be below the BN254 field modulus`,
+    );
 
 const bytes32 = (what: string) => z.string().regex(HEX32, `${what} must be 32-byte hex`);
+
+const nonzeroBytes32 = (what: string) =>
+  bytes32(what).refine((s) => !HEX32.test(s) || BigInt(s) !== 0n, `${what} must be nonzero`);
 
 const uint256 = (what: string) =>
   z
     .string()
     .regex(UINT, `${what} must be a canonical decimal string`)
-    .refine((s) => s.length <= 78 && BigInt(s) < 1n << 256n, `${what} exceeds uint256`);
+    .refine((s) => !UINT.test(s) || (s.length <= 78 && BigInt(s) < 1n << 256n), `${what} exceeds uint256`);
 
-/** §7 NetworkIdentity, member names and encodings as the EIP-712 struct. */
+/** An Aztec scalar carried as a uint256: nonzero and below the BN254 modulus. */
+const aztecScalar = (what: string) =>
+  uint256(what)
+    .refine((s) => s !== "0", `${what} must be nonzero`)
+    .refine(
+      (s) => !UINT.test(s) || s.length > 78 || BigInt(s) < BN254_FR_MODULUS,
+      `${what} must be below the BN254 field modulus`,
+    );
+
+/**
+ * §7 NetworkIdentity: member names, types and value rules exactly as
+ * `@xochi/spec` `shielded.json` pins them and Riddler's
+ * `Shielded.NetworkIdentity` parses them. The Aztec chain id and protocol
+ * version are Aztec scalars (nonzero, below r), the L1 chain id a positive
+ * uint256, the rollup a nonzero EVM address, the digest a nonzero bytes32.
+ * The bridge forwards the struct as given; `genesisOrNetworkDigest` is a
+ * corridor manifest value (`PXE_BRIDGE_SETTLEMENT_CORRIDOR`), never derived.
+ */
 export const NetworkIdentitySchema = z
   .object({
-    aztecChainId: uint256("aztecChainId"),
-    protocolVersion: uint256("protocolVersion"),
-    rollupAddress: z.string().regex(HEX20, "rollupAddress must be a 20-byte hex address"),
-    l1ChainId: uint256("l1ChainId"),
-    genesisOrNetworkDigest: bytes32("genesisOrNetworkDigest"),
+    aztecChainId: aztecScalar("aztecChainId"),
+    protocolVersion: aztecScalar("protocolVersion"),
+    rollupAddress: z
+      .string()
+      .regex(HEX20, "rollupAddress must be a 20-byte hex address")
+      .refine((s) => !HEX20.test(s) || BigInt(s) !== 0n, "rollupAddress must be nonzero"),
+    l1ChainId: uint256("l1ChainId").refine((s) => s !== "0", "l1ChainId must be nonzero"),
+    genesisOrNetworkDigest: nonzeroBytes32("genesisOrNetworkDigest"),
   })
   .strict();
 
@@ -71,7 +100,7 @@ export type Corridor = z.infer<typeof CorridorSchema>;
  * corridor or network digest is refused before anything is prepared.
  */
 export const CorridorConfigSchema = CorridorSchema.extend({
-  genesisOrNetworkDigest: bytes32("genesisOrNetworkDigest"),
+  genesisOrNetworkDigest: nonzeroBytes32("genesisOrNetworkDigest"),
 }).strict();
 
 export type CorridorConfig = z.infer<typeof CorridorConfigSchema>;
@@ -91,12 +120,21 @@ export const SettlementTermsSchema = z
     corridor: CorridorSchema,
     accountMode: AccountModeSchema,
     recipient: field("recipient"),
+    /**
+     * `ShieldedDestination.descriptorDigest` / `RecipientBinding.descriptorDigest`
+     * as `@xochi/spec` types it: an opaque bytes32 (zero admitted) copied
+     * verbatim from the enrollment. Its preimage is Xochi's, still open in §7;
+     * the bridge never derives or interprets it.
+     */
     recipientDescriptorDigest: bytes32("recipientDescriptorDigest"),
     token: field("token"),
     amount: z
       .string()
       .regex(POSITIVE, "amount must be a positive canonical decimal string")
-      .refine((s) => s.length <= 39 && BigInt(s) <= MAX_AMOUNT, "amount exceeds 2^128 - 1"),
+      .refine(
+        (s) => !POSITIVE.test(s) || (s.length <= 39 && BigInt(s) <= MAX_AMOUNT),
+        "amount exceeds 2^128 - 1",
+      ),
     /** Unix seconds. The bridge neither prepares nor broadcasts at or after it. */
     validUntil: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   })
