@@ -135,6 +135,7 @@ export function recordingGate(refuse?: Error): BroadcastGate & { seen: PreparedT
       seen.push(tx);
       if (refuse) throw refuse;
     },
+    beforeSend() {},
   };
 }
 

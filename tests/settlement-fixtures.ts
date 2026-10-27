@@ -95,6 +95,25 @@ export function fakeMayBroadcast(decision: FakeMayBroadcast["decision"] = "allow
   return fake;
 }
 
+/**
+ * Riddler's may-broadcast as D-A specifies it: the first `allow` for an
+ * operation binds `{fingerprint, txHash}`; the same pair again is `allow`,
+ * anything else for that operation `deny`.
+ */
+export function bindingMayBroadcast(): { client: MayBroadcastClient; answers: string[] } {
+  const bound = new Map<string, { fingerprint: string; txHash: string }>();
+  const answers: string[] = [];
+  const client: MayBroadcastClient = async ({ operationId, fingerprint, txHash }) => {
+    const held = bound.get(operationId);
+    const decision =
+      held === undefined || (held.fingerprint === fingerprint && held.txHash === txHash) ? "allow" : "deny";
+    if (held === undefined) bound.set(operationId, { fingerprint, txHash });
+    answers.push(decision);
+    return { decision, detail: "binding fake" };
+  };
+  return { client, answers };
+}
+
 export function settlementContext(
   journal: SettlementJournal,
   mayBroadcast: MayBroadcastClient | undefined = fakeMayBroadcast().client,
@@ -149,6 +168,8 @@ export class FakeAztecClient implements IAztecClient {
   observeError: Error | undefined;
   /** Runs after the transaction is proven or reconstructed, before the gate. */
   beforeGate: (() => void) | undefined;
+  /** Runs after `beforeBroadcast` resolves, before the synchronous `beforeSend`. */
+  afterGate: (() => void) | undefined;
 
   async connect(): Promise<void> {}
 
@@ -230,7 +251,10 @@ export class FakeAztecClient implements IAztecClient {
   private async send(tx: PreparedTransaction, gate: BroadcastGate): Promise<TransferOutcome> {
     this.beforeGate?.();
     await gate.beforeBroadcast(tx);
+    this.afterGate?.();
     if (this.behaviour === "die_after_mark") throw new Error("process died after the mark");
+    // As AztecClient: the final check and the send in one synchronous run.
+    gate.beforeSend(tx);
     this.sends.push(tx.txHash);
     const observation: NodeObservation = {
       kind: "mined",

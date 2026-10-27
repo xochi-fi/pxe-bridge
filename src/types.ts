@@ -42,13 +42,20 @@ export interface PreparedTransaction {
 }
 
 /**
- * Called with the exact proven transaction immediately before it is handed to
- * the node. Resolving permits the broadcast; throwing stops it, and nothing
- * reaches the network. This is where rpc.ts journals the transaction, asks
- * Riddler, and marks may-broadcast.
+ * Two steps around handing the exact proven transaction to the node.
+ *
+ * `beforeBroadcast` runs first and may wait: this is where rpc.ts journals
+ * the transaction, asks Riddler, and marks may-broadcast. Throwing stops the
+ * broadcast.
+ *
+ * `beforeSend` is the final step and is SYNCHRONOUS: the client calls it and
+ * then invokes `sendTx` in the same synchronous run, with no `await` between
+ * them, so a bound it checks (rpc.ts: `validUntil` and the protocol
+ * expiration) still holds when the node is called. Throwing stops the send.
  */
 export interface BroadcastGate {
   beforeBroadcast(tx: PreparedTransaction): Promise<void>;
+  beforeSend(tx: PreparedTransaction): void;
 }
 
 /** A broadcast that reached a proposed block, with what the node reports. */

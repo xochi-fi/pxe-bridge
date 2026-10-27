@@ -409,7 +409,13 @@ function gatedNode(node: AztecNode): AztecNode {
       if (property === "sendTx") {
         return async (tx: Tx) => {
           const gate = broadcastGates.getStore();
-          if (gate) await gate.beforeBroadcast(await preparedTransaction(tx));
+          if (gate) {
+            const prepared = await preparedTransaction(tx);
+            await gate.beforeBroadcast(prepared);
+            // No await from here to the call: the final bound check and the
+            // send happen in one synchronous run.
+            gate.beforeSend(prepared);
+          }
           return target.sendTx(tx);
         };
       }
@@ -1158,6 +1164,8 @@ export class AztecClient implements IAztecClient {
     const tx = Tx.fromBuffer(txBytes);
     const prepared = await preparedTransaction(tx);
     await gate.beforeBroadcast(prepared);
+    // Synchronous from the final check to the call (see BroadcastGate).
+    gate.beforeSend(prepared);
     await this.node.sendTx(tx);
     await waitForTx(this.node, tx.getTxHash(), {
       waitForStatus: TxStatus.PROPOSED,

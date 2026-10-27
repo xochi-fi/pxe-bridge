@@ -8,6 +8,7 @@ import { SETTLEMENT_VERSION, fingerprintTerms, termsFrom, CreateNoteV1Schema } f
 import type { MayBroadcastClient } from "../src/may-broadcast.js";
 import {
   FakeAztecClient,
+  bindingMayBroadcast,
   fakeMayBroadcast,
   openBoundJournal,
   rpcBody,
@@ -421,24 +422,94 @@ describe("the gate is the last word on both bounds", () => {
     expect(journal.spendsSince(0)).toEqual([]);
   });
 
-  it("refuses to mark when the protocol expiration passes during the wait, and a retry proves afresh", async () => {
+  it("makes a post-allow expiration terminal for the operation: Riddler has bound that hash", async () => {
+    const riddler = bindingMayBroadcast();
+    const bound = { ...timed, mayBroadcast: riddler.client };
     client.expiration = BigInt(nowSec() + 100);
     const first = await createNote(client, {
-      settlement: { ...timed, mayBroadcast: allowAt(() => (nowSec() + 200) * 1000) },
+      settlement: {
+        ...bound,
+        mayBroadcast: async (query) => {
+          const answer = await riddler.client(query);
+          clock = (nowSec() + 200) * 1000;
+          return answer;
+        },
+      },
     });
     expect(first.error?.data?.observation).toEqual({
       state: "not_submitted",
-      reason: "expiration_passed",
-      retryableAfterRevalidation: true,
+      reason: "expired_after_allow",
+      retryableAfterRevalidation: false,
     });
+    expect(riddler.answers).toEqual(["allow"]);
     expect(client.sends).toHaveLength(0);
     expect(journal.spendsSince(0)).toEqual([]);
 
+    // A retry of the same operation proves nothing: a fresh proof would carry
+    // a new hash, which the binding denies forever.
     client.expiration = BigInt(nowSec() + 86_400);
-    const retry = await createNote(client, ctx);
-    expect(retry.result?.observation.state).toBe("included");
-    expect(client.proofs).toBe(2);
+    const retry = await createNote(client, { settlement: bound });
+    expect(retry.error?.data?.observation).toMatchObject({
+      state: "not_submitted",
+      reason: "expired_after_allow",
+      retryableAfterRevalidation: false,
+    });
+    expect(client.proofs).toBe(1);
+    expect(riddler.answers).toEqual(["allow"]);
+
+    // Which is what it would do: a new hash for the same operation is denied.
+    const stale = journal.attempts("op-1")[0]!.txHash;
+    const fresh = "0x" + "e".repeat(64);
+    expect(fresh).not.toBe(stale);
+    const fingerprint = journal.get("op-1")!.fingerprint;
+    expect((await riddler.client({ operationId: "op-1", fingerprint, txHash: fresh })).decision).toBe("deny");
+
+    // The remedy is a requote under a NEW operation id.
+    const requoted = await createNote(client, { settlement: bound }, v1Params({ operationId: "op-2" }));
+    expect(requoted.result?.observation.state).toBe("included");
     expect(client.sends).toHaveLength(1);
+  });
+
+  it.each([
+    ["validUntil", "validity_bound_passed", () => (VALID_UNTIL + 1) * 1000],
+    ["the protocol expiration", "expiration_passed", () => (nowSec() + 200) * 1000],
+  ] as const)("does not send when %s passes inside the mark: submitted_unknown, never not_submitted", async (
+    _bound,
+    reason,
+    toMs,
+  ) => {
+    client.expiration = BigInt(nowSec() + 100);
+    const mark = journal.markMayBroadcast.bind(journal);
+    journal.markMayBroadcast = (...args) => {
+      mark(...args);
+      clock = toMs(); // the fsync crossed the bound
+    };
+    const res = await createNote(client, { settlement: timed });
+    expect(res.error?.code).toBe(RPC_ERRORS.SUBMITTED_UNKNOWN);
+    expect(res.error?.data?.observation).toMatchObject({ state: "submitted_unknown", reason });
+    expect(client.sends).toHaveLength(0);
+    expect(journal.get("op-1")?.state).toBe("may_broadcast");
+    expect(journal.spendsSince(0)).toHaveLength(1);
+  });
+
+  it.each([
+    ["validUntil", "validity_bound_passed", () => (VALID_UNTIL + 1) * 1000],
+    ["the protocol expiration", "expiration_passed", () => (nowSec() + 200) * 1000],
+  ] as const)("does not re-broadcast when %s passes between the gate and the send", async (
+    _bound,
+    reason,
+    toMs,
+  ) => {
+    client.expiration = BigInt(nowSec() + 100);
+    client.behaviour = "die_after_mark";
+    await createNote(client, { settlement: timed });
+    client.behaviour = "land";
+    client.afterGate = () => {
+      clock = toMs();
+    };
+    const retry = await createNote(client, { settlement: timed });
+    expect(retry.error?.data?.observation).toMatchObject({ state: "submitted_unknown", reason });
+    expect(client.sends).toHaveLength(0);
   });
 
   it.each([

@@ -205,12 +205,18 @@ type GateMode =
 
 /**
  * The per-attempt broadcast gate: journal the exact transaction, ask Riddler,
- * mark may-broadcast, in that order, each step durable before the next.
+ * mark may-broadcast, in that order, each step durable before the next; then
+ * a synchronous final step right before the node is called.
  *
  * `close()` is synchronous and checked synchronously right before the mark,
  * so once the caller has answered (timeout), a proof that finishes later
  * cannot broadcast: the only thing that permits a broadcast is a mark that a
  * closed gate never writes.
+ *
+ * The bounds (`validUntil`, the attempt's protocol expiration) are checked
+ * last in `beforeSend`, which the client calls with no `await` between it and
+ * `sendTx`: the mark is an fsync and the client awaits after the gate, so a
+ * check made before either is stale by the time the node is called.
  */
 class OperationGate implements BroadcastGate {
   closed = false;
@@ -241,16 +247,9 @@ class OperationGate implements BroadcastGate {
         throw new Error("journaled bytes no longer produce the journaled hash");
       }
       // Permission was recorded with the mark; an exact re-broadcast of a
-      // marked attempt does not ask again. It does recheck both bounds, here,
-      // after the bytes were reconstructed and immediately before the send:
-      // the checks the caller made earlier are stale by then. A marked attempt
-      // past a bound is never sent and never "not submitted" -- it may already
-      // be on chain -- so it surfaces as submitted_unknown.
-      if (this.mode.kind === "rebroadcast") {
-        const passed = this.passedBound(this.mode.attempt);
-        if (passed) throw new BoundPassed(passed);
-        return;
-      }
+      // marked attempt does not ask again. Its bounds are checked in
+      // beforeSend, after the bytes were reconstructed.
+      if (this.mode.kind === "rebroadcast") return;
     } else {
       const attempt = journal.recordPrepared(operationId, tx);
       this.attempt = {
@@ -263,16 +262,17 @@ class OperationGate implements BroadcastGate {
     }
     const attempt = this.attempt!;
 
-    this.refuseUnmarkedPastBound(attempt);
+    // Before asking: nothing is bound at Riddler yet, so an attempt past its
+    // protocol expiration can simply be proven again.
+    this.refuseUnmarkedPastBound(attempt, false);
 
     const answer = await this.s.mayBroadcast!({
       operationId,
       fingerprint: this.state.fingerprint,
       txHash: attempt.txHash,
     });
-    // Synchronous from here to the mark: nothing can close the gate, and the
-    // clock read below is the last one, between it and the write that permits
-    // the broadcast.
+    // Synchronous from here to the mark: nothing can close the gate between
+    // this check and the write that permits the broadcast.
     if (this.closed) throw new GateClosed();
     if (answer.decision !== "allow") {
       const hold: Hold =
@@ -288,11 +288,27 @@ class OperationGate implements BroadcastGate {
         hold,
       });
     }
-    // The authoritative check: the may-broadcast wait can outlast either bound.
-    this.refuseUnmarkedPastBound(attempt);
+    // The may-broadcast wait can outlast either bound. Riddler has now bound
+    // this txHash, so an expired attempt cannot be replaced under this
+    // operation: a fresh proof has a new hash, which Riddler denies.
+    this.refuseUnmarkedPastBound(attempt, true);
     journal.markMayBroadcast(operationId, attempt.attempt, this.state.terms.amount);
     this.marked = true;
     this.onMark();
+  }
+
+  /**
+   * The final step, synchronous, immediately before the client calls
+   * `sendTx`. Past either bound the marked attempt is not sent; it was
+   * marked, so it surfaces as submitted_unknown, never not_submitted.
+   */
+  beforeSend(tx: PreparedTransaction): void {
+    const attempt = this.attempt;
+    if (!this.marked || !attempt || tx.txHash.toLowerCase() !== attempt.txHash) {
+      throw new Error("send without a may-broadcast mark for this transaction");
+    }
+    const passed = this.passedBound(attempt);
+    if (passed) throw new BoundPassed(passed);
   }
 
   /** Which bound has passed for `attempt`, if any, at this instant. */
@@ -305,15 +321,18 @@ class OperationGate implements BroadcastGate {
 
   /**
    * An unmarked attempt past a bound provably never broadcast, so it is
-   * recorded not_submitted: past `validUntil` for good (revalidate), past the
-   * protocol expiration retryable (a retry proves a fresh attempt).
+   * recorded not_submitted. Past `validUntil` it is final (revalidate). Past
+   * the protocol expiration it is retryable only while Riddler has not
+   * allowed it; after an `allow` it is `expired_after_allow`, final for this
+   * operation id: requote under a new one.
    */
-  private refuseUnmarkedPastBound(attempt: Attempt): void {
+  private refuseUnmarkedPastBound(attempt: Attempt, allowed: boolean): void {
     const passed = this.passedBound(attempt);
     if (!passed) return;
-    const retryable = passed === "expiration_passed";
-    this.s.journal.recordNotSubmitted(this.state.op.operationId, passed, retryable);
-    throw new Held({ state: "not_submitted", reason: passed, retryableAfterRevalidation: retryable });
+    const reason = passed === "expiration_passed" && allowed ? "expired_after_allow" : passed;
+    const retryable = reason === "expiration_passed";
+    this.s.journal.recordNotSubmitted(this.state.op.operationId, reason, retryable);
+    throw new Held({ state: "not_submitted", reason, retryableAfterRevalidation: retryable });
   }
 }
 
@@ -322,7 +341,7 @@ type Bound = "validity_bound_passed" | "expiration_passed";
 /** A marked attempt reached the send past one of its bounds; nothing was sent. */
 class BoundPassed extends Error {
   constructor(readonly bound: Bound) {
-    super(`marked attempt not re-broadcast: ${bound}`);
+    super(`marked attempt not sent: ${bound}`);
   }
 }
 

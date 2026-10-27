@@ -104,18 +104,36 @@ Effects are uninterpreted evidence: no element is "the" recipient note.
 `network_mismatch`, `account_mode_mismatch`, `token_mismatch`,
 `network_unreadable`, `may_broadcast_unconfigured`, `corridor_unconfigured`,
 `limits: ...`), `validity_bound_passed` (not retryable), `expiration_passed`
-(the prepared transaction's protocol expiration passed before it was marked;
-retryable, a retry proves a fresh attempt), `prepare_failed`, and
-`response_deadline` (the request deadline passed before anything was
-prepared; retry the same operation).
+(the prepared transaction's protocol expiration passed BEFORE Riddler was
+asked; retryable, a retry proves a fresh attempt), `expired_after_allow` (it
+passed after Riddler answered `allow` and before the mark; NOT retryable, see
+below), `prepare_failed`, and `response_deadline` (the request deadline passed
+before anything was prepared; retry the same operation).
 
-**The gate is the authoritative bound check.** Immediately before the
-may-broadcast mark -- after Riddler's answer, with nothing asynchronous in
-between -- the gate rereads the clock against BOTH `validUntil` and the
-attempt's protocol `expirationTimestamp`; an unmarked attempt past either is
-recorded `not_submitted` and never marked. A re-broadcast of a marked attempt
-rechecks both after the journaled bytes are reconstructed, immediately before
-the send. Earlier checks (admission, resume) only save work.
+**`expired_after_allow` is terminal for the operation id.** Riddler's `allow`
+durably bound that txHash (D-A). The attempt was never marked, so it provably
+never broadcast, but it can never be replaced under the same operation: a
+fresh proof carries a new hash, which Riddler denies for good, so retrying
+would only park the operation at `may_broadcast_denied`. The remedy is a
+requote under a NEW operation id; a retry of the old id answers the same
+`not_submitted` and proves nothing.
+
+**The gate is the authoritative bound check, in two steps.**
+
+1. After Riddler's answer and before the mark, with nothing asynchronous in
+   between, the gate checks the clock against BOTH `validUntil` and the
+   attempt's protocol `expirationTimestamp`. An unmarked attempt past either
+   is recorded `not_submitted` and never marked.
+2. After the mark -- an fsync that can itself cross a second -- a separate
+   SYNCHRONOUS final step (`BroadcastGate.beforeSend`) rechecks both bounds,
+   and the client calls the node's `sendTx` in the same synchronous run, with
+   no `await` between the check and the call. A re-broadcast of a marked
+   attempt takes the same step after its bytes are reconstructed. A marked
+   attempt refused here is never sent and answers `submitted_unknown` (reason
+   `validity_bound_passed` / `expiration_passed`), never `not_submitted`: it
+   was marked.
+
+Earlier checks (admission, resume) only save work.
 
 ## Fingerprint
 
@@ -170,7 +188,15 @@ nothing turns a held admission into `deny` today.
 
 On the bridge side: `deny` and `unknown` hold alike (`prepared`, retried
 later, never refunded); an answer whose `operationId` is not the one asked
-holds; only an exact 200 `allow` marks.
+holds; only an exact 200 `allow` marks. What the bridge does after an `allow`:
+
+| After `allow` | Bridge | Observation |
+| --- | --- | --- |
+| both bounds still open | mark, then the synchronous final check, then send | `pending` / `included` / ... |
+| `validUntil` passed before the mark | not marked, not sent | `not_submitted`, `validity_bound_passed`, not retryable |
+| protocol expiration passed before the mark | not marked, not sent; the hash stays bound at Riddler | `not_submitted`, `expired_after_allow`, not retryable: requote under a new operation id |
+| either bound passed after the mark, at the final check | marked, not sent | `submitted_unknown`, reason naming the bound |
+| the gate closed (request deadline) before the mark | not marked, not sent; the hash stays bound | `prepared`, `interrupted`. A retry re-asks with the same hash and is allowed again while the attempt is unexpired; once it has expired a fresh proof is denied (`may_broadcast_denied`), and the remedy is again a new operation id |
 
 ### Single-use may-broadcast and the rollback domain (D-A)
 
