@@ -355,7 +355,9 @@ restarted for being unready.
 `feat/pxe-bridge-journal`) carries this: journal path and audit log on the
 existing `/opt/aztec-testnet/bridge/journal` (uid 1000, 0700) bind mount, the
 corridor JSON and may-broadcast URL as asserted inventory placeholders, the
-may-broadcast token as a fifth 1Password-delivered tmpfs secret read by the
-entrypoint, and `aztec_testnet_bridge_readiness_path: /ready`. Its
-`NODE_ENV` is `testnet`, so the role asserts the `https://` URL itself in
-addition to the bridge's own check.
+may-broadcast token as one more 1Password-delivered tmpfs secret read by the
+entrypoint, `aztec_testnet_bridge_readiness_path: /ready`, one-shot adoption
+as `-e aztec_testnet_bridge_journal_adopt_account=<account>@<journal id>`, and
+a replacement check that the journal id is unchanged and its generation did
+not go back. Its `NODE_ENV` is `testnet`, so the role asserts the `https://`
+URL itself in addition to the bridge's own check.
