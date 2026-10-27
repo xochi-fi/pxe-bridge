@@ -37,7 +37,9 @@ describe("HTTP server (e2e)", () => {
     // The account is shared with the other suites, so it predates this
     // journal; adopting it is the operator acknowledgement the bridge needs.
     const journal = SettlementJournal.open(join(mkdtempSync(join(tmpdir(), "e2e-journal-")), "j.sqlite"));
-    journal.bindAccount(client.getAddress()!, client.accountPreexisted(), client.getAddress()!);
+    journal.bindAccount(client.getAddress()!, client.accountPreexisted(), {
+      acknowledgement: `${client.getAddress()!}@${journal.meta().journalId}`,
+    });
     server = createApp(client, {
       settlement: {
         journal,

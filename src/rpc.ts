@@ -16,6 +16,7 @@ import {
   isLegacyCreateNoteParams,
   termsFrom,
   type CorridorConfig,
+  type CreateNoteV1,
   type NodeObservation,
   type Observation,
   type SettlementTerms,
@@ -41,7 +42,11 @@ export interface SettlementContext {
   corridor: CorridorConfig | undefined;
   /** Operations this process is driving right now. */
   inFlight: Set<string>;
-  /** Bounds one createNote; past it the gate closes. Default TX deadline. */
+  /**
+   * Bounds one createNote from the moment it is handled: admission, cooldown,
+   * proving and the may-broadcast query all spend it, and when it passes the
+   * gate closes. Default TX deadline.
+   */
   timeoutMs: number;
   now?: () => number;
 }
@@ -53,6 +58,12 @@ export interface RpcContext {
   /** From the `Idempotency-Key` request header, when the caller sent one. */
   idempotencyKey?: string | undefined;
   clientIp?: string | undefined;
+  /**
+   * Aborted when the HTTP response deadline answers the caller (504). Closes
+   * the gate synchronously, before the 504 is written, so nothing this
+   * request started can be marked may-broadcast after the caller gave up.
+   */
+  signal?: AbortSignal | undefined;
 }
 
 function success(id: number | string | null, result: unknown): JsonRpcResponse {
@@ -102,16 +113,51 @@ function delay(ms: number): Promise<void> {
 
 const TIMED_OUT = Symbol("timed-out");
 
-/** Races `promise` against `ms`; the promise keeps running either way. */
-async function within<T>(promise: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<typeof TIMED_OUT>((resolve) => {
-    timer = setTimeout(() => resolve(TIMED_OUT), ms);
-  });
-  try {
-    return await Promise.race([promise, timeout]);
-  } finally {
-    clearTimeout(timer);
+/**
+ * The one deadline of a createNote (pxe-bridge#45 review): started before
+ * admission and cooldown, not after them, so a request cannot outlive the
+ * HTTP response deadline and mark after its caller was answered. It passes on
+ * the first of `ms` elapsing and `signal` aborting, and passing closes the
+ * attempt's gate synchronously -- the gate is the only thing that marks.
+ */
+class RequestDeadline {
+  expired = false;
+  private gate: { close(): void } | undefined;
+  private readonly timer: ReturnType<typeof setTimeout>;
+  private readonly passed: Promise<typeof TIMED_OUT>;
+  private readonly onAbort: () => void;
+
+  constructor(
+    ms: number,
+    private readonly signal: AbortSignal | undefined,
+  ) {
+    let resolve: (value: typeof TIMED_OUT) => void = () => undefined;
+    this.passed = new Promise((r) => (resolve = r));
+    this.onAbort = () => {
+      if (this.expired) return;
+      this.expired = true;
+      this.gate?.close();
+      resolve(TIMED_OUT);
+    };
+    this.timer = setTimeout(this.onAbort, ms);
+    if (signal?.aborted) this.onAbort();
+    else signal?.addEventListener("abort", this.onAbort, { once: true });
+  }
+
+  /** Closes `gate` the moment the deadline passes (now, if it has). */
+  guard(gate: { close(): void }): void {
+    this.gate = gate;
+    if (this.expired) gate.close();
+  }
+
+  /** Races `promise` against the deadline; the promise keeps running either way. */
+  race<T>(promise: Promise<T>): Promise<T | typeof TIMED_OUT> {
+    return Promise.race([promise, this.passed]);
+  }
+
+  dispose(): void {
+    clearTimeout(this.timer);
+    this.signal?.removeEventListener("abort", this.onAbort);
   }
 }
 
@@ -436,7 +482,23 @@ async function handleCreateNote(
       detail: "PXE_BRIDGE_JOURNAL is not set",
     });
   }
-  const operationId = parsed.data.operationId;
+  const deadline = new RequestDeadline(s.timeoutMs, ctx.signal);
+  try {
+    return await createNoteWithin(id, parsed.data, client, ctx, s, deadline);
+  } finally {
+    deadline.dispose();
+  }
+}
+
+async function createNoteWithin(
+  id: number | string,
+  params: CreateNoteV1,
+  client: IAztecClient,
+  ctx: RpcContext,
+  s: SettlementContext,
+  deadline: RequestDeadline,
+): Promise<JsonRpcResponse> {
+  const operationId = params.operationId;
   // The operation id IS the idempotency key, so a delivery attempt cannot be
   // replayed under a different operation, or two operations under one key.
   if (ctx.idempotencyKey !== operationId) {
@@ -445,7 +507,7 @@ async function handleCreateNote(
     });
   }
 
-  const terms = termsFrom(parsed.data);
+  const terms = termsFrom(params);
   const fingerprint = fingerprintTerms(terms);
 
   const health = s.journal.health();
@@ -472,7 +534,7 @@ async function handleCreateNote(
   // proving, and a retry must see "in flight" until it stops.
   const background = new BackgroundCalls();
   try {
-    return await driveOperation(id, client, ctx, s, operationId, fingerprint, terms, background);
+    return await driveOperation(id, client, ctx, s, operationId, fingerprint, terms, background, deadline);
   } finally {
     background.whenIdle(() => s.inFlight.delete(operationId));
   }
@@ -521,6 +583,7 @@ async function driveOperation(
   fingerprint: string,
   terms: SettlementTerms,
   background: BackgroundCalls,
+  deadline: RequestDeadline,
 ): Promise<JsonRpcResponse> {
   let op: StoredOperation;
   try {
@@ -530,7 +593,7 @@ async function driveOperation(
     }
     op = claim.operation;
     if (claim.kind === "existing") {
-      const resumed = await resumeExisting(id, client, ctx, s, op, background);
+      const resumed = await resumeExisting(id, client, ctx, s, op, background, deadline);
       if (resumed) return resumed;
       op = s.journal.get(operationId)!;
     }
@@ -538,10 +601,10 @@ async function driveOperation(
     return journalFault(id, s, operationId, cause);
   }
 
-  const refusal = await admissionRefusal(client, s, terms);
+  const refusal = await admissionRefusal(client, s, terms, deadline);
   if (refusal) return notSubmitted(id, ctx, s, op, fingerprint, refusal, true);
 
-  return runAttempt(id, client, ctx, s, { op, fingerprint, terms }, { kind: "fresh" }, background);
+  return runAttempt(id, client, ctx, s, { op, fingerprint, terms }, { kind: "fresh" }, background, deadline);
 }
 
 /**
@@ -556,6 +619,7 @@ async function resumeExisting(
   s: SettlementContext,
   op: StoredOperation,
   background: BackgroundCalls,
+  deadline: RequestDeadline,
 ): Promise<JsonRpcResponse | undefined> {
   const state = { op, fingerprint: op.fingerprint, terms: op.terms };
   switch (op.state) {
@@ -584,25 +648,40 @@ async function resumeExisting(
         // prepare a new attempt under the same operation.
         return undefined;
       }
-      const refusal = await admissionRefusal(client, s, op.terms);
+      const refusal = await admissionRefusal(client, s, op.terms, deadline);
       if (refusal) return notSubmitted(id, ctx, s, op, op.fingerprint, refusal, true);
-      return runAttempt(id, client, ctx, s, state, { kind: "resume", attempt }, background);
+      return runAttempt(id, client, ctx, s, state, { kind: "resume", attempt }, background, deadline);
     }
 
     case "may_broadcast": {
       const attempt = currentAttempt(s.journal, op);
       if (!attempt) return answer(id, op, { state: "unknown", reason: "missing_transaction_identity" });
-      const observation = await observe(s, client, op);
+      const observed = await deadline.race(observe(s, client, op));
+      const observation: Observation =
+        observed === TIMED_OUT
+          ? {
+              state: "submitted_unknown",
+              txHash: attempt.txHash,
+              expirationTimestamp: attempt.expirationTimestamp,
+              reason: "response_deadline",
+            }
+          : observed;
+      // A re-broadcast needs every bound still open: the protocol's expiry AND
+      // the operation's own `validUntil`. Past `validUntil` the marked attempt
+      // is never resent -- the deal it was admitted for is over -- and it is
+      // never "not submitted" either: it was marked and may be on chain, so
+      // the answer stays submitted_unknown until a node observation settles it.
       const unseen =
         observation.state === "submitted_unknown" &&
         observation.reason === "node_reports_dropped_or_unknown" &&
-        BigInt(nowSeconds(s)) < BigInt(attempt.expirationTimestamp);
+        BigInt(nowSeconds(s)) < BigInt(attempt.expirationTimestamp) &&
+        nowSeconds(s) < op.terms.validUntil;
       if (!unseen) return answer(id, op, observation);
       // Marked, and the node does not know it: the process may have died
       // between the mark and the send. Re-broadcast the journaled bytes --
       // never a rebuilt transaction -- which can land at most once.
       console.warn(`[rpc] Re-broadcasting journaled attempt ${attempt.attempt} of ${op.operationId}`);
-      return runAttempt(id, client, ctx, s, state, { kind: "rebroadcast", attempt }, background);
+      return runAttempt(id, client, ctx, s, state, { kind: "rebroadcast", attempt }, background, deadline);
     }
   }
 }
@@ -612,6 +691,7 @@ async function admissionRefusal(
   client: IAztecClient,
   s: SettlementContext,
   terms: SettlementTerms,
+  deadline: RequestDeadline,
 ): Promise<string | undefined> {
   if (!s.mayBroadcast) return "may_broadcast_unconfigured";
   const corridor = s.corridor;
@@ -631,11 +711,12 @@ async function admissionRefusal(
   if (pinned !== undefined && pinned.toLowerCase() !== terms.token) return "token_mismatch";
   let network;
   try {
-    network = await client.networkIdentity();
+    network = await deadline.race(client.networkIdentity());
   } catch (cause) {
     console.error("[rpc] Network identity read failed:", cause);
     return "network_unreadable";
   }
+  if (network === TIMED_OUT) return "response_deadline";
   if (
     network.aztecChainId !== terms.network.aztecChainId ||
     network.protocolVersion !== terms.network.protocolVersion ||
@@ -692,7 +773,11 @@ function journalFault(
 }
 
 /**
- * One attempt through the gate, bounded by `s.timeoutMs`.
+ * One attempt through the gate, bounded by the request's `deadline`.
+ *
+ * The gate exists, and is guarded by the deadline, before the cooldown, so a
+ * cooldown or a proof that runs past the deadline cannot mark afterwards; an
+ * attempt the deadline has already ended starts no client call at all.
  *
  * Classification is by which side of the may-broadcast mark the failure is
  * on, never by error type: before it nothing can have been broadcast; after
@@ -706,6 +791,7 @@ async function runAttempt(
   state: DriveState,
   mode: GateMode,
   background: BackgroundCalls,
+  deadline: RequestDeadline,
 ): Promise<JsonRpcResponse> {
   const { op, fingerprint, terms } = state;
   const amount = BigInt(terms.amount);
@@ -719,35 +805,42 @@ async function runAttempt(
   }
 
   let reservationId: number | undefined;
+  let cooldownMs: number | undefined;
   if (ctx.limits && mode.kind !== "rebroadcast") {
     const reservation = ctx.limits.reserve(amount);
     if (!reservation.allowed) {
       return notSubmitted(id, ctx, s, op, fingerprint, `limits: ${reservation.reason}`, true);
     }
     reservationId = reservation.reservationId;
-    if (reservation.cooldownMs) {
-      console.log(`[rpc] Cooldown ${reservation.cooldownMs}ms for ${op.operationId}`);
-      await delay(reservation.cooldownMs);
-    }
+    cooldownMs = reservation.cooldownMs;
   }
 
   const gate = new OperationGate(s, state, mode, () => {
     if (ctx.limits && reservationId !== undefined) ctx.limits.commit(reservationId);
   });
-  const call: Promise<TransferOutcome> =
-    journaledBytes === undefined
-      ? client.createNote({ recipient: terms.recipient, token: terms.token, amount: terms.amount }, gate)
-      : client.broadcastPrepared(journaledBytes, gate);
-  background.track(call);
+  deadline.guard(gate);
 
   let outcome: TransferOutcome | typeof TIMED_OUT | undefined;
   let failure: unknown;
-  try {
-    outcome = await within(call, s.timeoutMs);
-  } catch (cause) {
-    failure = cause;
+  if (cooldownMs) {
+    console.log(`[rpc] Cooldown ${cooldownMs}ms for ${op.operationId}`);
+    await deadline.race(delay(cooldownMs));
   }
-  if (outcome === TIMED_OUT) failure = new Error(`no outcome within ${s.timeoutMs}ms`);
+  if (deadline.expired) {
+    failure = new GateClosed();
+  } else {
+    const call: Promise<TransferOutcome> =
+      journaledBytes === undefined
+        ? client.createNote({ recipient: terms.recipient, token: terms.token, amount: terms.amount }, gate)
+        : client.broadcastPrepared(journaledBytes, gate);
+    background.track(call);
+    try {
+      outcome = await deadline.race(call);
+    } catch (cause) {
+      failure = cause;
+    }
+    if (outcome === TIMED_OUT) failure = new Error(`no outcome within the ${s.timeoutMs}ms request deadline`);
+  }
   // Whatever happened, nothing on this path may mark from now on.
   gate.close();
   if (!gate.marked && ctx.limits && reservationId !== undefined) {
@@ -774,7 +867,7 @@ async function runAttempt(
       state: "submitted_unknown",
       txHash: attempt.txHash,
       expirationTimestamp: attempt.expirationTimestamp,
-      reason: outcome === TIMED_OUT ? "response_deadline" : "post_mark_failure",
+      reason: deadline.expired ? "response_deadline" : "post_mark_failure",
     };
     await audit(ctx, op, fingerprint, observation);
     return answer(id, { operationId: op.operationId, fingerprint }, observation);
@@ -806,7 +899,7 @@ async function runAttempt(
     await audit(ctx, op, fingerprint, observation);
     return answer(id, { operationId: op.operationId, fingerprint }, observation);
   }
-  return notSubmitted(id, ctx, s, op, fingerprint, "prepare_failed", true);
+  return notSubmitted(id, ctx, s, op, fingerprint, deadline.expired ? "response_deadline" : "prepare_failed", true);
 }
 
 /**

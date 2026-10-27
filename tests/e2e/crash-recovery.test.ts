@@ -13,6 +13,7 @@ import { gunzipSync } from "node:zlib";
 import { randomBytes } from "node:crypto";
 import { AztecClient } from "../../src/aztec-client.js";
 import { SETTLEMENT_VERSION } from "../../src/settlement.js";
+import { SettlementJournal } from "../../src/journal.js";
 import { MAY_BROADCAST_VERSION } from "../../src/may-broadcast.js";
 import { getTestConfig, registerPublished, requireTestToken, walletDataDirectory } from "./helpers.js";
 
@@ -127,7 +128,6 @@ describe("hard crash mid-broadcast (e2e)", () => {
         PXE_BRIDGE_API_KEY: RPC_KEY,
         PXE_BRIDGE_PORT: String(port),
         PXE_BRIDGE_JOURNAL: journal,
-        PXE_BRIDGE_JOURNAL_ADOPT_ACCOUNT: account,
         PXE_BRIDGE_SETTLEMENT_CORRIDOR: JSON.stringify(CORRIDOR),
         PXE_BRIDGE_MAY_BROADCAST_URL: gateUrl,
         PXE_BRIDGE_MAY_BROADCAST_TOKEN: SERVICE_TOKEN,
@@ -267,15 +267,28 @@ describe("hard crash mid-broadcast (e2e)", () => {
     await new Promise<void>((done) => gate?.close(() => done()));
   });
 
+  /**
+   * The shared account predates every journal here, so each one is adopted
+   * before the bridge first opens it -- with the one-shot acknowledgement
+   * bound to THIS journal's id (D-B), exactly as an operator would.
+   */
+  function adoptedJournal(workDir: string): string {
+    const path = join(workDir, "journal.sqlite");
+    const journal = SettlementJournal.open(path);
+    journal.bindAccount(account, true, { acknowledgement: `${account}@${journal.meta().journalId}` });
+    expect(journal.health()).toEqual({ writable: true });
+    journal.close();
+    return path;
+  }
+
   it.each(["after_node_accepts", "before_node_sees"] as const)(
     "credits exactly once after a SIGKILL %s and a restart",
     async (point) => {
       const workDir = mkdtempSync(join(tmpdir(), "pxe-crash-"));
-      const journal = join(workDir, "journal.sqlite");
+      const journal = adoptedJournal(workDir);
       const operationId = `crash-${point}-${randomBytes(4).toString("hex")}`;
       const params = await terms(operationId);
       const before = await publicBalance();
-
       bridge = await startBridge(workDir, journal);
       killPoint = point;
       const first = await rpc(bridge.url, "aztec_createNote", params, operationId).catch(
@@ -327,7 +340,7 @@ describe("hard crash mid-broadcast (e2e)", () => {
 
   it("halts writes visibly on a corrupt journal and keeps serving status", async () => {
     const workDir = mkdtempSync(join(tmpdir(), "pxe-corrupt-"));
-    const journal = join(workDir, "journal.sqlite");
+    const journal = adoptedJournal(workDir);
     bridge = await startBridge(workDir, journal);
     bridge.child.kill("SIGKILL");
     await bridge.exited;

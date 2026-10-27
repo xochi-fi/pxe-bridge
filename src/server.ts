@@ -18,6 +18,13 @@ const REQUEST_TIMEOUT_MS = 30_000;
 // is not waiting on anything the bridge is going to deliver.
 export const RESPONSE_TIMEOUT_MS = 150_000;
 
+// The one deadline of a createNote, started when the request is handled and
+// spent by admission, cooldown, proving, the may-broadcast query and the
+// send. Under the response deadline by a margin, so the structured answer
+// (prepared / submitted_unknown with the txHash) reaches the caller before a
+// bare 504 can; the response deadline's abort closes the gate regardless.
+export const SETTLEMENT_DEADLINE_MS = RESPONSE_TIMEOUT_MS - 5_000;
+
 export interface ServerOptions {
   apiKey?: string | undefined;
   /**
@@ -40,6 +47,8 @@ export interface ServerOptions {
   minFeeJuice?: bigint | undefined;
   /** How long a fee juice reading is served before the node is asked again. */
   feeJuiceCacheMs?: number | undefined;
+  /** The HTTP response deadline; RESPONSE_TIMEOUT_MS unless a test shortens it. */
+  responseTimeoutMs?: number | undefined;
 }
 
 // /status is unauthenticated, so without a cache anyone could turn its rate
@@ -135,6 +144,9 @@ const SECURITY_HEADERS: Record<string, string> = {
 };
 
 function sendJson(res: ServerResponse, status: number, data: unknown): void {
+  // The response deadline may already have answered (504); the handler that
+  // finishes afterwards has nobody to tell.
+  if (res.headersSent || res.writableEnded) return;
   const body = JSON.stringify(data);
   res.writeHead(status, {
     ...SECURITY_HEADERS,
@@ -247,8 +259,15 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
   const server = createServer(async (req, res) => {
     // Nothing otherwise bounded how long a connection could stay open waiting
     // for a reply, so a stalled node held sockets indefinitely.
-    res.setTimeout(RESPONSE_TIMEOUT_MS, () => {
+    //
+    // The settlement deadline (SettlementContext.timeoutMs) normally answers
+    // first; this signal is the backstop that closes the gate if it does not.
+    const responseDeadline = new AbortController();
+    res.setTimeout(opts.responseTimeoutMs ?? RESPONSE_TIMEOUT_MS, () => {
       console.error("[pxe-bridge] Response deadline exceeded, closing connection");
+      // Before the 504 goes out: once the caller is answered, nothing this
+      // request started may be marked may-broadcast.
+      responseDeadline.abort();
       if (res.headersSent) {
         res.destroy();
         return;
@@ -263,8 +282,11 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
     try {
       const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
 
-      // Health check (no auth required, rate-limited)
-      if (req.method === "GET" && pathname === "/status") {
+      // Liveness (/status) and readiness (/ready): no auth, rate-limited, one
+      // body. /status answers 200 whenever the node does, so a degraded but
+      // live bridge is not restarted; /ready answers 200 only when every
+      // settlement prerequisite holds, and 503 otherwise.
+      if (req.method === "GET" && (pathname === "/status" || pathname === "/ready")) {
         const statusIp = req.socket.remoteAddress ?? "unknown";
         if (!rateLimiter.allow(statusIp)) {
           sendJson(res, 429, { error: "Too many requests" });
@@ -275,11 +297,27 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           const balance = await readFeeJuice();
           const low =
             opts.minFeeJuice !== undefined && balance !== null && balance < opts.minFeeJuice;
+          const settlement = opts.settlement;
           // Public, so the reason only: the detail can name the account.
-          const journal = opts.settlement?.journal.health();
-          const journalDown = journal === undefined || !journal.writable;
-          sendJson(res, 200, {
-            status: low || journalDown ? "degraded" : "ok",
+          const journal = settlement?.journal.health();
+          const notReady = [
+            ...(journal === undefined
+              ? ["journal_unconfigured"]
+              : journal.writable
+                ? []
+                : [`journal_${journal.reason}`]),
+            ...(settlement !== undefined && settlement.mayBroadcast === undefined
+              ? ["may_broadcast_unconfigured"]
+              : []),
+            ...(settlement !== undefined && settlement.corridor === undefined
+              ? ["corridor_unconfigured"]
+              : []),
+          ];
+          const ready = notReady.length === 0;
+          sendJson(res, pathname === "/ready" && !ready ? 503 : 200, {
+            status: ready && !low ? "ok" : "degraded",
+            ready,
+            ...(ready ? {} : { notReady }),
             version,
             feeJuice: {
               balance: balance === null ? null : balance.toString(),
@@ -291,10 +329,14 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
                 : journal.writable
                   ? { writable: true }
                   : { writable: false, reason: journal.reason },
+            settlement: {
+              mayBroadcast: settlement?.mayBroadcast === undefined ? "unconfigured" : "configured",
+              corridor: settlement?.corridor === undefined ? "unconfigured" : "configured",
+            },
           });
         } catch (err) {
           console.error("[pxe-bridge] Health check failed:", err);
-          sendJson(res, 503, { status: "starting" });
+          sendJson(res, 503, { status: "starting", ready: false });
         }
         return;
       }
@@ -418,6 +460,7 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           settlement: opts.settlement,
           idempotencyKey,
           clientIp: clientIp,
+          signal: responseDeadline.signal,
         };
         const result = await handleRpcRequest(parsed, client, rpcCtx);
         sendJson(res, 200, result);

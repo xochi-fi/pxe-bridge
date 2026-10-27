@@ -1,8 +1,18 @@
 import { describe, it, expect } from "vitest";
-import { copyFileSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname } from "node:path";
 import Database from "better-sqlite3";
 import {
   JournalLockedError,
+  JournalPermissionError,
   JournalUnreadableError,
   JournalWriteError,
   SettlementJournal,
@@ -124,10 +134,86 @@ describe("SettlementJournal", () => {
     });
   });
 
-  it("adopts an existing account only when the operator names it", () => {
+  it("adopts an existing account only with an acknowledgement naming THIS journal", () => {
     const journal = SettlementJournal.open(tempJournalPath());
-    journal.bindAccount(ACCOUNT, true, ACCOUNT.toUpperCase().replace("0X", "0x"));
+    const ack = `${ACCOUNT.toUpperCase().replace("0X", "0x")}@${journal.meta().journalId}`;
+    journal.bindAccount(ACCOUNT, true, { acknowledgement: ack });
     expect(journal.health()).toEqual({ writable: true });
+  });
+
+  it("refuses the pre-D-B bare-address acknowledgement", () => {
+    const journal = SettlementJournal.open(tempJournalPath());
+    journal.bindAccount(ACCOUNT, true, { acknowledgement: ACCOUNT });
+    expect(journal.health()).toMatchObject({
+      writable: false,
+      reason: "empty_journal_for_existing_account",
+      detail: expect.stringContaining(`PXE_BRIDGE_JOURNAL_ADOPT_ACCOUNT=${ACCOUNT}@${journal.meta().journalId}`),
+    });
+  });
+
+  it("spends the acknowledgement once: it cannot authorise a later journal loss", () => {
+    const first = SettlementJournal.open(tempJournalPath());
+    const ack = `${ACCOUNT}@${first.meta().journalId}`;
+    first.bindAccount(ACCOUNT, true, { acknowledgement: ack });
+    expect(first.health()).toEqual({ writable: true });
+    marked(first);
+    first.close();
+
+    // The journal is lost and a fresh one appears beside the same account,
+    // with the old acknowledgement still in the environment.
+    const replacement = SettlementJournal.open(tempJournalPath());
+    expect(replacement.meta().journalId).not.toBe(first.meta().journalId);
+    replacement.bindAccount(ACCOUNT, true, { acknowledgement: ack });
+    expect(replacement.health()).toMatchObject({
+      writable: false,
+      reason: "empty_journal_for_existing_account",
+    });
+    expect(() => replacement.claim("op-2", fingerprint, terms)).toThrow(JournalWriteError);
+  });
+
+  it("ignores a leftover acknowledgement once the journal is bound", () => {
+    const path = tempJournalPath();
+    const journal = SettlementJournal.open(path);
+    const ack = `${ACCOUNT}@${journal.meta().journalId}`;
+    journal.bindAccount(ACCOUNT, true, { acknowledgement: ack });
+    journal.close();
+    const reopened = SettlementJournal.open(path);
+    reopened.bindAccount(ACCOUNT, true, { acknowledgement: "anything@else" });
+    expect(reopened.health()).toEqual({ writable: true });
+  });
+
+  it("refuses adoption while the legacy audit log says so, and never asks otherwise", () => {
+    const journal = SettlementJournal.open(tempJournalPath());
+    let asked = 0;
+    journal.bindAccount(ACCOUNT, true, {
+      acknowledgement: `${ACCOUNT}@${journal.meta().journalId}`,
+      legacyAuditRefusal: () => {
+        asked += 1;
+        return "1 unresolved key(s) (k1)";
+      },
+    });
+    expect(asked).toBe(1);
+    expect(journal.health()).toMatchObject({
+      writable: false,
+      reason: "legacy_audit_unresolved",
+      detail: expect.stringContaining("k1"),
+    });
+
+    // A fresh account adopts nothing, so the legacy log is not consulted.
+    const fresh = SettlementJournal.open(tempJournalPath());
+    fresh.bindAccount(ACCOUNT, false, { legacyAuditRefusal: () => "never asked" });
+    expect(fresh.health()).toEqual({ writable: true });
+  });
+
+  it("refuses adoption when the legacy check itself fails", () => {
+    const journal = SettlementJournal.open(tempJournalPath());
+    journal.bindAccount(ACCOUNT, true, {
+      acknowledgement: `${ACCOUNT}@${journal.meta().journalId}`,
+      legacyAuditRefusal: () => {
+        throw new Error("EACCES");
+      },
+    });
+    expect(journal.health()).toMatchObject({ writable: false, reason: "legacy_audit_unresolved" });
   });
 
   it("refuses writes until an account is bound, and refuses another account", () => {
@@ -175,5 +261,124 @@ describe("SettlementJournal", () => {
     marked(journal);
     const mark = JSON.parse(readFileSync(`${path}.hwm`, "utf8")) as { generation: number };
     expect(mark.generation).toBe(journal.meta().generation);
+  });
+});
+
+describe("SettlementJournal startup invariant", () => {
+  /** Leaves op-1 claimed, prepared or marked, then closes the journal. */
+  function journalWith(state: "claimed" | "prepared" | "marked"): string {
+    const path = tempJournalPath();
+    const journal = openBoundJournal(path);
+    journal.claim("op-1", fingerprint, terms);
+    if (state !== "claimed") {
+      const attempt = journal.recordPrepared("op-1", tx(1));
+      if (state === "marked") journal.markMayBroadcast("op-1", attempt, terms.amount);
+    }
+    journal.close();
+    return path;
+  }
+
+  /** Edits the file behind the journal's back; the generation is untouched. */
+  function tamper(path: string, sql: string): void {
+    const db = new Database(path);
+    db.exec(sql);
+    db.close();
+  }
+
+  it.each([
+    ["a prepared operation with a marked attempt", "prepared", "UPDATE attempts SET may_broadcast_at = 1"],
+    ["a prepared operation with a spend", "prepared", "INSERT INTO spends VALUES ('op-1', '1000', 1)"],
+    ["a marked operation with no spend", "marked", "DELETE FROM spends"],
+    ["a marked operation whose attempt is unmarked", "marked", "UPDATE attempts SET may_broadcast_at = NULL"],
+    [
+      "a claimed operation with a marked attempt",
+      "marked",
+      "UPDATE operations SET state = 'claimed', current_attempt = NULL; DELETE FROM spends",
+    ],
+    ["a spend for an operation never marked", "claimed", "INSERT INTO spends VALUES ('op-1', '1000', 1)"],
+    ["a spend for an operation that does not exist", "marked", "INSERT INTO spends VALUES ('ghost', '1', 1)"],
+    [
+      "terms that are not the fingerprint's",
+      "marked",
+      `UPDATE operations SET terms_json = replace(terms_json, '"amount":"1000"', '"amount":"9"')`,
+    ],
+    ["a state the code never writes", "claimed", "UPDATE operations SET state = 'sending'"],
+  ] as const)("disables writes (and so every replay) on %s, keeping reads", (_name, state, sql) => {
+    const path = journalWith(state);
+    tamper(path, sql);
+    const reopened = SettlementJournal.open(path);
+    reopened.bindAccount(ACCOUNT, false);
+    expect(reopened.health()).toMatchObject({ writable: false, reason: "journal_inconsistent" });
+    expect(reopened.get("op-1")).toBeDefined();
+    expect(() => reopened.claim("op-1", fingerprint, terms)).toThrow(JournalWriteError);
+  });
+
+  it.each([
+    ["a prepared operation", "prepared"],
+    ["a marked operation", "marked"],
+  ] as const)("treats a malformed transaction hash on %s as a missing identity", (_name, state) => {
+    const path = journalWith(state);
+    tamper(path, "UPDATE attempts SET tx_hash = '0x' || substr(tx_hash, 4)");
+    expect(SettlementJournal.open(path).health()).toMatchObject({
+      writable: false,
+      reason: "missing_transaction_identity",
+    });
+  });
+
+  it("passes every state the code itself writes", () => {
+    const path = tempJournalPath();
+    const journal = openBoundJournal(path);
+    journal.claim("claimed", fingerprint, terms);
+    journal.claim("held", fingerprint, terms);
+    journal.recordPrepared("held", tx(6));
+    journal.recordHold("held", "may_broadcast_denied");
+    journal.claim("refused", fingerprint, terms);
+    journal.recordNotSubmitted("refused", "corridor_mismatch", true);
+    journal.claim("abandoned", fingerprint, terms);
+    journal.recordPrepared("abandoned", tx(7));
+    journal.recordNotSubmitted("abandoned", "validity_bound_passed", false);
+    journal.claim("rearmed", fingerprint, terms);
+    journal.recordNotSubmitted("rearmed", "prepare_failed", true);
+    journal.reclaim("rearmed");
+    marked(journal, "sent");
+    journal.close();
+    const reopened = SettlementJournal.open(path);
+    reopened.bindAccount(ACCOUNT, false);
+    expect(reopened.health()).toEqual({ writable: true });
+  });
+});
+
+describe("SettlementJournal file permissions", () => {
+  const mode = (path: string) => statSync(path).mode & 0o777;
+
+  it("creates the journal and its high-water mark owner-only", () => {
+    const path = tempJournalPath();
+    const journal = openBoundJournal(path);
+    marked(journal);
+    expect(mode(path)).toBe(0o600);
+    expect(mode(`${path}.hwm`)).toBe(0o600);
+  });
+
+  it("tightens an existing journal and its side files at open", () => {
+    const path = tempJournalPath();
+    openBoundJournal(path).close();
+    chmodSync(path, 0o644);
+    chmodSync(`${path}.hwm`, 0o644);
+    // An empty rollback journal is not hot; SQLite ignores it.
+    writeFileSync(`${path}-journal`, "", { mode: 0o644 });
+    chmodSync(`${path}-journal`, 0o644);
+    const reopened = SettlementJournal.open(path);
+    expect(mode(path)).toBe(0o600);
+    expect(mode(`${path}.hwm`)).toBe(0o600);
+    if (existsSync(`${path}-journal`)) expect(mode(`${path}-journal`)).toBe(0o600);
+    reopened.bindAccount(ACCOUNT, false);
+    expect(reopened.health()).toEqual({ writable: true });
+  });
+
+  it("refuses to start in a directory others can write", () => {
+    const path = tempJournalPath();
+    chmodSync(dirname(path), 0o770);
+    expect(() => SettlementJournal.open(path)).toThrow(JournalPermissionError);
+    expect(existsSync(path)).toBe(false);
   });
 });

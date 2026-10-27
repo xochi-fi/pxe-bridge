@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import Database from "better-sqlite3";
 import { handleRpcRequest, type RpcContext, type SettlementContext } from "../src/rpc.js";
 import { RPC_ERRORS, SUBMITTED_UNKNOWN_MESSAGE } from "../src/types.js";
 import { SettlementJournal } from "../src/journal.js";
@@ -14,6 +15,7 @@ import {
   tempJournalPath,
   v1Params,
   TOKEN,
+  VALID_UNTIL,
   type FakeMayBroadcast,
 } from "./settlement-fixtures.js";
 
@@ -327,6 +329,46 @@ describe("ambiguity after the mark is submitted_unknown, never a retryable error
     expect(gate.calls).toEqual(["op-1"]);
   });
 
+  it("never re-broadcasts a marked attempt past validUntil, and never calls it unsubmitted", async () => {
+    client.behaviour = "die_after_mark";
+    await createNote(client, ctx);
+    const marked = journal.attempts("op-1")[0]!.txHash;
+    client.behaviour = "land";
+    // Past the operation's own bound, still inside the protocol expiry.
+    const late = { settlement: { ...s, now: () => (VALID_UNTIL + 1) * 1000 } };
+    expect(BigInt(VALID_UNTIL + 1)).toBeLessThan(client.expiration);
+    const retry = await createNote(client, late);
+    expect(retry.error?.code).toBe(RPC_ERRORS.SUBMITTED_UNKNOWN);
+    expect(retry.error?.data?.observation).toMatchObject({
+      state: "submitted_unknown",
+      txHash: marked,
+      reason: "node_reports_dropped_or_unknown",
+    });
+    expect(client.sends).toHaveLength(0);
+    expect(journal.get("op-1")?.state).toBe("may_broadcast");
+    expect((await getSettlement(client, late)).observation.state).toBe("submitted_unknown");
+  });
+
+  it("refuses every replay once the startup invariant fails", async () => {
+    const path = tempJournalPath();
+    const first = openBoundJournal(path);
+    client.behaviour = "die_after_mark";
+    await createNote(client, { settlement: settlementContext(first, gate.client) });
+    first.close();
+    const db = new Database(path);
+    db.exec("DELETE FROM spends");
+    db.close();
+
+    const reopened = SettlementJournal.open(path);
+    reopened.bindAccount(client.getAddress()!, false);
+    expect(reopened.health()).toMatchObject({ writable: false, reason: "journal_inconsistent" });
+    client.behaviour = "land";
+    const retry = await createNote(client, { settlement: settlementContext(reopened, gate.client) });
+    expect(retry.error?.code).toBe(RPC_ERRORS.JOURNAL_UNAVAILABLE);
+    expect(client.sends).toHaveLength(0);
+    expect(client.proofs).toBe(1);
+  });
+
   it("survives a restart: a reopened journal answers and the retry sends nothing", async () => {
     const path = tempJournalPath();
     const first = openBoundJournal(path);
@@ -343,6 +385,65 @@ describe("ambiguity after the mark is submitted_unknown, never a retryable error
     expect(retry.result?.observation.state).toBe("included");
     expect(client.sends).toHaveLength(1);
     expect(client.credits()).toBe(1);
+  });
+});
+
+describe("one deadline for the whole request", () => {
+  it("counts the cooldown against it: a cooldown past the deadline proves nothing", async () => {
+    const limits = new TransactionLimits({ cooldownThreshold: 1n, cooldownDelayMs: 300 });
+    const res = await createNote(client, { settlement: { ...s, timeoutMs: 50 }, limits });
+    expect(res.error?.data?.observation).toEqual({
+      state: "not_submitted",
+      reason: "response_deadline",
+      retryableAfterRevalidation: true,
+    });
+    expect(client.proofs).toBe(0);
+    expect(limits.windowStatus().reserved).toBe(0n);
+    // Nothing was started, so nothing can finish after the cooldown either.
+    expect(client.sends).toHaveLength(0);
+    expect(gate.calls).toEqual([]);
+  });
+
+  it("counts admission against it: a node that will not answer ends the request", async () => {
+    client.networkIdentity = () => new Promise(() => undefined);
+    const res = await createNote(client, { settlement: { ...s, timeoutMs: 50 } });
+    expect(res.error?.data?.observation).toMatchObject({ state: "not_submitted", reason: "response_deadline" });
+    expect(client.proofs).toBe(0);
+  });
+
+  it("closes the gate when the HTTP deadline aborts, so a later allow cannot mark", async () => {
+    let release: (decision: "allow") => void = () => undefined;
+    let asked: () => void = () => undefined;
+    const askedOnce = new Promise<void>((r) => (asked = r));
+    const late: MayBroadcastClient = () => {
+      asked();
+      return new Promise((resolve) => {
+        release = (decision) => resolve({ decision, detail: "late" });
+      });
+    };
+    const http = new AbortController();
+    const pending = createNote(client, {
+      settlement: { ...s, mayBroadcast: late, timeoutMs: 60_000 },
+      signal: http.signal,
+    });
+    await askedOnce;
+    http.abort();
+    const res = await pending;
+    expect(res.error?.data?.observation).toMatchObject({ state: "prepared", hold: "interrupted" });
+    release("allow");
+    await new Promise((r) => setImmediate(r));
+    expect(client.sends).toHaveLength(0);
+    expect(journal.get("op-1")?.state).toBe("prepared");
+    expect(journal.spendsSince(0)).toEqual([]);
+  });
+
+  it("starts nothing when the HTTP deadline has already passed", async () => {
+    const http = new AbortController();
+    http.abort();
+    const res = await createNote(client, { settlement: s, signal: http.signal });
+    expect(res.error?.data?.observation).toMatchObject({ state: "not_submitted", reason: "response_deadline" });
+    expect(client.proofs).toBe(0);
+    expect(gate.calls).toEqual([]);
   });
 });
 

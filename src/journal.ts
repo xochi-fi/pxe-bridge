@@ -1,8 +1,19 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  fchmodSync,
+  fsyncSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeSync,
+} from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
-import type { Observation, SettlementTerms } from "./settlement.js";
+import { fingerprintTerms, type Observation, type SettlementTerms } from "./settlement.js";
 
 /**
  * The durable settlement journal (xochi-fi/pxe-bridge#45; decided 2026-10-25).
@@ -29,9 +40,22 @@ import type { Observation, SettlementTerms } from "./settlement.js";
  * Writes can be disabled while reads continue: a corrupt file, a rollback
  * (generation below the high-water mark), a fresh journal next to an account
  * that already existed, an account that is not the journal's, an operation
- * that may have broadcast without a recorded transaction hash, an unknown
- * schema version, or a write that failed at runtime. None of these is cleared
- * by the process; see docs/settlement-operations.md for the operator response.
+ * that may have broadcast without a recorded transaction hash, a state its
+ * attempts and spends cannot produce, an unknown schema version, or a write
+ * that failed at runtime. None of these is cleared by the process; see
+ * docs/settlement-operations.md for the operator response.
+ *
+ * The high-water mark shares the journal's volume, and with it the volume's
+ * rollback domain: a snapshot restore of the volume restores both, and the
+ * mark then agrees with the older journal. It catches a lost or swapped file,
+ * not a restored volume. The guarantee against a second payout from a
+ * rolled-back journal is Riddler's single-use may-broadcast binding (D-A).
+ *
+ * Permissions: the journal holds signed transaction bytes before they are
+ * permitted to broadcast, so anyone who can read it can submit them. The file
+ * and every side file are owner-only (0600) and the directory may not be
+ * writable by anyone else; `open` tightens what it can and refuses to start
+ * (`JournalPermissionError`) otherwise.
  */
 
 export const JOURNAL_SCHEMA_VERSION = 1;
@@ -40,8 +64,10 @@ export type WriteDisabledReason =
   | "corrupt"
   | "rollback_detected"
   | "empty_journal_for_existing_account"
+  | "legacy_audit_unresolved"
   | "account_mismatch"
   | "missing_transaction_identity"
+  | "journal_inconsistent"
   | "unknown_schema_version"
   | "write_failed"
   | "account_unbound";
@@ -118,6 +144,27 @@ export class JournalWriteError extends Error {
     super(message, options);
     this.name = "JournalWriteError";
   }
+}
+
+/**
+ * The journal's files cannot be made owner-only. Fatal at startup: the
+ * journal holds signed transactions before they are permitted to broadcast,
+ * so a reader can submit them, and a writer to the directory can plant a hot
+ * rollback journal SQLite would apply.
+ */
+export class JournalPermissionError extends Error {
+  constructor(detail: string, cause?: unknown) {
+    super(`Settlement journal permissions: ${detail}. Refusing to start.`, { cause });
+    this.name = "JournalPermissionError";
+  }
+}
+
+/** What `bindAccount` needs to decide an adoption (decision D-B). */
+export interface AdoptionInput {
+  /** PXE_BRIDGE_JOURNAL_ADOPT_ACCOUNT: `<account>@<journal id>`. */
+  acknowledgement?: string | undefined;
+  /** Why the legacy audit log forbids adoption, or undefined when it does not. */
+  legacyAuditRefusal?: (() => string | undefined) | undefined;
 }
 
 interface OperationRow {
@@ -219,6 +266,7 @@ export class SettlementJournal {
   }
 
   private initialize(): void {
+    enforceOwnerOnly(this.path, this.hwmPath);
     let db: Database.Database;
     try {
       db = new Database(this.path, { timeout: 0 });
@@ -274,7 +322,7 @@ export class SettlementJournal {
     if (!this.healthState.writable) return;
     this.checkHighWaterMark();
     if (!this.healthState.writable) return;
-    this.checkTransactionIdentity();
+    this.checkInvariants();
   }
 
   private classifyOpenError(cause: unknown): void {
@@ -357,25 +405,121 @@ export class SettlementJournal {
     }
   }
 
-  /** May-broadcast without a recorded transaction hash cannot be reconciled. */
-  private checkTransactionIdentity(): void {
+  /**
+   * The startup invariant. Every operation's state must be one its attempts
+   * and spend rows can produce:
+   *
+   * - `prepared`: the current attempt exists with a full transaction identity
+   *   and is unmarked; no attempt is marked; no spend row.
+   * - `may_broadcast` / `finalized` / `reverted`: the current attempt exists
+   *   with a full transaction identity and is the one marked attempt; the
+   *   spend row exists.
+   * - `claimed` / `not_submitted`: no attempt is marked and no spend row;
+   *   `claimed` has no current attempt, `not_submitted` at most an unmarked one.
+   *
+   * Plus: every spend row belongs to a marked operation, and the stored
+   * fingerprint is the fingerprint of the stored terms. Anything else was not
+   * written by this code -- a partial restore, a hand edit, a bug -- and a
+   * replay from it could resend or re-prove what the journal cannot vouch
+   * for, so writes (and with them every replay) are disabled.
+   */
+  private checkInvariants(): void {
     const db = this.db!;
-    const orphan = db
+    const operations = db
+      .prepare("SELECT operation_id, fingerprint, terms_json, state, current_attempt FROM operations")
+      .all() as Pick<OperationRow, "operation_id" | "fingerprint" | "terms_json" | "state" | "current_attempt">[];
+    const attempts = db
       .prepare(
-        `SELECT o.operation_id FROM operations o
-         WHERE o.state IN ('prepared', 'may_broadcast', 'finalized', 'reverted')
-           AND NOT EXISTS (SELECT 1 FROM attempts a
-                           WHERE a.operation_id = o.operation_id
-                             AND a.attempt = o.current_attempt
-                             AND length(a.tx_hash) = 66)
-         LIMIT 1`,
+        `SELECT operation_id, attempt, tx_hash, expiration_timestamp, may_broadcast_at,
+                length(tx_bytes) AS byte_length
+         FROM attempts`,
       )
-      .get() as { operation_id: string } | undefined;
-    if (orphan) {
-      this.disable(
-        "missing_transaction_identity",
-        `operation ${orphan.operation_id} may have broadcast but has no recorded transaction`,
-      );
+      .all() as (AttemptRow & { operation_id: string; byte_length: number })[];
+    const spent = new Set(
+      (db.prepare("SELECT operation_id FROM spends").all() as { operation_id: string }[]).map(
+        (r) => r.operation_id,
+      ),
+    );
+    const attemptsOf = new Map<string, typeof attempts>();
+    for (const a of attempts) {
+      const list = attemptsOf.get(a.operation_id) ?? [];
+      list.push(a);
+      attemptsOf.set(a.operation_id, list);
+    }
+    const known = new Set(operations.map((o) => o.operation_id));
+
+    for (const op of operations) {
+      const id = op.operation_id;
+      const own = attemptsOf.get(id) ?? [];
+      const marked = own.filter((a) => a.may_broadcast_at !== null);
+      const current = own.find((a) => a.attempt === op.current_attempt);
+      const identified =
+        current !== undefined &&
+        /^0x[0-9a-f]{64}$/.test(current.tx_hash) &&
+        /^[0-9]+$/.test(current.expiration_timestamp) &&
+        current.byte_length > 0;
+      let violation: string | undefined;
+      switch (op.state) {
+        case "prepared":
+          if (!identified) {
+            this.disable("missing_transaction_identity", `operation ${id} is prepared with no recorded transaction`);
+            return;
+          }
+          if (marked.length > 0) violation = "prepared, but an attempt is marked may-broadcast";
+          else if (spent.has(id)) violation = "prepared, but a spend is recorded";
+          break;
+        case "may_broadcast":
+        case "finalized":
+        case "reverted":
+          if (!identified) {
+            this.disable(
+              "missing_transaction_identity",
+              `operation ${id} may have broadcast but has no recorded transaction`,
+            );
+            return;
+          }
+          if (current.may_broadcast_at === null) violation = `${op.state}, but its current attempt is unmarked`;
+          else if (marked.length !== 1) violation = `${op.state} with ${marked.length} marked attempts`;
+          else if (!spent.has(id)) violation = `${op.state} with no spend recorded`;
+          break;
+        case "claimed":
+        case "not_submitted":
+          if (marked.length > 0) violation = `${op.state}, but an attempt is marked may-broadcast`;
+          else if (spent.has(id)) violation = `${op.state}, but a spend is recorded`;
+          else if (op.state === "claimed" && op.current_attempt !== null) {
+            violation = "claimed with a current attempt";
+          } else if (op.current_attempt !== null && current === undefined) {
+            violation = `not_submitted names attempt ${op.current_attempt}, which is absent`;
+          }
+          break;
+        default:
+          violation = `unknown state ${String(op.state)}`;
+      }
+      if (violation === undefined) {
+        try {
+          if (fingerprintTerms(JSON.parse(op.terms_json) as SettlementTerms) !== op.fingerprint) {
+            violation = "stored fingerprint is not the fingerprint of the stored terms";
+          }
+        } catch {
+          violation = "stored terms are unreadable";
+        }
+      }
+      if (violation !== undefined) {
+        this.disable("journal_inconsistent", `operation ${id}: ${violation}`);
+        return;
+      }
+    }
+    for (const id of spent) {
+      if (!known.has(id)) {
+        this.disable("journal_inconsistent", `spend recorded for unknown operation ${id}`);
+        return;
+      }
+    }
+    for (const id of attemptsOf.keys()) {
+      if (!known.has(id)) {
+        this.disable("journal_inconsistent", `attempt recorded for unknown operation ${id}`);
+        return;
+      }
     }
   }
 
@@ -387,15 +531,24 @@ export class SettlementJournal {
    * lost-journal case: whatever the old journal knew -- may-broadcast marks,
    * transactions in flight -- is gone, and a plausible balance proves nothing
    * (§7 recovery: "A does not resume sends simply because balances appear
-   * plausible"). Writes stay disabled unless the operator names the account
-   * in `adoptAccount` (PXE_BRIDGE_JOURNAL_ADOPT_ACCOUNT), having reconciled.
+   * plausible"). Writes stay disabled unless the operator acknowledges THIS
+   * journal (decision D-B): `adoption.acknowledgement`
+   * (PXE_BRIDGE_JOURNAL_ADOPT_ACCOUNT) must be `<account>@<journal id>`, so an
+   * acknowledgement left in the environment cannot authorise a later journal
+   * loss -- a replacement journal has a new id. It is spent once: the binding
+   * records the account, and from then on the stored account decides.
+   *
+   * Adoption is also refused while `adoption.legacyAuditRefusal` names a
+   * reason: the pre-journal audit log still holds an unresolved key or a
+   * spend inside the last 24h (see legacy-audit.ts).
    */
-  bindAccount(address: string, accountPreexisted: boolean, adoptAccount?: string): void {
+  bindAccount(address: string, accountPreexisted: boolean, adoption: AdoptionInput = {}): void {
     if (!this.db || !this.healthState.writable) {
       this.bound = true;
       return;
     }
     const lower = address.toLowerCase();
+    const expected = `${lower}@${this.journalId}`;
     const stored = (
       this.db.prepare("SELECT value FROM meta WHERE key = 'account'").get() as
         | { value: string }
@@ -404,6 +557,11 @@ export class SettlementJournal {
     if (stored !== undefined) {
       if (stored !== lower) {
         this.disable("account_mismatch", `journal belongs to ${stored}, not ${lower}`);
+      } else if (adoption.acknowledgement !== undefined) {
+        console.warn(
+          "[pxe-bridge] PXE_BRIDGE_JOURNAL_ADOPT_ACCOUNT is set but this journal is already bound; " +
+            "it has no effect and can authorise no other journal. Remove it.",
+        );
       }
       this.bound = true;
       return;
@@ -411,20 +569,43 @@ export class SettlementJournal {
     const operations = (
       this.db.prepare("SELECT count(*) AS n FROM operations").get() as { n: number }
     ).n;
-    if (accountPreexisted && operations === 0) {
-      if (adoptAccount === undefined || adoptAccount.toLowerCase() !== lower) {
+    const adopting = accountPreexisted && operations === 0;
+    if (adopting) {
+      const ack = adoption.acknowledgement;
+      if (ack === undefined || ack.toLowerCase() !== expected.toLowerCase()) {
         this.disable(
           "empty_journal_for_existing_account",
-          `account ${lower} existed before this journal; set ` +
-            `PXE_BRIDGE_JOURNAL_ADOPT_ACCOUNT=${lower} only after reconciling every ` +
-            "earlier transfer",
+          `account ${lower} existed before this journal (${this.journalId})` +
+            (ack === undefined ? "" : `; the acknowledgement "${ack}" names another account or journal`) +
+            `. Only after the drain procedure (docs/settlement-operations.md) set ` +
+            `PXE_BRIDGE_JOURNAL_ADOPT_ACCOUNT=${expected}`,
         );
         this.bound = true;
         return;
       }
+      let legacy: string | undefined;
+      try {
+        legacy = adoption.legacyAuditRefusal?.();
+      } catch (cause) {
+        legacy = `the legacy audit log could not be checked: ${(cause as Error).message}`;
+      }
+      if (legacy !== undefined) {
+        this.disable("legacy_audit_unresolved", `adoption of ${lower} refused: ${legacy}`);
+        this.bound = true;
+        return;
+      }
+    } else if (adoption.acknowledgement !== undefined) {
+      console.warn(
+        "[pxe-bridge] PXE_BRIDGE_JOURNAL_ADOPT_ACCOUNT is set but nothing needs adopting; remove it.",
+      );
     }
     this.write("bind account", (db) => {
-      db.prepare("INSERT INTO meta (key, value) VALUES ('account', ?)").run(lower);
+      const put = db.prepare("INSERT INTO meta (key, value) VALUES (?, ?)");
+      put.run("account", lower);
+      if (adopting) {
+        put.run("adopted_at", String(this.now()));
+        put.run("adoption_acknowledgement", expected);
+      }
     });
     this.bound = true;
   }
@@ -748,6 +929,9 @@ export class SettlementJournal {
     const body = JSON.stringify({ journalId: this.journalId, generation: this.generation });
     const fd = openSync(tmp, "w", 0o600);
     try {
+      // The mode above applies only when the file is created; a leftover
+      // temp file keeps whatever mode it had.
+      fchmodSync(fd, 0o600);
       writeSync(fd, body);
       fsyncSync(fd);
     } finally {
@@ -774,6 +958,47 @@ class StateError extends Error {}
 function isBusy(cause: unknown): boolean {
   const code = (cause as { code?: string } | null)?.code;
   return code === "SQLITE_BUSY" || code === "SQLITE_LOCKED";
+}
+
+/**
+ * Makes the journal, its SQLite side files and the high-water mark owner-only
+ * (0600), creating the journal 0600 before SQLite opens it, and refuses a
+ * directory anyone else can write. SQLite creates `-journal` (and `-wal`/
+ * `-shm`) with the database file's own mode, so a 0600 database keeps them
+ * 0600; any that exist now are tightened too.
+ */
+function enforceOwnerOnly(path: string, hwmPath: string): void {
+  const dir = dirname(path);
+  let dirMode: number;
+  try {
+    dirMode = statSync(dir).mode;
+  } catch (cause) {
+    throw new JournalPermissionError(`cannot stat the journal directory ${dir}`, cause);
+  }
+  if ((dirMode & 0o022) !== 0) {
+    throw new JournalPermissionError(
+      `${dir} is writable by group or others (mode ${(dirMode & 0o777).toString(8)}); make it 0700`,
+    );
+  }
+  if (!existsSync(path)) {
+    try {
+      closeSync(openSync(path, "wx", 0o600));
+    } catch (cause) {
+      throw new JournalPermissionError(`cannot create ${path} owner-only`, cause);
+    }
+  }
+  for (const file of [path, `${path}-journal`, `${path}-wal`, `${path}-shm`, hwmPath]) {
+    if (!existsSync(file)) continue;
+    try {
+      if ((statSync(file).mode & 0o077) !== 0) chmodSync(file, 0o600);
+    } catch (cause) {
+      throw new JournalPermissionError(`cannot make ${file} owner-only`, cause);
+    }
+    const mode = statSync(file).mode & 0o777;
+    if ((mode & 0o077) !== 0) {
+      throw new JournalPermissionError(`${file} is mode ${mode.toString(8)}, not owner-only`);
+    }
+  }
 }
 
 function toOperation(row: OperationRow): StoredOperation {

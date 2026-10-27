@@ -7,7 +7,7 @@ import {
   sponsoredFpcSetting,
   type SponsoredFpcSetting,
 } from "./aztec-client.js";
-import { createApp, RESPONSE_TIMEOUT_MS } from "./server.js";
+import { createApp, RESPONSE_TIMEOUT_MS, SETTLEMENT_DEADLINE_MS } from "./server.js";
 import {
   AccountDeploymentSchema,
   AllowlistRecipientsSchema,
@@ -24,7 +24,8 @@ import {
 import { TransactionLimits, type LimitsConfig } from "./limits.js";
 import { AuditLogger } from "./audit.js";
 import { SettlementJournal } from "./journal.js";
-import { httpMayBroadcastClient } from "./may-broadcast.js";
+import { legacyAuditRefusal } from "./legacy-audit.js";
+import { httpMayBroadcastClient, type MayBroadcastClient } from "./may-broadcast.js";
 import { CorridorConfigSchema, type CorridorConfig } from "./settlement.js";
 import { resolveSecretKey } from "./secrets.js";
 import type { SpendingLimitConfig } from "./spending-limit-account.js";
@@ -172,19 +173,17 @@ if (COOLDOWN_THRESHOLD_RAW && COOLDOWN_DELAY_RAW) {
     console.error("[pxe-bridge] PXE_BRIDGE_COOLDOWN_DELAY_MS must be a positive integer");
     process.exit(1);
   }
-  // The cooldown is spent BEFORE the send, so it and the transaction share one
-  // response budget. Only the lower bound was checked, and the 150s response
-  // deadline is justified as being above the 120s tx timeout "so a legitimate
-  // transfer is never cut off by it" -- which stops being true at 30s of
-  // cooldown. Past that the caller gets a bare 504 with no txHash while the
-  // transfer proceeds, and it is large amounts specifically that wait, so the
-  // ambiguous outcome would land on exactly the transfers the delay protects.
+  // The cooldown is spent BEFORE the send, inside the one settlement deadline
+  // that starts when the request is handled (SETTLEMENT_DEADLINE_MS), so it
+  // and the transaction share one budget. Past this bound a large transfer --
+  // the kind the delay exists for -- would routinely run out of deadline
+  // mid-send and answer submitted_unknown instead of its outcome.
   // TODO.md suggests 30s as an example value, one millisecond inside the edge.
   if (limitsConfig.cooldownDelayMs > MAX_COOLDOWN_DELAY_MS) {
     console.error(
       `[pxe-bridge] PXE_BRIDGE_COOLDOWN_DELAY_MS must be at most ${MAX_COOLDOWN_DELAY_MS}ms. ` +
-        `The cooldown runs before the send, so it shares the ${RESPONSE_TIMEOUT_MS}ms response ` +
-        `deadline with the ${TX_TIMEOUT_MS}ms transaction timeout.`,
+        `The cooldown runs before the send, so it shares the request's settlement deadline ` +
+        `with the ${TX_TIMEOUT_MS}ms transaction timeout.`,
     );
     process.exit(1);
   }
@@ -218,6 +217,8 @@ if (!JOURNAL_PATH && process.env["NODE_ENV"] === "production") {
   );
   process.exit(1);
 }
+// `<account>@<journal id>`: one-shot, bound to the fresh journal it adopts
+// (D-B). The refusal that asks for it prints the exact value.
 const JOURNAL_ADOPT_ACCOUNT = process.env["PXE_BRIDGE_JOURNAL_ADOPT_ACCOUNT"];
 
 // The corridor this bridge serves; every value is still open for manifest
@@ -255,10 +256,17 @@ if (Boolean(MAY_BROADCAST_URL) !== Boolean(MAY_BROADCAST_TOKEN)) {
   );
   process.exit(1);
 }
-const mayBroadcast =
-  MAY_BROADCAST_URL && MAY_BROADCAST_TOKEN
-    ? httpMayBroadcastClient({ url: MAY_BROADCAST_URL, token: MAY_BROADCAST_TOKEN })
-    : undefined;
+// HTTPS, or plain http to loopback only: the bearer token and the allow/deny
+// answer cross this link (assertMayBroadcastUrl).
+let mayBroadcast: MayBroadcastClient | undefined;
+if (MAY_BROADCAST_URL && MAY_BROADCAST_TOKEN) {
+  try {
+    mayBroadcast = httpMayBroadcastClient({ url: MAY_BROADCAST_URL, token: MAY_BROADCAST_TOKEN });
+  } catch (err) {
+    console.error(`[pxe-bridge] ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+}
 
 // Key for POST /admin/resume. Separate from the RPC key on purpose; see
 // ServerOptions.adminKey.
@@ -573,7 +581,7 @@ async function main(): Promise<void> {
             mayBroadcast,
             corridor,
             inFlight: new Set<string>(),
-            timeoutMs: TX_TIMEOUT_MS,
+            timeoutMs: SETTLEMENT_DEADLINE_MS,
           },
         }
       : {}),
@@ -584,7 +592,14 @@ async function main(): Promise<void> {
   // Bound only now, because whether this is a lost journal depends on whether
   // the account already existed on chain before this process.
   if (journal) {
-    journal.bindAccount(client.getAddress()!, client.accountPreexisted(), JOURNAL_ADOPT_ACCOUNT);
+    // Adoption also reads the pre-journal audit log, which lives at the same
+    // PXE_BRIDGE_AUDIT_LOG path the legacy bridge wrote (legacy-audit.ts).
+    journal.bindAccount(client.getAddress()!, client.accountPreexisted(), {
+      acknowledgement: JOURNAL_ADOPT_ACCOUNT,
+      legacyAuditRefusal: AUDIT_LOG_PATH
+        ? () => legacyAuditRefusal(AUDIT_LOG_PATH, Date.now())
+        : undefined,
+    });
     const health = journal.health();
     console.log(
       health.writable
@@ -638,7 +653,8 @@ async function main(): Promise<void> {
       `  POST /           -- JSON-RPC (aztec_createNote, aztec_getSettlement, aztec_getVersion)`,
     );
     console.log(`  POST /api/rpc    -- JSON-RPC (alias)`);
-    console.log(`  GET  /status     -- Health check`);
+    console.log(`  GET  /status     -- Liveness (200 while the node answers; body lists prerequisites)`);
+    console.log(`  GET  /ready      -- Readiness (200 only when every settlement prerequisite holds)`);
     console.log(
       `  POST /admin/resume -- Clear the circuit breaker (${ADMIN_KEY ? "enabled" : "DISABLED"})`,
     );
