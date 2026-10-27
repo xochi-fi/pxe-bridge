@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { AztecClient } from "../../src/aztec-client.js";
 import { ACCOUNT_ADDRESS_ENV, SCHNORR_CLASS_ID_6_0_0 } from "../../src/account-identity.js";
-import { getTestConfig, requireTestToken, walletDataDirectory } from "./helpers.js";
+import { getTestConfig, recordingGate, requireTestToken, walletDataDirectory } from "./helpers.js";
 
 // Never deployed by this suite: the guard refuses before connect() reaches the
 // deploy, which is what the test below checks on the node.
@@ -89,42 +89,55 @@ describe("AztecClient (e2e)", () => {
   });
 
   describe("createNote", () => {
-    it("creates a shielded note with valid receipt fields", async () => {
+    it("broadcasts exactly the transaction the gate saw, and reports it mined", async () => {
       // Self-transfer. The recipient used to be the TOKEN address, which the
       // comment beside it already described as "the solver's own address" -- a
       // discrepancy nothing caught, because this test never ran.
-      const result = await client.createNote({
-        recipient: client.getAddress()!,
-        token: requireTestToken(),
-        amount: "1000",
-        chainId: 1,
-      });
+      const gate = recordingGate();
+      const result = await client.createNote(
+        { recipient: client.getAddress()!, token: requireTestToken(), amount: "1000" },
+        gate,
+      );
 
-      expect(result.l2TxHash).toBeTruthy();
-      expect(result.noteCommitment).toBeTruthy();
-      expect(result.nullifierHash).toBeTruthy();
-
-      // The full effects, and the alias identity types.ts declares. Exact
-      // counts are deliberately not pinned here: "two note hashes and three
-      // nullifiers" is prose in CLAUDE.md rather than anything the code
-      // asserts, and this suite has never once executed, so it is not a
-      // number to encode on the strength of a comment.
-      expect(result.noteHashes.length).toBeGreaterThan(0);
-      expect(result.nullifiers.length).toBeGreaterThan(0);
-      expect(result.noteCommitment).toBe(result.noteHashes[0]);
-      expect(result.nullifierHash).toBe(result.nullifiers[0]);
+      // The hash journaled before the broadcast is the one that landed: the
+      // identity the recovery path depends on.
+      expect(gate.seen).toHaveLength(1);
+      expect(result.txHash).toBe(gate.seen[0]!.txHash);
+      expect(gate.seen[0]!.txBytes.length).toBeGreaterThan(0);
+      expect(gate.seen[0]!.expirationTimestamp).toBeGreaterThan(BigInt(Math.floor(Date.now() / 1000)));
+      expect(result.observation).toMatchObject({ kind: "mined", executionResult: "success" });
+      if (result.observation.kind === "mined") {
+        expect(result.observation.effects.noteHashes.length).toBeGreaterThan(0);
+        expect(result.observation.effects.nullifiers.length).toBeGreaterThan(0);
+      }
+      expect(await client.observeTx(result.txHash)).toMatchObject({ kind: "mined" });
     });
 
-    it("rejects a non-existent token contract", async () => {
-      const fakeToken = "0x" + "dead".repeat(16);
+    it("sends nothing when the gate refuses", async () => {
+      const gate = recordingGate(new Error("held"));
       await expect(
-        client.createNote({
-          recipient: fakeToken,
-          token: fakeToken,
-          amount: "1000",
-          chainId: 1,
-        }),
+        client.createNote(
+          { recipient: client.getAddress()!, token: requireTestToken(), amount: "1000" },
+          gate,
+        ),
+      ).rejects.toThrow("held");
+      expect(gate.seen).toHaveLength(1);
+      expect(await client.observeTx(gate.seen[0]!.txHash)).toEqual({ kind: "dropped" });
+    });
+
+    it("rejects a non-existent token contract before the gate", async () => {
+      const fakeToken = "0x" + "dead".repeat(16);
+      const gate = recordingGate();
+      await expect(
+        client.createNote({ recipient: fakeToken, token: fakeToken, amount: "1000" }, gate),
       ).rejects.toThrow();
+      expect(gate.seen).toHaveLength(0);
+    });
+
+    it("reports the node's network identity", async () => {
+      const network = await client.networkIdentity();
+      expect(network.aztecChainId).toBe(network.l1ChainId);
+      expect(network.rollupAddress).toMatch(/^0x[0-9a-f]{40}$/);
     });
   });
 });

@@ -1,9 +1,8 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import { handleRpcRequest, type RpcContext } from "./rpc.js";
+import { handleRpcRequest, type RpcContext, type SettlementContext } from "./rpc.js";
 import { RPC_ERRORS, type IAztecClient } from "./types.js";
 import type { TransactionLimits } from "./limits.js";
-import type { IdempotencyStore } from "./idempotency.js";
 import type { AuditLogger } from "./audit.js";
 
 const MAX_BODY_BYTES = 64 * 1024; // 64 KB
@@ -29,8 +28,11 @@ export interface ServerOptions {
   adminKey?: string | undefined;
   limits?: TransactionLimits | undefined;
   audit?: AuditLogger | undefined;
-  /** Absent disables replay: every request executes, as before. */
-  idempotency?: IdempotencyStore | undefined;
+  /**
+   * The settlement journal and its collaborators. Absent refuses every
+   * `aztec_createNote` and `aztec_getSettlement` with -32004.
+   */
+  settlement?: SettlementContext | undefined;
   /**
    * Fee juice floor. Below it `/status` reports `degraded` and a warning is
    * logged on each refresh. Unset reports the balance without judging it.
@@ -273,13 +275,22 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           const balance = await readFeeJuice();
           const low =
             opts.minFeeJuice !== undefined && balance !== null && balance < opts.minFeeJuice;
+          // Public, so the reason only: the detail can name the account.
+          const journal = opts.settlement?.journal.health();
+          const journalDown = journal === undefined || !journal.writable;
           sendJson(res, 200, {
-            status: low ? "degraded" : "ok",
+            status: low || journalDown ? "degraded" : "ok",
             version,
             feeJuice: {
               balance: balance === null ? null : balance.toString(),
               ...(opts.minFeeJuice !== undefined && balance !== null ? { low } : {}),
             },
+            journal:
+              journal === undefined
+                ? { writable: false, reason: "journal_unconfigured" }
+                : journal.writable
+                  ? { writable: true }
+                  : { writable: false, reason: journal.reason },
           });
         } catch (err) {
           console.error("[pxe-bridge] Health check failed:", err);
@@ -404,7 +415,7 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
         const rpcCtx: RpcContext = {
           limits: opts.limits,
           audit: opts.audit,
-          idempotency: opts.idempotency,
+          settlement: opts.settlement,
           idempotencyKey,
           clientIp: clientIp,
         };

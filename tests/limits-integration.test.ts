@@ -3,61 +3,32 @@ import type { Server } from "node:http";
 import { createApp } from "../src/server.js";
 import { TransactionLimits } from "../src/limits.js";
 import { AuditLogger } from "../src/audit.js";
-import type { CreateNoteParams, CreateNoteResult, IAztecClient } from "../src/types.js";
 import { readFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { rpcJson } from "./helpers.js";
+import {
+  FakeAztecClient,
+  openBoundJournal,
+  rpcBody,
+  settlementContext,
+  v1Params,
+} from "./settlement-fixtures.js";
 
-const VALID_ADDR = "0x" + "a".repeat(64);
-const JSON_HEADERS = { "Content-Type": "application/json" };
-
-class FakeAztecClient implements IAztecClient {
-  createNoteResult: CreateNoteResult = {
-    // Two note hashes and three nullifiers, matching what a real
-    // transfer_to_private emits: a fake with one of each would hide the reason
-    // the scalar fields below are ambiguous.
-    noteHashes: ["0xcommit", "0xcommit2"],
-    nullifiers: ["0xnullifier", "0xnullifier2", "0xnullifier3"],
-    l2TxHash: "0xtx",
-    noteCommitment: "0xcommit",
-    nullifierHash: "0xnullifier",
-  };
-
-  async connect(): Promise<void> {}
-
-  async createNote(_params: CreateNoteParams): Promise<CreateNoteResult> {
-    return this.createNoteResult;
-  }
-
-  async getVersion(): Promise<string> {
-    return "4.2.0";
-  }
-
-  pinnedToken(): string | undefined {
-    return undefined;
-  }
-
-  async getFeeJuiceBalance(): Promise<bigint> {
-    return 0n;
-  }
-}
-
-function rpcBody(method: string, params: unknown[] = [], id: number = 1) {
-  return JSON.stringify({ jsonrpc: "2.0", id, method, params });
-}
-
-function createNoteBody(amount: string) {
-  return rpcBody("aztec_createNote", [
-    { recipient: VALID_ADDR, token: VALID_ADDR, amount, chainId: 1 },
-  ]);
+function createNote(baseUrl: string, operationId: string, amount: string): Promise<Response> {
+  return fetch(baseUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": operationId },
+    body: JSON.stringify(rpcBody("aztec_createNote", [v1Params({ operationId, amount })])),
+  });
 }
 
 describe("limits integration through server", () => {
   let server: Server;
   let baseUrl: string;
   let auditPath: string;
+  const journal = openBoundJournal();
 
   beforeAll(async () => {
     auditPath = join(tmpdir(), `audit-int-${randomBytes(8).toString("hex")}.jsonl`);
@@ -66,8 +37,11 @@ describe("limits integration through server", () => {
       dailyLimit: 50000n,
     });
     const audit = new AuditLogger(auditPath);
-    const client = new FakeAztecClient();
-    server = createApp(client, { limits, audit });
+    server = createApp(new FakeAztecClient(), {
+      limits,
+      audit,
+      settlement: settlementContext(journal),
+    });
 
     await new Promise<void>((resolve) => {
       server.listen(0, () => {
@@ -85,47 +59,30 @@ describe("limits integration through server", () => {
     await unlink(auditPath).catch(() => {});
   });
 
-  it("rejects amount above per-tx ceiling", async () => {
-    const res = await fetch(baseUrl, {
-      method: "POST",
-      headers: JSON_HEADERS,
-      body: createNoteBody("10001"),
-    });
+  it("refuses an amount above the per-tx ceiling as not submitted", async () => {
+    const res = await createNote(baseUrl, "over", "10001");
     expect(res.status).toBe(200);
     const body = await rpcJson(res);
-    expect(body.error).toBeDefined();
-    expect(body.error?.message).toContain("per-transaction maximum");
+    expect(body.error?.code).toBe(-32005);
+    expect(JSON.stringify(body.error?.data)).toContain("per-transaction maximum");
+    expect(journal.get("over")?.state).toBe("not_submitted");
   });
 
-  it("allows amount within ceiling", async () => {
-    const res = await fetch(baseUrl, {
-      method: "POST",
-      headers: JSON_HEADERS,
-      body: createNoteBody("5000"),
+  it("allows an amount within the ceiling", async () => {
+    const res = await createNote(baseUrl, "within", "5000");
+    const body = await rpcJson<{ observation: { state: string } }>(res);
+    expect(body.result?.observation.state).toBe("included");
+  });
+
+  it("writes output-only audit lines for both", async () => {
+    const lines = (await readFile(auditPath, "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+    expect(lines.find((l) => l.operationId === "over")).toMatchObject({
+      observation: "not_submitted",
+      amount: "10001",
     });
-    expect(res.status).toBe(200);
-    const body = await rpcJson<CreateNoteResult>(res);
-    expect(body.result).toBeDefined();
-    expect(body.result?.l2TxHash).toBe("0xtx");
-  });
-
-  it("writes audit log entries for success and rejection", async () => {
-    // Wait a tick for file writes to flush
-    await new Promise((r) => setTimeout(r, 50));
-    const content = await readFile(auditPath, "utf8");
-    const lines = content.trim().split("\n");
-    expect(lines.length).toBeGreaterThanOrEqual(2);
-
-    const rejected = lines.find((l) => JSON.parse(l).status === "rejected");
-    expect(rejected).toBeDefined();
-    const rejectedEntry = JSON.parse(rejected!);
-    expect(rejectedEntry.amount).toBe("10001");
-    expect(rejectedEntry.error).toContain("per-transaction maximum");
-
-    const success = lines.find((l) => JSON.parse(l).status === "success");
-    expect(success).toBeDefined();
-    const successEntry = JSON.parse(success!);
-    expect(successEntry.amount).toBe("5000");
-    expect(successEntry.txHash).toBe("0xtx");
+    expect(lines.find((l) => l.operationId === "within")).toMatchObject({
+      observation: "included",
+      amount: "5000",
+    });
   });
 });

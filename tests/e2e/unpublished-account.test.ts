@@ -13,6 +13,7 @@ import {
   requireTestToken,
   FUNDER_KEY,
   walletDataDirectory,
+  recordingGate,
 } from "./helpers.js";
 
 /**
@@ -91,14 +92,12 @@ describe("account deployed unpublished by v0.1.2 (e2e)", () => {
         () => mintOne(funderWallet, token, funderAddress),
       );
 
-      const result = await client.createNote({
-        recipient: accountAddress,
-        token,
-        amount: "1000",
-        chainId: 1,
-      });
-      expect(result.l2TxHash).toBeTruthy();
-      expect(result.noteHashes.length).toBeGreaterThan(0);
+      const result = await client.createNote(
+        { recipient: accountAddress, token, amount: "1000" },
+        recordingGate(),
+      );
+      expect(result.txHash).toBeTruthy();
+      expect(result.observation).toMatchObject({ kind: "mined", executionResult: "success" });
     },
     600_000,
   );

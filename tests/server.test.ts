@@ -2,49 +2,31 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import type { Server } from "node:http";
 import { createApp, type ServerOptions } from "../src/server.js";
 import { TransactionLimits } from "../src/limits.js";
-import { IdempotencyStore } from "../src/idempotency.js";
-import type { CreateNoteParams, CreateNoteResult, IAztecClient } from "../src/types.js";
+import { SettlementJournal } from "../src/journal.js";
 import { rpcJson } from "./helpers.js";
+import {
+  FakeAztecClient as SettlementFakeClient,
+  openBoundJournal,
+  settlementContext,
+  v1Params,
+} from "./settlement-fixtures.js";
 
-const VALID_ADDR = "0x" + "a".repeat(64);
 const JSON_HEADERS = { "Content-Type": "application/json" };
 
-class FakeAztecClient implements IAztecClient {
-  createNoteResult: CreateNoteResult = {
-    // Two note hashes and three nullifiers, matching what a real
-    // transfer_to_private emits: a fake with one of each would hide the reason
-    // the scalar fields below are ambiguous.
-    noteHashes: ["0xcommit", "0xcommit2"],
-    nullifiers: ["0xnullifier", "0xnullifier2", "0xnullifier3"],
-    l2TxHash: "0xtx",
-    noteCommitment: "0xcommit",
-    nullifierHash: "0xnullifier",
-  };
+/** The settlement fake, plus the knobs /status needs. */
+class FakeAztecClient extends SettlementFakeClient {
   versionResult = "4.1.3";
   versionError: Error | null = null;
-  /** Counts real executions, so a replay is distinguishable from a re-run. */
-  createNoteCalls = 0;
 
-  async connect(): Promise<void> {}
-
-  async createNote(_params: CreateNoteParams): Promise<CreateNoteResult> {
-    this.createNoteCalls++;
-    return this.createNoteResult;
-  }
-
-  async getVersion(): Promise<string> {
+  override async getVersion(): Promise<string> {
     if (this.versionError) throw this.versionError;
     return this.versionResult;
-  }
-
-  pinnedToken(): string | undefined {
-    return undefined;
   }
 
   feeJuiceBalance = 1000n;
   feeJuiceError: Error | null = null;
   feeJuiceReads = 0;
-  async getFeeJuiceBalance(): Promise<bigint> {
+  override async getFeeJuiceBalance(): Promise<bigint> {
     this.feeJuiceReads++;
     if (this.feeJuiceError) throw this.feeJuiceError;
     return this.feeJuiceBalance;
@@ -57,7 +39,7 @@ let baseUrl: string;
 
 beforeAll(async () => {
   client = new FakeAztecClient();
-  server = createApp(client);
+  server = createApp(client, { settlement: settlementContext(openBoundJournal()) });
   await new Promise<void>((resolve) => {
     server.listen(0, () => {
       const addr = server.address();
@@ -91,7 +73,12 @@ describe("HTTP server", () => {
       const res = await fetch(`${baseUrl}/status`);
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body).toEqual({ status: "ok", version: "4.1.3", feeJuice: { balance: "1000" } });
+      expect(body).toEqual({
+        status: "ok",
+        version: "4.1.3",
+        feeJuice: { balance: "1000" },
+        journal: { writable: true },
+      });
     });
 
     it("returns 503 when client errors", async () => {
@@ -133,16 +120,21 @@ describe("HTTP server", () => {
     });
 
     it("handles aztec_createNote", async () => {
-      const params = {
-        recipient: VALID_ADDR,
-        token: VALID_ADDR,
-        amount: "1000",
-        chainId: 1,
-      };
-      const res = await jsonPost(baseUrl, rpcBody("aztec_createNote", [params]));
+      const res = await jsonPost(baseUrl, rpcBody("aztec_createNote", [v1Params()]), {
+        "Idempotency-Key": "op-1",
+      });
       expect(res.status).toBe(200);
-      const body = await rpcJson<CreateNoteResult>(res);
-      expect(body.result).toEqual(client.createNoteResult);
+      const body = await rpcJson<{ observation: { state: string } }>(res);
+      expect(body.result?.observation.state).toBe("included");
+    });
+
+    it("handles aztec_getSettlement", async () => {
+      const res = await jsonPost(
+        baseUrl,
+        rpcBody("aztec_getSettlement", [{ version: "pxe-bridge.settlement.v1", operationId: "op-1" }]),
+      );
+      const body = await rpcJson<{ found: boolean }>(res);
+      expect(body.result?.found).toBe(true);
     });
   });
 
@@ -392,7 +384,7 @@ describe("GET /status fee juice", () => {
     close: () => Promise<void>;
   }> {
     const c = new FakeAztecClient();
-    const srv = createApp(c, opts);
+    const srv = createApp(c, { settlement: settlementContext(openBoundJournal()), ...opts });
     await new Promise<void>((resolve) => srv.listen(0, resolve));
     const addr = srv.address();
     const port = addr && typeof addr === "object" ? addr.port : 0;
@@ -413,6 +405,7 @@ describe("GET /status fee juice", () => {
         status: "degraded",
         version: "4.1.3",
         feeJuice: { balance: "999", low: true },
+        journal: { writable: true },
       });
 
       c.feeJuiceBalance = 1000n;
@@ -447,9 +440,50 @@ describe("GET /status fee juice", () => {
         status: "ok",
         version: "4.1.3",
         feeJuice: { balance: null },
+        journal: { writable: true },
       });
     } finally {
       await close();
+    }
+  });
+});
+
+describe("GET /status journal", () => {
+  it("reports a journal with writes disabled as degraded, naming only the reason", async () => {
+    const journal = openBoundJournal();
+    const path = journal.path;
+    journal.close();
+    const readOnly = SettlementJournal.open(path);
+    readOnly.bindAccount("0x" + "9".repeat(64), true);
+    const srv = createApp(new FakeAztecClient(), { settlement: settlementContext(readOnly) });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const port = addr && typeof addr === "object" ? addr.port : 0;
+    try {
+      const body = await (await fetch(`http://127.0.0.1:${port}/status`)).json();
+      expect(body).toMatchObject({
+        status: "degraded",
+        journal: { writable: false, reason: "account_mismatch" },
+      });
+      expect(JSON.stringify(body)).not.toContain("9999");
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+  it("reports a bridge with no journal as degraded", async () => {
+    const srv = createApp(new FakeAztecClient());
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const port = addr && typeof addr === "object" ? addr.port : 0;
+    try {
+      const body = await (await fetch(`http://127.0.0.1:${port}/status`)).json();
+      expect(body).toMatchObject({
+        status: "degraded",
+        journal: { writable: false, reason: "journal_unconfigured" },
+      });
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
     }
   });
 });
@@ -461,7 +495,7 @@ describe("Idempotency-Key header", () => {
     close: () => Promise<void>;
   }> {
     const c = new FakeAztecClient();
-    const srv = createApp(c, { idempotency: new IdempotencyStore() });
+    const srv = createApp(c, { settlement: settlementContext(openBoundJournal()) });
     await new Promise<void>((resolve) => srv.listen(0, resolve));
     const addr = srv.address();
     const port = addr && typeof addr === "object" ? addr.port : 0;
@@ -472,31 +506,30 @@ describe("Idempotency-Key header", () => {
     };
   }
 
-  const noteBody = () =>
-    rpcBody("aztec_createNote", [
-      { recipient: VALID_ADDR, token: VALID_ADDR, amount: "1000", chainId: 1 },
-    ]);
+  const noteBody = (operationId: string) =>
+    rpcBody("aztec_createNote", [v1Params({ operationId })]);
 
-  it("carries the header through to replay a duplicate", async () => {
-    const { url, close } = await boot();
+  it("answers a duplicate from the journal without sending again", async () => {
+    const { url, client: c, close } = await boot();
     try {
-      const first = await jsonPost(url, noteBody(), { "Idempotency-Key": "trade-1" });
-      const second = await jsonPost(url, noteBody(), { "Idempotency-Key": "trade-1" });
+      const first = await jsonPost(url, noteBody("trade-1"), { "Idempotency-Key": "trade-1" });
+      const second = await jsonPost(url, noteBody("trade-1"), { "Idempotency-Key": "trade-1" });
 
       expect(await rpcJson(first)).toEqual(await rpcJson(second));
+      expect(c.sends).toHaveLength(1);
     } finally {
       await close();
     }
   });
 
-  it("treats different keys as different requests", async () => {
-    const { url, close } = await boot();
+  it("treats different operation ids as different operations", async () => {
+    const { url, client: c, close } = await boot();
     try {
-      await jsonPost(url, noteBody(), { "Idempotency-Key": "trade-1" });
-      const other = await jsonPost(url, noteBody(), { "Idempotency-Key": "trade-2" });
+      await jsonPost(url, noteBody("trade-1"), { "Idempotency-Key": "trade-1" });
+      const other = await jsonPost(url, noteBody("trade-2"), { "Idempotency-Key": "trade-2" });
 
-      expect(other.status).toBe(200);
       expect("result" in (await rpcJson(other))).toBe(true);
+      expect(c.sends).toHaveLength(2);
     } finally {
       await close();
     }
@@ -513,7 +546,7 @@ describe("Idempotency-Key header", () => {
     const { url, close } = await boot();
     try {
       for (const bad of ["", "   ", "x".repeat(129), "tab\there"]) {
-        const res = await jsonPost(url, noteBody(), { "Idempotency-Key": bad });
+        const res = await jsonPost(url, noteBody("trade-1"), { "Idempotency-Key": bad });
         expect(res.status, `should reject ${JSON.stringify(bad)}`).toBe(400);
       }
     } finally {
@@ -521,22 +554,23 @@ describe("Idempotency-Key header", () => {
     }
   });
 
-  it("accepts a key at the length limit", async () => {
+  it("accepts an operation id at the length limit", async () => {
     const { url, close } = await boot();
     try {
-      const res = await jsonPost(url, noteBody(), { "Idempotency-Key": "x".repeat(128) });
-      expect(res.status).toBe(200);
+      const id = "x".repeat(128);
+      const res = await jsonPost(url, noteBody(id), { "Idempotency-Key": id });
+      expect("result" in (await rpcJson(res))).toBe(true);
     } finally {
       await close();
     }
   });
 
-  it("runs normally when no key is sent", async () => {
-    const { url, client, close } = await boot();
+  it("refuses a createNote with no key: the key is the operation id", async () => {
+    const { url, client: c, close } = await boot();
     try {
-      await jsonPost(url, noteBody());
-      await jsonPost(url, noteBody());
-      expect(client.createNoteCalls).toBe(2);
+      const body = await rpcJson(await jsonPost(url, noteBody("trade-1")));
+      expect(body.error).toMatchObject({ code: -32602, data: { reason: "operation_id_mismatch" } });
+      expect(c.sends).toHaveLength(0);
     } finally {
       await close();
     }

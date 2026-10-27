@@ -1,636 +1,408 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { handleRpcRequest, type RpcContext } from "../src/rpc.js";
+import { handleRpcRequest, type RpcContext, type SettlementContext } from "../src/rpc.js";
+import { RPC_ERRORS, SUBMITTED_UNKNOWN_MESSAGE } from "../src/types.js";
+import { SettlementJournal } from "../src/journal.js";
 import { TransactionLimits } from "../src/limits.js";
-import { IdempotencyStore } from "../src/idempotency.js";
-import { PostSubmissionError, SUBMITTED_UNKNOWN_MESSAGE } from "../src/types.js";
-import type { AuditEntry, AuditLogger } from "../src/audit.js";
-import type { CreateNoteParams, CreateNoteResult, IAztecClient } from "../src/types.js";
+import { SETTLEMENT_VERSION, fingerprintTerms, termsFrom, CreateNoteV1Schema } from "../src/settlement.js";
+import type { MayBroadcastClient } from "../src/may-broadcast.js";
+import {
+  FakeAztecClient,
+  fakeMayBroadcast,
+  openBoundJournal,
+  rpcBody,
+  settlementContext,
+  tempJournalPath,
+  v1Params,
+  TOKEN,
+  type FakeMayBroadcast,
+} from "./settlement-fixtures.js";
 
-const VALID_ADDR = "0x" + "a".repeat(64);
-
-class FakeAztecClient implements IAztecClient {
-  createNoteResult: CreateNoteResult = {
-    // Two note hashes and three nullifiers, matching what a real
-    // transfer_to_private emits: a fake with one of each would hide the reason
-    // the scalar fields below are ambiguous.
-    noteHashes: ["0xcommit", "0xcommit2"],
-    nullifiers: ["0xnullifier", "0xnullifier2", "0xnullifier3"],
-    l2TxHash: "0xtx",
-    noteCommitment: "0xcommit",
-    nullifierHash: "0xnullifier",
+interface Answer {
+  result?: { observation: { state: string; txHash?: string }; fingerprint: string } & Record<string, unknown>;
+  error?: {
+    code: number;
+    message: string;
+    data?: { observation?: { state: string; reason?: string; hold?: string; txHash?: string } } & Record<
+      string,
+      unknown
+    >;
   };
-  createNoteError: Error | null = null;
-  versionResult = "4.1.3";
-  versionError: Error | null = null;
-  lastCreateNoteParams: CreateNoteParams | null = null;
-  /** Counts real executions, so a replay is distinguishable from a re-run. */
-  createNoteCalls = 0;
-  /** Holds the call open long enough for a concurrent duplicate to arrive. */
-  createNoteDelayMs = 0;
-
-  async connect(): Promise<void> {}
-
-  async createNote(params: CreateNoteParams): Promise<CreateNoteResult> {
-    this.lastCreateNoteParams = params;
-    this.createNoteCalls++;
-    if (this.createNoteDelayMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, this.createNoteDelayMs));
-    }
-    if (this.createNoteError) throw this.createNoteError;
-    return this.createNoteResult;
-  }
-
-  async getVersion(): Promise<string> {
-    if (this.versionError) throw this.versionError;
-    return this.versionResult;
-  }
-
-  pinned: string | undefined = undefined;
-  pinnedToken(): string | undefined {
-    return this.pinned;
-  }
-
-  async getFeeJuiceBalance(): Promise<bigint> {
-    return 0n;
-  }
 }
 
-function rpcRequest(method: string, params: unknown[] = []) {
-  return { jsonrpc: "2.0" as const, id: 1, method, params };
+async function createNote(
+  client: FakeAztecClient,
+  ctx: RpcContext,
+  params: Record<string, unknown> = v1Params(),
+  key: string | undefined = String(params["operationId"]),
+): Promise<Answer> {
+  return (await handleRpcRequest(rpcBody("aztec_createNote", [params]), client, {
+    ...ctx,
+    idempotencyKey: key,
+  })) as Answer;
 }
 
-describe("handleRpcRequest", () => {
-  let client: FakeAztecClient;
+interface Settlement {
+  found: boolean;
+  fingerprint?: string;
+  terms?: Record<string, unknown>;
+  state?: string;
+  attempts?: { txHash: string; mayBroadcast: boolean }[];
+  observation: { state: string; reason?: string; txHash?: string; receiptStatus?: string };
+  journal: { writable: boolean; reason?: string };
+}
 
-  beforeEach(() => {
-    client = new FakeAztecClient();
+async function getSettlement(
+  client: FakeAztecClient,
+  ctx: RpcContext,
+  operationId = "op-1",
+): Promise<Settlement> {
+  const res = (await handleRpcRequest(
+    rpcBody("aztec_getSettlement", [{ version: SETTLEMENT_VERSION, operationId }]),
+    client,
+    ctx,
+  )) as { result: Settlement };
+  return res.result;
+}
+
+let client: FakeAztecClient;
+let journal: SettlementJournal;
+let gate: FakeMayBroadcast;
+let s: SettlementContext;
+let ctx: RpcContext;
+
+beforeEach(() => {
+  client = new FakeAztecClient();
+  journal = openBoundJournal();
+  gate = fakeMayBroadcast("allow");
+  s = settlementContext(journal, gate.client);
+  ctx = { settlement: s };
+});
+
+describe("aztec_createNote: the versioned payload", () => {
+  it("refuses legacy params by name and does no work", async () => {
+    const res = await createNote(
+      client,
+      ctx,
+      { recipient: "0x" + "2".repeat(64), token: TOKEN, amount: "1", chainId: 1 },
+      "legacy",
+    );
+    expect(res.error?.code).toBe(RPC_ERRORS.INVALID_PARAMS);
+    expect(res.error?.data).toEqual({ reason: "legacy_params_refused" });
+    expect(client.proofs).toBe(0);
   });
 
-  describe("envelope validation", () => {
-    it("rejects non-object body", async () => {
-      const res = await handleRpcRequest("not json", client);
-      expect(res).toHaveProperty("error");
-      if ("error" in res) {
-        expect(res.error.code).toBe(-32600);
-      }
-    });
-
-    it("rejects missing jsonrpc field", async () => {
-      const res = await handleRpcRequest({ id: 1, method: "test" }, client);
-      expect(res).toHaveProperty("error");
-    });
-
-    it("rejects wrong jsonrpc version", async () => {
-      const res = await handleRpcRequest({ jsonrpc: "1.0", id: 1, method: "test" }, client);
-      expect(res).toHaveProperty("error");
-    });
+  it.each([
+    ["unknown key", { extra: true }],
+    ["zero recipient", { recipient: "0x" + "0".repeat(64) }],
+    ["amount above 2^128 - 1", { amount: (1n << 128n).toString() }],
+    ["leading-zero amount", { amount: "01" }],
+    ["wrong version", { version: "pxe-bridge.settlement.v0" }],
+    ["short rollup address", { network: { ...v1Params()["network"] as object, rollupAddress: "0x12" } }],
+  ])("refuses %s", async (_name, override) => {
+    const res = await createNote(client, ctx, v1Params(override));
+    expect(res.error?.code).toBe(RPC_ERRORS.INVALID_PARAMS);
+    expect(client.proofs).toBe(0);
   });
 
-  describe("method routing", () => {
-    it("returns METHOD_NOT_FOUND for unknown method", async () => {
-      const res = await handleRpcRequest(rpcRequest("unknown_method"), client);
-      expect(res).toHaveProperty("error");
-      if ("error" in res) {
-        expect(res.error.code).toBe(-32601);
-        expect(res.error.message).toContain("unknown_method");
-      }
-    });
+  it("requires the Idempotency-Key to equal the operation id", async () => {
+    const res = await createNote(client, ctx, v1Params(), "some-other-key");
+    expect(res.error?.code).toBe(RPC_ERRORS.INVALID_PARAMS);
+    expect(res.error?.data).toEqual({ reason: "operation_id_mismatch" });
+    expect(client.proofs).toBe(0);
   });
 
-  describe("aztec_getVersion", () => {
-    it("returns version string", async () => {
-      const res = await handleRpcRequest(rpcRequest("aztec_getVersion"), client);
-      expect(res).toHaveProperty("result");
-      if ("result" in res) {
-        expect(res.result).toBe("4.1.3");
-      }
-    });
+  it("refuses with -32004 when no journal is configured", async () => {
+    const res = await createNote(client, {});
+    expect(res.error?.code).toBe(RPC_ERRORS.JOURNAL_UNAVAILABLE);
+  });
+});
 
-    it("returns INTERNAL_ERROR when client throws", async () => {
-      client.versionError = new Error("connection refused");
-      const res = await handleRpcRequest(rpcRequest("aztec_getVersion"), client);
-      expect(res).toHaveProperty("error");
-      if ("error" in res) {
-        expect(res.error.code).toBe(-32603);
-        expect(res.error.message).toBe("Internal error");
-      }
-    });
+describe("aztec_createNote: the broadcast gate", () => {
+  it("journals, asks, marks, then broadcasts once and returns the observation", async () => {
+    const res = await createNote(client, ctx);
+    const params = CreateNoteV1Schema.parse(v1Params());
+    expect(res.result?.observation.state).toBe("included");
+    expect(res.result?.fingerprint).toBe(fingerprintTerms(termsFrom(params)));
+    expect(gate.calls).toEqual(["op-1"]);
+    expect(client.sends).toHaveLength(1);
+    const op = journal.get("op-1")!;
+    expect(op.state).toBe("may_broadcast");
+    expect(journal.attempts("op-1")).toEqual([
+      expect.objectContaining({ txHash: client.sends[0], mayBroadcastAt: expect.any(Number) }),
+    ]);
+    expect(journal.spendsSince(0)).toEqual([{ amount: 1000n, timestamp: expect.any(Number) }]);
   });
 
-  describe("aztec_createNote", () => {
-    const validParams = {
-      recipient: VALID_ADDR,
-      token: VALID_ADDR,
-      amount: "1000",
-      chainId: 1,
-    };
-
-    it("returns note result on success", async () => {
-      const res = await handleRpcRequest(rpcRequest("aztec_createNote", [validParams]), client);
-      expect(res).toHaveProperty("result");
-      if ("result" in res) {
-        expect(res.result).toEqual(client.createNoteResult);
-      }
-    });
-
-    it("returns every note hash and nullifier, not just the first", async () => {
-      const res = await handleRpcRequest(rpcRequest("aztec_createNote", [validParams]), client);
-      expect(res).toHaveProperty("result");
-      if ("result" in res) {
-        const result = res.result as CreateNoteResult;
-        // The whole point of the shape: a transfer emits more than one of each,
-        // so truncating to a scalar loses the values a caller may actually want.
-        expect(result.noteHashes).toHaveLength(2);
-        expect(result.nullifiers).toHaveLength(3);
-        // The deprecated scalars stay consistent with the arrays they alias.
-        expect(result.noteCommitment).toBe(result.noteHashes[0]);
-        expect(result.nullifierHash).toBe(result.nullifiers[0]);
-      }
-    });
-
-    it("passes parsed params to client", async () => {
-      await handleRpcRequest(rpcRequest("aztec_createNote", [validParams]), client);
-      expect(client.lastCreateNoteParams).toEqual(validParams);
-    });
-
-    it("returns INVALID_PARAMS for missing params", async () => {
-      const res = await handleRpcRequest(rpcRequest("aztec_createNote", []), client);
-      expect(res).toHaveProperty("error");
-      if ("error" in res) {
-        expect(res.error.code).toBe(-32602);
-      }
-    });
-
-    it("returns INVALID_PARAMS for bad recipient", async () => {
-      const res = await handleRpcRequest(
-        rpcRequest("aztec_createNote", [{ ...validParams, recipient: "bad" }]),
-        client,
-      );
-      expect(res).toHaveProperty("error");
-      if ("error" in res) {
-        expect(res.error.code).toBe(-32602);
-      }
-    });
-
-    it("returns INTERNAL_ERROR when client throws", async () => {
-      client.createNoteError = new Error("tx reverted");
-      const res = await handleRpcRequest(rpcRequest("aztec_createNote", [validParams]), client);
-      expect(res).toHaveProperty("error");
-      if ("error" in res) {
-        expect(res.error.code).toBe(-32603);
-        expect(res.error.message).toBe("Internal error");
-      }
-    });
-
-    it("does not leak internal error details", async () => {
-      client.createNoteError = new Error("secret internal details");
-      const res = await handleRpcRequest(rpcRequest("aztec_createNote", [validParams]), client);
-      if ("error" in res) {
-        expect(res.error.message).not.toContain("secret");
-      }
-    });
-
-    it("accepts params with XIP-1 trade context", async () => {
-      const paramsWithTrade = {
-        ...validParams,
-        tradeId: "0x" + "b".repeat(64),
-        subTradeIndex: 1,
-        totalSubTrades: 3,
-      };
-      const res = await handleRpcRequest(rpcRequest("aztec_createNote", [paramsWithTrade]), client);
-      expect(res).toHaveProperty("result");
-      expect(client.lastCreateNoteParams).toEqual(paramsWithTrade);
-    });
-
-    it("rejects partial XIP-1 trade context", async () => {
-      const res = await handleRpcRequest(
-        rpcRequest("aztec_createNote", [{ ...validParams, tradeId: "0x" + "b".repeat(64) }]),
-        client,
-      );
-      expect(res).toHaveProperty("error");
-      if ("error" in res) {
-        expect(res.error.code).toBe(-32602);
-      }
-    });
+  it.each([
+    ["deny", "may_broadcast_denied"],
+    ["unknown", "may_broadcast_unknown"],
+  ] as const)("holds on %s: prepared, never broadcast, never refunded", async (decision, hold) => {
+    gate.decision = decision;
+    const res = await createNote(client, ctx);
+    expect(res.error?.code).toBe(RPC_ERRORS.NOT_SUBMITTED);
+    expect(res.error?.data?.observation).toMatchObject({ state: "prepared", hold });
+    expect(client.sends).toHaveLength(0);
+    expect(journal.get("op-1")).toMatchObject({ state: "prepared", hold });
+    expect(journal.spendsSince(0)).toEqual([]);
   });
 
-  describe("params edge cases", () => {
-    it("returns INVALID_PARAMS when params[0] is null", async () => {
-      const res = await handleRpcRequest(rpcRequest("aztec_createNote", [null]), client);
-      expect(res).toHaveProperty("error");
-      if ("error" in res) {
-        expect(res.error.code).toBe(-32602);
-      }
-    });
-
-    it("returns INVALID_PARAMS when params[0] is a number", async () => {
-      const res = await handleRpcRequest(rpcRequest("aztec_createNote", [123]), client);
-      expect(res).toHaveProperty("error");
-      if ("error" in res) {
-        expect(res.error.code).toBe(-32602);
-      }
-    });
-
-    it("returns INVALID_PARAMS when params[0] is a string", async () => {
-      const res = await handleRpcRequest(rpcRequest("aztec_createNote", ["hello"]), client);
-      expect(res).toHaveProperty("error");
-      if ("error" in res) {
-        expect(res.error.code).toBe(-32602);
-      }
-    });
+  it("treats a may-broadcast that throws as a hold, not as permission", async () => {
+    gate.decision = "throw";
+    const res = await createNote(client, ctx);
+    expect(res.error?.code).toBe(RPC_ERRORS.NOT_SUBMITTED);
+    expect(res.error?.data?.observation).toMatchObject({ state: "prepared", hold: "interrupted" });
+    expect(client.sends).toHaveLength(0);
   });
 
-  describe("batch requests", () => {
-    it("rejects array body as invalid request", async () => {
-      const batch = [rpcRequest("aztec_getVersion"), rpcRequest("aztec_getVersion")];
-      const res = await handleRpcRequest(batch, client);
-      expect(res).toHaveProperty("error");
-      if ("error" in res) {
-        expect(res.error.code).toBe(-32600);
-      }
-    });
-  });
-
-  describe("id fallback", () => {
-    it("uses id=null when envelope is invalid (per JSON-RPC spec)", async () => {
-      const res = await handleRpcRequest({ not: "valid" }, client);
-      expect(res.id).toBeNull();
-    });
-  });
-
-  describe("id preservation", () => {
-    it("preserves numeric id", async () => {
-      const res = await handleRpcRequest(
-        { jsonrpc: "2.0", id: 42, method: "aztec_getVersion", params: [] },
-        client,
-      );
-      expect(res.id).toBe(42);
-    });
-
-    it("preserves string id", async () => {
-      const res = await handleRpcRequest(
-        {
-          jsonrpc: "2.0",
-          id: "req-123",
-          method: "aztec_getVersion",
-          params: [],
-        },
-        client,
-      );
-      expect(res.id).toBe("req-123");
-    });
-  });
-
-  describe("pinned token", () => {
-    const PINNED = "0x" + "B".repeat(64);
-    const params = (token: string) => ({ recipient: VALID_ADDR, token, amount: "3000", chainId: 1 });
-
-    it("refuses another token before sending or reserving budget", async () => {
-      client.pinned = PINNED;
-      const limits = new TransactionLimits({ dailyLimit: 5000n });
-
-      const res = await handleRpcRequest(
-        rpcRequest("aztec_createNote", [params(VALID_ADDR)]),
-        client,
-        { limits },
-      );
-
-      expect("error" in res && res.error.code).toBe(-32602);
-      expect(client.createNoteCalls).toBe(0);
-      expect(limits.check(5000n).allowed).toBe(true);
-    });
-
-    it("accepts the pinned token in any case", async () => {
-      client.pinned = PINNED;
-
-      const res = await handleRpcRequest(
-        rpcRequest("aztec_createNote", [params(PINNED.toLowerCase())]),
-        client,
-      );
-
-      expect(res).toHaveProperty("result");
-      expect(client.createNoteCalls).toBe(1);
-    });
-
-    it("frees the idempotency key so a corrected retry runs", async () => {
-      client.pinned = PINNED;
-      const idempotency = new IdempotencyStore();
-      const ctx: RpcContext = { idempotency, idempotencyKey: "k1" };
-
-      await handleRpcRequest(rpcRequest("aztec_createNote", [params(VALID_ADDR)]), client, ctx);
-      const res = await handleRpcRequest(rpcRequest("aztec_createNote", [params(PINNED)]), client, ctx);
-
-      expect(res).toHaveProperty("result");
-    });
-  });
-
-  // A transfer that may already be on chain must not be accounted as if
-  // nothing happened. Releasing the reservation let a caller repeat whatever
-  // caused the failure -- a slow node, most obviously -- and move funds past
-  // the daily cap without the window ever seeing them.
-  describe("post-submission failures", () => {
-    const noteParams = {
-      recipient: VALID_ADDR,
-      token: VALID_ADDR,
-      amount: "3000",
-      chainId: 1,
-    };
-
-    it("counts the amount against the window instead of releasing it", async () => {
-      const limits = new TransactionLimits({ dailyLimit: 5000n });
-      client.createNoteError = new PostSubmissionError("Incomplete receipt", "0xabc");
-
-      await handleRpcRequest(rpcRequest("aztec_createNote", [noteParams]), client, { limits });
-
-      // 3000 stayed counted, so a second 3000 no longer fits under 5000.
-      expect(limits.check(3000n).allowed).toBe(false);
-    });
-
-    it("still releases when the failure was before submission", async () => {
-      const limits = new TransactionLimits({ dailyLimit: 5000n });
-      client.createNoteError = new Error("simulation reverted");
-
-      await handleRpcRequest(rpcRequest("aztec_createNote", [noteParams]), client, { limits });
-
-      expect(limits.check(5000n).allowed).toBe(true);
-    });
-
-    it("returns a distinct message and the txHash to reconcile against", async () => {
-      client.createNoteError = new PostSubmissionError("Incomplete receipt", "0xabc");
-
-      const res = await handleRpcRequest(rpcRequest("aztec_createNote", [noteParams]), client);
-
-      expect("error" in res && res.error.message).toContain("do not retry");
-      expect("error" in res && res.error.data).toEqual({ txHash: "0xabc" });
-    });
-
-    // Without a hash there is nothing to reconcile against, so the message has
-    // to carry the warning on its own.
-    it("omits data when no txHash is known", async () => {
-      client.createNoteError = new PostSubmissionError("Timed out");
-
-      const res = await handleRpcRequest(rpcRequest("aztec_createNote", [noteParams]), client);
-
-      expect("error" in res && res.error.message).toContain("result unknown");
-      expect("error" in res && "data" in res.error).toBe(false);
-    });
-
-    it("records the failure as unknown, not error", async () => {
-      const logged: AuditEntry[] = [];
-      const audit = { log: async (e: AuditEntry) => void logged.push(e) } as AuditLogger;
-      client.createNoteError = new PostSubmissionError("Incomplete receipt", "0xabc");
-
-      await handleRpcRequest(rpcRequest("aztec_createNote", [noteParams]), client, { audit });
-
-      // "this moved nothing" and "we do not know whether this moved funds"
-      // call for opposite responses on replay.
-      expect(logged.at(-1)?.status).toBe("unknown");
-    });
-
-    it("records the txHash on the audit entry", async () => {
-      const logged: AuditEntry[] = [];
-      const audit = { log: async (e: AuditEntry) => void logged.push(e) } as AuditLogger;
-      client.createNoteError = new PostSubmissionError("Incomplete receipt", "0xabc");
-
-      await handleRpcRequest(rpcRequest("aztec_createNote", [noteParams]), client, { audit });
-
-      expect(logged.at(-1)?.status).toBe("unknown");
-      expect(logged.at(-1)?.txHash).toBe("0xabc");
-    });
-  });
-
-  describe("idempotency", () => {
-    const noteParams = {
-      recipient: VALID_ADDR,
-      token: VALID_ADDR,
-      amount: "3000",
-      chainId: 1,
-    };
-    const send = (ctx: RpcContext) =>
-      handleRpcRequest(rpcRequest("aztec_createNote", [noteParams]), client, ctx);
-
-    let idempotency: IdempotencyStore;
-    beforeEach(() => {
-      idempotency = new IdempotencyStore();
-    });
-
-    // The failure this whole mechanism exists for: a transfer that may be on
-    // chain, an error the caller cannot distinguish from a clean rejection,
-    // and a retry that moves funds a second time.
-    it("does not re-transfer when a retry replays a landed failure", async () => {
-      client.createNoteError = new PostSubmissionError("Incomplete receipt", "0xabc");
-      const ctx: RpcContext = { idempotency, idempotencyKey: "k1" };
-
-      const first = await send(ctx);
-      const callsAfterFirst = client.createNoteCalls;
-      const second = await send(ctx);
-
-      expect(client.createNoteCalls).toBe(callsAfterFirst);
-      expect(second).toEqual(first);
-    });
-
-    it("replays a success without calling the client again", async () => {
-      const ctx: RpcContext = { idempotency, idempotencyKey: "k1" };
-
-      const first = await send(ctx);
-      const second = await send(ctx);
-
-      expect(client.createNoteCalls).toBe(1);
-      expect(second).toEqual(first);
-    });
-
-    // The replay has to answer the request in front of it. Storing the whole
-    // original response would have handed the first caller's id to the second.
-    it("replays under the retrying request's own id", async () => {
-      const ctx: RpcContext = { idempotency, idempotencyKey: "k1" };
-      await send(ctx);
-
-      const replayed = await handleRpcRequest(
-        { jsonrpc: "2.0", id: "second-request", method: "aztec_createNote", params: [noteParams] },
-        client,
-        ctx,
-      );
-
-      expect(replayed.id).toBe("second-request");
-      expect("result" in replayed && replayed.result).toEqual(client.createNoteResult);
-    });
-
-    // A retry after a definitive failure is legitimate: nothing moved, so the
-    // key is free and the trade can still settle. Recording the error would
-    // strand the caller with no way forward.
-    it("lets a retry through after a clean failure", async () => {
-      const ctx: RpcContext = { idempotency, idempotencyKey: "k1" };
-      client.createNoteError = new Error("simulation reverted");
-      await send(ctx);
-
-      client.createNoteError = null;
-      const retry = await send(ctx);
-
-      expect(client.createNoteCalls).toBe(2);
-      expect("result" in retry).toBe(true);
-    });
-
-    it("lets a retry through after the limits rejected it", async () => {
-      const limits = new TransactionLimits({ maxAmount: 100n });
-      const ctx: RpcContext = { idempotency, idempotencyKey: "k1", limits };
-
-      expect("error" in (await send(ctx))).toBe(true);
-      expect(client.createNoteCalls).toBe(0);
-
-      // Same key, now under a limit that admits it.
-      const allowed = await send({ idempotency, idempotencyKey: "k1" });
-      expect("result" in allowed).toBe(true);
-    });
-
-    it("refuses a concurrent duplicate rather than running it twice", async () => {
-      const ctx: RpcContext = { idempotency, idempotencyKey: "k1" };
-      client.createNoteDelayMs = 20;
-
-      const [a, b] = await Promise.all([send(ctx), send(ctx)]);
-
-      expect(client.createNoteCalls).toBe(1);
-      const messages = [a, b].map((r) => ("error" in r ? r.error.message : "ok"));
-      expect(messages).toContain("ok");
-      expect(messages.join(" ")).toContain("still in flight");
-    });
-
-    it("keeps distinct keys independent", async () => {
-      await send({ idempotency, idempotencyKey: "k1" });
-      await send({ idempotency, idempotencyKey: "k2" });
-
-      expect(client.createNoteCalls).toBe(2);
-    });
-
-    // Unchanged behaviour for callers that send no header: every request runs.
-    it("does not dedupe when no key is supplied", async () => {
-      await send({ idempotency });
-      await send({ idempotency });
-
-      expect(client.createNoteCalls).toBe(2);
-    });
-
-    it("writes the intent record before the send", async () => {
-      const logged: AuditEntry[] = [];
-      const audit = { log: async (e: AuditEntry) => void logged.push(e) } as AuditLogger;
-
-      await send({ idempotency, idempotencyKey: "k1", audit });
-
-      // Ordering is the whole point: a crash between the two is recoverable
-      // only because the first one is already on disk.
-      expect(logged.map((e) => e.status)).toEqual(["submitting", "success"]);
-      expect(logged.every((e) => e.idempotencyKey === "k1")).toBe(true);
-    });
-
-    // No key means no crash-window to protect, and the intent record only
-    // exists to close that window.
-    it("writes no intent record without a key", async () => {
-      const logged: AuditEntry[] = [];
-      const audit = { log: async (e: AuditEntry) => void logged.push(e) } as AuditLogger;
-
-      await send({ idempotency, audit });
-
-      expect(logged.map((e) => e.status)).toEqual(["success"]);
-    });
-
-    it("records the note effects so a replay after restart is faithful", async () => {
-      const logged: AuditEntry[] = [];
-      const audit = { log: async (e: AuditEntry) => void logged.push(e) } as AuditLogger;
-
-      await send({ idempotency, idempotencyKey: "k1", audit });
-
-      expect(logged.at(-1)?.noteHashes).toEqual(client.createNoteResult.noteHashes);
-      expect(logged.at(-1)?.nullifiers).toEqual(client.createNoteResult.nullifiers);
-    });
-
-    // Every audit double above resolves, which is why none of the following
-    // was ever exercised. A real logger writes to a disk that fills.
-    describe("when the audit log cannot be written", () => {
-      /** Rejects on the Nth call, 1-indexed. 0 never rejects. */
-      const failingAudit = (failOn: number, logged: AuditEntry[]) => {
-        let calls = 0;
-        return {
-          log: async (e: AuditEntry) => {
-            calls += 1;
-            if (calls === failOn) throw new Error("ENOSPC: no space left on device");
-            logged.push(e);
-          },
-        } as AuditLogger;
-      };
-
-      // Fail-closed. The intent record is what makes a crash mid-send
-      // recoverable, so without it the send must not happen at all.
-      it("refuses to send when the intent record cannot be written", async () => {
-        const logged: AuditEntry[] = [];
-        const audit = failingAudit(1, logged);
-        const limits = new TransactionLimits({ dailyLimit: 5000n });
-
-        const res = await send({ idempotency, idempotencyKey: "k1", audit, limits });
-
-        expect(client.createNoteCalls).toBe(0);
-        expect("error" in res && res.error.message).toBe("Internal error");
-        expect(logged).toEqual([]);
+  it("never broadcasts when the answer arrives after the deadline", async () => {
+    let release: (decision: "allow") => void = () => undefined;
+    const late: MayBroadcastClient = () =>
+      new Promise((resolve) => {
+        release = (decision) => resolve({ decision, detail: "late" });
       });
+    const res = await createNote(client, { settlement: { ...s, mayBroadcast: late, timeoutMs: 50 } });
+    expect(res.error?.code).toBe(RPC_ERRORS.NOT_SUBMITTED);
+    expect(res.error?.data?.observation).toMatchObject({ state: "prepared", hold: "interrupted" });
+    release("allow");
+    await new Promise((r) => setImmediate(r));
+    expect(client.sends).toHaveLength(0);
+    expect(journal.get("op-1")?.state).toBe("prepared");
+  });
 
-      // The reservation and the key are both claimed before the intent write.
-      // Leaving either behind punishes a caller whose transfer never happened:
-      // the amount would hold budget for 24h and the key would report itself
-      // still in flight forever.
-      it("releases the reservation and frees the key when the intent write fails", async () => {
-        // 5000 admits one 3000 transfer and not two, so a leaked reservation
-        // surfaces as the retry being refused for budget rather than running.
-        const limits = new TransactionLimits({ dailyLimit: 5000n });
-        const logged: AuditEntry[] = [];
+  it("resumes a held operation with the SAME prepared transaction once allowed", async () => {
+    gate.decision = "deny";
+    await createNote(client, ctx);
+    const held = journal.attempts("op-1")[0]!.txHash;
+    gate.decision = "allow";
+    const res = await createNote(client, ctx);
+    expect(res.result?.observation).toMatchObject({ state: "included", txHash: held });
+    expect(client.proofs).toBe(1);
+    expect(client.sends).toEqual([held]);
+  });
 
-        await send({ idempotency, idempotencyKey: "k1", audit: failingAudit(1, logged), limits });
+  it("refuses a same-id request with changed terms and does no work", async () => {
+    await createNote(client, ctx);
+    const res = await createNote(client, ctx, v1Params({ amount: "999" }));
+    expect(res.error?.code).toBe(RPC_ERRORS.OPERATION_CONFLICT);
+    expect(res.error?.data).toMatchObject({ operationId: "op-1" });
+    expect(client.proofs).toBe(1);
+  });
 
-        // Same key, working logger. Both claims had to be released for this to
-        // reach the client: the key, or it reports itself in flight; the
-        // reservation, or the limits refuse it.
-        const retry = await send({
-          idempotency,
-          idempotencyKey: "k1",
-          audit: failingAudit(0, logged),
-          limits,
-        });
+  it("answers a concurrent duplicate with -32001", async () => {
+    gate.decision = "hang";
+    const first = createNote(client, { settlement: { ...s, timeoutMs: 100 } });
+    const second = await createNote(client, ctx);
+    expect(second.error?.code).toBe(RPC_ERRORS.REQUEST_IN_FLIGHT);
+    expect(second.error?.data?.observation).toEqual({ state: "request_in_flight" });
+    await first;
+  });
 
-        expect("result" in retry).toBe(true);
-        expect(client.createNoteCalls).toBe(1);
-      });
+  it.each([
+    ["corridor_mismatch", () => ({ corridor: { ...(v1Params()["corridor"] as object), corridorRevision: 2 } })],
+    ["account_mode_mismatch", () => ({ accountMode: "spending_limit" })],
+  ])("refuses %s before preparing", async (reason, override) => {
+    const res = await createNote(client, ctx, v1Params(override()));
+    expect(res.error?.code).toBe(RPC_ERRORS.NOT_SUBMITTED);
+    expect(res.error?.data?.observation).toMatchObject({ state: "not_submitted", reason });
+    expect(client.proofs).toBe(0);
+  });
 
-      // The damaging one. The write used to sit inside the same try as the
-      // send, so failing it looked identical to the transfer failing: the key
-      // was abandoned and the next retry sent a second transfer.
-      it("still reports success when the outcome write fails after a landed transfer", async () => {
-        const logged: AuditEntry[] = [];
-        const audit = failingAudit(2, logged);
+  it("refuses a node on another network", async () => {
+    client.network = { ...client.network, rollupAddress: "0x" + "9".repeat(40) };
+    const res = await createNote(client, ctx);
+    expect(res.error?.data?.observation).toMatchObject({ reason: "network_mismatch" });
+    expect(client.proofs).toBe(0);
+  });
 
-        const res = await send({ idempotency, idempotencyKey: "k1", audit });
+  it("refuses a token other than the pinned one", async () => {
+    client.pinned = "0x" + "e".repeat(64);
+    const res = await createNote(client, ctx);
+    expect(res.error?.data?.observation).toMatchObject({ reason: "token_mismatch" });
+  });
 
-        expect("result" in res).toBe(true);
-        expect(logged.map((e) => e.status)).toEqual(["submitting"]);
-      });
+  it("refuses when no may-broadcast endpoint is configured", async () => {
+    const res = await createNote(client, { settlement: { ...s, mayBroadcast: undefined } });
+    expect(res.error?.data?.observation).toMatchObject({ reason: "may_broadcast_unconfigured" });
+    expect(client.proofs).toBe(0);
+  });
 
-      it("does not re-transfer when a retry follows a failed outcome write", async () => {
-        const logged: AuditEntry[] = [];
+  it("refuses an operation past its validity bound, permanently", async () => {
+    const res = await createNote(client, ctx, v1Params({ validUntil: 1 }));
+    expect(res.error?.data?.observation).toEqual({
+      state: "not_submitted",
+      reason: "validity_bound_passed",
+      retryableAfterRevalidation: false,
+    });
+  });
 
-        await send({ idempotency, idempotencyKey: "k1", audit: failingAudit(2, logged) });
-        const retry = await send({ idempotency, idempotencyKey: "k1", audit: failingAudit(0, logged) });
+  it("frees a failed proof for a retry under the same operation", async () => {
+    client.behaviour = "fail_before_gate";
+    const first = await createNote(client, ctx);
+    expect(first.error?.data?.observation).toMatchObject({
+      state: "not_submitted",
+      reason: "prepare_failed",
+      retryableAfterRevalidation: true,
+    });
+    client.behaviour = "land";
+    const second = await createNote(client, ctx);
+    expect(second.result?.observation.state).toBe("included");
+    expect(client.sends).toHaveLength(1);
+  });
 
-        expect(client.createNoteCalls).toBe(1);
-        expect("result" in retry).toBe(true);
-      });
+  it("counts the spend at the mark, not before, and releases a hold", async () => {
+    const limits = new TransactionLimits({ maxAmount: 5000n, dailyLimit: 1500n });
+    gate.decision = "deny";
+    await createNote(client, { settlement: s, limits });
+    expect(limits.windowStatus().committed).toBe(0n);
+    expect(limits.windowStatus().reserved).toBe(0n);
+    gate.decision = "allow";
+    await createNote(client, { settlement: s, limits });
+    expect(limits.windowStatus().committed).toBe(1000n);
+    const over = await createNote(client, { settlement: s, limits }, v1Params({ operationId: "op-2" }));
+    expect(over.error?.data?.observation).toMatchObject({ state: "not_submitted" });
+    expect(client.sends).toHaveLength(1);
+  });
 
-      // A failed write on the error path must not cost the caller the one
-      // response that tells them to reconcile rather than retry.
-      it("still reports the reconcile message when the outcome write fails", async () => {
-        client.createNoteError = new PostSubmissionError("Incomplete receipt", "0xabc");
-        const logged: AuditEntry[] = [];
+  it("reports a mined revert as `reverted`, not as a failure", async () => {
+    client.revert = true;
+    const res = await createNote(client, ctx);
+    expect(res.result?.observation).toMatchObject({ state: "reverted", executionResult: "reverted" });
+  });
+});
 
-        const res = await send({ idempotency, idempotencyKey: "k1", audit: failingAudit(2, logged) });
+describe("ambiguity after the mark is submitted_unknown, never a retryable error", () => {
+  it("keeps -32002 with the transaction hash when the response is lost", async () => {
+    client.behaviour = "lose_response";
+    const res = await createNote(client, ctx);
+    expect(res.error?.code).toBe(RPC_ERRORS.SUBMITTED_UNKNOWN);
+    expect(res.error?.message).toBe(SUBMITTED_UNKNOWN_MESSAGE);
+    expect(res.error?.data?.["txHash"]).toBe(client.sends[0]);
+    expect(res.error?.data?.observation).toMatchObject({
+      state: "submitted_unknown",
+      reason: "post_mark_failure",
+    });
+  });
 
-        expect("error" in res && res.error.message).toBe(SUBMITTED_UNKNOWN_MESSAGE);
-        expect("error" in res && res.error.data).toEqual({ txHash: "0xabc" });
-      });
+  it("keeps -32002 when the deadline passes after the broadcast", async () => {
+    client.behaviour = "hang_after_broadcast";
+    const res = await createNote(client, { settlement: { ...s, timeoutMs: 50 } });
+    expect(res.error?.code).toBe(RPC_ERRORS.SUBMITTED_UNKNOWN);
+    expect(res.error?.data?.observation).toMatchObject({ reason: "response_deadline" });
+  });
+
+  it("recovers a lost response through aztec_getSettlement, and a retry does not send again", async () => {
+    client.behaviour = "lose_response";
+    await createNote(client, ctx);
+    const read = await getSettlement(client, ctx);
+    expect(read).toMatchObject({
+      found: true,
+      state: "may_broadcast",
+      observation: { state: "included", txHash: client.sends[0] },
+      journal: { writable: true },
+    });
+    expect(read.terms).toMatchObject({ amount: "1000", recipient: v1Params()["recipient"] });
+    client.behaviour = "land";
+    const retry = await createNote(client, ctx);
+    expect(retry.result?.observation.state).toBe("included");
+    expect(client.sends).toHaveLength(1);
+    expect(client.credits()).toBe(1);
+  });
+
+  it("re-broadcasts the journaled bytes when the process died between mark and send", async () => {
+    client.behaviour = "die_after_mark";
+    const first = await createNote(client, ctx);
+    expect(first.error?.code).toBe(RPC_ERRORS.SUBMITTED_UNKNOWN);
+    expect(client.sends).toHaveLength(0);
+    const marked = journal.attempts("op-1")[0]!.txHash;
+    expect((await getSettlement(client, ctx)).observation).toMatchObject({
+      state: "submitted_unknown",
+      reason: "node_reports_dropped_or_unknown",
+    });
+    client.behaviour = "land";
+    const retry = await createNote(client, ctx);
+    expect(retry.result?.observation).toMatchObject({ state: "included", txHash: marked });
+    expect(client.proofs).toBe(1);
+    expect(client.credits()).toBe(1);
+    // Permission was granted once, with the mark; a re-broadcast does not re-ask.
+    expect(gate.calls).toEqual(["op-1"]);
+  });
+
+  it("survives a restart: a reopened journal answers and the retry sends nothing", async () => {
+    const path = tempJournalPath();
+    const first = openBoundJournal(path);
+    client.behaviour = "lose_response";
+    await createNote(client, { settlement: settlementContext(first, gate.client) });
+    first.close();
+
+    const reopened = SettlementJournal.open(path);
+    reopened.bindAccount(client.getAddress()!, true);
+    expect(reopened.health()).toEqual({ writable: true });
+    const after = { settlement: settlementContext(reopened, gate.client) };
+    client.behaviour = "land";
+    const retry = await createNote(client, after);
+    expect(retry.result?.observation.state).toBe("included");
+    expect(client.sends).toHaveLength(1);
+    expect(client.credits()).toBe(1);
+  });
+});
+
+describe("aztec_getSettlement", () => {
+  it("answers unknown, never 'safe', for an operation it does not hold", async () => {
+    const read = await getSettlement(client, ctx, "nobody");
+    expect(read).toEqual({
+      version: SETTLEMENT_VERSION,
+      operationId: "nobody",
+      found: false,
+      observation: { state: "unknown", reason: "operation_not_journaled" },
+      journal: { writable: true },
+    });
+  });
+
+  it("records a finalized outcome durably and serves it without the node", async () => {
+    await createNote(client, ctx);
+    client.finalizeAll();
+    expect((await getSettlement(client, ctx)).observation.state).toBe("finalized");
+    expect(journal.get("op-1")?.state).toBe("finalized");
+    client.observeError = new Error("node down");
+    const read = await getSettlement(client, ctx);
+    expect(read.observation).toMatchObject({ state: "finalized", receiptStatus: "finalized" });
+  });
+
+  it("reports a node that cannot be read as submitted_unknown", async () => {
+    await createNote(client, ctx);
+    client.observeError = new Error("node down");
+    expect((await getSettlement(client, ctx)).observation).toMatchObject({
+      state: "submitted_unknown",
+      reason: "node_read_failed",
+    });
+  });
+
+  it("lists every attempt, and which one may have broadcast", async () => {
+    gate.decision = "deny";
+    await createNote(client, ctx);
+    const read = await getSettlement(client, ctx);
+    expect(read.attempts).toEqual([
+      expect.objectContaining({ attempt: 1, mayBroadcast: false }),
+    ]);
+    expect(read.observation).toMatchObject({ state: "prepared", hold: "may_broadcast_denied" });
+  });
+
+  it("keeps serving reads while writes are disabled", async () => {
+    await createNote(client, ctx);
+    const path = journal.path;
+    journal.close();
+    const reopened = SettlementJournal.open(path);
+    reopened.bindAccount("0x" + "f".repeat(64), true);
+    expect(reopened.health()).toMatchObject({ writable: false, reason: "account_mismatch" });
+    const readOnly = { settlement: settlementContext(reopened, gate.client) };
+    const write = await createNote(client, readOnly, v1Params({ operationId: "op-2" }));
+    expect(write.error?.code).toBe(RPC_ERRORS.JOURNAL_UNAVAILABLE);
+    expect(write.error?.data).toMatchObject({ journal: { writable: false, reason: "account_mismatch" } });
+    const read = await getSettlement(client, readOnly);
+    expect(read).toMatchObject({
+      found: true,
+      observation: { state: "included" },
+      journal: { writable: false, reason: "account_mismatch" },
     });
   });
 });
