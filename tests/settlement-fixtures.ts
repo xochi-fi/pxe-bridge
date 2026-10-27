@@ -147,6 +147,8 @@ export class FakeAztecClient implements IAztecClient {
   revert = false;
   proofs = 0;
   observeError: Error | undefined;
+  /** Runs after the transaction is proven or reconstructed, before the gate. */
+  beforeGate: (() => void) | undefined;
 
   async connect(): Promise<void> {}
 
@@ -226,6 +228,7 @@ export class FakeAztecClient implements IAztecClient {
   }
 
   private async send(tx: PreparedTransaction, gate: BroadcastGate): Promise<TransferOutcome> {
+    this.beforeGate?.();
     await gate.beforeBroadcast(tx);
     if (this.behaviour === "die_after_mark") throw new Error("process died after the mark");
     this.sends.push(tx.txHash);

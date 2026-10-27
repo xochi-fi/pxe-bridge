@@ -388,6 +388,108 @@ describe("ambiguity after the mark is submitted_unknown, never a retryable error
   });
 });
 
+describe("the gate is the last word on both bounds", () => {
+  const nowSec = () => Math.floor(Date.now() / 1000);
+  let clock: number;
+  let timed: SettlementContext;
+  let asked: number;
+
+  beforeEach(() => {
+    clock = Date.now();
+    asked = 0;
+    timed = { ...s, now: () => clock };
+  });
+
+  /** Allows, but only after the clock has moved to `toMs` during the wait. */
+  const allowAt = (toMs: () => number): MayBroadcastClient => async (query) => {
+    asked += 1;
+    clock = toMs();
+    return gate.client(query);
+  };
+
+  it("refuses to mark when validUntil passes during the may-broadcast wait", async () => {
+    const res = await createNote(client, {
+      settlement: { ...timed, mayBroadcast: allowAt(() => (VALID_UNTIL + 1) * 1000) },
+    });
+    expect(res.error?.data?.observation).toEqual({
+      state: "not_submitted",
+      reason: "validity_bound_passed",
+      retryableAfterRevalidation: false,
+    });
+    expect(client.sends).toHaveLength(0);
+    expect(journal.attempts("op-1")[0]?.mayBroadcastAt).toBeNull();
+    expect(journal.spendsSince(0)).toEqual([]);
+  });
+
+  it("refuses to mark when the protocol expiration passes during the wait, and a retry proves afresh", async () => {
+    client.expiration = BigInt(nowSec() + 100);
+    const first = await createNote(client, {
+      settlement: { ...timed, mayBroadcast: allowAt(() => (nowSec() + 200) * 1000) },
+    });
+    expect(first.error?.data?.observation).toEqual({
+      state: "not_submitted",
+      reason: "expiration_passed",
+      retryableAfterRevalidation: true,
+    });
+    expect(client.sends).toHaveLength(0);
+    expect(journal.spendsSince(0)).toEqual([]);
+
+    client.expiration = BigInt(nowSec() + 86_400);
+    const retry = await createNote(client, ctx);
+    expect(retry.result?.observation.state).toBe("included");
+    expect(client.proofs).toBe(2);
+    expect(client.sends).toHaveLength(1);
+  });
+
+  it.each([
+    ["validUntil", "validity_bound_passed", () => (VALID_UNTIL + 1) * 1000],
+    ["the protocol expiration", "expiration_passed", () => (nowSec() + 200) * 1000],
+  ] as const)(
+    "never re-broadcasts a marked attempt when %s passes while its bytes are reconstructed",
+    async (_bound, reason, toMs) => {
+      client.expiration = BigInt(nowSec() + 100);
+      client.behaviour = "die_after_mark";
+      await createNote(client, { settlement: timed });
+      const marked = journal.attempts("op-1")[0]!.txHash;
+      client.behaviour = "land";
+      client.beforeGate = () => {
+        clock = toMs();
+      };
+      const retry = await createNote(client, { settlement: timed });
+      expect(retry.error?.code).toBe(RPC_ERRORS.SUBMITTED_UNKNOWN);
+      expect(retry.error?.data?.observation).toMatchObject({ state: "submitted_unknown", txHash: marked, reason });
+      expect(client.sends).toHaveLength(0);
+      expect(journal.get("op-1")?.state).toBe("may_broadcast");
+    },
+  );
+
+  it.each([
+    ["validUntil", "validity_bound_passed", false, () => (VALID_UNTIL + 1) * 1000],
+    ["the protocol expiration", "expiration_passed", true, () => (nowSec() + 200) * 1000],
+  ] as const)(
+    "does not ask again for a held attempt when %s passes while its bytes are reconstructed",
+    async (_bound, reason, retryable, toMs) => {
+      client.expiration = BigInt(nowSec() + 100);
+      gate.decision = "deny";
+      await createNote(client, { settlement: timed });
+      gate.decision = "allow";
+      const before = gate.calls.length;
+      client.beforeGate = () => {
+        clock = toMs();
+      };
+      const res = await createNote(client, { settlement: timed });
+      expect(res.error?.data?.observation).toEqual({
+        state: "not_submitted",
+        reason,
+        retryableAfterRevalidation: retryable,
+      });
+      expect(gate.calls.length).toBe(before);
+      expect(client.sends).toHaveLength(0);
+      expect(asked).toBe(0);
+    },
+  );
+});
+
 describe("one deadline for the whole request", () => {
   it("counts the cooldown against it: a cooldown past the deadline proves nothing", async () => {
     const limits = new TransactionLimits({ cooldownThreshold: 1n, cooldownDelayMs: 300 });

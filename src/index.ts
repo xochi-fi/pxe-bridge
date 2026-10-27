@@ -541,13 +541,13 @@ async function main(): Promise<void> {
       );
     }
     // The rolling window is rebuilt from the journal's spend rows, which are
-    // written in the same transaction as each may-broadcast mark.
+    // written in the same transaction as each may-broadcast mark. A failure
+    // disables journal writes (and readiness) rather than serving with an
+    // empty window, which would hand back the daily budget.
     if (limits) {
-      try {
-        const restored = limits.restore(journal.spendsSince(Date.now() - DAY_MS));
+      const restored = journal.restoreSpendWindow(Date.now() - DAY_MS, (spends) => limits.restore(spends));
+      if (restored !== undefined) {
         console.log(`[pxe-bridge] Restored ${restored} spend(s) into the 24h window`);
-      } catch (cause) {
-        console.error("[pxe-bridge] Could not read spends from the journal:", cause);
       }
     }
   } else {

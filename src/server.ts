@@ -306,12 +306,10 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
               : journal.writable
                 ? []
                 : [`journal_${journal.reason}`]),
-            ...(settlement !== undefined && settlement.mayBroadcast === undefined
-              ? ["may_broadcast_unconfigured"]
-              : []),
-            ...(settlement !== undefined && settlement.corridor === undefined
-              ? ["corridor_unconfigured"]
-              : []),
+            // Listed with or without a settlement context: a bridge with no
+            // journal lacks these too, and the operator needs every gap at once.
+            ...(settlement?.mayBroadcast === undefined ? ["may_broadcast_unconfigured"] : []),
+            ...(settlement?.corridor === undefined ? ["corridor_unconfigured"] : []),
           ];
           const ready = notReady.length === 0;
           sendJson(res, pathname === "/ready" && !ready ? 503 : 200, {

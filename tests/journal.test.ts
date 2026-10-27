@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
+import { TransactionLimits } from "../src/limits.js";
 import {
   JournalLockedError,
   JournalPermissionError,
@@ -303,6 +304,12 @@ describe("SettlementJournal startup invariant", () => {
       `UPDATE operations SET terms_json = replace(terms_json, '"amount":"1000"', '"amount":"9"')`,
     ],
     ["a state the code never writes", "claimed", "UPDATE operations SET state = 'sending'"],
+    // The spend rows rebuild the rolling window: each must be the mark's own.
+    ["a spend smaller than the terms amount", "marked", "UPDATE spends SET amount = '999'"],
+    ["a spend older than its mark", "marked", "UPDATE spends SET at = at - 86400000"],
+    ["a non-canonical spend amount", "marked", "UPDATE spends SET amount = '01000'"],
+    ["a malformed spend amount", "marked", "UPDATE spends SET amount = '1e3'"],
+    ["a spend time that is not an integer", "marked", "UPDATE spends SET at = 'yesterday'"],
   ] as const)("disables writes (and so every replay) on %s, keeping reads", (_name, state, sql) => {
     const path = journalWith(state);
     tamper(path, sql);
@@ -323,6 +330,37 @@ describe("SettlementJournal startup invariant", () => {
       writable: false,
       reason: "missing_transaction_identity",
     });
+  });
+
+  it("rebuilds the rolling window from the spend rows", () => {
+    const journal = openBoundJournal();
+    marked(journal);
+    const limits = new TransactionLimits({ dailyLimit: 5000n });
+    expect(journal.restoreSpendWindow(0, (spends) => limits.restore(spends))).toBe(1);
+    expect(limits.windowStatus().committed).toBe(1000n);
+    expect(journal.health()).toEqual({ writable: true });
+  });
+
+  it("disables writes and readiness, never an empty window, when the window cannot be rebuilt", () => {
+    const journal = openBoundJournal();
+    marked(journal);
+    const restored = journal.restoreSpendWindow(0, () => {
+      throw new Error("restore exploded");
+    });
+    expect(restored).toBeUndefined();
+    expect(journal.health()).toMatchObject({
+      writable: false,
+      reason: "spend_window_unreadable",
+      detail: expect.stringContaining("restore exploded"),
+    });
+    expect(() => journal.claim("op-2", fingerprint, terms)).toThrow(JournalWriteError);
+  });
+
+  it("disables writes when the spend rows themselves cannot be read", () => {
+    const journal = openBoundJournal();
+    journal.close();
+    expect(journal.restoreSpendWindow(0, () => 0)).toBeUndefined();
+    expect(journal.health()).toMatchObject({ writable: false, reason: "spend_window_unreadable" });
   });
 
   it("passes every state the code itself writes", () => {

@@ -539,7 +539,11 @@ describe("GET /ready: every settlement prerequisite", () => {
       () => ({ settlement: settlementContext(openBoundJournal(), undefined, { corridor: undefined }) }),
       ["corridor_unconfigured"],
     ],
-    ["no journal", () => ({}), ["journal_unconfigured"]],
+    [
+      "no journal",
+      () => ({}),
+      ["journal_unconfigured", "may_broadcast_unconfigured", "corridor_unconfigured"],
+    ],
     [
       "an unbound journal",
       () => ({ settlement: settlementContext(SettlementJournal.open(tempJournalPath())) }),

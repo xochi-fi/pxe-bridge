@@ -70,6 +70,7 @@ export type WriteDisabledReason =
   | "journal_inconsistent"
   | "unknown_schema_version"
   | "write_failed"
+  | "spend_window_unreadable"
   | "account_unbound";
 
 export type JournalHealth =
@@ -417,11 +418,15 @@ export class SettlementJournal {
    * - `claimed` / `not_submitted`: no attempt is marked and no spend row;
    *   `claimed` has no current attempt, `not_submitted` at most an unmarked one.
    *
-   * Plus: every spend row belongs to a marked operation, and the stored
-   * fingerprint is the fingerprint of the stored terms. Anything else was not
-   * written by this code -- a partial restore, a hand edit, a bug -- and a
-   * replay from it could resend or re-prove what the journal cannot vouch
-   * for, so writes (and with them every replay) are disabled.
+   * Plus: every spend row belongs to a marked operation, is exactly that
+   * operation's terms amount (canonical decimal) and carries the mark's own
+   * timestamp (the two are written in one transaction), and the stored
+   * fingerprint is the fingerprint of the stored terms. A spend row is what
+   * the rolling window is rebuilt from, so a smaller amount or an older
+   * timestamp would hand budget back. Anything else was not written by this
+   * code -- a partial restore, a hand edit, a bug -- and a replay from it could
+   * resend or re-prove what the journal cannot vouch for, so writes (and with
+   * them every replay) are disabled.
    */
   private checkInvariants(): void {
     const db = this.db!;
@@ -435,11 +440,14 @@ export class SettlementJournal {
          FROM attempts`,
       )
       .all() as (AttemptRow & { operation_id: string; byte_length: number })[];
-    const spent = new Set(
-      (db.prepare("SELECT operation_id FROM spends").all() as { operation_id: string }[]).map(
-        (r) => r.operation_id,
-      ),
+    const spends = new Map(
+      (db.prepare("SELECT operation_id, amount, at FROM spends").all() as {
+        operation_id: string;
+        amount: unknown;
+        at: unknown;
+      }[]).map((r) => [r.operation_id, { amount: r.amount, at: r.at }]),
     );
+    const spent = new Set(spends.keys());
     const attemptsOf = new Map<string, typeof attempts>();
     for (const a of attempts) {
       const list = attemptsOf.get(a.operation_id) ?? [];
@@ -450,6 +458,12 @@ export class SettlementJournal {
 
     for (const op of operations) {
       const id = op.operation_id;
+      let terms: SettlementTerms | undefined;
+      try {
+        terms = JSON.parse(op.terms_json) as SettlementTerms;
+      } catch {
+        terms = undefined;
+      }
       const own = attemptsOf.get(id) ?? [];
       const marked = own.filter((a) => a.may_broadcast_at !== null);
       const current = own.find((a) => a.attempt === op.current_attempt);
@@ -480,7 +494,7 @@ export class SettlementJournal {
           }
           if (current.may_broadcast_at === null) violation = `${op.state}, but its current attempt is unmarked`;
           else if (marked.length !== 1) violation = `${op.state} with ${marked.length} marked attempts`;
-          else if (!spent.has(id)) violation = `${op.state} with no spend recorded`;
+          else violation = spendViolation(spends.get(id), terms, current.may_broadcast_at, op.state);
           break;
         case "claimed":
         case "not_submitted":
@@ -497,8 +511,11 @@ export class SettlementJournal {
       }
       if (violation === undefined) {
         try {
-          if (fingerprintTerms(JSON.parse(op.terms_json) as SettlementTerms) !== op.fingerprint) {
-            violation = "stored fingerprint is not the fingerprint of the stored terms";
+          if (terms === undefined || fingerprintTerms(terms) !== op.fingerprint) {
+            violation =
+              terms === undefined
+                ? "stored terms are unreadable"
+                : "stored fingerprint is not the fingerprint of the stored terms";
           }
         } catch {
           violation = "stored terms are unreadable";
@@ -819,6 +836,28 @@ export class SettlementJournal {
     return rows.map((r) => ({ amount: BigInt(r.amount), timestamp: r.at }));
   }
 
+  /**
+   * Rebuilds the rolling window: feeds the spends since `sinceMs` to `restore`
+   * (`TransactionLimits.restore`) and returns how many it took. Any failure --
+   * an unreadable table, a malformed amount, a restore that throws -- disables
+   * writes (`spend_window_unreadable`, so readiness fails) and returns
+   * undefined: an empty window would hand back the daily budget.
+   */
+  restoreSpendWindow(
+    sinceMs: number,
+    restore: (spends: { amount: bigint; timestamp: number }[]) => number,
+  ): number | undefined {
+    try {
+      return restore(this.spendsSince(sinceMs));
+    } catch (cause) {
+      this.disable(
+        "spend_window_unreadable",
+        `the 24h spend window could not be rebuilt: ${(cause as Error).message ?? String(cause)}`,
+      );
+      return undefined;
+    }
+  }
+
   /** Operations a restart must reconcile: anything not provably settled. */
   unresolved(): string[] {
     const rows = this.read((db) =>
@@ -999,6 +1038,31 @@ function enforceOwnerOnly(path: string, hwmPath: string): void {
       throw new JournalPermissionError(`${file} is mode ${mode.toString(8)}, not owner-only`);
     }
   }
+}
+
+/**
+ * Why a marked operation's spend row cannot be trusted, or undefined. The row
+ * must exist, hold the terms amount as a canonical decimal string, and carry
+ * the mark's timestamp as an integer: `markMayBroadcast` writes both in one
+ * transaction from those very values.
+ */
+function spendViolation(
+  spend: { amount: unknown; at: unknown } | undefined,
+  terms: SettlementTerms | undefined,
+  markedAt: number,
+  state: string,
+): string | undefined {
+  if (spend === undefined) return `${state} with no spend recorded`;
+  if (typeof spend.amount !== "string" || !/^[1-9][0-9]*$/.test(spend.amount)) {
+    return `spend amount ${JSON.stringify(spend.amount)} is not a canonical decimal`;
+  }
+  if (terms === undefined || spend.amount !== terms.amount) {
+    return `spend amount ${spend.amount} is not the terms amount ${terms?.amount ?? "(unreadable)"}`;
+  }
+  if (typeof spend.at !== "number" || !Number.isSafeInteger(spend.at) || spend.at !== markedAt) {
+    return `spend time ${JSON.stringify(spend.at)} is not the mark's ${markedAt}`;
+  }
+  return undefined;
 }
 
 function toOperation(row: OperationRow): StoredOperation {

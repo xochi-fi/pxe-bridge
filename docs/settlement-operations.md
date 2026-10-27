@@ -91,7 +91,7 @@ corridor.
 | `prepared` | no (journaled, unmarked) | `txHash, expirationTimestamp, hold: may_broadcast_unknown \| may_broadcast_denied \| interrupted` | hold; retry the same operation later; never refund |
 | `not_submitted` | no | `reason, retryableAfterRevalidation` | `true`: retry the same operation; `false` (e.g. `validity_bound_passed`): revalidate/requote |
 | `request_in_flight` | maybe | -- | wait, then read |
-| `submitted_unknown` | maybe | `txHash, expirationTimestamp, reason` (`post_mark_failure`, `response_deadline`, `node_reports_dropped_or_unknown`, `node_read_failed`) | hold; reconcile. A retry of the same operation re-broadcasts the journaled bytes (same hash, lands at most once) only while BOTH the protocol `expirationTimestamp` and the operation's `validUntil` are in the future; past either it answers `submitted_unknown` without sending, and never `not_submitted` |
+| `submitted_unknown` | maybe | `txHash, expirationTimestamp, reason` (`post_mark_failure`, `response_deadline`, `node_reports_dropped_or_unknown`, `node_read_failed`, `validity_bound_passed`, `expiration_passed`) | hold; reconcile. A retry of the same operation re-broadcasts the journaled bytes (same hash, lands at most once) only while BOTH the protocol `expirationTimestamp` and the operation's `validUntil` are in the future -- checked last by the gate, after the bytes are reconstructed and immediately before the send; past either it answers `submitted_unknown` (reason naming the bound) without sending, and never `not_submitted` |
 | `pending` | yes | `txHash, expirationTimestamp` | wait |
 | `included` | yes | `txHash, expirationTimestamp, executionResult: success, blockHash, blockNumber, receiptStatus (proposed\|checkpointed\|proven), observedAt, effects {state, noteHashes, nullifiers}` | non-terminal; wait for `finalized` |
 | `finalized` | yes | as `included`, `receiptStatus: finalized` (durably recorded) | delivery evidence (never "completed" alone) |
@@ -103,9 +103,19 @@ Effects are uninterpreted evidence: no element is "the" recipient note.
 `not_submitted` reasons include the admission refusals (`corridor_mismatch`,
 `network_mismatch`, `account_mode_mismatch`, `token_mismatch`,
 `network_unreadable`, `may_broadcast_unconfigured`, `corridor_unconfigured`,
-`limits: ...`), `validity_bound_passed` (not retryable), `prepare_failed`, and
+`limits: ...`), `validity_bound_passed` (not retryable), `expiration_passed`
+(the prepared transaction's protocol expiration passed before it was marked;
+retryable, a retry proves a fresh attempt), `prepare_failed`, and
 `response_deadline` (the request deadline passed before anything was
 prepared; retry the same operation).
+
+**The gate is the authoritative bound check.** Immediately before the
+may-broadcast mark -- after Riddler's answer, with nothing asynchronous in
+between -- the gate rereads the clock against BOTH `validUntil` and the
+attempt's protocol `expirationTimestamp`; an unmarked attempt past either is
+recorded `not_submitted` and never marked. A re-broadcast of a marked attempt
+rechecks both after the journaled bytes are reconstructed, immediately before
+the send. Earlier checks (admission, resume) only save work.
 
 ## Fingerprint
 
@@ -220,10 +230,16 @@ spend rows can produce: `prepared` = current attempt unmarked, no marked
 attempt, no spend; `may_broadcast`/`finalized`/`reverted` = current attempt
 is the one marked attempt, spend row present; `claimed`/`not_submitted` = no
 marked attempt, no spend (`claimed` with no current attempt); every spend row
-belongs to a marked operation; the stored fingerprint is the fingerprint of
-the stored terms. A missing or malformed transaction identity (hash, bytes,
-expiration) on a prepared or marked operation is
+belongs to a marked operation, holds exactly the terms `amount` as a canonical
+decimal string and carries the mark's own `may_broadcast_at` as its `at` (both
+are written in one transaction); the stored fingerprint is the fingerprint of
+the stored terms. The spend rows rebuild the 24h window, so a smaller amount or
+an older timestamp would hand budget back. A missing or malformed transaction
+identity (hash, bytes, expiration) on a prepared or marked operation is
 `missing_transaction_identity`; any other violation is `journal_inconsistent`.
+If the window cannot be rebuilt at startup (unreadable rows, a restore that
+fails) writes are disabled with `spend_window_unreadable`: the bridge never
+serves with an empty window.
 
 Writes are disabled (reads continue, `/ready` is 503, `/status` reports
 `degraded` with the reason) on: `corrupt`, `rollback_detected` (generation
@@ -231,7 +247,8 @@ below `<journal>.hwm`, a different journal id, or the mark missing beside a
 used journal), `empty_journal_for_existing_account` (fresh journal next to an
 account that already existed; see "Legacy drain and adoption"),
 `legacy_audit_unresolved`, `account_mismatch`, `missing_transaction_identity`,
-`journal_inconsistent`, `unknown_schema_version`, `write_failed`. With writes
+`journal_inconsistent`, `spend_window_unreadable`, `unknown_schema_version`,
+`write_failed`. With writes
 disabled every createNote -- replays of marked attempts included -- is refused
 `-32004`. None clears itself: restore the exact journal, or reconcile and
 start a new one through the adoption procedure.
@@ -300,7 +317,8 @@ Body: `{status, ready, notReady?, version, feeJuice {balance, low?},
 journal {writable, reason?}, settlement {mayBroadcast, corridor}}`.
 `notReady` lists every unmet prerequisite: `journal_unconfigured`,
 `journal_<reason>` (writes disabled, including `journal_account_unbound`
-before connect), `may_broadcast_unconfigured`, `corridor_unconfigured`. Low
+before connect), `may_broadcast_unconfigured`, `corridor_unconfigured`; a
+bridge with no journal reports all three it lacks. Low
 fee juice degrades without making the bridge unready. Public, so only reasons:
 details can name the account. Point container restarts at `/status` and
 traffic/deploy gates at `/ready`.

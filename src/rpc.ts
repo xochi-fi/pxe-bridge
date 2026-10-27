@@ -241,8 +241,16 @@ class OperationGate implements BroadcastGate {
         throw new Error("journaled bytes no longer produce the journaled hash");
       }
       // Permission was recorded with the mark; an exact re-broadcast of a
-      // marked attempt does not ask again.
-      if (this.mode.kind === "rebroadcast") return;
+      // marked attempt does not ask again. It does recheck both bounds, here,
+      // after the bytes were reconstructed and immediately before the send:
+      // the checks the caller made earlier are stale by then. A marked attempt
+      // past a bound is never sent and never "not submitted" -- it may already
+      // be on chain -- so it surfaces as submitted_unknown.
+      if (this.mode.kind === "rebroadcast") {
+        const passed = this.passedBound(this.mode.attempt);
+        if (passed) throw new BoundPassed(passed);
+        return;
+      }
     } else {
       const attempt = journal.recordPrepared(operationId, tx);
       this.attempt = {
@@ -255,22 +263,16 @@ class OperationGate implements BroadcastGate {
     }
     const attempt = this.attempt!;
 
-    if (nowSeconds(this.s) >= this.state.terms.validUntil) {
-      journal.recordNotSubmitted(operationId, "validity_bound_passed", false);
-      throw new Held({
-        state: "not_submitted",
-        reason: "validity_bound_passed",
-        retryableAfterRevalidation: false,
-      });
-    }
+    this.refuseUnmarkedPastBound(attempt);
 
     const answer = await this.s.mayBroadcast!({
       operationId,
       fingerprint: this.state.fingerprint,
       txHash: attempt.txHash,
     });
-    // Synchronous from here to the mark: nothing can close the gate between
-    // this check and the write that permits the broadcast.
+    // Synchronous from here to the mark: nothing can close the gate, and the
+    // clock read below is the last one, between it and the write that permits
+    // the broadcast.
     if (this.closed) throw new GateClosed();
     if (answer.decision !== "allow") {
       const hold: Hold =
@@ -286,9 +288,41 @@ class OperationGate implements BroadcastGate {
         hold,
       });
     }
+    // The authoritative check: the may-broadcast wait can outlast either bound.
+    this.refuseUnmarkedPastBound(attempt);
     journal.markMayBroadcast(operationId, attempt.attempt, this.state.terms.amount);
     this.marked = true;
     this.onMark();
+  }
+
+  /** Which bound has passed for `attempt`, if any, at this instant. */
+  private passedBound(attempt: Attempt): Bound | undefined {
+    const now = nowSeconds(this.s);
+    if (now >= this.state.terms.validUntil) return "validity_bound_passed";
+    if (BigInt(now) >= BigInt(attempt.expirationTimestamp)) return "expiration_passed";
+    return undefined;
+  }
+
+  /**
+   * An unmarked attempt past a bound provably never broadcast, so it is
+   * recorded not_submitted: past `validUntil` for good (revalidate), past the
+   * protocol expiration retryable (a retry proves a fresh attempt).
+   */
+  private refuseUnmarkedPastBound(attempt: Attempt): void {
+    const passed = this.passedBound(attempt);
+    if (!passed) return;
+    const retryable = passed === "expiration_passed";
+    this.s.journal.recordNotSubmitted(this.state.op.operationId, passed, retryable);
+    throw new Held({ state: "not_submitted", reason: passed, retryableAfterRevalidation: retryable });
+  }
+}
+
+type Bound = "validity_bound_passed" | "expiration_passed";
+
+/** A marked attempt reached the send past one of its bounds; nothing was sent. */
+class BoundPassed extends Error {
+  constructor(readonly bound: Bound) {
+    super(`marked attempt not re-broadcast: ${bound}`);
   }
 }
 
@@ -867,7 +901,12 @@ async function runAttempt(
       state: "submitted_unknown",
       txHash: attempt.txHash,
       expirationTimestamp: attempt.expirationTimestamp,
-      reason: deadline.expired ? "response_deadline" : "post_mark_failure",
+      reason:
+        failure instanceof BoundPassed
+          ? failure.bound
+          : deadline.expired
+            ? "response_deadline"
+            : "post_mark_failure",
     };
     await audit(ctx, op, fingerprint, observation);
     return answer(id, { operationId: op.operationId, fingerprint }, observation);
