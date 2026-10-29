@@ -634,6 +634,16 @@ export class SettlementJournal {
     return this.healthState;
   }
 
+  /**
+   * Whether this process still owns the SQLite connection that acquired the
+   * exclusive writer lock. Journal health alone is insufficient: `close()`
+   * intentionally leaves the durable health diagnosis unchanged so recovery
+   * metadata remains inspectable, but closing releases the writer fence.
+   */
+  writerFenceHeld(): boolean {
+    return this.db !== null;
+  }
+
   get(operationId: string): StoredOperation | undefined {
     const row = this.read((db) =>
       db.prepare("SELECT * FROM operations WHERE operation_id = ?").get(operationId),

@@ -33,6 +33,7 @@ import {
 import type { MayBroadcastClient } from "./may-broadcast.js";
 import type { TransactionLimits } from "./limits.js";
 import type { AuditLogger } from "./audit.js";
+import type { OperationalReadiness, ReadinessObserver, ReadinessReason } from "./readiness.js";
 
 export interface SettlementContext {
   journal: SettlementJournal;
@@ -48,6 +49,8 @@ export interface SettlementContext {
    * gate closes. Default TX deadline.
    */
   timeoutMs: number;
+  /** Same instance exposed by authenticated GET /ready. */
+  readiness?: ReadinessObserver | undefined;
   now?: () => number;
 }
 
@@ -55,6 +58,8 @@ export interface RpcContext {
   limits?: TransactionLimits | undefined;
   audit?: AuditLogger | undefined;
   settlement?: SettlementContext | undefined;
+  /** The same authoritative observer served by authenticated GET /ready. */
+  readiness?: ReadinessObserver | undefined;
   /** From the `Idempotency-Key` request header, when the caller sent one. */
   idempotencyKey?: string | undefined;
   clientIp?: string | undefined;
@@ -564,7 +569,44 @@ async function createNoteWithin(
   const fingerprint = fingerprintTerms(terms);
 
   const health = s.journal.health();
-  if (!health.writable) return journalUnavailable(id, health, operationId);
+  if (!health.writable) {
+    let existing: StoredOperation | undefined;
+    try {
+      existing = s.journal.get(operationId);
+    } catch (cause) {
+      return journalFault(id, s, operationId, cause);
+    }
+    if (!existing) return journalUnavailable(id, health, operationId);
+    if (existing.fingerprint !== fingerprint) {
+      return conflict(id, operationId, fingerprint, existing.fingerprint);
+    }
+    if (
+      existing.state !== "may_broadcast" &&
+      existing.state !== "finalized" &&
+      existing.state !== "reverted"
+    ) {
+      return journalUnavailable(id, health, operationId);
+    }
+    if (s.inFlight.has(operationId)) {
+      return answer(id, existing, { state: "request_in_flight" });
+    }
+    s.inFlight.add(operationId);
+    const background = new BackgroundCalls();
+    try {
+      const resumed = await resumeExisting(
+        id,
+        client,
+        ctx,
+        s,
+        existing,
+        background,
+        deadline,
+      );
+      return resumed ?? journalUnavailable(id, health, operationId);
+    } finally {
+      background.whenIdle(() => s.inFlight.delete(operationId));
+    }
+  }
 
   // Synchronous from the check to the add: two concurrent duplicates cannot
   // both get past here.
@@ -654,8 +696,12 @@ async function driveOperation(
     return journalFault(id, s, operationId, cause);
   }
 
-  const refusal = await admissionRefusal(client, s, terms, deadline);
-  if (refusal) return notSubmitted(id, ctx, s, op, fingerprint, refusal, true);
+  const refusal = await admissionRefusal(ctx, s, terms, deadline);
+  if (refusal) {
+    return refusal.kind === "not_ready"
+      ? notReady(id, ctx, s, op, fingerprint, refusal)
+      : notSubmitted(id, ctx, s, op, fingerprint, refusal.reason, true);
+  }
 
   return runAttempt(id, client, ctx, s, { op, fingerprint, terms }, { kind: "fresh" }, background, deadline);
 }
@@ -701,8 +747,12 @@ async function resumeExisting(
         // prepare a new attempt under the same operation.
         return undefined;
       }
-      const refusal = await admissionRefusal(client, s, op.terms, deadline);
-      if (refusal) return notSubmitted(id, ctx, s, op, op.fingerprint, refusal, true);
+      const refusal = await admissionRefusal(ctx, s, op.terms, deadline);
+      if (refusal) {
+        return refusal.kind === "not_ready"
+          ? notReady(id, ctx, s, op, op.fingerprint, refusal)
+          : notSubmitted(id, ctx, s, op, op.fingerprint, refusal.reason, true);
+      }
       return runAttempt(id, client, ctx, s, state, { kind: "resume", attempt }, background, deadline);
     }
 
@@ -739,47 +789,107 @@ async function resumeExisting(
   }
 }
 
-/** Every check a fresh or resumed attempt must pass before preparing. */
+type AdmissionRefusal =
+  | { kind: "terms"; reason: string }
+  | {
+      kind: "not_ready";
+      reasons: ReadinessReason[];
+      readiness?: OperationalReadiness;
+    };
+
+/** Every check a fresh or unmarked resumed attempt must pass before preparing. */
 async function admissionRefusal(
-  client: IAztecClient,
+  ctx: RpcContext,
   s: SettlementContext,
   terms: SettlementTerms,
   deadline: RequestDeadline,
-): Promise<string | undefined> {
-  if (!s.mayBroadcast) return "may_broadcast_unconfigured";
+): Promise<AdmissionRefusal | undefined> {
+  const observer = ctx.readiness ?? s.readiness;
+  if (!observer) {
+    return { kind: "not_ready", reasons: ["readiness_observation_failed"] };
+  }
+
+  let readiness: OperationalReadiness | typeof TIMED_OUT;
+  try {
+    readiness = await deadline.race(observer.observe());
+  } catch (cause) {
+    console.error("[rpc] Authoritative readiness observation failed:", cause);
+    return { kind: "not_ready", reasons: ["readiness_observation_failed"] };
+  }
+  if (readiness === TIMED_OUT) {
+    return { kind: "terms", reason: "response_deadline" };
+  }
+  if (!readiness.ready) {
+    return { kind: "not_ready", reasons: readiness.reasons, readiness };
+  }
+
   const corridor = s.corridor;
-  if (!corridor) return "corridor_unconfigured";
+  if (!s.mayBroadcast || !corridor) {
+    // A ready projection and missing local prerequisites cannot coexist. Fail
+    // closed rather than introducing a second definition of readiness.
+    return { kind: "not_ready", reasons: ["readiness_observation_failed"] };
+  }
   if (
     terms.corridor.corridorId !== corridor.corridorId.toLowerCase() ||
     terms.corridor.corridorRevision !== corridor.corridorRevision ||
     terms.corridor.manifestDigest !== corridor.manifestDigest.toLowerCase()
   ) {
-    return "corridor_mismatch";
+    return { kind: "terms", reason: "corridor_mismatch" };
   }
   if (terms.network.genesisOrNetworkDigest !== corridor.genesisOrNetworkDigest.toLowerCase()) {
-    return "network_mismatch";
+    return { kind: "terms", reason: "network_mismatch" };
   }
-  if (terms.accountMode !== client.accountMode()) return "account_mode_mismatch";
-  const pinned = client.pinnedToken();
-  if (pinned !== undefined && pinned.toLowerCase() !== terms.token) return "token_mismatch";
-  let network;
-  try {
-    network = await deadline.race(client.networkIdentity());
-  } catch (cause) {
-    console.error("[rpc] Network identity read failed:", cause);
-    return "network_unreadable";
+  if (terms.accountMode !== readiness.accountMode) {
+    return { kind: "terms", reason: "account_mode_mismatch" };
   }
-  if (network === TIMED_OUT) return "response_deadline";
+  if (readiness.token === null || readiness.token.toLowerCase() !== terms.token) {
+    return { kind: "terms", reason: "token_mismatch" };
+  }
   if (
-    network.aztecChainId !== terms.network.aztecChainId ||
-    network.protocolVersion !== terms.network.protocolVersion ||
-    network.rollupAddress !== terms.network.rollupAddress ||
-    network.l1ChainId !== terms.network.l1ChainId
+    readiness.network.aztecChainId !== terms.network.aztecChainId ||
+    readiness.network.protocolVersion !== terms.network.protocolVersion ||
+    readiness.network.rollupContract !== terms.network.rollupAddress ||
+    readiness.l1ChainId !== terms.network.l1ChainId
   ) {
-    return "network_mismatch";
+    return { kind: "terms", reason: "network_mismatch" };
   }
-  if (nowSeconds(s) >= terms.validUntil) return "validity_bound_passed";
+  if (nowSeconds(s) >= terms.validUntil) {
+    return { kind: "terms", reason: "validity_bound_passed" };
+  }
   return undefined;
+}
+
+async function notReady(
+  id: number | string,
+  ctx: RpcContext,
+  s: SettlementContext,
+  op: StoredOperation,
+  fingerprint: string,
+  refusal: Extract<AdmissionRefusal, { kind: "not_ready" }>,
+): Promise<JsonRpcResponse> {
+  const primaryReason = refusal.reasons[0] ?? "readiness_observation_failed";
+  try {
+    s.journal.recordNotSubmitted(op.operationId, primaryReason, true);
+  } catch (cause) {
+    return journalFault(id, s, op.operationId, cause);
+  }
+  const observation: Observation = {
+    state: "not_submitted",
+    reason: primaryReason,
+    retryableAfterRevalidation: true,
+  };
+  await audit(ctx, op, fingerprint, observation);
+  return rpcError(id, RPC_ERRORS.NOT_READY, "Bridge is not ready for new settlement admission", {
+    reason: "bridge_not_ready",
+    reasons: refusal.reasons,
+    observation,
+    ...(refusal.readiness
+      ? {
+          finalized: refusal.readiness.finalized,
+          observedAt: refusal.readiness.observedAt,
+        }
+      : {}),
+  });
 }
 
 async function notSubmitted(

@@ -2,14 +2,13 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import type { Server } from "node:http";
 import { createApp, type ServerOptions } from "../src/server.js";
 import { TransactionLimits } from "../src/limits.js";
-import { SettlementJournal } from "../src/journal.js";
 import type { MayBroadcastClient } from "../src/may-broadcast.js";
 import { rpcJson } from "./helpers.js";
 import {
   FakeAztecClient as SettlementFakeClient,
   openBoundJournal,
+  readyObserver,
   settlementContext,
-  tempJournalPath,
   v1Params,
 } from "./settlement-fixtures.js";
 
@@ -23,15 +22,6 @@ class FakeAztecClient extends SettlementFakeClient {
   override async getVersion(): Promise<string> {
     if (this.versionError) throw this.versionError;
     return this.versionResult;
-  }
-
-  feeJuiceBalance = 1000n;
-  feeJuiceError: Error | null = null;
-  feeJuiceReads = 0;
-  override async getFeeJuiceBalance(): Promise<bigint> {
-    this.feeJuiceReads++;
-    if (this.feeJuiceError) throw this.feeJuiceError;
-    return this.feeJuiceBalance;
   }
 }
 
@@ -75,14 +65,7 @@ describe("HTTP server", () => {
       const res = await fetch(`${baseUrl}/status`);
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body).toEqual({
-        status: "ok",
-        ready: true,
-        version: "4.1.3",
-        feeJuice: { balance: "1000" },
-        journal: { writable: true },
-        settlement: { mayBroadcast: "configured", corridor: "configured" },
-      });
+      expect(body).toEqual({ status: "ok" });
     });
 
     it("returns 503 when client errors", async () => {
@@ -90,7 +73,7 @@ describe("HTTP server", () => {
       const res = await fetch(`${baseUrl}/status`);
       expect(res.status).toBe(503);
       const body = await res.json();
-      expect(body).toEqual({ status: "starting", ready: false });
+      expect(body).toEqual({ status: "starting" });
       client.versionError = null;
     });
 
@@ -101,18 +84,13 @@ describe("HTTP server", () => {
   });
 
   describe("GET /ready", () => {
-    it("answers 200 only when every settlement prerequisite holds", async () => {
-      const res = await fetch(`${baseUrl}/ready`);
-      expect(res.status).toBe(200);
-      expect(await res.json()).toMatchObject({ status: "ok", ready: true });
-    });
-
-    it("answers 503 while the node is not answering", async () => {
-      client.versionError = new Error("not ready");
+    it("never exposes operational detail without a configured API key", async () => {
       const res = await fetch(`${baseUrl}/ready`);
       expect(res.status).toBe(503);
-      expect(await res.json()).toEqual({ status: "starting", ready: false });
-      client.versionError = null;
+      expect(await res.json()).toEqual({
+        ready: false,
+        reasons: ["api_key_unconfigured"],
+      });
     });
   });
 
@@ -298,7 +276,12 @@ describe("HTTP server with auth", () => {
 
   beforeAll(async () => {
     authClient = new FakeAztecClient();
-    authServer = createApp(authClient, { apiKey: TEST_API_KEY });
+    const settlement = settlementContext(openBoundJournal());
+    authServer = createApp(authClient, {
+      apiKey: TEST_API_KEY,
+      settlement,
+      readiness: settlement.readiness,
+    });
     await new Promise<void>((resolve) => {
       authServer.listen(0, () => {
         const addr = authServer.address();
@@ -333,6 +316,19 @@ describe("HTTP server with auth", () => {
     expect(res.status).toBe(200);
     const body = await rpcJson<string>(res);
     expect(body.result).toBe("4.1.3");
+  });
+
+  it("authenticates /ready and serves the authoritative projection", async () => {
+    expect((await fetch(`${authBaseUrl}/ready`)).status).toBe(401);
+    const res = await fetch(`${authBaseUrl}/ready`, {
+      headers: { Authorization: `Bearer ${TEST_API_KEY}` },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      ready: true,
+      nodeVersion: "6.0.0",
+      account: { address: expect.any(String), classId: expect.any(String) },
+    });
   });
 
   it("allows /status without auth", async () => {
@@ -397,165 +393,102 @@ describe("auth failures are throttled separately from real traffic", () => {
   });
 });
 
-describe("GET /status fee juice", () => {
-  async function boot(opts: ServerOptions): Promise<{
-    url: string;
-    client: FakeAztecClient;
-    close: () => Promise<void>;
+describe("GET /ready: authoritative routing", () => {
+  const key = "readiness-route-key";
+
+  async function probe(readiness = readyObserver()): Promise<{
+    live: { status: number; body: unknown };
+    ready: { status: number; body: unknown };
   }> {
-    const c = new FakeAztecClient();
-    const srv = createApp(c, { settlement: settlementContext(openBoundJournal()), ...opts });
-    await new Promise<void>((resolve) => srv.listen(0, resolve));
-    const addr = srv.address();
-    const port = addr && typeof addr === "object" ? addr.port : 0;
-    return {
-      url: `http://127.0.0.1:${port}`,
-      client: c,
-      close: () => new Promise<void>((resolve) => srv.close(() => resolve())),
-    };
-  }
-
-  const status = async (url: string) => (await fetch(`${url}/status`)).json();
-
-  it("reports degraded below the minimum and ok at it", async () => {
-    const { url, client: c, close } = await boot({ minFeeJuice: 1000n, feeJuiceCacheMs: 0 });
-    try {
-      c.feeJuiceBalance = 999n;
-      expect(await status(url)).toEqual({
-        status: "degraded",
-        // Low fee juice degrades the bridge without making it unready.
-        ready: true,
-        version: "4.1.3",
-        feeJuice: { balance: "999", low: true },
-        journal: { writable: true },
-        settlement: { mayBroadcast: "configured", corridor: "configured" },
-      });
-
-      c.feeJuiceBalance = 1000n;
-      expect(await status(url)).toMatchObject({ status: "ok", feeJuice: { low: false } });
-    } finally {
-      await close();
-    }
-  });
-
-  it("serves a cached reading instead of asking the node per request", async () => {
-    const { url, client: c, close } = await boot({ minFeeJuice: 1000n, feeJuiceCacheMs: 60_000 });
-    try {
-      await status(url);
-      c.feeJuiceBalance = 1n;
-      const body = await status(url);
-
-      expect(c.feeJuiceReads).toBe(1);
-      expect(body).toMatchObject({ status: "ok", feeJuice: { balance: "1000" } });
-    } finally {
-      await close();
-    }
-  });
-
-  it("stays up with a null balance when the read fails", async () => {
-    const { url, client: c, close } = await boot({ minFeeJuice: 1000n, feeJuiceCacheMs: 0 });
-    try {
-      c.feeJuiceError = new Error("node down");
-      const res = await fetch(`${url}/status`);
-
-      expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({
-        status: "ok",
-        ready: true,
-        version: "4.1.3",
-        feeJuice: { balance: null },
-        journal: { writable: true },
-        settlement: { mayBroadcast: "configured", corridor: "configured" },
-      });
-    } finally {
-      await close();
-    }
-  });
-});
-
-describe("GET /status journal", () => {
-  it("reports a journal with writes disabled as degraded, naming only the reason", async () => {
-    const journal = openBoundJournal();
-    const path = journal.path;
-    journal.close();
-    const readOnly = SettlementJournal.open(path);
-    readOnly.bindAccount("0x" + "9".repeat(64), true);
-    const srv = createApp(new FakeAztecClient(), { settlement: settlementContext(readOnly) });
-    await new Promise<void>((resolve) => srv.listen(0, resolve));
-    const addr = srv.address();
-    const port = addr && typeof addr === "object" ? addr.port : 0;
-    try {
-      const body = await (await fetch(`http://127.0.0.1:${port}/status`)).json();
-      expect(body).toMatchObject({
-        status: "degraded",
-        journal: { writable: false, reason: "account_mismatch" },
-      });
-      expect(JSON.stringify(body)).not.toContain("9999");
-    } finally {
-      await new Promise<void>((resolve) => srv.close(() => resolve()));
-    }
-  });
-
-  it("reports a bridge with no journal as degraded", async () => {
-    const srv = createApp(new FakeAztecClient());
-    await new Promise<void>((resolve) => srv.listen(0, resolve));
-    const addr = srv.address();
-    const port = addr && typeof addr === "object" ? addr.port : 0;
-    try {
-      const body = await (await fetch(`http://127.0.0.1:${port}/status`)).json();
-      expect(body).toMatchObject({
-        status: "degraded",
-        journal: { writable: false, reason: "journal_unconfigured" },
-      });
-    } finally {
-      await new Promise<void>((resolve) => srv.close(() => resolve()));
-    }
-  });
-});
-
-describe("GET /ready: every settlement prerequisite", () => {
-  async function probe(opts: ServerOptions): Promise<{ live: number; ready: number; body: unknown }> {
-    const srv = createApp(new FakeAztecClient(), opts);
+    const settlement = settlementContext(openBoundJournal(), undefined, { readiness });
+    const srv = createApp(new FakeAztecClient(), {
+      apiKey: key,
+      settlement,
+      readiness,
+    });
     await new Promise<void>((resolve) => srv.listen(0, resolve));
     const addr = srv.address();
     const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
     try {
-      const live = (await fetch(`${url}/status`)).status;
-      const res = await fetch(`${url}/ready`);
-      return { live, ready: res.status, body: await res.json() };
+      const liveResponse = await fetch(`${url}/status`);
+      const readyResponse = await fetch(`${url}/ready`, {
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      return {
+        live: { status: liveResponse.status, body: await liveResponse.json() },
+        ready: { status: readyResponse.status, body: await readyResponse.json() },
+      };
     } finally {
       await new Promise<void>((resolve) => srv.close(() => resolve()));
     }
   }
 
-  it.each([
-    [
-      "no may-broadcast endpoint",
-      () => ({ settlement: settlementContext(openBoundJournal(), undefined, { mayBroadcast: undefined }) }),
-      ["may_broadcast_unconfigured"],
-    ],
-    [
-      "no corridor",
-      () => ({ settlement: settlementContext(openBoundJournal(), undefined, { corridor: undefined }) }),
-      ["corridor_unconfigured"],
-    ],
-    [
-      "no journal",
-      () => ({}),
-      ["journal_unconfigured", "may_broadcast_unconfigured", "corridor_unconfigured"],
-    ],
-    [
-      "an unbound journal",
-      () => ({ settlement: settlementContext(SettlementJournal.open(tempJournalPath())) }),
-      ["journal_account_unbound"],
-    ],
-  ] as const)("is not ready with %s: /status stays 200 but says degraded", async (_name, opts, notReady) => {
-    const { live, ready, body } = await probe(opts());
-    expect(live).toBe(200);
-    expect(ready).toBe(503);
-    expect(body).toMatchObject({ status: "degraded", ready: false, notReady });
+  it("keeps public liveness minimal when operational readiness is lost", async () => {
+    const result = await probe(
+      readyObserver({
+        ready: false,
+        reasons: ["account_paused"],
+        policy: {
+          initialized: true,
+          paused: true,
+          allowlistRoot: "0x" + "c".repeat(64),
+          configuredAllowlistRoot: "0x" + "c".repeat(64),
+        },
+      }),
+    );
+    expect(result.live).toEqual({ status: 200, body: { status: "ok" } });
+    expect(result.ready.status).toBe(503);
+    expect(result.ready.body).toMatchObject({
+      ready: false,
+      reasons: ["account_paused"],
+    });
+  });
+
+  it("returns 200 iff the shared observer says ready", async () => {
+    const result = await probe();
+    expect(result.ready.status).toBe(200);
+    expect(result.ready.body).toMatchObject({ ready: true });
+  });
+
+  it("makes /ready and new admission return the same not-ready reasons", async () => {
+    const readiness = readyObserver({
+      ready: false,
+      reasons: ["inventory_insufficient", "fee_runway_insufficient"],
+    });
+    const settlement = settlementContext(openBoundJournal(), undefined, { readiness });
+    const client = new FakeAztecClient();
+    const srv = createApp(client, { apiKey: key, settlement, readiness });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+    try {
+      const readyResponse = await fetch(`${url}/ready`, {
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      const rpcResponse = await jsonPost(url, rpcBody("aztec_createNote", [v1Params()]), {
+        Authorization: `Bearer ${key}`,
+        "Idempotency-Key": "op-1",
+      });
+      const rpc = await rpcJson(rpcResponse);
+
+      expect((await readyResponse.json()) as object).toMatchObject({
+        ready: false,
+        reasons: ["inventory_insufficient", "fee_runway_insufficient"],
+      });
+      expect(rpc.error).toMatchObject({
+        code: -32006,
+        data: {
+          reason: "bridge_not_ready",
+          reasons: ["inventory_insufficient", "fee_runway_insufficient"],
+        },
+      });
+      expect(client.proofs).toBe(0);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
   });
 });
+
 
 describe("HTTP response deadline", () => {
   it("closes the gate before the 504, so an answer arriving later cannot mark", async () => {

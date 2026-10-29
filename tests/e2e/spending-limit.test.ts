@@ -7,7 +7,15 @@ import {
 import { AllowlistTree } from "../../src/allowlist-tree.js";
 import type { AccountDeployment } from "../../src/types.js";
 import { SCHNORR_CLASS_ID_6_0_0, assertAccountIdentity } from "../../src/account-identity.js";
+import { SettlementJournal } from "../../src/journal.js";
+import { TransactionLimits } from "../../src/limits.js";
+import { createReadinessObserver } from "../../src/readiness.js";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
+  advanceFinalizedTip,
+  finalizedTimestampMs,
   getTestConfig,
   deployTestToken,
   feeWithHeadroom,
@@ -85,6 +93,12 @@ const UNLISTED_RECIPIENT = "0x" + "22".repeat(32);
 // first touch of a position visibly an addition.
 const ALLOWLIST_SEED = "0x" + "07".repeat(32);
 const SEED_RECIPIENT_INDEX = 137;
+const READINESS_CORRIDOR = {
+  corridorId: "0x" + "c2".repeat(32),
+  corridorRevision: 1,
+  manifestDigest: "0x" + "d2".repeat(32),
+  genesisOrNetworkDigest: "0x" + "e2".repeat(32),
+};
 
 
 describe("spending limit account (e2e)", () => {
@@ -151,6 +165,10 @@ describe("spending limit account (e2e)", () => {
         FEE_JUICE_AMOUNT,
         () => mintOne(funderWallet, tokenAddress, adminAddress),
       );
+      await advanceFinalizedTip(
+        config.nodeUrl,
+        () => mintOne(funderWallet, tokenAddress, adminAddress),
+      );
     } catch (err) {
       deployFailure = err;
     }
@@ -164,6 +182,114 @@ describe("spending limit account (e2e)", () => {
     }
     expect(accountAddress).toMatch(/^0x[0-9a-f]{64}$/i);
   });
+
+  it("observes the funded deployment as ready from one finalized reference", async (ctx) => {
+    if (deployFailure) return ctx.skip();
+
+    const observed = new AztecClient(
+      config.nodeUrl,
+      config.secretKey,
+      undefined,
+      {
+        maxAmountPerTx: MAX_PER_TX,
+        dailyLimit: DAILY_LIMIT,
+        admin: adminAddress,
+        token: tokenAddress,
+        allowlistSeed: ALLOWLIST_SEED,
+        allowlistRecipients: [{ address: SEED_RECIPIENT, index: SEED_RECIPIENT_INDEX }],
+        deployment: await deployedRecord(),
+      },
+      undefined,
+      walletDataDirectory("limit-readiness"),
+    );
+    await observed.connect();
+    const trustedNow = await finalizedTimestampMs(config.nodeUrl);
+
+    const journal = SettlementJournal.open(
+      join(mkdtempSync(join(tmpdir(), "limit-readiness-journal-")), "settlement.sqlite"),
+    );
+    journal.bindAccount(accountAddress, observed.accountPreexisted(), {
+      acknowledgement: `${accountAddress}@${journal.meta().journalId}`,
+    });
+    const observer = createReadinessObserver(observed, {
+      journal,
+      limits: new TransactionLimits({
+        maxAmount: MAX_PER_TX,
+        dailyLimit: DAILY_LIMIT,
+      }),
+      mayBroadcastConfigured: true,
+      corridor: READINESS_CORRIDOR,
+      now: () => trustedNow,
+    });
+    try {
+      const readiness = await observer.observe();
+
+      expect(readiness.reasons, JSON.stringify(readiness, null, 2)).toEqual([]);
+      expect(readiness.ready).toBe(true);
+      expect(readiness.finalized).toMatchObject({
+        blockNumber: expect.stringMatching(/^[1-9]\d*$/),
+        blockHash: expect.stringMatching(/^0x[0-9a-f]{64}$/i),
+        maxAgeSeconds: 7_200,
+      });
+      expect(readiness.inventory.observed).toBe(MINT_AMOUNT.toString());
+      expect(BigInt(readiness.feeRunway.observed!)).toBeGreaterThanOrEqual(
+        BigInt(readiness.feeRunway.required!),
+      );
+
+      journal.close();
+      const withoutFence = await observer.observe();
+      expect(withoutFence.ready).toBe(false);
+      expect(withoutFence.reasons).toContain("writer_fence_lost");
+    } finally {
+      journal.close();
+    }
+  }, 600_000);
+
+  it("fails readiness on finalized allowlist-root drift", async (ctx) => {
+    if (deployFailure) return ctx.skip();
+
+    const drifted = new AztecClient(
+      config.nodeUrl,
+      config.secretKey,
+      undefined,
+      {
+        maxAmountPerTx: MAX_PER_TX,
+        dailyLimit: DAILY_LIMIT,
+        admin: adminAddress,
+        token: tokenAddress,
+        allowlistSeed: ALLOWLIST_SEED,
+        allowlistRecipients: [{ address: UNLISTED_RECIPIENT, index: 511 }],
+        deployment: await deployedRecord(),
+      },
+      undefined,
+      walletDataDirectory("limit-readiness-root-drift"),
+    );
+    await drifted.connect();
+    const trustedNow = await finalizedTimestampMs(config.nodeUrl);
+    const journal = SettlementJournal.open(
+      join(mkdtempSync(join(tmpdir(), "limit-root-drift-journal-")), "settlement.sqlite"),
+    );
+    journal.bindAccount(accountAddress, drifted.accountPreexisted(), {
+      acknowledgement: `${accountAddress}@${journal.meta().journalId}`,
+    });
+    try {
+      const readiness = await createReadinessObserver(drifted, {
+        journal,
+        limits: new TransactionLimits({
+          maxAmount: MAX_PER_TX,
+          dailyLimit: DAILY_LIMIT,
+        }),
+        mayBroadcastConfigured: true,
+        corridor: READINESS_CORRIDOR,
+        now: () => trustedNow,
+      }).observe();
+      expect(readiness.ready).toBe(false);
+      expect(readiness.reasons).toContain("allowlist_root_mismatch");
+      expect(readiness.finalized.blockNumber).toMatch(/^[1-9]\d*$/);
+    } finally {
+      journal.close();
+    }
+  }, 600_000);
 
   // The restart the allowlist runbook prescribes. The address used to derive
   // from live configuration, so this client, with a different set and

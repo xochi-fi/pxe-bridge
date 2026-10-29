@@ -12,6 +12,7 @@ import {
   fakeMayBroadcast,
   openBoundJournal,
   rpcBody,
+  readyObserver,
   settlementContext,
   tempJournalPath,
   v1Params,
@@ -120,6 +121,35 @@ describe("aztec_createNote: the versioned payload", () => {
   });
 });
 
+  it("returns typed not-ready data before proving or reserving", async () => {
+    s.readiness = readyObserver({
+      ready: false,
+      reasons: ["account_paused", "fee_runway_insufficient"],
+      policy: {
+        initialized: true,
+        paused: true,
+        allowlistRoot: "0x" + "c".repeat(64),
+        configuredAllowlistRoot: "0x" + "c".repeat(64),
+      },
+    });
+    const limits = new TransactionLimits({ maxAmount: 1000n, dailyLimit: 10_000n });
+    const res = await createNote(client, { settlement: s, limits });
+
+    expect(res.error?.code).toBe(RPC_ERRORS.NOT_READY);
+    expect(res.error?.data).toMatchObject({
+      reason: "bridge_not_ready",
+      reasons: ["account_paused", "fee_runway_insufficient"],
+      finalized: { blockNumber: "7" },
+    });
+    expect(res.error?.data?.observation).toEqual({
+      state: "not_submitted",
+      reason: "account_paused",
+      retryableAfterRevalidation: true,
+    });
+    expect(client.proofs).toBe(0);
+    expect(limits.windowStatus().reserved).toBe(0n);
+  });
+
 describe("aztec_createNote: the broadcast gate", () => {
   it("journals, asks, marks, then broadcasts once and returns the observation", async () => {
     const res = await createNote(client, ctx);
@@ -202,7 +232,7 @@ describe("aztec_createNote: the broadcast gate", () => {
 
   it.each([
     ["corridor_mismatch", () => ({ corridor: { ...(v1Params()["corridor"] as object), corridorRevision: 2 } })],
-    ["account_mode_mismatch", () => ({ accountMode: "spending_limit" })],
+    ["account_mode_mismatch", () => ({ accountMode: "standard" })],
   ])("refuses %s before preparing", async (reason, override) => {
     const res = await createNote(client, ctx, v1Params(override()));
     expect(res.error?.code).toBe(RPC_ERRORS.NOT_SUBMITTED);
@@ -210,21 +240,29 @@ describe("aztec_createNote: the broadcast gate", () => {
     expect(client.proofs).toBe(0);
   });
 
-  it("refuses a node on another network", async () => {
-    client.network = { ...client.network, rollupAddress: "0x" + "9".repeat(40) };
+  it("refuses a request for a network other than authoritative readiness", async () => {
+    const projected = await readyObserver().observe();
+    s.readiness = readyObserver({
+      network: { ...projected.network, rollupContract: "0x" + "9".repeat(40) },
+    });
     const res = await createNote(client, ctx);
     expect(res.error?.data?.observation).toMatchObject({ reason: "network_mismatch" });
     expect(client.proofs).toBe(0);
   });
 
-  it("refuses a token other than the pinned one", async () => {
-    client.pinned = "0x" + "e".repeat(64);
+  it("refuses a token other than the readiness-pinned one", async () => {
+    s.readiness = readyObserver({ token: "0x" + "e".repeat(64) });
     const res = await createNote(client, ctx);
     expect(res.error?.data?.observation).toMatchObject({ reason: "token_mismatch" });
   });
 
   it("refuses when no may-broadcast endpoint is configured", async () => {
+    s.readiness = readyObserver({
+      ready: false,
+      reasons: ["may_broadcast_unconfigured"],
+    });
     const res = await createNote(client, { settlement: { ...s, mayBroadcast: undefined } });
+    expect(res.error?.code).toBe(RPC_ERRORS.NOT_READY);
     expect(res.error?.data?.observation).toMatchObject({ reason: "may_broadcast_unconfigured" });
     expect(client.proofs).toBe(0);
   });
@@ -317,6 +355,10 @@ describe("ambiguity after the mark is submitted_unknown, never a retryable error
     expect(first.error?.code).toBe(RPC_ERRORS.SUBMITTED_UNKNOWN);
     expect(client.sends).toHaveLength(0);
     const marked = journal.attempts("op-1")[0]!.txHash;
+    s.readiness = readyObserver({
+      ready: false,
+      reasons: ["finalized_history_unavailable"],
+    });
     expect((await getSettlement(client, ctx)).observation).toMatchObject({
       state: "submitted_unknown",
       reason: "node_reports_dropped_or_unknown",
@@ -350,7 +392,7 @@ describe("ambiguity after the mark is submitted_unknown, never a retryable error
     expect((await getSettlement(client, late)).observation.state).toBe("submitted_unknown");
   });
 
-  it("refuses every replay once the startup invariant fails", async () => {
+  it("keeps exact-byte recovery available when readiness loses journal writes", async () => {
     const path = tempJournalPath();
     const first = openBoundJournal(path);
     client.behaviour = "die_after_mark";
@@ -365,8 +407,8 @@ describe("ambiguity after the mark is submitted_unknown, never a retryable error
     expect(reopened.health()).toMatchObject({ writable: false, reason: "journal_inconsistent" });
     client.behaviour = "land";
     const retry = await createNote(client, { settlement: settlementContext(reopened, gate.client) });
-    expect(retry.error?.code).toBe(RPC_ERRORS.JOURNAL_UNAVAILABLE);
-    expect(client.sends).toHaveLength(0);
+    expect(retry.result?.observation.state).toBe("included");
+    expect(client.sends).toHaveLength(1);
     expect(client.proofs).toBe(1);
   });
 
@@ -577,10 +619,13 @@ describe("one deadline for the whole request", () => {
     expect(gate.calls).toEqual([]);
   });
 
-  it("counts admission against it: a node that will not answer ends the request", async () => {
-    client.networkIdentity = () => new Promise(() => undefined);
+  it("counts readiness observation against the request deadline", async () => {
+    s.readiness = { observe: () => new Promise(() => undefined) };
     const res = await createNote(client, { settlement: { ...s, timeoutMs: 50 } });
-    expect(res.error?.data?.observation).toMatchObject({ state: "not_submitted", reason: "response_deadline" });
+    expect(res.error?.data?.observation).toMatchObject({
+      state: "not_submitted",
+      reason: "response_deadline",
+    });
     expect(client.proofs).toBe(0);
   });
 

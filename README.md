@@ -57,7 +57,7 @@ EVM Solver --JSON-RPC--> pxe-bridge --Aztec SDK--> Aztec L2 Node
 | `PXE_BRIDGE_PORT`       | No       | `8547`                  | HTTP listen port (0-65535)                     |
 | `PXE_BRIDGE_ACCOUNT_ADDRESS` | Prod | --                   | The bridge account's recorded address; startup refuses any other |
 | `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY` | Prod, first deploy only | -- | `1` lets production start without a recorded address |
-| `PXE_BRIDGE_MIN_FEE_JUICE` | No    | --                      | Fee juice floor; below it `/status` reports `degraded` and a warning is logged |
+| `PXE_BRIDGE_ACCOUNT_DEPLOYMENT` | Operational settlement | -- | Durable spending-limit deployment record; hard readiness refuses new settlements without it |
 
 The secret key is a BN254 scalar, not an arbitrary 32 bytes. About 81% of
 random 32-byte values are at or above the field modulus and are rejected at
@@ -633,43 +633,53 @@ Requests without the header behave exactly as before: every one executes.
 
 Returns the connected Aztec node version string.
 
-### Health Check
+### Liveness and operational readiness
 
-Two unauthenticated, rate-limited endpoints share one body:
+`GET /status` is the public, unauthenticated liveness endpoint. It exposes only
+`{"status":"ok"}` while the node answers (HTTP 200), or
+`{"status":"starting"}` while it does not (HTTP 503). Keep container restarts
+on this route: a bridge that has lost settlement readiness must remain up for
+reconciliation and exact-byte rebroadcast of already marked operations.
 
-- `GET /status` is **liveness**: 200 whenever the node answers, 503
-  `{ status: "starting", ready: false }` until it does. Keep container
-  restarts on it: a bridge with journal writes disabled must stay up to serve
-  `aztec_getSettlement`.
-- `GET /ready` is **readiness**: 200 only when every settlement prerequisite
-  holds -- the journal configured and writable, the may-broadcast endpoint
-  and the corridor configured -- and 503 otherwise. Gate traffic and deploys
-  on it.
+`GET /ready` is the authenticated operational endpoint. It requires the same
+`Authorization: Bearer <PXE_BRIDGE_API_KEY>` header as JSON-RPC and returns
+HTTP 200 only when the single admission predicate says a new settlement may
+start; otherwise it returns HTTP 503 with stable reasons. Authentication
+failures use the separate auth-failure rate limiter and expose no operational
+state.
 
-The body is `{ status, ready, notReady?, version, feeJuice: { balance, low? },
-journal: { writable, reason? }, settlement: { mayBroadcast, corridor } }`.
-`notReady` lists every unmet prerequisite (`journal_unconfigured`,
-`journal_<reason>`, `may_broadcast_unconfigured`, `corridor_unconfigured`).
-`status` is `ok` only when ready and fee juice is not low, otherwise
-`degraded`. `balance` is the solver account's fee juice as a decimal string,
-cached for 30s so the unauthenticated endpoints do not query the node per
-request, and `null` if the last read failed (never `low` then). With
-`PXE_BRIDGE_MIN_FEE_JUICE` set, `feeJuice.low` is added while the balance is
-below it; low fee juice degrades the bridge without making it unready, since
-restarting it does not add fee juice. Top up with `npm run top-up-fee-juice`
-before it runs out, since every transfer fails once it does.
+Hard readiness requires design-A `spending_limit` mode and its durable
+deployment record; the exact derived account address and compiled class;
+initialized, unpaused account state; exact token, allowlist root and live
+limits; sufficient finalized token inventory and rolling-window headroom;
+sufficient fee juice; a healthy writable journal with its exclusive writer
+fence; complete network identity; node transaction readiness; and synchronized
+world-state history. All contract, storage, inventory and fee observations use
+one exact, nonzero `finalized` block number and hash. There is no
+`proven`/`latest` fallback. That finalized block's timestamp must be no more
+than 7,200 seconds old or 300 seconds ahead of local time; a missing or
+unreadable value is not ready.
 
-```jsonc
-// /status 200, /ready 200
-{ "status": "ok", "ready": true, "version": "6.0.0", "feeJuice": { "balance": "999000000000000000" },
-  "journal": { "writable": true }, "settlement": { "mayBroadcast": "configured", "corridor": "configured" } }
-// /status 200, /ready 503: no corridor configured
-{ "status": "degraded", "ready": false, "notReady": ["corridor_unconfigured"], "version": "6.0.0",
-  "feeJuice": { "balance": "10" }, "journal": { "writable": true },
-  "settlement": { "mayBroadcast": "configured", "corridor": "unconfigured" } }
-// both 503, not connected yet
-{ "status": "starting", "ready": false }
+The fee runway shown by `/ready` reports both observed and required fee juice.
+Required fee juice is:
+
 ```
+(in-flight transfers + ceil(rolling-window headroom / live per-tx cap))
+  * (transaction gas limits * predicted maximum fees per gas)
+```
+
+Inventory likewise reports observed finalized balance and the volume still
+admissible, including reservations. A static minimum-balance setting is not a
+substitute for this operation-count-based policy.
+
+`aztec_createNote` invokes this same observer before proving or broadcasting
+new work and returns JSON-RPC `-32006` with
+`data.reason: "bridge_not_ready"`, stable `data.reasons`, and the established
+typed `data.observation` (`not_submitted`, with the primary readiness reason).
+Readiness loss does not erase or redirect journaled operations:
+`aztec_getSettlement`, marked-operation reconciliation and exact-byte
+rebroadcast remain available. An unmarked operation cannot newly pass
+admission while the bridge is unready.
 
 The Docker `HEALTHCHECK` reads only `/status`'s HTTP code (`curl -sf`).
 
