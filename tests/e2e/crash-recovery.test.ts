@@ -11,11 +11,23 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { randomBytes } from "node:crypto";
+import { AllowlistTree } from "../../src/allowlist-tree.js";
+import type { AccountDeployment } from "../../src/types.js";
 import { AztecClient } from "../../src/aztec-client.js";
 import { SETTLEMENT_VERSION } from "../../src/settlement.js";
 import { SettlementJournal } from "../../src/journal.js";
 import { MAY_BROADCAST_VERSION } from "../../src/may-broadcast.js";
-import { getTestConfig, registerPublished, requireTestToken, walletDataDirectory } from "./helpers.js";
+import {
+  advanceFinalizedTip,
+  FUNDER_KEY,
+  fundFeeJuice,
+  getTestConfig,
+  mintOne,
+  mintTo,
+  registerPublished,
+  requireTestToken,
+  walletDataDirectory,
+} from "./helpers.js";
 
 /**
  * HARD-CRASH SMOKE (xochi-fi/pxe-bridge#45). A real bridge process, a real
@@ -44,6 +56,12 @@ const CORRIDOR = {
 };
 const SERVICE_TOKEN = "smoke-service-credential";
 const RPC_KEY = "smoke-rpc-key";
+const MAX_PER_TX = 1_000_000n;
+const DAILY_LIMIT = 10_000_000n;
+const INVENTORY = 100_000_000n;
+const ALLOWLIST_SEED = "0x" + "47".repeat(32);
+const FEE_JUICE_AMOUNT = 1_000_000_000_000_000_000_000n;
+const RECIPIENT = "0x" + "48".repeat(32);
 
 type KillPoint = "after_node_accepts" | "before_node_sees";
 
@@ -85,6 +103,8 @@ describe("hard crash mid-broadcast (e2e)", () => {
   let observer: AztecClient;
   let account: string;
   let token: string;
+  let admin: string;
+  let deployment: AccountDeployment;
   let proxy: Server;
   let proxyUrl: string;
   let gate: Server;
@@ -113,7 +133,11 @@ describe("hard crash mid-broadcast (e2e)", () => {
     return BigInt((value as { toString(): string }).toString());
   }
 
-  async function startBridge(workDir: string, journal: string): Promise<Bridge> {
+  async function startBridge(
+    workDir: string,
+    journal: string,
+    requireReadiness = true,
+  ): Promise<Bridge> {
     // A port the OS just handed out, released for the bridge to bind.
     const probe = createServer();
     const port = await listen(probe);
@@ -125,6 +149,13 @@ describe("hard crash mid-broadcast (e2e)", () => {
         AZTEC_NODE_URL: proxyUrl,
         PXE_BRIDGE_SECRET_KEY: config.secretKey,
         PXE_BRIDGE_ACCOUNT_ADDRESS: account,
+        PXE_BRIDGE_SPENDING_LIMIT_ADMIN: admin,
+        PXE_BRIDGE_SPENDING_LIMIT_TOKEN: token,
+        PXE_BRIDGE_ALLOWLIST_SEED: ALLOWLIST_SEED,
+        PXE_BRIDGE_ALLOWLIST_RECIPIENTS: JSON.stringify([{ address: RECIPIENT, index: 347 }]),
+        PXE_BRIDGE_ACCOUNT_DEPLOYMENT: JSON.stringify(deployment),
+        PXE_BRIDGE_MAX_AMOUNT: MAX_PER_TX.toString(),
+        PXE_BRIDGE_DAILY_LIMIT: DAILY_LIMIT.toString(),
         PXE_BRIDGE_API_KEY: RPC_KEY,
         PXE_BRIDGE_PORT: String(port),
         PXE_BRIDGE_JOURNAL: journal,
@@ -144,7 +175,11 @@ describe("hard crash mid-broadcast (e2e)", () => {
     while (Date.now() < deadline) {
       if (child.exitCode !== null) throw new Error(`bridge exited during startup:\n${log}`);
       try {
-        const res = await fetch(`${url}/status`);
+        const res = await fetch(`${url}${requireReadiness ? "/ready" : "/status"}`, {
+          ...(requireReadiness
+            ? { headers: { authorization: `Bearer ${RPC_KEY}` } }
+            : {}),
+        });
         if (res.status === 200) return { child, url, exited };
       } catch {
         // not listening yet
@@ -182,9 +217,8 @@ describe("hard crash mid-broadcast (e2e)", () => {
         corridorRevision: CORRIDOR.corridorRevision,
         manifestDigest: CORRIDOR.manifestDigest,
       },
-      accountMode: "standard",
-      // A fresh recipient per run: nobody else can be paying it.
-      recipient: "0x00" + randomBytes(31).toString("hex"),
+      accountMode: "spending_limit",
+      recipient: RECIPIENT,
       recipientDescriptorDigest: "0x" + "ab".repeat(32),
       token,
       amount: AMOUNT,
@@ -195,16 +229,62 @@ describe("hard crash mid-broadcast (e2e)", () => {
   beforeAll(async () => {
     execFileSync("npm", ["run", "build"], { cwd: REPO, stdio: "inherit" });
     token = requireTestToken();
+    const funder = new AztecClient(
+      config.nodeUrl,
+      FUNDER_KEY,
+      undefined,
+      undefined,
+      undefined,
+      walletDataDirectory("crash-funder"),
+    );
+    await funder.connect();
+    admin = funder.getAddress()!;
+    // Test access to the SDK wallet is unavailable on AztecClient's public API.
+    const funderInternal = funder as unknown as { wallet: unknown };
+    const funderWallet = funderInternal.wallet;
     observer = new AztecClient(
       config.nodeUrl,
       config.secretKey,
-      config.feeJuiceClaim,
       undefined,
+      {
+        maxAmountPerTx: MAX_PER_TX,
+        dailyLimit: DAILY_LIMIT,
+        admin,
+        token,
+        allowlistSeed: ALLOWLIST_SEED,
+        allowlistRecipients: [{ address: RECIPIENT, index: 347 }],
+      },
       undefined,
       walletDataDirectory("crash-observer"),
     );
     await observer.connect();
     account = observer.getAddress()!;
+    const { TokenContract } = await import("@aztec-labs/noir-contracts.js/Token");
+    await registerPublished(funderWallet, token, TokenContract.artifact);
+    await mintTo(funderWallet, token, account, INVENTORY, admin);
+    await fundFeeJuice(
+      config.nodeUrl,
+      funderWallet,
+      admin,
+      account,
+      FEE_JUICE_AMOUNT,
+      () => mintOne(funderWallet, token, admin),
+    );
+    await advanceFinalizedTip(
+      config.nodeUrl,
+      () => mintOne(funderWallet, token, admin),
+    );
+    const tree = await AllowlistTree.build(ALLOWLIST_SEED, [
+      { address: RECIPIENT, index: 347 },
+    ]);
+    deployment = {
+      address: account,
+      maxAmountPerTx: MAX_PER_TX.toString(),
+      dailyLimit: DAILY_LIMIT.toString(),
+      admin,
+      token,
+      allowlistRoot: tree.root.toString(),
+    };
 
     // The may-broadcast endpoint Riddler would serve: allow, authenticated.
     gate = createServer(async (req, res) => {
@@ -348,12 +428,16 @@ describe("hard crash mid-broadcast (e2e)", () => {
     writeSync(fd, Buffer.alloc(100, 0x5a), 0, 100, 0);
     closeSync(fd);
 
-    bridge = await startBridge(workDir, journal);
-    const status = (await (await fetch(`${bridge.url}/status`)).json()) as {
-      status: string;
-      journal: { writable: boolean; reason?: string };
-    };
-    expect(status).toMatchObject({ status: "degraded", journal: { writable: false, reason: "corrupt" } });
+    bridge = await startBridge(workDir, journal, false);
+    expect(await (await fetch(`${bridge.url}/status`)).json()).toEqual({ status: "ok" });
+    const readiness = await fetch(`${bridge.url}/ready`, {
+      headers: { authorization: `Bearer ${RPC_KEY}` },
+    });
+    expect(readiness.status).toBe(503);
+    expect(await readiness.json()).toMatchObject({
+      ready: false,
+      reasons: expect.arrayContaining(["journal_unwritable"]),
+    });
     const params = await terms("corrupt-op");
     const refused = await rpc(bridge.url, "aztec_createNote", params, "corrupt-op");
     expect(refused.error?.code).toBe(-32004);

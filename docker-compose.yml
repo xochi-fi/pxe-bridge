@@ -20,10 +20,13 @@ services:
     # automine sequencer drives L1 time itself. Under `--block-time 1` its
     # checkpoint proposals reverted `Rollup__SlotAlreadyInChain` in a loop,
     # and startup failed with "Timeout awaiting isMined".
+    # Match Aztec's supported test Anvil launcher: finalized = latest -
+    # 2*slots-in-an-epoch. One makes finalized history advance after two L1
+    # blocks instead of Anvil's stock epoch depth, without weakening the node.
     entrypoint:
-      ["anvil", "--host", "0.0.0.0", "--chain-id", "31337", "--block-base-fee-per-gas", "0"]
+      ["anvil", "--host", "0.0.0.0", "--chain-id", "31337", "--block-base-fee-per-gas", "0", "--slots-in-an-epoch", "1"]
     ports:
-      - "8545:8545"
+      - "${L1_PORT:-8545}:8545"
     healthcheck:
       test: ["CMD", "cast", "block-number", "--rpc-url", "http://localhost:8545"]
       interval: 5s
@@ -53,7 +56,7 @@ services:
     # cold starts reached healthy without a restart (2026-10-19). The one 6.0.0
     # arm64 cold start with the anvil above did too (2026-10-25).
     ports:
-      - "8080:8080"
+      - "${AZTEC_PORT:-8080}:8080"
     environment:
       ETHEREUM_HOSTS: http://anvil:8545
       L1_CHAIN_ID: "31337"
@@ -71,7 +74,7 @@ services:
   pxe-bridge:
     build: .
     ports:
-      - "8547:8547"
+      - "${BRIDGE_PORT:-8547}:8547"
     environment:
       # The image sets NODE_ENV=production, under which secrets.ts rejects
       # PXE_BRIDGE_SECRET_KEY and demands PXE_BRIDGE_SECRET_ARN. That made this

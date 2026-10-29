@@ -28,6 +28,7 @@ import { legacyAuditRefusal } from "./legacy-audit.js";
 import { httpMayBroadcastClient, type MayBroadcastClient } from "./may-broadcast.js";
 import { CorridorConfigSchema, type CorridorConfig } from "./settlement.js";
 import { resolveSecretKey } from "./secrets.js";
+import { createReadinessObserver } from "./readiness.js";
 import type { SpendingLimitConfig } from "./spending-limit-account.js";
 
 // Must match WINDOW_MS in limits.ts: it bounds the same rolling window.
@@ -153,13 +154,6 @@ if (DAILY_LIMIT_RAW) {
   limitsConfig.dailyLimit = parsePositiveBigInt("PXE_BRIDGE_DAILY_LIMIT", DAILY_LIMIT_RAW);
 }
 
-// Unlike the limits above, a floor on the bridge's own fee juice. The
-// spending-limit account cannot refill itself, so running dry means every
-// transfer fails; this surfaces it on /status before that happens.
-const MIN_FEE_JUICE_RAW = process.env["PXE_BRIDGE_MIN_FEE_JUICE"];
-const minFeeJuice = MIN_FEE_JUICE_RAW
-  ? parsePositiveBigInt("PXE_BRIDGE_MIN_FEE_JUICE", MIN_FEE_JUICE_RAW)
-  : undefined;
 
 const COOLDOWN_THRESHOLD_RAW = process.env["PXE_BRIDGE_COOLDOWN_THRESHOLD"];
 const COOLDOWN_DELAY_RAW = process.env["PXE_BRIDGE_COOLDOWN_DELAY_MS"];
@@ -569,11 +563,18 @@ async function main(): Promise<void> {
         : {}),
     },
   );
+  const readiness = createReadinessObserver(client, {
+    journal,
+    limits,
+    mayBroadcastConfigured: mayBroadcast !== undefined,
+    corridor,
+  });
   const server = createApp(client, {
     apiKey: API_KEY,
     adminKey: ADMIN_KEY,
     limits,
     audit,
+    readiness,
     ...(journal
       ? {
           settlement: {
@@ -582,10 +583,10 @@ async function main(): Promise<void> {
             corridor,
             inFlight: new Set<string>(),
             timeoutMs: SETTLEMENT_DEADLINE_MS,
+            readiness,
           },
         }
       : {}),
-    minFeeJuice,
   });
 
   await client.connect();
@@ -653,8 +654,8 @@ async function main(): Promise<void> {
       `  POST /           -- JSON-RPC (aztec_createNote, aztec_getSettlement, aztec_getVersion)`,
     );
     console.log(`  POST /api/rpc    -- JSON-RPC (alias)`);
-    console.log(`  GET  /status     -- Liveness (200 while the node answers; body lists prerequisites)`);
-    console.log(`  GET  /ready      -- Readiness (200 only when every settlement prerequisite holds)`);
+    console.log(`  GET  /status     -- Minimal public liveness`);
+    console.log(`  GET  /ready      -- Authenticated hard settlement readiness`);
     console.log(
       `  POST /admin/resume -- Clear the circuit breaker (${ADMIN_KEY ? "enabled" : "DISABLED"})`,
     );

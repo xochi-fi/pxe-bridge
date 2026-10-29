@@ -4,6 +4,7 @@ import { handleRpcRequest, type RpcContext, type SettlementContext } from "./rpc
 import { RPC_ERRORS, type IAztecClient } from "./types.js";
 import type { TransactionLimits } from "./limits.js";
 import type { AuditLogger } from "./audit.js";
+import type { ReadinessObserver } from "./readiness.js";
 
 const MAX_BODY_BYTES = 64 * 1024; // 64 KB
 const RATE_LIMIT_WINDOW_MS = 60_000;
@@ -40,20 +41,12 @@ export interface ServerOptions {
    * `aztec_createNote` and `aztec_getSettlement` with -32004.
    */
   settlement?: SettlementContext | undefined;
-  /**
-   * Fee juice floor. Below it `/status` reports `degraded` and a warning is
-   * logged on each refresh. Unset reports the balance without judging it.
-   */
-  minFeeJuice?: bigint | undefined;
-  /** How long a fee juice reading is served before the node is asked again. */
-  feeJuiceCacheMs?: number | undefined;
+  /** Authoritative operational readiness, shared with createNote admission. */
+  readiness?: ReadinessObserver | undefined;
   /** The HTTP response deadline; RESPONSE_TIMEOUT_MS unless a test shortens it. */
   responseTimeoutMs?: number | undefined;
 }
 
-// /status is unauthenticated, so without a cache anyone could turn its rate
-// limit into node reads on the bridge's behalf.
-const FEE_JUICE_CACHE_MS = 30_000;
 
 // Failed auth gets its own, much smaller budget, separate from the one real
 // traffic spends. One shared bucket forces a choice between two bad outcomes:
@@ -200,6 +193,14 @@ function checkAuth(req: IncomingMessage, apiKey: string): boolean {
 }
 
 export function createApp(client: IAztecClient, opts: ServerOptions = {}): Server {
+  if (
+    opts.readiness !== undefined &&
+    opts.settlement?.readiness !== undefined &&
+    opts.readiness !== opts.settlement.readiness
+  ) {
+    throw new Error("Server and settlement must share one readiness observer");
+  }
+  const readinessObserver = opts.readiness ?? opts.settlement?.readiness;
   const rateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const authFailureLimiter = new RateLimiter(AUTH_FAILURE_MAX, RATE_LIMIT_WINDOW_MS);
 
@@ -225,36 +226,6 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
     return true;
   };
 
-  const feeJuiceCacheMs = opts.feeJuiceCacheMs ?? FEE_JUICE_CACHE_MS;
-  let feeJuice: { balance: bigint | null; at: number } | undefined;
-  let feeJuiceRead: Promise<bigint | null> | undefined;
-
-  /**
-   * The cached balance, refreshed at most once per `feeJuiceCacheMs` and
-   * shared by concurrent callers. A failed read is cached as null for the same
-   * interval: a node that cannot answer should not be asked once per request.
-   */
-  const readFeeJuice = async (): Promise<bigint | null> => {
-    if (feeJuice && Date.now() - feeJuice.at < feeJuiceCacheMs) return feeJuice.balance;
-    feeJuiceRead ??= client
-      .getFeeJuiceBalance()
-      .catch((err: unknown) => {
-        console.error("[pxe-bridge] Fee juice balance read failed:", err);
-        return null;
-      })
-      .then((balance) => {
-        feeJuice = { balance, at: Date.now() };
-        feeJuiceRead = undefined;
-        if (balance !== null && opts.minFeeJuice !== undefined && balance < opts.minFeeJuice) {
-          console.warn(
-            `[pxe-bridge] Fee juice low: ${balance} below PXE_BRIDGE_MIN_FEE_JUICE ` +
-              `${opts.minFeeJuice}. Top up with npm run top-up-fee-juice.`,
-          );
-        }
-        return balance;
-      });
-    return feeJuiceRead;
-  };
 
   const server = createServer(async (req, res) => {
     // Nothing otherwise bounded how long a connection could stay open waiting
@@ -282,59 +253,47 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
     try {
       const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
 
-      // Liveness (/status) and readiness (/ready): no auth, rate-limited, one
-      // body. /status answers 200 whenever the node does, so a degraded but
-      // live bridge is not restarted; /ready answers 200 only when every
-      // settlement prerequisite holds, and 503 otherwise.
-      if (req.method === "GET" && (pathname === "/status" || pathname === "/ready")) {
+      // Public liveness is deliberately minimal: no account, policy, balance,
+      // journal, network, or readiness detail is exposed without the RPC key.
+      if (req.method === "GET" && pathname === "/status") {
         const statusIp = req.socket.remoteAddress ?? "unknown";
         if (!rateLimiter.allow(statusIp)) {
           sendJson(res, 429, { error: "Too many requests" });
           return;
         }
         try {
-          const version = await client.getVersion();
-          const balance = await readFeeJuice();
-          const low =
-            opts.minFeeJuice !== undefined && balance !== null && balance < opts.minFeeJuice;
-          const settlement = opts.settlement;
-          // Public, so the reason only: the detail can name the account.
-          const journal = settlement?.journal.health();
-          const notReady = [
-            ...(journal === undefined
-              ? ["journal_unconfigured"]
-              : journal.writable
-                ? []
-                : [`journal_${journal.reason}`]),
-            // Listed with or without a settlement context: a bridge with no
-            // journal lacks these too, and the operator needs every gap at once.
-            ...(settlement?.mayBroadcast === undefined ? ["may_broadcast_unconfigured"] : []),
-            ...(settlement?.corridor === undefined ? ["corridor_unconfigured"] : []),
-          ];
-          const ready = notReady.length === 0;
-          sendJson(res, pathname === "/ready" && !ready ? 503 : 200, {
-            status: ready && !low ? "ok" : "degraded",
-            ready,
-            ...(ready ? {} : { notReady }),
-            version,
-            feeJuice: {
-              balance: balance === null ? null : balance.toString(),
-              ...(opts.minFeeJuice !== undefined && balance !== null ? { low } : {}),
-            },
-            journal:
-              journal === undefined
-                ? { writable: false, reason: "journal_unconfigured" }
-                : journal.writable
-                  ? { writable: true }
-                  : { writable: false, reason: journal.reason },
-            settlement: {
-              mayBroadcast: settlement?.mayBroadcast === undefined ? "unconfigured" : "configured",
-              corridor: settlement?.corridor === undefined ? "unconfigured" : "configured",
-            },
-          });
+          await client.getVersion();
+          sendJson(res, 200, { status: "ok" });
         } catch (err) {
-          console.error("[pxe-bridge] Health check failed:", err);
-          sendJson(res, 503, { status: "starting", ready: false });
+          console.error("[pxe-bridge] Liveness check failed:", err);
+          sendJson(res, 503, { status: "starting" });
+        }
+        return;
+      }
+
+      // Operational readiness contains funded-account and policy detail, so it
+      // is authenticated before spending the real-traffic rate-limit budget.
+      if (req.method === "GET" && pathname === "/ready") {
+        const readyIp = req.socket.remoteAddress ?? "unknown";
+        if (!opts.apiKey) {
+          sendJson(res, 503, { ready: false, reasons: ["api_key_unconfigured"] });
+          return;
+        }
+        if (rejectedUnauthenticated(req, res, opts.apiKey, readyIp)) return;
+        if (!rateLimiter.allow(readyIp)) {
+          sendJson(res, 429, { error: "Too many requests" });
+          return;
+        }
+        if (!readinessObserver) {
+          sendJson(res, 503, { ready: false, reasons: ["readiness_observer_unconfigured"] });
+          return;
+        }
+        try {
+          const readiness = await readinessObserver.observe();
+          sendJson(res, readiness.ready ? 200 : 503, readiness);
+        } catch (err) {
+          console.error("[pxe-bridge] Readiness observation failed:", err);
+          sendJson(res, 503, { ready: false, reasons: ["readiness_observation_failed"] });
         }
         return;
       }
@@ -456,6 +415,7 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           limits: opts.limits,
           audit: opts.audit,
           settlement: opts.settlement,
+          readiness: readinessObserver,
           idempotencyKey,
           clientIp: clientIp,
           signal: responseDeadline.signal,

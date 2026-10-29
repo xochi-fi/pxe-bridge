@@ -13,6 +13,17 @@ export type LimitsReservation =
   | { allowed: true; reservationId: number; cooldownMs?: number }
   | { allowed: false; reason: string };
 
+export interface LimitsWindowStatus {
+  committed: bigint;
+  reserved: bigint;
+  remaining: bigint | undefined;
+  dailyLimit: bigint | undefined;
+  maxAmount: bigint | undefined;
+  inFlightTransfers: number;
+  paused: boolean;
+  mayTripAgain: boolean;
+}
+
 const WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
 const CLEANUP_INTERVAL_MS = 60_000; // 1 minute
 // The window counts as drained once committed volume leaves less than
@@ -201,13 +212,7 @@ export class TransactionLimits {
    * from committed volume alone, which answered false while in-flight sends
    * were about to fill the window.
    */
-  windowStatus(): {
-    committed: bigint;
-    reserved: bigint;
-    remaining: bigint | undefined;
-    dailyLimit: bigint | undefined;
-    mayTripAgain: boolean;
-  } {
+  windowStatus(): LimitsWindowStatus {
     const committed = this.committedTotal();
     const reserved = this.reservedTotal();
     const budgetUsed = committed + reserved;
@@ -222,6 +227,9 @@ export class TransactionLimits {
       reserved,
       remaining,
       dailyLimit,
+      maxAmount: this.config.maxAmount,
+      inFlightTransfers: this.pending.size,
+      paused: this.paused,
       mayTripAgain: dailyLimit !== undefined && drained(budgetUsed, dailyLimit),
     };
   }
