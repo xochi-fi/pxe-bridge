@@ -58,10 +58,15 @@ EVM Solver --JSON-RPC--> pxe-bridge --Aztec SDK--> Aztec L2 Node
 | `PXE_BRIDGE_ACCOUNT_ADDRESS` | Prod | --                   | The bridge account's recorded address; startup refuses any other |
 | `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY` | Prod, first deploy only | -- | `1` lets production start without a recorded address |
 | `PXE_BRIDGE_ACCOUNT_DEPLOYMENT` | Operational settlement | -- | Durable spending-limit deployment record; hard readiness refuses new settlements without it |
+| `PXE_BRIDGE_ATTESTATION_API_KEY` | With attestations | -- | Dedicated Bearer token for `POST /attest/rpc`; must differ from RPC/admin/outbound tokens |
+| `PXE_BRIDGE_ATTESTATION_SECRET_ARN` | Prod attestations | -- | AWS Secrets Manager secp256k1 key used only for readiness records |
+| `PXE_BRIDGE_ATTESTATION_SECRET_KEY` | Dev attestations | -- | Dev-only nonzero secp256k1 scalar; refused in production |
+| `PXE_BRIDGE_ATTESTATION_SOURCE_CHAIN_ID` / `PXE_BRIDGE_ATTESTATION_ENVIRONMENT` | With attestations | -- | Trusted readiness EIP-712 domain inputs |
+| `PXE_BRIDGE_ATTESTATION_RELAY_URL` / `PXE_BRIDGE_ATTESTATION_RELAY_TOKEN` | With attestations | -- | RootUpdate relay (HTTPS or loopback HTTP) and separate outbound credential |
 
-The secret key is a BN254 scalar, not an arbitrary 32 bytes. About 81% of
-random 32-byte values are at or above the field modulus and are rejected at
-startup, so generate one by retrying until it is in range:
+The bridge spending secret key is a BN254 scalar, not an arbitrary 32 bytes.
+About 81% of random 32-byte values are at or above the field modulus and are
+rejected at startup, so generate one by retrying until it is in range:
 
 ```bash
 node -e 'const {randomBytes} = require("crypto");
@@ -69,6 +74,30 @@ const MODULUS = BigInt("0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f5
 let k; do { k = randomBytes(32).toString("hex"); } while (BigInt("0x" + k) >= MODULUS);
 console.log("0x" + k);'
 ```
+
+### Readiness attestations
+
+Attestations are optional and hidden (`404`) unless every attestation variable
+above is configured together with the main RPC key, journal, settlement
+corridor and spending-limit account. `POST /attest/rpc` accepts only
+`aztec_attestMembership` and `aztec_attestRecipientDeployment`. Its strict
+params are `{descriptor, descriptorDigest, recipient, bindingAuthorization:
+{bindingDigest, signature}}`; source-wallet/chain fields, block selectors,
+witnesses, salts, indexes and unknown fields are refused.
+
+The bridge validates the pinned `aztec-6.0.0` descriptor, derived recipient,
+trusted finalized network and recipient Schnorr authorization before reading
+or signing. It signs exact `@xochi/signer` Membership and
+RecipientDeployment records with the dedicated secp256k1 key. Uncertain
+history, roots or deployment state return an unsigned typed refusal. The
+journal stores durable allowlist snapshots and a write-before-send RootUpdate
+outbox; pending deliveries retry after restart, and the current finalized root
+is pushed once per process start. Attestation audit lines contain only method,
+outcome and typed reason.
+
+Riddler/Worker consumers import the strict Zod schemas and inferred types from
+`@xochi-fi/pxe-bridge/attestation`; readiness policy is maximum age 7,200
+seconds and future skew 300 seconds.
 
 ### Recording the account address
 

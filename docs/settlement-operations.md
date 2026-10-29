@@ -427,6 +427,71 @@ inventory and required admissible volume, and the exact finalized reference.
 Readiness loss blocks only unmarked admission: an already may-broadcast-marked
 operation keeps its normal lookup, observation and exact-byte rebroadcast path.
 
+## Recipient readiness attestations
+
+The optional Worker/Riddler interface is `POST /attest/rpc`, authenticated only
+by `Bearer PXE_BRIDGE_ATTESTATION_API_KEY`. RPC/admin credentials do not work
+there, and the attestation credential does not work on RPC/admin routes. The
+feature is hidden with 404 when every attestation setting is absent; any partial
+configuration fails startup. Enabling it also requires the separately
+authenticated main RPC, durable journal, settlement corridor and spending-limit
+account.
+
+Only `aztec_attestMembership` and `aztec_attestRecipientDeployment` are
+accepted. Both take exactly:
+
+```json
+{
+  "descriptor": "<@xochi/signer RecipientDescriptor object>",
+  "descriptorDigest": "0x<32 bytes>",
+  "recipient": "0x<32 bytes>",
+  "bindingAuthorization": {
+    "bindingDigest": "0x<32 bytes>",
+    "signature": "0x<64-byte Aztec Schnorr signature>"
+  }
+}
+```
+
+These params are the `params` member of a strict JSON-RPC 2.0 request with an
+`id` and one of the two method names. Consumers import the unchanged schemas
+and inferred types from `@xochi-fi/pxe-bridge/attestation`.
+
+Every object is strict. In particular, source wallet/chain/binding identifiers,
+domain/corridor/network overrides, block selectors, witnesses, salts, indexes
+and unknown members are forbidden. The bridge uses trusted local corridor
+configuration and node-observed network identity. Before any observation or
+signature, `@xochi/signer` validates the descriptor, its digest, the derived
+recipient, the pinned `aztec-6.0.0` class/profile/network and the recipient
+message wrapper/Schnorr authorization.
+
+Membership is positive only when the durable local snapshot reproduces the
+exact finalized root and its recipient witness verifies. It is negative only
+when that authoritative snapshot/root proves absence. RecipientDeployment is
+positive only for the exact descriptor recipient and class in initialized
+finalized state; authoritative absence or non-initialization is negative, while
+a different subject/class is a refusal. Missing history, root drift, failed
+reads and every other uncertainty return `{status:"refused", reason:...}` with
+no record or signature.
+
+Records are the exact SDK Membership, RecipientDeployment and RootUpdate wire
+shapes, signed over `readinessDigest` by a dedicated secp256k1 key. Consumers
+verify them with `verifyReadinessRecord`, `maxAgeSeconds: 7200` and
+`maxFutureSkewSeconds: 300`. The signer is
+`PXE_BRIDGE_ATTESTATION_SECRET_ARN` in production or dev-only
+`PXE_BRIDGE_ATTESTATION_SECRET_KEY`; it may not reuse spend, admin or allowlist
+custody.
+
+The SQLite journal schema stores the local allowlist snapshot identity and
+exact signed RootUpdate outbox payload. The payload is durable before HTTP
+send, retains one idempotency key across uncertain delivery, and retries after
+restart. A process publishes its current finalized root once at startup and
+again whenever the finalized root changes. The relay is configured separately
+by `PXE_BRIDGE_ATTESTATION_RELAY_URL` / `_TOKEN`; only HTTPS or loopback HTTP
+is accepted. Attestation audit output contains only method, outcome and typed
+reason—never recipient, descriptor/digest/signature, root association,
+witness/salt/index or L2 transaction data.
+
+
 **xochimilco.** The `aztec_testnet` role (`roles/aztec_testnet`, branch
 `feat/pxe-bridge-journal`) carries this: journal path and audit log on the
 existing `/opt/aztec-testnet/bridge/journal` (uid 1000, 0700) bind mount, the

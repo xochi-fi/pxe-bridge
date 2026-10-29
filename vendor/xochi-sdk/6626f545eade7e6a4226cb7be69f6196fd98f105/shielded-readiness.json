@@ -1,0 +1,2027 @@
+{
+  "version": 1,
+  "generator": "packages/spec/conformance/generate-shielded-readiness.ts",
+  "source": "xochi docs/planning/shielded-execution.md §7 (Readiness evidence; \"Decided 2026-10-19: readiness attestation\"), xochi-fi/pxe-bridge#50, xochi-fi/xochi-sdk#42",
+  "scope": "Membership and RootUpdate are design-A testnet-tracer readiness (B-panel has no spending-limit allowlist); RecipientDeployment serves both designs.",
+  "domain": {
+    "typeString": "EIP712Domain(string name,string version,uint256 chainId,bytes32 salt)",
+    "typehash": "0xa604fff5a27d5951f334ccda7abff3286a8af29caeeb196a6f2b40a1dce7612b",
+    "name": "Xochi Shielded Readiness",
+    "version": "1",
+    "chainId": "the corridor's source chain id (a manifest identity field); never the source wallet's chain as such, which the bridge never learns",
+    "salt": "keccak256(abi.encode(keccak256(bytes(environment)), network_identity_digest, manifestDigest))",
+    "manifestDigest": "folded into the salt as the third abi-encoded word, not a domain member: EIP-712 defines only name, version, chainId, verifyingContract and salt as domain members, so a manifestDigest member would make the domain non-standard",
+    "vectors": [
+      {
+        "name": "staging-rev1",
+        "environment": "staging",
+        "chainId": "84532",
+        "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d",
+        "network": {
+          "aztecChainId": "11155111",
+          "protocolVersion": "679261766",
+          "rollupAddress": "0xb6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6",
+          "l1ChainId": "11155111",
+          "genesisOrNetworkDigest": "0x6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e"
+        },
+        "networkIdentityDigest": "0x94f8311a1f66b0ca3925750e8f05682a5e5af14c1abf18e917f34572da35197b",
+        "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        },
+        "domainSeparator": "0x7be86cbacbe55c24cb662529784b0d8262a460952cb59ec79320e00492d52d9a"
+      },
+      {
+        "name": "staging-rev2",
+        "environment": "staging",
+        "chainId": "84532",
+        "manifestDigest": "0x4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e",
+        "network": {
+          "aztecChainId": "11155111",
+          "protocolVersion": "679261766",
+          "rollupAddress": "0xb6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6",
+          "l1ChainId": "11155111",
+          "genesisOrNetworkDigest": "0x6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e"
+        },
+        "networkIdentityDigest": "0x94f8311a1f66b0ca3925750e8f05682a5e5af14c1abf18e917f34572da35197b",
+        "salt": "0xed4d6a43a2fddaf86880f52d33bc6b43a17bf9c08806c9a6398e1cfd95533c97",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xed4d6a43a2fddaf86880f52d33bc6b43a17bf9c08806c9a6398e1cfd95533c97"
+        },
+        "domainSeparator": "0x88f8f64ec19266186b7804436e8c48a353cde464177477ce583aeaf3c47d9be6"
+      },
+      {
+        "name": "production-rev1",
+        "environment": "production",
+        "chainId": "84532",
+        "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d",
+        "network": {
+          "aztecChainId": "11155111",
+          "protocolVersion": "679261766",
+          "rollupAddress": "0xb6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6",
+          "l1ChainId": "11155111",
+          "genesisOrNetworkDigest": "0x6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e"
+        },
+        "networkIdentityDigest": "0x94f8311a1f66b0ca3925750e8f05682a5e5af14c1abf18e917f34572da35197b",
+        "salt": "0x79efaa3d4a3ccc6c6f7b3801d00cfbaf40bf4870df9edbffa1be092c2813432f",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0x79efaa3d4a3ccc6c6f7b3801d00cfbaf40bf4870df9edbffa1be092c2813432f"
+        },
+        "domainSeparator": "0x7a8cf5c50efd0ea00249e54db311a2f6a42607ca815b6a060398d664a82530e8"
+      }
+    ]
+  },
+  "types": [
+    {
+      "primaryType": "Membership",
+      "typeString": "Membership(bytes32 descriptorDigest,bytes32 root,bool member,uint64 rootBlock,uint64 attestedAt)",
+      "typehash": "0x232bb773a7467a56968e3262bcbf9b0e6c5e2a711b5819d3707e94b8bfa13066"
+    },
+    {
+      "primaryType": "RecipientDeployment",
+      "typeString": "RecipientDeployment(bytes32 descriptorDigest,bytes32 recipient,bytes32 classId,bool deployed,uint64 finalBlock,uint64 attestedAt)",
+      "typehash": "0x1e87953d60d4f440a38d42d3e38cba95a2ced85420c67b5b1185284a09d6c6af"
+    },
+    {
+      "primaryType": "RootUpdate",
+      "typeString": "RootUpdate(bytes32 root,uint64 rootBlock,uint64 attestedAt)",
+      "typehash": "0x22edb2e46abab36c6c38da2427ed184b86f7e433a312ce6636e5cf7c64054b0f"
+    }
+  ],
+  "wire": [
+    "rootBlock / finalBlock: canonical decimal strings (uint64), so heights never pass through an unsafe JS number",
+    "attestedAt: JSON integer Unix seconds (uint64)",
+    "signature: 0x + 65 bytes (r || s || v), EIP-712 over secp256k1 by the bridge's dedicated attestation key",
+    "no leaf index, path or witness is ever part of a record",
+    "a verifier rebuilds the domain from its own corridor record (environment, network, source chain, manifestDigest) and checks the recovered address against the attestation key it pins"
+  ],
+  "attesterIsTestKey": true,
+  "vectors": [
+    {
+      "name": "membership: member",
+      "primaryType": "Membership",
+      "domain": {
+        "name": "Xochi Shielded Readiness",
+        "version": "1",
+        "chainId": "84532",
+        "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+      },
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "3061",
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c"
+      },
+      "domainSeparator": "0x7be86cbacbe55c24cb662529784b0d8262a460952cb59ec79320e00492d52d9a",
+      "structHash": "0x1f277f5334a3b9b481508defdba1a1d6f09afafedb6e95a71096d55cbb5a24f2",
+      "digest": "0x4efbf1e27f20f473adbba4e9cd32143b91c8bec109506db30f9131b81ddb6180",
+      "signer": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc"
+    },
+    {
+      "name": "membership: not a member",
+      "primaryType": "Membership",
+      "domain": {
+        "name": "Xochi Shielded Readiness",
+        "version": "1",
+        "chainId": "84532",
+        "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+      },
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": false,
+        "rootBlock": "3061",
+        "attestedAt": 1793000000,
+        "signature": "0xb787816435296f6de9327fcc07182821875af75eb7f82b708302ebf250ee012072b68b6ef48e2ef7b9b5fa42f9d6cced1dde7a15cdb9eb06a2b95419b21352ae1b"
+      },
+      "domainSeparator": "0x7be86cbacbe55c24cb662529784b0d8262a460952cb59ec79320e00492d52d9a",
+      "structHash": "0x61860c4976888a53056391e031cf61149a48d9f0367849a02f8ec686efd2153c",
+      "digest": "0xa0535e4212b83bfff85a95cffcc2f81a5e9207b3b6b42cd620f8fcc8cc8b41cb",
+      "signer": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc"
+    },
+    {
+      "name": "membership: rootBlock = 2^64 - 1 (beyond JS safe integers)",
+      "primaryType": "Membership",
+      "domain": {
+        "name": "Xochi Shielded Readiness",
+        "version": "1",
+        "chainId": "84532",
+        "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+      },
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "18446744073709551615",
+        "attestedAt": 1793000000,
+        "signature": "0xe636286c7575b8f6e2ab8a709e4da937ecbf8f85ca4efbd2c3886781fda32d3356bdf4aead324d2f7c9de9c20335ff89f04214abbbdd534f1c4d468f62e790221c"
+      },
+      "domainSeparator": "0x7be86cbacbe55c24cb662529784b0d8262a460952cb59ec79320e00492d52d9a",
+      "structHash": "0x935ebbb254212116c1e81a255785a27e066e688de8e184f1399a1be456e5fdae",
+      "digest": "0xa7554492f1e35d8879df47797ed6de3b4ea1109080a0790d367cf3076faddfc0",
+      "signer": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc"
+    },
+    {
+      "name": "deployment: deployed",
+      "primaryType": "RecipientDeployment",
+      "domain": {
+        "name": "Xochi Shielded Readiness",
+        "version": "1",
+        "chainId": "84532",
+        "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+      },
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "3062",
+        "attestedAt": 1793000000,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b"
+      },
+      "domainSeparator": "0x7be86cbacbe55c24cb662529784b0d8262a460952cb59ec79320e00492d52d9a",
+      "structHash": "0x9f4e1b47f584f43840e651971448dc5e96b2a37b53ad79ce1df127857a2247c2",
+      "digest": "0x92466ad6c6ceb83d3cc98b63abc4be894b5925335228289572364d0a8f888570",
+      "signer": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc"
+    },
+    {
+      "name": "deployment: not deployed",
+      "primaryType": "RecipientDeployment",
+      "domain": {
+        "name": "Xochi Shielded Readiness",
+        "version": "1",
+        "chainId": "84532",
+        "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+      },
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": false,
+        "finalBlock": "3062",
+        "attestedAt": 1793000000,
+        "signature": "0x444645c983adf97098462059e2ce587563c649319746317c56df271fcc7379db269b31f02cf1a4522e023eda85fbbfb8b4fcbc414e44a2837f733fd5e7a182951b"
+      },
+      "domainSeparator": "0x7be86cbacbe55c24cb662529784b0d8262a460952cb59ec79320e00492d52d9a",
+      "structHash": "0xcfb496010535ee1d3b7e4f9b5d3eb9253b7133d0c421add6b1871b7ce2fc0cea",
+      "digest": "0x0a5eeca28026bf70d95db2eced2f35dd29e810408f8e2615e6abe113a10b9a54",
+      "signer": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc"
+    },
+    {
+      "name": "root update",
+      "primaryType": "RootUpdate",
+      "domain": {
+        "name": "Xochi Shielded Readiness",
+        "version": "1",
+        "chainId": "84532",
+        "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+      },
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "3070",
+        "attestedAt": 1793000060,
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c"
+      },
+      "domainSeparator": "0x7be86cbacbe55c24cb662529784b0d8262a460952cb59ec79320e00492d52d9a",
+      "structHash": "0xee07e8230160c87fe3d7ebd3d39673352f4d587cb31a36aa7223aea864faa19d",
+      "digest": "0xef5db242fe0b879c4187d811ca5ab53645073d6e90f9b5eeef05cbbce21e708a",
+      "signer": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc"
+    },
+    {
+      "name": "root update: attestedAt 0, rootBlock 0",
+      "primaryType": "RootUpdate",
+      "domain": {
+        "name": "Xochi Shielded Readiness",
+        "version": "1",
+        "chainId": "84532",
+        "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+      },
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "0",
+        "attestedAt": 0,
+        "signature": "0x0156c8b6d74d67ad13c5838aa81d1567c8a5640c911ef1a772cac19da9d011610540c0733818a793da93589e5432c50d8cc67df6e309b8c4942f08db62018df11b"
+      },
+      "domainSeparator": "0x7be86cbacbe55c24cb662529784b0d8262a460952cb59ec79320e00492d52d9a",
+      "structHash": "0xa9710fdda51a151b6117f10721e768bf60ad259ec2263c02bb42e1e6dd240fa6",
+      "digest": "0x7925daa3890552bd5cb4deacd471cb91538855ff8893151bb0e70813bdb6eb6c",
+      "signer": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc"
+    },
+    {
+      "name": "membership under revision 2",
+      "primaryType": "Membership",
+      "domain": {
+        "name": "Xochi Shielded Readiness",
+        "version": "1",
+        "chainId": "84532",
+        "salt": "0xed4d6a43a2fddaf86880f52d33bc6b43a17bf9c08806c9a6398e1cfd95533c97"
+      },
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "3061",
+        "attestedAt": 1793000000,
+        "signature": "0x45fee9d4a95c02c34bab72f0eeda4ca4ce3434eeaa85f949244e7b001c8743370e48bac8e3e88e78163970fcbd2001c49195fca2e2fcc7f9c3282d20b78761dc1b"
+      },
+      "domainSeparator": "0x88f8f64ec19266186b7804436e8c48a353cde464177477ce583aeaf3c47d9be6",
+      "structHash": "0x1f277f5334a3b9b481508defdba1a1d6f09afafedb6e95a71096d55cbb5a24f2",
+      "digest": "0xce5df35721b50ee18b0adeebb39001594d32a10533b3c69f1bb149468d86000f",
+      "signer": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc"
+    }
+  ],
+  "replays": [
+    {
+      "name": "Membership presented as RootUpdate",
+      "kind": "wrong_primary_type",
+      "signedAs": {
+        "primaryType": "Membership",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "presentedAs": {
+        "primaryType": "RootUpdate",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "rootBlock": "3061",
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c"
+      },
+      "digest": "0x9457dc3f23bd3d8e90d37c9a26471ed8b10105bb9c9e38491b8894d9645eb838",
+      "recovered": "0x1c1563a6d94849443163a709961cd9b514cd58d6",
+      "attester": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "valid": false
+    },
+    {
+      "name": "RootUpdate presented as Membership",
+      "kind": "wrong_primary_type",
+      "signedAs": {
+        "primaryType": "RootUpdate",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "presentedAs": {
+        "primaryType": "Membership",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "3070",
+        "attestedAt": 1793000060,
+        "member": true,
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c"
+      },
+      "digest": "0x88af77cff4b827d131688e61a7542bf4464db3c43443d66a9aae5d876adc53ff",
+      "recovered": "0x223f6e0c6e82ea424f546fe4c646e101d7542230",
+      "attester": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "valid": false
+    },
+    {
+      "name": "RecipientDeployment presented as Membership",
+      "kind": "wrong_primary_type",
+      "signedAs": {
+        "primaryType": "RecipientDeployment",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "presentedAs": {
+        "primaryType": "Membership",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "3062",
+        "attestedAt": 1793000000,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b"
+      },
+      "digest": "0x85da8d4e6706cb6cd159e920cacc7f70bc4289402fd270df33aad23e59f87e72",
+      "recovered": "0xe7ce2658635b1fc2f52a467cb86af2620d321d61",
+      "attester": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "valid": false
+    },
+    {
+      "name": "Membership presented as RecipientDeployment",
+      "kind": "wrong_primary_type",
+      "signedAs": {
+        "primaryType": "Membership",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "presentedAs": {
+        "primaryType": "RecipientDeployment",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "3061",
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c"
+      },
+      "digest": "0xd3239593edb3ecc1283d63370c67f2213a2781085a18a0d5dcce3e6113d48347",
+      "recovered": "0x6b8388322bdff40c3e7320e1b078aeb415b4319d",
+      "attester": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "valid": false
+    },
+    {
+      "name": "RootUpdate presented as RecipientDeployment",
+      "kind": "wrong_primary_type",
+      "signedAs": {
+        "primaryType": "RootUpdate",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "presentedAs": {
+        "primaryType": "RecipientDeployment",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "3070",
+        "attestedAt": 1793000060,
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c"
+      },
+      "digest": "0x4d761f2197fcd96cd730af15a5649a8732f51b5275a7692d297c94ea481ddc07",
+      "recovered": "0x048845c7d93f2aa3be195a8bc0379030d22066d6",
+      "attester": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "valid": false
+    },
+    {
+      "name": "Membership (revision 1) presented under revision 2",
+      "kind": "wrong_manifest_digest",
+      "signedAs": {
+        "primaryType": "Membership",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "presentedAs": {
+        "primaryType": "Membership",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xed4d6a43a2fddaf86880f52d33bc6b43a17bf9c08806c9a6398e1cfd95533c97"
+        }
+      },
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "3061",
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c"
+      },
+      "digest": "0xce5df35721b50ee18b0adeebb39001594d32a10533b3c69f1bb149468d86000f",
+      "recovered": "0x1b4592f854f5c7ee80e06cc7b04543d7a4435514",
+      "attester": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "valid": false
+    },
+    {
+      "name": "Membership presented under the name \"Xochi Shielded Recipient\"",
+      "kind": "wrong_domain_name",
+      "signedAs": {
+        "primaryType": "Membership",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "presentedAs": {
+        "primaryType": "Membership",
+        "domain": {
+          "name": "Xochi Shielded Recipient",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "3061",
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c"
+      },
+      "digest": "0x62d15ff03e2d740de469800c053793380631cc20af37a8e316718a2b3b8ab319",
+      "recovered": "0xf944195019499a45f86a2a2dc62f97cc19661af7",
+      "attester": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "valid": false
+    },
+    {
+      "name": "Membership presented under the name \"Xochi Shielded Terms\"",
+      "kind": "wrong_domain_name",
+      "signedAs": {
+        "primaryType": "Membership",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "presentedAs": {
+        "primaryType": "Membership",
+        "domain": {
+          "name": "Xochi Shielded Terms",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "3061",
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c"
+      },
+      "digest": "0x64892447c5e4362e54711d59ec46c60047644a0743c0d67d7baf859b01046471",
+      "recovered": "0x3127897b267a8dcd9e9a534c3638428cf521d4af",
+      "attester": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "valid": false
+    },
+    {
+      "name": "Membership presented under production",
+      "kind": "wrong_environment",
+      "signedAs": {
+        "primaryType": "Membership",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "presentedAs": {
+        "primaryType": "Membership",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0x79efaa3d4a3ccc6c6f7b3801d00cfbaf40bf4870df9edbffa1be092c2813432f"
+        }
+      },
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "3061",
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c"
+      },
+      "digest": "0xbb08e00fe75393120af52497af3f22f638d6204988cf1c405713ee809652d8e6",
+      "recovered": "0x6b178cb86b4035bf8b719a64c6134080f45be1af",
+      "attester": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "valid": false
+    },
+    {
+      "name": "Membership presented under chain 1",
+      "kind": "wrong_chain_id",
+      "signedAs": {
+        "primaryType": "Membership",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "presentedAs": {
+        "primaryType": "Membership",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "1",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "3061",
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c"
+      },
+      "digest": "0x0386a7c1f6c65cfe740e2f4b61b2104b6d396667c8af5bfbe7541f51a80d91ef",
+      "recovered": "0x50d99d79280d0b1583cc7f2919bf0bbdfba6e520",
+      "attester": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "valid": false
+    },
+    {
+      "name": "RecipientDeployment (revision 1) presented under revision 2",
+      "kind": "wrong_manifest_digest",
+      "signedAs": {
+        "primaryType": "RecipientDeployment",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "presentedAs": {
+        "primaryType": "RecipientDeployment",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xed4d6a43a2fddaf86880f52d33bc6b43a17bf9c08806c9a6398e1cfd95533c97"
+        }
+      },
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "3062",
+        "attestedAt": 1793000000,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b"
+      },
+      "digest": "0x7e9bf1e07957af04ee6b6c1c53107e57d91de895c71729851ff856f4b29b81e9",
+      "recovered": "0x52536eea54f1582d98719427859062174e9d2325",
+      "attester": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "valid": false
+    },
+    {
+      "name": "RecipientDeployment presented under the name \"Xochi Shielded Recipient\"",
+      "kind": "wrong_domain_name",
+      "signedAs": {
+        "primaryType": "RecipientDeployment",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "presentedAs": {
+        "primaryType": "RecipientDeployment",
+        "domain": {
+          "name": "Xochi Shielded Recipient",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "3062",
+        "attestedAt": 1793000000,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b"
+      },
+      "digest": "0xd4903328fd8b662958b55004f7dc1b94cc58ee06ea0356fe42e734c7a29fc1eb",
+      "recovered": "0x463ec975e50d9ca86a6961775865c2ec276d6d8a",
+      "attester": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "valid": false
+    },
+    {
+      "name": "RecipientDeployment presented under the name \"Xochi Shielded Terms\"",
+      "kind": "wrong_domain_name",
+      "signedAs": {
+        "primaryType": "RecipientDeployment",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "presentedAs": {
+        "primaryType": "RecipientDeployment",
+        "domain": {
+          "name": "Xochi Shielded Terms",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "3062",
+        "attestedAt": 1793000000,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b"
+      },
+      "digest": "0x3bc56dd22b04889837b18bd4d86ee51453007ba692124149553278781966fd2c",
+      "recovered": "0x0be7b83a7fe25e555735e988a07f21fb4909a6de",
+      "attester": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "valid": false
+    },
+    {
+      "name": "RecipientDeployment presented under production",
+      "kind": "wrong_environment",
+      "signedAs": {
+        "primaryType": "RecipientDeployment",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "presentedAs": {
+        "primaryType": "RecipientDeployment",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0x79efaa3d4a3ccc6c6f7b3801d00cfbaf40bf4870df9edbffa1be092c2813432f"
+        }
+      },
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "3062",
+        "attestedAt": 1793000000,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b"
+      },
+      "digest": "0x6e3378286c4667de861a2be6dbff5a33f3cea0914f1480dbf382fd692acacbb6",
+      "recovered": "0xbf3088358507f0ac299700bc13d55cd1be59ddba",
+      "attester": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "valid": false
+    },
+    {
+      "name": "RecipientDeployment presented under chain 1",
+      "kind": "wrong_chain_id",
+      "signedAs": {
+        "primaryType": "RecipientDeployment",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "presentedAs": {
+        "primaryType": "RecipientDeployment",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "1",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "3062",
+        "attestedAt": 1793000000,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b"
+      },
+      "digest": "0xba86a3272043537fddfb60cba5451797364b2d14fef538190a98d6afd273b4ee",
+      "recovered": "0x3389c782b78cf699331ed1ac0cf6510f47eaf9d9",
+      "attester": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "valid": false
+    },
+    {
+      "name": "RootUpdate (revision 1) presented under revision 2",
+      "kind": "wrong_manifest_digest",
+      "signedAs": {
+        "primaryType": "RootUpdate",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "presentedAs": {
+        "primaryType": "RootUpdate",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xed4d6a43a2fddaf86880f52d33bc6b43a17bf9c08806c9a6398e1cfd95533c97"
+        }
+      },
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "3070",
+        "attestedAt": 1793000060,
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c"
+      },
+      "digest": "0xb6f6ad27c036465dd5210d8e9c355b00b07936d03ac88eaaa89eefe43ce757f3",
+      "recovered": "0xef3bf16d18d6483a4a892cee6d700ed459e89317",
+      "attester": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "valid": false
+    },
+    {
+      "name": "RootUpdate presented under the name \"Xochi Shielded Recipient\"",
+      "kind": "wrong_domain_name",
+      "signedAs": {
+        "primaryType": "RootUpdate",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "presentedAs": {
+        "primaryType": "RootUpdate",
+        "domain": {
+          "name": "Xochi Shielded Recipient",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "3070",
+        "attestedAt": 1793000060,
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c"
+      },
+      "digest": "0xfe3bf513481ee5c53af5d72c3990235b98b5293ae1032008fe2cc7de52aa669c",
+      "recovered": "0xc46cdf5326cf09bf7469ed857337defca8f14a4d",
+      "attester": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "valid": false
+    },
+    {
+      "name": "RootUpdate presented under the name \"Xochi Shielded Terms\"",
+      "kind": "wrong_domain_name",
+      "signedAs": {
+        "primaryType": "RootUpdate",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "presentedAs": {
+        "primaryType": "RootUpdate",
+        "domain": {
+          "name": "Xochi Shielded Terms",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "3070",
+        "attestedAt": 1793000060,
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c"
+      },
+      "digest": "0x306a241262f542282f36c8b47464c1e4cfb95691c8ab3b07cdc9a096f7e7f979",
+      "recovered": "0x114ed6299a3dcb7fc7b37f617716ccd6f5788ed0",
+      "attester": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "valid": false
+    },
+    {
+      "name": "RootUpdate presented under production",
+      "kind": "wrong_environment",
+      "signedAs": {
+        "primaryType": "RootUpdate",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "presentedAs": {
+        "primaryType": "RootUpdate",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0x79efaa3d4a3ccc6c6f7b3801d00cfbaf40bf4870df9edbffa1be092c2813432f"
+        }
+      },
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "3070",
+        "attestedAt": 1793000060,
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c"
+      },
+      "digest": "0x0d86b9ca44f6ff5f19c4b7c54d1534ced80f7f872fb46841a254b557d1fa54c9",
+      "recovered": "0x20718b631936cdb90bcb5d1b7233c95ced08d2eb",
+      "attester": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "valid": false
+    },
+    {
+      "name": "RootUpdate presented under chain 1",
+      "kind": "wrong_chain_id",
+      "signedAs": {
+        "primaryType": "RootUpdate",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "presentedAs": {
+        "primaryType": "RootUpdate",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "1",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "3070",
+        "attestedAt": 1793000060,
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c"
+      },
+      "digest": "0x06c3fa84e5690a50e67b35d4a7f89f456617808f8f2d0f229067757b9c146d0b",
+      "recovered": "0x177fd4d25a4bf17d850d904b90ebed5e06c9dcc1",
+      "attester": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "valid": false
+    },
+    {
+      "name": "Membership presented under the binding domain itself",
+      "kind": "wrong_domain_name",
+      "signedAs": {
+        "primaryType": "Membership",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "presentedAs": {
+        "primaryType": "Membership",
+        "domain": {
+          "name": "Xochi Shielded Recipient",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0x5d6b354bc9af916994e5873d9e348ccb71428137c0d9180344abd25a615f206a"
+        }
+      },
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "3061",
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c"
+      },
+      "digest": "0xf6ec0c25886dd68b6f7bbf2b956448e28b612e1163371bcc4c949a05893a14d3",
+      "recovered": "0x6964acbc58147d9a9f006cfa0cdaa179c9989e2a",
+      "attester": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "valid": false
+    },
+    {
+      "name": "revision-2 Membership presented under revision 1",
+      "kind": "wrong_manifest_digest",
+      "signedAs": {
+        "primaryType": "Membership",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xed4d6a43a2fddaf86880f52d33bc6b43a17bf9c08806c9a6398e1cfd95533c97"
+        }
+      },
+      "presentedAs": {
+        "primaryType": "Membership",
+        "domain": {
+          "name": "Xochi Shielded Readiness",
+          "version": "1",
+          "chainId": "84532",
+          "salt": "0xf2c4ac28c88635b60e3c596de4416dce8383dd486f00e79c0220e9d52af91048"
+        }
+      },
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "3061",
+        "attestedAt": 1793000000,
+        "signature": "0x45fee9d4a95c02c34bab72f0eeda4ca4ce3434eeaa85f949244e7b001c8743370e48bac8e3e88e78163970fcbd2001c49195fca2e2fcc7f9c3282d20b78761dc1b"
+      },
+      "digest": "0x4efbf1e27f20f473adbba4e9cd32143b91c8bec109506db30f9131b81ddb6180",
+      "recovered": "0xc7ed7ec8fc1888e9a1364dbe118ec612d659804c",
+      "attester": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "valid": false
+    }
+  ],
+  "refusals": [
+    {
+      "name": "Membership: carries leafIndex",
+      "primaryType": "Membership",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "3061",
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c",
+        "leafIndex": 7
+      },
+      "error": {
+        "code": "forbidden_field",
+        "field": "leafIndex"
+      }
+    },
+    {
+      "name": "Membership: carries leafPath",
+      "primaryType": "Membership",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "3061",
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c",
+        "leafPath": [
+          "0x0000000000000000000000000000000000000000000000000000000000000000"
+        ]
+      },
+      "error": {
+        "code": "forbidden_field",
+        "field": "leafPath"
+      }
+    },
+    {
+      "name": "Membership: carries siblingPath",
+      "primaryType": "Membership",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "3061",
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c",
+        "siblingPath": [
+          "0x0000000000000000000000000000000000000000000000000000000000000000"
+        ]
+      },
+      "error": {
+        "code": "forbidden_field",
+        "field": "siblingPath"
+      }
+    },
+    {
+      "name": "Membership: carries path",
+      "primaryType": "Membership",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "3061",
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c",
+        "path": [
+          "0x0000000000000000000000000000000000000000000000000000000000000000"
+        ]
+      },
+      "error": {
+        "code": "forbidden_field",
+        "field": "path"
+      }
+    },
+    {
+      "name": "Membership: carries witness",
+      "primaryType": "Membership",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "3061",
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c",
+        "witness": [
+          "0x0000000000000000000000000000000000000000000000000000000000000000"
+        ]
+      },
+      "error": {
+        "code": "forbidden_field",
+        "field": "witness"
+      }
+    },
+    {
+      "name": "Membership: unknown member",
+      "primaryType": "Membership",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "3061",
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c",
+        "comment": "x"
+      },
+      "error": {
+        "code": "unknown_field",
+        "field": "comment"
+      }
+    },
+    {
+      "name": "Membership: signature missing",
+      "primaryType": "Membership",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "3061",
+        "attestedAt": 1793000000
+      },
+      "error": {
+        "code": "missing_field",
+        "field": "signature"
+      }
+    },
+    {
+      "name": "Membership: attestedAt missing",
+      "primaryType": "Membership",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "3061",
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c"
+      },
+      "error": {
+        "code": "missing_field",
+        "field": "attestedAt"
+      }
+    },
+    {
+      "name": "Membership: attestedAt as a string",
+      "primaryType": "Membership",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "3061",
+        "attestedAt": "1793000000",
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c"
+      },
+      "error": {
+        "code": "timestamp_not_integer",
+        "field": "attestedAt"
+      }
+    },
+    {
+      "name": "Membership: attestedAt fractional",
+      "primaryType": "Membership",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "3061",
+        "attestedAt": 1793000000.5,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c"
+      },
+      "error": {
+        "code": "timestamp_not_integer",
+        "field": "attestedAt"
+      }
+    },
+    {
+      "name": "Membership: attestedAt negative",
+      "primaryType": "Membership",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "3061",
+        "attestedAt": -1,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c"
+      },
+      "error": {
+        "code": "uint_out_of_range",
+        "field": "attestedAt"
+      }
+    },
+    {
+      "name": "Membership: signature 64 bytes",
+      "primaryType": "Membership",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "3061",
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f"
+      },
+      "error": {
+        "code": "signature_malformed",
+        "field": "signature"
+      }
+    },
+    {
+      "name": "Membership: rootBlock as a JSON number",
+      "primaryType": "Membership",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": 3061,
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c"
+      },
+      "error": {
+        "code": "block_not_string",
+        "field": "rootBlock"
+      }
+    },
+    {
+      "name": "Membership: rootBlock with a leading zero",
+      "primaryType": "Membership",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "03061",
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c"
+      },
+      "error": {
+        "code": "uint_not_canonical",
+        "field": "rootBlock"
+      }
+    },
+    {
+      "name": "Membership: rootBlock = 2^64",
+      "primaryType": "Membership",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "18446744073709551616",
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c"
+      },
+      "error": {
+        "code": "uint_out_of_range",
+        "field": "rootBlock"
+      }
+    },
+    {
+      "name": "Membership: rootBlock hex",
+      "primaryType": "Membership",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "0xbf5",
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c"
+      },
+      "error": {
+        "code": "uint_not_canonical",
+        "field": "rootBlock"
+      }
+    },
+    {
+      "name": "Membership: descriptorDigest 31 bytes",
+      "primaryType": "Membership",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "3061",
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c"
+      },
+      "error": {
+        "code": "not_bytes32",
+        "field": "descriptorDigest"
+      }
+    },
+    {
+      "name": "Membership: root = r",
+      "primaryType": "Membership",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001",
+        "member": true,
+        "rootBlock": "3061",
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c"
+      },
+      "error": {
+        "code": "aztec_out_of_field",
+        "field": "root"
+      }
+    },
+    {
+      "name": "Membership: root with a 0X prefix",
+      "primaryType": "Membership",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0X0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": true,
+        "rootBlock": "3061",
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c"
+      },
+      "error": {
+        "code": "not_bytes32",
+        "field": "root"
+      }
+    },
+    {
+      "name": "RecipientDeployment: carries leafIndex",
+      "primaryType": "RecipientDeployment",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "3062",
+        "attestedAt": 1793000000,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b",
+        "leafIndex": 7
+      },
+      "error": {
+        "code": "forbidden_field",
+        "field": "leafIndex"
+      }
+    },
+    {
+      "name": "RecipientDeployment: carries leafPath",
+      "primaryType": "RecipientDeployment",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "3062",
+        "attestedAt": 1793000000,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b",
+        "leafPath": [
+          "0x0000000000000000000000000000000000000000000000000000000000000000"
+        ]
+      },
+      "error": {
+        "code": "forbidden_field",
+        "field": "leafPath"
+      }
+    },
+    {
+      "name": "RecipientDeployment: carries siblingPath",
+      "primaryType": "RecipientDeployment",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "3062",
+        "attestedAt": 1793000000,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b",
+        "siblingPath": [
+          "0x0000000000000000000000000000000000000000000000000000000000000000"
+        ]
+      },
+      "error": {
+        "code": "forbidden_field",
+        "field": "siblingPath"
+      }
+    },
+    {
+      "name": "RecipientDeployment: carries path",
+      "primaryType": "RecipientDeployment",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "3062",
+        "attestedAt": 1793000000,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b",
+        "path": [
+          "0x0000000000000000000000000000000000000000000000000000000000000000"
+        ]
+      },
+      "error": {
+        "code": "forbidden_field",
+        "field": "path"
+      }
+    },
+    {
+      "name": "RecipientDeployment: carries witness",
+      "primaryType": "RecipientDeployment",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "3062",
+        "attestedAt": 1793000000,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b",
+        "witness": [
+          "0x0000000000000000000000000000000000000000000000000000000000000000"
+        ]
+      },
+      "error": {
+        "code": "forbidden_field",
+        "field": "witness"
+      }
+    },
+    {
+      "name": "RecipientDeployment: unknown member",
+      "primaryType": "RecipientDeployment",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "3062",
+        "attestedAt": 1793000000,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b",
+        "comment": "x"
+      },
+      "error": {
+        "code": "unknown_field",
+        "field": "comment"
+      }
+    },
+    {
+      "name": "RecipientDeployment: signature missing",
+      "primaryType": "RecipientDeployment",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "3062",
+        "attestedAt": 1793000000
+      },
+      "error": {
+        "code": "missing_field",
+        "field": "signature"
+      }
+    },
+    {
+      "name": "RecipientDeployment: attestedAt missing",
+      "primaryType": "RecipientDeployment",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "3062",
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b"
+      },
+      "error": {
+        "code": "missing_field",
+        "field": "attestedAt"
+      }
+    },
+    {
+      "name": "RecipientDeployment: attestedAt as a string",
+      "primaryType": "RecipientDeployment",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "3062",
+        "attestedAt": "1793000000",
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b"
+      },
+      "error": {
+        "code": "timestamp_not_integer",
+        "field": "attestedAt"
+      }
+    },
+    {
+      "name": "RecipientDeployment: attestedAt fractional",
+      "primaryType": "RecipientDeployment",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "3062",
+        "attestedAt": 1793000000.5,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b"
+      },
+      "error": {
+        "code": "timestamp_not_integer",
+        "field": "attestedAt"
+      }
+    },
+    {
+      "name": "RecipientDeployment: attestedAt negative",
+      "primaryType": "RecipientDeployment",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "3062",
+        "attestedAt": -1,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b"
+      },
+      "error": {
+        "code": "uint_out_of_range",
+        "field": "attestedAt"
+      }
+    },
+    {
+      "name": "RecipientDeployment: signature 64 bytes",
+      "primaryType": "RecipientDeployment",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "3062",
+        "attestedAt": 1793000000,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede0191"
+      },
+      "error": {
+        "code": "signature_malformed",
+        "field": "signature"
+      }
+    },
+    {
+      "name": "RecipientDeployment: finalBlock as a JSON number",
+      "primaryType": "RecipientDeployment",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": 3062,
+        "attestedAt": 1793000000,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b"
+      },
+      "error": {
+        "code": "block_not_string",
+        "field": "finalBlock"
+      }
+    },
+    {
+      "name": "RecipientDeployment: finalBlock with a leading zero",
+      "primaryType": "RecipientDeployment",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "03062",
+        "attestedAt": 1793000000,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b"
+      },
+      "error": {
+        "code": "uint_not_canonical",
+        "field": "finalBlock"
+      }
+    },
+    {
+      "name": "RecipientDeployment: finalBlock = 2^64",
+      "primaryType": "RecipientDeployment",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "18446744073709551616",
+        "attestedAt": 1793000000,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b"
+      },
+      "error": {
+        "code": "uint_out_of_range",
+        "field": "finalBlock"
+      }
+    },
+    {
+      "name": "RecipientDeployment: finalBlock hex",
+      "primaryType": "RecipientDeployment",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "0xbf6",
+        "attestedAt": 1793000000,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b"
+      },
+      "error": {
+        "code": "uint_not_canonical",
+        "field": "finalBlock"
+      }
+    },
+    {
+      "name": "RecipientDeployment: descriptorDigest 31 bytes",
+      "primaryType": "RecipientDeployment",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "3062",
+        "attestedAt": 1793000000,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b"
+      },
+      "error": {
+        "code": "not_bytes32",
+        "field": "descriptorDigest"
+      }
+    },
+    {
+      "name": "RootUpdate: carries leafIndex",
+      "primaryType": "RootUpdate",
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "3070",
+        "attestedAt": 1793000060,
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c",
+        "leafIndex": 7
+      },
+      "error": {
+        "code": "forbidden_field",
+        "field": "leafIndex"
+      }
+    },
+    {
+      "name": "RootUpdate: carries leafPath",
+      "primaryType": "RootUpdate",
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "3070",
+        "attestedAt": 1793000060,
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c",
+        "leafPath": [
+          "0x0000000000000000000000000000000000000000000000000000000000000000"
+        ]
+      },
+      "error": {
+        "code": "forbidden_field",
+        "field": "leafPath"
+      }
+    },
+    {
+      "name": "RootUpdate: carries siblingPath",
+      "primaryType": "RootUpdate",
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "3070",
+        "attestedAt": 1793000060,
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c",
+        "siblingPath": [
+          "0x0000000000000000000000000000000000000000000000000000000000000000"
+        ]
+      },
+      "error": {
+        "code": "forbidden_field",
+        "field": "siblingPath"
+      }
+    },
+    {
+      "name": "RootUpdate: carries path",
+      "primaryType": "RootUpdate",
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "3070",
+        "attestedAt": 1793000060,
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c",
+        "path": [
+          "0x0000000000000000000000000000000000000000000000000000000000000000"
+        ]
+      },
+      "error": {
+        "code": "forbidden_field",
+        "field": "path"
+      }
+    },
+    {
+      "name": "RootUpdate: carries witness",
+      "primaryType": "RootUpdate",
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "3070",
+        "attestedAt": 1793000060,
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c",
+        "witness": [
+          "0x0000000000000000000000000000000000000000000000000000000000000000"
+        ]
+      },
+      "error": {
+        "code": "forbidden_field",
+        "field": "witness"
+      }
+    },
+    {
+      "name": "RootUpdate: unknown member",
+      "primaryType": "RootUpdate",
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "3070",
+        "attestedAt": 1793000060,
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c",
+        "comment": "x"
+      },
+      "error": {
+        "code": "unknown_field",
+        "field": "comment"
+      }
+    },
+    {
+      "name": "RootUpdate: signature missing",
+      "primaryType": "RootUpdate",
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "3070",
+        "attestedAt": 1793000060
+      },
+      "error": {
+        "code": "missing_field",
+        "field": "signature"
+      }
+    },
+    {
+      "name": "RootUpdate: attestedAt missing",
+      "primaryType": "RootUpdate",
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "3070",
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c"
+      },
+      "error": {
+        "code": "missing_field",
+        "field": "attestedAt"
+      }
+    },
+    {
+      "name": "RootUpdate: attestedAt as a string",
+      "primaryType": "RootUpdate",
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "3070",
+        "attestedAt": "1793000060",
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c"
+      },
+      "error": {
+        "code": "timestamp_not_integer",
+        "field": "attestedAt"
+      }
+    },
+    {
+      "name": "RootUpdate: attestedAt fractional",
+      "primaryType": "RootUpdate",
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "3070",
+        "attestedAt": 1793000000.5,
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c"
+      },
+      "error": {
+        "code": "timestamp_not_integer",
+        "field": "attestedAt"
+      }
+    },
+    {
+      "name": "RootUpdate: attestedAt negative",
+      "primaryType": "RootUpdate",
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "3070",
+        "attestedAt": -1,
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c"
+      },
+      "error": {
+        "code": "uint_out_of_range",
+        "field": "attestedAt"
+      }
+    },
+    {
+      "name": "RootUpdate: signature 64 bytes",
+      "primaryType": "RootUpdate",
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "3070",
+        "attestedAt": 1793000060,
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff"
+      },
+      "error": {
+        "code": "signature_malformed",
+        "field": "signature"
+      }
+    },
+    {
+      "name": "RootUpdate: rootBlock as a JSON number",
+      "primaryType": "RootUpdate",
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": 3070,
+        "attestedAt": 1793000060,
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c"
+      },
+      "error": {
+        "code": "block_not_string",
+        "field": "rootBlock"
+      }
+    },
+    {
+      "name": "RootUpdate: rootBlock with a leading zero",
+      "primaryType": "RootUpdate",
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "03070",
+        "attestedAt": 1793000060,
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c"
+      },
+      "error": {
+        "code": "uint_not_canonical",
+        "field": "rootBlock"
+      }
+    },
+    {
+      "name": "RootUpdate: rootBlock = 2^64",
+      "primaryType": "RootUpdate",
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "18446744073709551616",
+        "attestedAt": 1793000060,
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c"
+      },
+      "error": {
+        "code": "uint_out_of_range",
+        "field": "rootBlock"
+      }
+    },
+    {
+      "name": "RootUpdate: rootBlock hex",
+      "primaryType": "RootUpdate",
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "0xbfe",
+        "attestedAt": 1793000060,
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c"
+      },
+      "error": {
+        "code": "uint_not_canonical",
+        "field": "rootBlock"
+      }
+    },
+    {
+      "name": "RootUpdate: root = r",
+      "primaryType": "RootUpdate",
+      "record": {
+        "root": "0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001",
+        "rootBlock": "3070",
+        "attestedAt": 1793000060,
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c"
+      },
+      "error": {
+        "code": "aztec_out_of_field",
+        "field": "root"
+      }
+    },
+    {
+      "name": "RootUpdate: root with a 0X prefix",
+      "primaryType": "RootUpdate",
+      "record": {
+        "root": "0X0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "3070",
+        "attestedAt": 1793000060,
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c"
+      },
+      "error": {
+        "code": "not_bytes32",
+        "field": "root"
+      }
+    },
+    {
+      "name": "Membership: member as a string",
+      "primaryType": "Membership",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": "true",
+        "rootBlock": "3061",
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c"
+      },
+      "error": {
+        "code": "not_bool",
+        "field": "member"
+      }
+    },
+    {
+      "name": "Membership: member as 1",
+      "primaryType": "Membership",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b01",
+        "member": 1,
+        "rootBlock": "3061",
+        "attestedAt": 1793000000,
+        "signature": "0x5e72beff7fd0365278d3d1bdfdc1844f80ad931bc25f81912e7865bdd97661810fefb151df118d4fa4d5c7a33cc33054a408c34e83c0d4702954f067fe91c34f1c"
+      },
+      "error": {
+        "code": "not_bool",
+        "field": "member"
+      }
+    },
+    {
+      "name": "RecipientDeployment: deployed as a string",
+      "primaryType": "RecipientDeployment",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": "true",
+        "finalBlock": "3062",
+        "attestedAt": 1793000000,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b"
+      },
+      "error": {
+        "code": "not_bool",
+        "field": "deployed"
+      }
+    },
+    {
+      "name": "RecipientDeployment: recipient zero",
+      "primaryType": "RecipientDeployment",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "3062",
+        "attestedAt": 1793000000,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b"
+      },
+      "error": {
+        "code": "aztec_zero",
+        "field": "recipient"
+      }
+    },
+    {
+      "name": "RecipientDeployment: recipient = r",
+      "primaryType": "RecipientDeployment",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001",
+        "classId": "0x2f7d07db78643da21eefb63ee07d28d1cc23dd86ec9b3a9fa29323bf17269d15",
+        "deployed": true,
+        "finalBlock": "3062",
+        "attestedAt": 1793000000,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b"
+      },
+      "error": {
+        "code": "aztec_out_of_field",
+        "field": "recipient"
+      }
+    },
+    {
+      "name": "RecipientDeployment: classId zero",
+      "primaryType": "RecipientDeployment",
+      "record": {
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b",
+        "recipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
+        "classId": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "deployed": true,
+        "finalBlock": "3062",
+        "attestedAt": 1793000000,
+        "signature": "0xceaad21f3c1228a1b39faa68ed8c5538d72ece7c1d16c00a70bdd42886123a850eb2a129e625bb2953626b8e5bb642220b9f65684bbf928f98cf2a3d0ede01911b"
+      },
+      "error": {
+        "code": "aztec_zero",
+        "field": "classId"
+      }
+    },
+    {
+      "name": "RootUpdate: carries descriptorDigest",
+      "primaryType": "RootUpdate",
+      "record": {
+        "root": "0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b02",
+        "rootBlock": "3070",
+        "attestedAt": 1793000060,
+        "signature": "0x378a27615cc189d4a6e8d5089760b63a5a94c792457fea06d13eee51aeb0b2cb000891479908fbec545203dbfd44eb3f1021a2fce44b44cfadf2fe99276398ff1c",
+        "descriptorDigest": "0x657b333db2a51e6254297c2f406f84539825f5d76c7f9836e29ef8f2c0431f1b"
+      },
+      "error": {
+        "code": "unknown_field",
+        "field": "descriptorDigest"
+      }
+    }
+  ]
+}

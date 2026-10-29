@@ -30,6 +30,15 @@ import { CorridorConfigSchema, type CorridorConfig } from "./settlement.js";
 import { resolveSecretKey } from "./secrets.js";
 import { createReadinessObserver } from "./readiness.js";
 import type { SpendingLimitConfig } from "./spending-limit-account.js";
+import { AllowlistTree } from "./allowlist-tree.js";
+import {
+  AttestationProducer,
+  RootUpdatePublisher,
+  attestationAudit,
+  readAttestationEnvironment,
+  type AttestationEnvironmentConfig,
+} from "./attestation.js";
+import { resolveAttestationSecret } from "./attestation-secret.js";
 
 // Must match WINDOW_MS in limits.ts: it bounds the same rolling window.
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -518,6 +527,28 @@ if (deployerFeeJuiceClaim && !spendingLimitConfig) {
   process.exit(1);
 }
 
+let attestationEnvironment: AttestationEnvironmentConfig | undefined;
+try {
+  attestationEnvironment = readAttestationEnvironment(process.env, [
+    API_KEY,
+    ADMIN_KEY,
+    MAY_BROADCAST_TOKEN,
+  ]);
+} catch (err) {
+  console.error(`[pxe-bridge] ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+}
+if (
+  attestationEnvironment &&
+  (!API_KEY || !JOURNAL_PATH || !spendingLimitConfig || !corridor)
+) {
+  console.error(
+    "[pxe-bridge] Attestation requires PXE_BRIDGE_API_KEY, PXE_BRIDGE_JOURNAL, " +
+      "the spending-limit account, and PXE_BRIDGE_SETTLEMENT_CORRIDOR",
+  );
+  process.exit(1);
+}
+
 async function main(): Promise<void> {
   const { key: secretKey, source: keySource } = await resolveSecretKey();
   console.log(`[pxe-bridge] Secret key loaded from ${keySource}`);
@@ -563,6 +594,40 @@ async function main(): Promise<void> {
         : {}),
     },
   );
+  let attestation: AttestationProducer | undefined;
+  let rootUpdatePublisher: RootUpdatePublisher | undefined;
+  let attestationTree: AllowlistTree | undefined;
+  if (attestationEnvironment && journal && spendingLimitConfig && corridor) {
+    const resolved = await resolveAttestationSecret(process.env, [
+      secretKey,
+      spendingLimitConfig.allowlistSeed,
+    ]);
+    console.log(`[pxe-bridge] Attestation key loaded from ${resolved.source}`);
+    attestationTree = await AllowlistTree.build(
+      spendingLimitConfig.allowlistSeed,
+      spendingLimitConfig.allowlistRecipients,
+    );
+    attestation = new AttestationProducer({
+      probe: client,
+      journal,
+      allowlistTree: attestationTree,
+      signer: resolved.signer,
+      domain: {
+        sourceChainId: attestationEnvironment.domain.sourceChainId,
+        environment: attestationEnvironment.domain.environment,
+        manifestDigest: corridor.manifestDigest,
+        genesisOrNetworkDigest: corridor.genesisOrNetworkDigest,
+      },
+      audit: attestationAudit,
+    });
+    rootUpdatePublisher = new RootUpdatePublisher(
+      attestation,
+      client,
+      journal,
+      attestationEnvironment.relay,
+      attestationAudit,
+    );
+  }
   const readiness = createReadinessObserver(client, {
     journal,
     limits,
@@ -575,6 +640,8 @@ async function main(): Promise<void> {
     limits,
     audit,
     readiness,
+    attestationApiKey: attestationEnvironment?.apiKey,
+    attestation,
     ...(journal
       ? {
           settlement: {
@@ -601,6 +668,12 @@ async function main(): Promise<void> {
         ? () => legacyAuditRefusal(AUDIT_LOG_PATH, Date.now())
         : undefined,
     });
+    if (attestationTree && spendingLimitConfig && journal.health().writable) {
+      journal.recordAllowlistSnapshot(
+        attestationTree.root.toString(),
+        spendingLimitConfig.allowlistRecipients,
+      );
+    }
     const health = journal.health();
     console.log(
       health.writable
@@ -614,6 +687,7 @@ async function main(): Promise<void> {
       console.warn("[pxe-bridge] WARNING: PXE_BRIDGE_SETTLEMENT_CORRIDOR not set; createNote refused");
     }
   }
+  rootUpdatePublisher?.start();
 
   // Printed on every unrecorded start, not just the first, so a missed first
   // print is not the end of it.
@@ -657,11 +731,15 @@ async function main(): Promise<void> {
     console.log(`  GET  /status     -- Minimal public liveness`);
     console.log(`  GET  /ready      -- Authenticated hard settlement readiness`);
     console.log(
+      `  POST /attest/rpc -- Readiness attestations (${attestation ? "enabled" : "DISABLED"})`,
+    );
+    console.log(
       `  POST /admin/resume -- Clear the circuit breaker (${ADMIN_KEY ? "enabled" : "DISABLED"})`,
     );
   });
 
   function shutdown(): void {
+    rootUpdatePublisher?.stop();
     console.log("[pxe-bridge] Shutting down...");
     const timer = setTimeout(() => process.exit(1), 5000);
     server.close(() => {

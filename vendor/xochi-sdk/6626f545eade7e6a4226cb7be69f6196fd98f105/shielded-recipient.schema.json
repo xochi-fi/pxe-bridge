@@ -1,0 +1,1333 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xochi.fi/spec/conformance/shielded-recipient.schema.json",
+  "title": "Shielded settlement v1 recipient encodings vector set",
+  "description": "RecipientDescriptor hashStruct (descriptorDigest) and the stock SchnorrAccount address derivation for the pinned Aztec 5.2.0 and @aztec-labs 6.0.0 classes; the recipient message wrapper with its wide reduction and Schnorr signatures; and the approved acknowledgement structs with cross-type and cross-binding replay refusals (xochi shielded-execution.md §7; product-owner decisions 2026-10-24/25 and 2026-10-29). Generated independently of @xochi/signer; held to the real SDKs by packages/spec/aztec-crosscheck. All keys are TEST ONLY synthetic scalars.",
+  "type": "object",
+  "required": [
+    "version",
+    "generator",
+    "source",
+    "testOnlyKeys",
+    "constants",
+    "descriptor",
+    "recipientMessage",
+    "acknowledgements"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "generator": {
+      "type": "string"
+    },
+    "source": {
+      "type": "string"
+    },
+    "testOnlyKeys": {
+      "type": "string"
+    },
+    "constants": {
+      "type": "object",
+      "required": [
+        "fieldModulus",
+        "grumpkinOrder",
+        "grumpkinGenerator",
+        "domainVersion",
+        "bindingDomainName",
+        "bindingPurpose"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "fieldModulus": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{64}$"
+        },
+        "grumpkinOrder": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{64}$"
+        },
+        "grumpkinGenerator": {
+          "type": "object",
+          "required": [
+            "x",
+            "y"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "x": {
+              "type": "string",
+              "pattern": "^0x[0-9a-f]{64}$"
+            },
+            "y": {
+              "type": "string",
+              "pattern": "^0x[0-9a-f]{64}$"
+            }
+          }
+        },
+        "domainVersion": {
+          "const": "1"
+        },
+        "bindingDomainName": {
+          "const": "Xochi Shielded Recipient"
+        },
+        "bindingPurpose": {
+          "const": "xochi.shielded.recipient-binding.v1"
+        }
+      }
+    },
+    "descriptor": {
+      "type": "object",
+      "required": [
+        "decided",
+        "typeString",
+        "typehash",
+        "digestRule",
+        "publicKeys",
+        "derivation",
+        "poseidon2",
+        "separators",
+        "constructorSelector",
+        "constructorSignature",
+        "profiles",
+        "checkOrder",
+        "vectors",
+        "crossProfile",
+        "refusals"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "decided": {
+          "type": "string"
+        },
+        "typeString": {
+          "const": "RecipientDescriptor(bytes32 aztecAddress,bytes32 classId,bytes32 salt,bytes32 deployer,bytes32 signingPublicKeyX,bytes32 signingPublicKeyY,bytes32 npkMHash,bytes32 ivpkMX,bytes32 ivpkMY,bytes32 ovpkMHash,bytes32 tpkMHash,bytes32 mspkMHash,bytes32 fbpkMHash,NetworkIdentity network)NetworkIdentity(uint256 aztecChainId,uint256 protocolVersion,address rollupAddress,uint256 l1ChainId,bytes32 genesisOrNetworkDigest)"
+        },
+        "typehash": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{64}$"
+        },
+        "digestRule": {
+          "type": "string"
+        },
+        "publicKeys": {
+          "type": "string"
+        },
+        "derivation": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "poseidon2": {
+          "type": "string"
+        },
+        "separators": {
+          "type": "object",
+          "required": [
+            "FUNCTION_ARGS",
+            "INITIALIZER",
+            "SALTED_INITIALIZATION_HASH",
+            "PARTIAL_ADDRESS",
+            "PUBLIC_KEYS_HASH",
+            "SINGLE_PUBLIC_KEY_HASH"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "FUNCTION_ARGS": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)$"
+            },
+            "INITIALIZER": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)$"
+            },
+            "SALTED_INITIALIZATION_HASH": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)$"
+            },
+            "PARTIAL_ADDRESS": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)$"
+            },
+            "PUBLIC_KEYS_HASH": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)$"
+            },
+            "SINGLE_PUBLIC_KEY_HASH": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)$"
+            }
+          }
+        },
+        "constructorSelector": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{64}$"
+        },
+        "constructorSignature": {
+          "const": "constructor(Field,Field)"
+        },
+        "profiles": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "sdk",
+              "network",
+              "pinnedClassId",
+              "artifactHash",
+              "initializerlessClassId",
+              "contractAddressSeparator"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "sdk": {
+                "type": "string"
+              },
+              "network": {
+                "type": "string"
+              },
+              "pinnedClassId": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{64}$"
+              },
+              "artifactHash": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{64}$"
+              },
+              "initializerlessClassId": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{64}$"
+              },
+              "contractAddressSeparator": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "value"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "checkOrder": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "vectors": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "profile",
+              "testOnlySecrets",
+              "descriptor",
+              "descriptorDigest",
+              "derivation"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "profile": {
+                "type": "string"
+              },
+              "testOnlySecrets": {
+                "type": "object",
+                "required": [
+                  "secretKey",
+                  "signingPrivateKey"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "secretKey": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "signingPrivateKey": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  }
+                }
+              },
+              "descriptor": {
+                "type": "object",
+                "required": [
+                  "aztecAddress",
+                  "classId",
+                  "salt",
+                  "deployer",
+                  "signingPublicKeyX",
+                  "signingPublicKeyY",
+                  "npkMHash",
+                  "ivpkMX",
+                  "ivpkMY",
+                  "ovpkMHash",
+                  "tpkMHash",
+                  "mspkMHash",
+                  "fbpkMHash",
+                  "network"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "aztecAddress": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "classId": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "salt": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "deployer": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "signingPublicKeyX": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "signingPublicKeyY": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "npkMHash": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "ivpkMX": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "ivpkMY": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "ovpkMHash": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "tpkMHash": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "mspkMHash": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "fbpkMHash": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "network": {
+                    "type": "object",
+                    "required": [
+                      "aztecChainId",
+                      "protocolVersion",
+                      "rollupAddress",
+                      "l1ChainId",
+                      "genesisOrNetworkDigest"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "aztecChainId": {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]*)$"
+                      },
+                      "protocolVersion": {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]*)$"
+                      },
+                      "rollupAddress": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-f]{40}$"
+                      },
+                      "l1ChainId": {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]*)$"
+                      },
+                      "genesisOrNetworkDigest": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-f]{64}$"
+                      }
+                    }
+                  }
+                }
+              },
+              "descriptorDigest": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{64}$"
+              },
+              "derivation": {
+                "type": "object",
+                "required": [
+                  "constructorArgsHash",
+                  "initializationHash",
+                  "immutablesHash",
+                  "saltedInitializationHash",
+                  "partialAddress",
+                  "ivpkMHash",
+                  "publicKeysHash",
+                  "preaddress",
+                  "addressPoint",
+                  "address"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "constructorArgsHash": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "initializationHash": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "immutablesHash": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "saltedInitializationHash": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "partialAddress": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "ivpkMHash": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "publicKeysHash": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "preaddress": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "addressPoint": {
+                    "type": "object",
+                    "required": [
+                      "x",
+                      "y"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "x": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-f]{64}$"
+                      },
+                      "y": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-f]{64}$"
+                      }
+                    }
+                  },
+                  "address": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "crossProfile": {
+          "type": "object",
+          "required": [
+            "name",
+            "keysFrom",
+            "addresses"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "keysFrom": {
+              "type": "string"
+            },
+            "addresses": {
+              "type": "object",
+              "required": [
+                "aztec-6.0.0",
+                "aztec-5.2.0"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "aztec-6.0.0": {
+                  "type": "string",
+                  "pattern": "^0x[0-9a-f]{64}$"
+                },
+                "aztec-5.2.0": {
+                  "type": "string",
+                  "pattern": "^0x[0-9a-f]{64}$"
+                }
+              }
+            }
+          }
+        },
+        "refusals": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "profile",
+              "descriptor",
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "profile": {
+                "type": "string"
+              },
+              "descriptor": {
+                "type": "object"
+              },
+              "error": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "field"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "code": {
+                    "enum": [
+                      "not_bytes32",
+                      "aztec_zero",
+                      "aztec_out_of_field",
+                      "class_not_pinned",
+                      "signing_key_invalid",
+                      "ivpk_invalid",
+                      "address_mismatch",
+                      "purpose_mismatch",
+                      "uint_not_canonical",
+                      "uint_out_of_range",
+                      "amount_not_canonical",
+                      "amount_zero",
+                      "amount_over_max",
+                      "senders_not_canonical",
+                      "senders_empty"
+                    ]
+                  },
+                  "field": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "recipientMessage": {
+      "type": "object",
+      "required": [
+        "decided",
+        "prefix",
+        "prefixHex",
+        "wideBytes",
+        "rule",
+        "schnorr",
+        "tooling",
+        "reduction",
+        "bindingMessages",
+        "refusals"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "decided": {
+          "type": "string"
+        },
+        "prefix": {
+          "const": "\u0019Xochi Shielded Recipient Message v1"
+        },
+        "prefixHex": {
+          "const": "0x19586f63686920536869656c64656420526563697069656e74204d657373616765207631"
+        },
+        "wideBytes": {
+          "const": 48
+        },
+        "rule": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "schnorr": {
+          "type": "object",
+          "required": [
+            "library",
+            "challenge",
+            "challengeDst",
+            "signatureEncoding",
+            "testOnlyNonce"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "library": {
+              "type": "string"
+            },
+            "challenge": {
+              "type": "string"
+            },
+            "challengeDst": {
+              "type": "string",
+              "pattern": "^0x[0-9a-f]{64}$"
+            },
+            "signatureEncoding": {
+              "type": "string"
+            },
+            "testOnlyNonce": {
+              "type": "string"
+            }
+          }
+        },
+        "tooling": {
+          "type": "string"
+        },
+        "reduction": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "u48",
+              "messageField",
+              "notTheRule"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "u48": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{96}$"
+              },
+              "messageField": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{64}$"
+              },
+              "notTheRule": {
+                "type": "object",
+                "required": [
+                  "truncated256ModR"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "truncated256ModR": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "bindingMessages": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "account",
+              "primaryType",
+              "environment",
+              "network",
+              "domain",
+              "message",
+              "structHash",
+              "digest",
+              "wrapper",
+              "publicKey",
+              "signature"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "account": {
+                "type": "string"
+              },
+              "primaryType": {
+                "type": "string"
+              },
+              "environment": {
+                "type": "string"
+              },
+              "network": {
+                "type": "object",
+                "required": [
+                  "aztecChainId",
+                  "protocolVersion",
+                  "rollupAddress",
+                  "l1ChainId",
+                  "genesisOrNetworkDigest"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "aztecChainId": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "protocolVersion": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "rollupAddress": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{40}$"
+                  },
+                  "l1ChainId": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "genesisOrNetworkDigest": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  }
+                }
+              },
+              "domain": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "version",
+                  "chainId",
+                  "salt"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "version": {
+                    "type": "string"
+                  },
+                  "chainId": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "salt": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  }
+                }
+              },
+              "message": {
+                "type": "object"
+              },
+              "structHash": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{64}$"
+              },
+              "digest": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{64}$"
+              },
+              "wrapper": {
+                "type": "object",
+                "required": [
+                  "u",
+                  "u48",
+                  "messageField",
+                  "provisionalPlainModR"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "u": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]*$"
+                  },
+                  "u48": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]*$"
+                  },
+                  "messageField": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "provisionalPlainModR": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  }
+                }
+              },
+              "publicKey": {
+                "type": "object",
+                "required": [
+                  "x",
+                  "y"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "x": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "y": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  }
+                }
+              },
+              "signature": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{128}$"
+              }
+            }
+          }
+        },
+        "refusals": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "account",
+              "digest",
+              "messageField",
+              "signedField",
+              "publicKey",
+              "signature",
+              "valid"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "account": {
+                "type": "string"
+              },
+              "digest": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{64}$"
+              },
+              "messageField": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{64}$"
+              },
+              "signedField": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{64}$"
+              },
+              "publicKey": {
+                "type": "object",
+                "required": [
+                  "x",
+                  "y"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "x": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "y": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  }
+                }
+              },
+              "signature": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{128}$"
+              },
+              "valid": {
+                "const": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "acknowledgements": {
+      "type": "object",
+      "required": [
+        "domain",
+        "types",
+        "rules",
+        "vectors",
+        "crossTypeReplays",
+        "crossBindingReplays",
+        "refusals"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "domain": {
+          "type": "string"
+        },
+        "types": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "primaryType",
+              "scope",
+              "purpose",
+              "typeString",
+              "typehash"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "primaryType": {
+                "type": "string"
+              },
+              "scope": {
+                "type": "string"
+              },
+              "purpose": {
+                "type": "string"
+              },
+              "typeString": {
+                "type": "string"
+              },
+              "typehash": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{64}$"
+              }
+            }
+          }
+        },
+        "rules": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "vectors": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "primaryType",
+              "environment",
+              "network",
+              "domain",
+              "message",
+              "structHash",
+              "digest",
+              "wrapper",
+              "publicKey",
+              "signature"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "primaryType": {
+                "type": "string"
+              },
+              "environment": {
+                "type": "string"
+              },
+              "network": {
+                "type": "object",
+                "required": [
+                  "aztecChainId",
+                  "protocolVersion",
+                  "rollupAddress",
+                  "l1ChainId",
+                  "genesisOrNetworkDigest"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "aztecChainId": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "protocolVersion": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "rollupAddress": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{40}$"
+                  },
+                  "l1ChainId": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "genesisOrNetworkDigest": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  }
+                }
+              },
+              "domain": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "version",
+                  "chainId",
+                  "salt"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "version": {
+                    "type": "string"
+                  },
+                  "chainId": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "salt": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  }
+                }
+              },
+              "message": {
+                "type": "object"
+              },
+              "structHash": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{64}$"
+              },
+              "digest": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{64}$"
+              },
+              "wrapper": {
+                "type": "object",
+                "required": [
+                  "u",
+                  "u48",
+                  "messageField",
+                  "provisionalPlainModR"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "u": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]*$"
+                  },
+                  "u48": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]*$"
+                  },
+                  "messageField": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "provisionalPlainModR": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  }
+                }
+              },
+              "publicKey": {
+                "type": "object",
+                "required": [
+                  "x",
+                  "y"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "x": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "y": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  }
+                }
+              },
+              "signature": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{128}$"
+              }
+            }
+          }
+        },
+        "crossTypeReplays": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "domain",
+              "message",
+              "digest",
+              "messageField",
+              "publicKey",
+              "signature",
+              "valid",
+              "signedAs",
+              "presentedAs"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "domain": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "version",
+                  "chainId",
+                  "salt"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "version": {
+                    "type": "string"
+                  },
+                  "chainId": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "salt": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  }
+                }
+              },
+              "message": {
+                "type": "object"
+              },
+              "digest": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{64}$"
+              },
+              "messageField": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{64}$"
+              },
+              "publicKey": {
+                "type": "object",
+                "required": [
+                  "x",
+                  "y"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "x": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "y": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  }
+                }
+              },
+              "signature": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{128}$"
+              },
+              "valid": {
+                "const": false
+              },
+              "signedAs": {
+                "type": "string"
+              },
+              "presentedAs": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "crossBindingReplays": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "domain",
+              "message",
+              "digest",
+              "messageField",
+              "publicKey",
+              "signature",
+              "valid",
+              "primaryType"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "domain": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "version",
+                  "chainId",
+                  "salt"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "version": {
+                    "type": "string"
+                  },
+                  "chainId": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "salt": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  }
+                }
+              },
+              "message": {
+                "type": "object"
+              },
+              "digest": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{64}$"
+              },
+              "messageField": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{64}$"
+              },
+              "publicKey": {
+                "type": "object",
+                "required": [
+                  "x",
+                  "y"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "x": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "y": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  }
+                }
+              },
+              "signature": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{128}$"
+              },
+              "valid": {
+                "const": false
+              },
+              "primaryType": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "refusals": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "primaryType",
+              "message",
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "primaryType": {
+                "type": "string"
+              },
+              "message": {
+                "type": "object"
+              },
+              "error": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "field"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "code": {
+                    "enum": [
+                      "not_bytes32",
+                      "aztec_zero",
+                      "aztec_out_of_field",
+                      "class_not_pinned",
+                      "signing_key_invalid",
+                      "ivpk_invalid",
+                      "address_mismatch",
+                      "purpose_mismatch",
+                      "uint_not_canonical",
+                      "uint_out_of_range",
+                      "amount_not_canonical",
+                      "amount_zero",
+                      "amount_over_max",
+                      "senders_not_canonical",
+                      "senders_empty"
+                    ]
+                  },
+                  "field": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

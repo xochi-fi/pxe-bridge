@@ -18,7 +18,10 @@ import { BlockHash } from "@aztec-labs/stdlib/block";
 import { getContractClassFromArtifact } from "@aztec-labs/stdlib/contract";
 import type { NodeInfo } from "@aztec-labs/stdlib/contract";
 import { ManaUsageEstimate, type GasFees } from "@aztec-labs/stdlib/gas";
-import { deriveStorageSlotInMap } from "@aztec-labs/stdlib/hash";
+import {
+  computeSiloedPrivateInitializationNullifier,
+  deriveStorageSlotInMap,
+} from "@aztec-labs/stdlib/hash";
 import { ACCOUNT_ADDRESS_ENV, assertAccountIdentity } from "./account-identity.js";
 import type {
   BroadcastGate,
@@ -42,6 +45,7 @@ import {
   SpendingLimitAccountContract,
   type SpendingLimitConfig,
 } from "./spending-limit-account.js";
+import type { AttestationObservation } from "./attestation.js";
 
 const MAX_TOKEN_CACHE_SIZE = 100;
 export const TX_TIMEOUT_MS = 120_000; // 2 minutes
@@ -1229,6 +1233,94 @@ export class AztecClient implements IAztecClient {
 
   pinnedToken(): string | undefined {
     return this.spendingLimitConfig?.token;
+  }
+
+  async observeAttestationChain(
+    recipient: string | undefined,
+    genesisOrNetworkDigest: string,
+  ): Promise<AttestationObservation> {
+    if (!this.node || !this.solverAddress || !this.spendingLimitContract) {
+      return { state: "unknown", reason: "finalized_history_unavailable" };
+    }
+    try {
+      const [nodeInfo, worldState, tips] = await Promise.all([
+        this.node.getNodeInfo(),
+        this.node.getWorldStateSyncStatus(),
+        this.node.getChainTips(),
+      ]);
+      const tip = tips.finalized.block;
+      const number = Number(tip.number);
+      if (
+        number === 0 ||
+        BigInt(tip.hash) === 0n ||
+        !worldState.treesAreSynched ||
+        Number(worldState.finalizedBlockNumber) < number ||
+        Number(worldState.oldestHistoricBlockNumber) > number
+      ) {
+        return { state: "unknown", reason: "finalized_history_unavailable" };
+      }
+      const reference = { number: tip.number, hash: BlockHash.fromString(tip.hash) };
+      const block = await this.node.getBlockData(reference);
+      if (
+        !block ||
+        Number(block.header.globalVariables.blockNumber) !== number ||
+        block.blockHash.toString().toLowerCase() !== tip.hash.toLowerCase()
+      ) {
+        return { state: "unknown", reason: "finalized_reference_invalid" };
+      }
+      const artifact = await this.spendingLimitContract.getContractArtifact();
+      const rootLayout = artifact.storageLayout["allowlist_root"];
+      if (!rootLayout) {
+        return { state: "unknown", reason: "finalized_history_unavailable" };
+      }
+      const root = await this.node.getPublicStorageAt(
+        reference,
+        this.solverAddress,
+        rootLayout.slot,
+      );
+      let recipientDeployment:
+        | { state: "absent" }
+        | { state: "present"; classId: string; initialized: boolean }
+        | undefined;
+      if (recipient !== undefined) {
+        const address = AztecAddress.fromStringUnsafe(recipient);
+        const instance = await this.node.getContract(address, reference);
+        if (instance) {
+          const initializationNullifier = await computeSiloedPrivateInitializationNullifier(
+            address,
+            instance.initializationHash,
+          );
+          const initializationWitness = await this.node.getNullifierMembershipWitness(
+            reference,
+            initializationNullifier,
+          );
+          recipientDeployment = {
+            state: "present",
+            classId: instance.currentContractClassId.toString().toLowerCase(),
+            initialized: initializationWitness !== undefined,
+          };
+        } else {
+          recipientDeployment = { state: "absent" };
+        }
+      }
+      const network = settlementNetworkFromNodeInfo(nodeInfo);
+      return {
+        state: "known",
+        value: {
+          network: { ...network, genesisOrNetworkDigest: genesisOrNetworkDigest.toLowerCase() },
+          finalized: {
+            blockNumber: String(number),
+            blockHash: tip.hash.toLowerCase(),
+            timestamp: block.header.globalVariables.timestamp.toString(),
+          },
+          allowlistRoot: root.toString().toLowerCase(),
+          ...(recipientDeployment ? { recipientDeployment } : {}),
+        },
+      };
+    } catch {
+      console.error("[pxe-bridge] Attestation finalized observation failed");
+      return { state: "unknown", reason: "finalized_history_unavailable" };
+    }
   }
 
   /**
