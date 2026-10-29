@@ -635,33 +635,43 @@ Returns the connected Aztec node version string.
 
 ### Health Check
 
-`GET /status` returns `{ status, version, feeJuice: { balance } }` (200) or
-`{ status: "starting" }` (503). `balance` is the solver account's fee juice as a
-decimal string, cached for 30s so the unauthenticated endpoint does not query
-the node per request, and `null` if the last read failed. With
-`PXE_BRIDGE_MIN_FEE_JUICE` set, `feeJuice.low` is added and `status` is
-`degraded` while the balance is below it. Degraded still answers 200: the
-bridge is up, and restarting it does not add fee juice. Top up with
-`npm run top-up-fee-juice` before it runs out, since every transfer fails once
-it does.
+Two unauthenticated, rate-limited endpoints share one body:
 
-Response bodies:
+- `GET /status` is **liveness**: 200 whenever the node answers, 503
+  `{ status: "starting", ready: false }` until it does. Keep container
+  restarts on it: a bridge with journal writes disabled must stay up to serve
+  `aztec_getSettlement`.
+- `GET /ready` is **readiness**: 200 only when every settlement prerequisite
+  holds -- the journal configured and writable, the may-broadcast endpoint
+  and the corridor configured -- and 503 otherwise. Gate traffic and deploys
+  on it.
+
+The body is `{ status, ready, notReady?, version, feeJuice: { balance, low? },
+journal: { writable, reason? }, settlement: { mayBroadcast, corridor } }`.
+`notReady` lists every unmet prerequisite (`journal_unconfigured`,
+`journal_<reason>`, `may_broadcast_unconfigured`, `corridor_unconfigured`).
+`status` is `ok` only when ready and fee juice is not low, otherwise
+`degraded`. `balance` is the solver account's fee juice as a decimal string,
+cached for 30s so the unauthenticated endpoints do not query the node per
+request, and `null` if the last read failed (never `low` then). With
+`PXE_BRIDGE_MIN_FEE_JUICE` set, `feeJuice.low` is added while the balance is
+below it; low fee juice degrades the bridge without making it unready, since
+restarting it does not add fee juice. Top up with `npm run top-up-fee-juice`
+before it runs out, since every transfer fails once it does.
 
 ```jsonc
-// 200, PXE_BRIDGE_MIN_FEE_JUICE unset
-{ "status": "ok", "version": "6.0.0", "feeJuice": { "balance": "999000000000000000" } }
-// 200, PXE_BRIDGE_MIN_FEE_JUICE set; "low" is present only when the read succeeded
-{ "status": "degraded", "version": "6.0.0", "feeJuice": { "balance": "10", "low": true } }
-// 200, the balance read failed (cached as null for 30s); status is never "degraded" on a failed read
-{ "status": "ok", "version": "6.0.0", "feeJuice": { "balance": null } }
-// 503, not connected yet
-{ "status": "starting" }
+// /status 200, /ready 200
+{ "status": "ok", "ready": true, "version": "6.0.0", "feeJuice": { "balance": "999000000000000000" },
+  "journal": { "writable": true }, "settlement": { "mayBroadcast": "configured", "corridor": "configured" } }
+// /status 200, /ready 503: no corridor configured
+{ "status": "degraded", "ready": false, "notReady": ["corridor_unconfigured"], "version": "6.0.0",
+  "feeJuice": { "balance": "10" }, "journal": { "writable": true },
+  "settlement": { "mayBroadcast": "configured", "corridor": "unconfigured" } }
+// both 503, not connected yet
+{ "status": "starting", "ready": false }
 ```
 
-Before this field existed the 200 body was `{ status: "ok", version }`. A
-client that compares `status` to `"ok"` must now also accept `"degraded"`, which
-means "up, but top up fee juice"; the Docker `HEALTHCHECK` reads only the HTTP
-code (`curl -sf`), so it is unaffected.
+The Docker `HEALTHCHECK` reads only `/status`'s HTTP code (`curl -sf`).
 
 ## Security
 

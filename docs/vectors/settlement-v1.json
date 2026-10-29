@@ -1,0 +1,462 @@
+{
+  "version": 1,
+  "generator": "scripts/settlement-vectors.ts (npm run generate:settlement-vectors)",
+  "contract": "pxe-bridge.settlement.v1",
+  "source": "docs/settlement-operations.md; values from @xochi/spec 0.9.0 conformance/shielded.json recipientBinding \"baseline\" (network fixture-a)",
+  "networkIdentity": {
+    "typeString": "NetworkIdentity(uint256 aztecChainId,uint256 protocolVersion,address rollupAddress,uint256 l1ChainId,bytes32 genesisOrNetworkDigest)",
+    "typehash": "0xd30a9f62f8e7b404cb3181a16d547adec2b019fa08cadb19ea0a97528c727cff",
+    "note": "The request's `network` object is @xochi/spec's NetworkIdentity, member for member; its hashStruct reproduces the spec's networkIdentityDigest.",
+    "networkIdentityDigest": "0xf5046ae3e3c59d817787e4d1b3ae6d178280a4bf1b4dad404d4d31d5ca81e968"
+  },
+  "createNote": {
+    "http": {
+      "method": "POST",
+      "path": "/",
+      "headers": {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer <PXE_BRIDGE_API_KEY>",
+        "Idempotency-Key": "riddler-shielded-00000000-0000-4000-8000-000000000001"
+      }
+    },
+    "body": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "aztec_createNote",
+      "params": [
+        {
+          "version": "pxe-bridge.settlement.v1",
+          "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
+          "network": {
+            "aztecChainId": "11155111",
+            "protocolVersion": "3924331020",
+            "rollupAddress": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "l1ChainId": "11155111",
+            "genesisOrNetworkDigest": "0x9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e"
+          },
+          "corridor": {
+            "corridorId": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            "corridorRevision": 1,
+            "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
+          },
+          "accountMode": "spending_limit",
+          "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+          "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
+          "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "amount": "1000000",
+          "validUntil": 1900000000
+        }
+      ]
+    },
+    "canonicalTerms": {
+      "network": {
+        "aztecChainId": "11155111",
+        "protocolVersion": "3924331020",
+        "rollupAddress": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "l1ChainId": "11155111",
+        "genesisOrNetworkDigest": "0x9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e"
+      },
+      "corridor": {
+        "corridorId": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+        "corridorRevision": 1,
+        "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
+      },
+      "accountMode": "spending_limit",
+      "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+      "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
+      "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+      "amount": "1000000",
+      "validUntil": 1900000000
+    },
+    "fingerprint": "0xef29c46772683bcab6d096ab4b5288111ba8f64cb8392ba6c72b802fcdbb6f88",
+    "sameFingerprint": [
+      {
+        "name": "uppercase hex in every hex member",
+        "params": {
+          "version": "pxe-bridge.settlement.v1",
+          "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
+          "network": {
+            "aztecChainId": "11155111",
+            "protocolVersion": "3924331020",
+            "rollupAddress": "0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1",
+            "l1ChainId": "11155111",
+            "genesisOrNetworkDigest": "0x9E9E9E9E9E9E9E9E9E9E9E9E9E9E9E9E9E9E9E9E9E9E9E9E9E9E9E9E9E9E9E9E"
+          },
+          "corridor": {
+            "corridorId": "0xC0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0",
+            "corridorRevision": 1,
+            "manifestDigest": "0x4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D"
+          },
+          "accountMode": "spending_limit",
+          "recipient": "0x1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C",
+          "recipientDescriptorDigest": "0xD5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5",
+          "token": "0x2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B",
+          "amount": "1000000",
+          "validUntil": 1900000000
+        }
+      },
+      {
+        "name": "another JSON-RPC id",
+        "body": {
+          "jsonrpc": "2.0",
+          "id": "retry-7",
+          "method": "aztec_createNote"
+        }
+      }
+    ],
+    "refusals": [
+      {
+        "name": "aztecChainId zero",
+        "params": {
+          "version": "pxe-bridge.settlement.v1",
+          "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
+          "network": {
+            "aztecChainId": "0",
+            "protocolVersion": "3924331020",
+            "rollupAddress": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "l1ChainId": "11155111",
+            "genesisOrNetworkDigest": "0x9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e"
+          },
+          "corridor": {
+            "corridorId": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            "corridorRevision": 1,
+            "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
+          },
+          "accountMode": "spending_limit",
+          "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+          "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
+          "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "amount": "1000000",
+          "validUntil": 1900000000
+        },
+        "error": {
+          "code": -32602
+        }
+      },
+      {
+        "name": "protocolVersion at the BN254 modulus",
+        "params": {
+          "version": "pxe-bridge.settlement.v1",
+          "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
+          "network": {
+            "aztecChainId": "11155111",
+            "protocolVersion": "21888242871839275222246405745257275088548364400416034343698204186575808495617",
+            "rollupAddress": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "l1ChainId": "11155111",
+            "genesisOrNetworkDigest": "0x9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e"
+          },
+          "corridor": {
+            "corridorId": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            "corridorRevision": 1,
+            "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
+          },
+          "accountMode": "spending_limit",
+          "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+          "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
+          "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "amount": "1000000",
+          "validUntil": 1900000000
+        },
+        "error": {
+          "code": -32602
+        }
+      },
+      {
+        "name": "l1ChainId zero",
+        "params": {
+          "version": "pxe-bridge.settlement.v1",
+          "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
+          "network": {
+            "aztecChainId": "11155111",
+            "protocolVersion": "3924331020",
+            "rollupAddress": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "l1ChainId": "0",
+            "genesisOrNetworkDigest": "0x9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e"
+          },
+          "corridor": {
+            "corridorId": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            "corridorRevision": 1,
+            "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
+          },
+          "accountMode": "spending_limit",
+          "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+          "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
+          "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "amount": "1000000",
+          "validUntil": 1900000000
+        },
+        "error": {
+          "code": -32602
+        }
+      },
+      {
+        "name": "l1ChainId as a JSON number",
+        "params": {
+          "version": "pxe-bridge.settlement.v1",
+          "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
+          "network": {
+            "aztecChainId": "11155111",
+            "protocolVersion": "3924331020",
+            "rollupAddress": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "l1ChainId": 11155111,
+            "genesisOrNetworkDigest": "0x9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e"
+          },
+          "corridor": {
+            "corridorId": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            "corridorRevision": 1,
+            "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
+          },
+          "accountMode": "spending_limit",
+          "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+          "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
+          "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "amount": "1000000",
+          "validUntil": 1900000000
+        },
+        "error": {
+          "code": -32602
+        }
+      },
+      {
+        "name": "rollupAddress zero",
+        "params": {
+          "version": "pxe-bridge.settlement.v1",
+          "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
+          "network": {
+            "aztecChainId": "11155111",
+            "protocolVersion": "3924331020",
+            "rollupAddress": "0x0000000000000000000000000000000000000000",
+            "l1ChainId": "11155111",
+            "genesisOrNetworkDigest": "0x9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e"
+          },
+          "corridor": {
+            "corridorId": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            "corridorRevision": 1,
+            "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
+          },
+          "accountMode": "spending_limit",
+          "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+          "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
+          "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "amount": "1000000",
+          "validUntil": 1900000000
+        },
+        "error": {
+          "code": -32602
+        }
+      },
+      {
+        "name": "genesisOrNetworkDigest zero",
+        "params": {
+          "version": "pxe-bridge.settlement.v1",
+          "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
+          "network": {
+            "aztecChainId": "11155111",
+            "protocolVersion": "3924331020",
+            "rollupAddress": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "l1ChainId": "11155111",
+            "genesisOrNetworkDigest": "0x0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "corridor": {
+            "corridorId": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            "corridorRevision": 1,
+            "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
+          },
+          "accountMode": "spending_limit",
+          "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+          "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
+          "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "amount": "1000000",
+          "validUntil": 1900000000
+        },
+        "error": {
+          "code": -32602
+        }
+      },
+      {
+        "name": "recipient as a 20-byte EVM address",
+        "params": {
+          "version": "pxe-bridge.settlement.v1",
+          "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
+          "network": {
+            "aztecChainId": "11155111",
+            "protocolVersion": "3924331020",
+            "rollupAddress": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "l1ChainId": "11155111",
+            "genesisOrNetworkDigest": "0x9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e"
+          },
+          "corridor": {
+            "corridorId": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            "corridorRevision": 1,
+            "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
+          },
+          "accountMode": "spending_limit",
+          "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+          "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
+          "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "amount": "1000000",
+          "validUntil": 1900000000
+        },
+        "error": {
+          "code": -32602
+        }
+      },
+      {
+        "name": "amount with a leading zero",
+        "params": {
+          "version": "pxe-bridge.settlement.v1",
+          "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
+          "network": {
+            "aztecChainId": "11155111",
+            "protocolVersion": "3924331020",
+            "rollupAddress": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "l1ChainId": "11155111",
+            "genesisOrNetworkDigest": "0x9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e"
+          },
+          "corridor": {
+            "corridorId": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            "corridorRevision": 1,
+            "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
+          },
+          "accountMode": "spending_limit",
+          "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+          "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
+          "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "amount": "01000000",
+          "validUntil": 1900000000
+        },
+        "error": {
+          "code": -32602
+        }
+      },
+      {
+        "name": "amount as a JSON number",
+        "params": {
+          "version": "pxe-bridge.settlement.v1",
+          "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
+          "network": {
+            "aztecChainId": "11155111",
+            "protocolVersion": "3924331020",
+            "rollupAddress": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "l1ChainId": "11155111",
+            "genesisOrNetworkDigest": "0x9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e"
+          },
+          "corridor": {
+            "corridorId": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            "corridorRevision": 1,
+            "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
+          },
+          "accountMode": "spending_limit",
+          "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+          "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
+          "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "amount": 1000000,
+          "validUntil": 1900000000
+        },
+        "error": {
+          "code": -32602
+        }
+      },
+      {
+        "name": "an unknown member",
+        "params": {
+          "version": "pxe-bridge.settlement.v1",
+          "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
+          "network": {
+            "aztecChainId": "11155111",
+            "protocolVersion": "3924331020",
+            "rollupAddress": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "l1ChainId": "11155111",
+            "genesisOrNetworkDigest": "0x9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e"
+          },
+          "corridor": {
+            "corridorId": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            "corridorRevision": 1,
+            "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
+          },
+          "accountMode": "spending_limit",
+          "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+          "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
+          "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "amount": "1000000",
+          "validUntil": 1900000000,
+          "chainId": 1
+        },
+        "error": {
+          "code": -32602
+        }
+      }
+    ]
+  },
+  "getSettlement": {
+    "body": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "method": "aztec_getSettlement",
+      "params": [
+        {
+          "version": "pxe-bridge.settlement.v1",
+          "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001"
+        }
+      ]
+    }
+  },
+  "mayBroadcast": {
+    "request": {
+      "method": "POST",
+      "url": "<PXE_BRIDGE_MAY_BROADCAST_URL>",
+      "headers": {
+        "content-type": "application/json",
+        "authorization": "Bearer <PXE_BRIDGE_MAY_BROADCAST_TOKEN>"
+      },
+      "body": {
+        "version": "pxe-bridge.may-broadcast.v1",
+        "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
+        "fingerprint": "0xef29c46772683bcab6d096ab4b5288111ba8f64cb8392ba6c72b802fcdbb6f88",
+        "txHash": "0x7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+      }
+    },
+    "marks": {
+      "status": 200,
+      "body": {
+        "version": "pxe-bridge.may-broadcast.v1",
+        "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
+        "decision": "allow"
+      }
+    },
+    "holds": [
+      {
+        "status": 200,
+        "body": {
+          "version": "pxe-bridge.may-broadcast.v1",
+          "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
+          "decision": "deny"
+        }
+      },
+      {
+        "status": 200,
+        "body": {
+          "version": "pxe-bridge.may-broadcast.v1",
+          "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
+          "decision": "unknown"
+        }
+      },
+      {
+        "status": 200,
+        "body": {
+          "version": "pxe-bridge.may-broadcast.v1",
+          "operationId": "another-operation",
+          "decision": "allow"
+        }
+      },
+      {
+        "status": 202,
+        "body": {
+          "version": "pxe-bridge.may-broadcast.v1",
+          "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
+          "decision": "allow"
+        }
+      }
+    ]
+  }
+}

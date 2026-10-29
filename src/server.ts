@@ -1,9 +1,8 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import { handleRpcRequest, type RpcContext } from "./rpc.js";
+import { handleRpcRequest, type RpcContext, type SettlementContext } from "./rpc.js";
 import { RPC_ERRORS, type IAztecClient } from "./types.js";
 import type { TransactionLimits } from "./limits.js";
-import type { IdempotencyStore } from "./idempotency.js";
 import type { AuditLogger } from "./audit.js";
 
 const MAX_BODY_BYTES = 64 * 1024; // 64 KB
@@ -19,6 +18,13 @@ const REQUEST_TIMEOUT_MS = 30_000;
 // is not waiting on anything the bridge is going to deliver.
 export const RESPONSE_TIMEOUT_MS = 150_000;
 
+// The one deadline of a createNote, started when the request is handled and
+// spent by admission, cooldown, proving, the may-broadcast query and the
+// send. Under the response deadline by a margin, so the structured answer
+// (prepared / submitted_unknown with the txHash) reaches the caller before a
+// bare 504 can; the response deadline's abort closes the gate regardless.
+export const SETTLEMENT_DEADLINE_MS = RESPONSE_TIMEOUT_MS - 5_000;
+
 export interface ServerOptions {
   apiKey?: string | undefined;
   /**
@@ -29,8 +35,11 @@ export interface ServerOptions {
   adminKey?: string | undefined;
   limits?: TransactionLimits | undefined;
   audit?: AuditLogger | undefined;
-  /** Absent disables replay: every request executes, as before. */
-  idempotency?: IdempotencyStore | undefined;
+  /**
+   * The settlement journal and its collaborators. Absent refuses every
+   * `aztec_createNote` and `aztec_getSettlement` with -32004.
+   */
+  settlement?: SettlementContext | undefined;
   /**
    * Fee juice floor. Below it `/status` reports `degraded` and a warning is
    * logged on each refresh. Unset reports the balance without judging it.
@@ -38,6 +47,8 @@ export interface ServerOptions {
   minFeeJuice?: bigint | undefined;
   /** How long a fee juice reading is served before the node is asked again. */
   feeJuiceCacheMs?: number | undefined;
+  /** The HTTP response deadline; RESPONSE_TIMEOUT_MS unless a test shortens it. */
+  responseTimeoutMs?: number | undefined;
 }
 
 // /status is unauthenticated, so without a cache anyone could turn its rate
@@ -133,6 +144,9 @@ const SECURITY_HEADERS: Record<string, string> = {
 };
 
 function sendJson(res: ServerResponse, status: number, data: unknown): void {
+  // The response deadline may already have answered (504); the handler that
+  // finishes afterwards has nobody to tell.
+  if (res.headersSent || res.writableEnded) return;
   const body = JSON.stringify(data);
   res.writeHead(status, {
     ...SECURITY_HEADERS,
@@ -245,8 +259,15 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
   const server = createServer(async (req, res) => {
     // Nothing otherwise bounded how long a connection could stay open waiting
     // for a reply, so a stalled node held sockets indefinitely.
-    res.setTimeout(RESPONSE_TIMEOUT_MS, () => {
+    //
+    // The settlement deadline (SettlementContext.timeoutMs) normally answers
+    // first; this signal is the backstop that closes the gate if it does not.
+    const responseDeadline = new AbortController();
+    res.setTimeout(opts.responseTimeoutMs ?? RESPONSE_TIMEOUT_MS, () => {
       console.error("[pxe-bridge] Response deadline exceeded, closing connection");
+      // Before the 504 goes out: once the caller is answered, nothing this
+      // request started may be marked may-broadcast.
+      responseDeadline.abort();
       if (res.headersSent) {
         res.destroy();
         return;
@@ -261,8 +282,11 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
     try {
       const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
 
-      // Health check (no auth required, rate-limited)
-      if (req.method === "GET" && pathname === "/status") {
+      // Liveness (/status) and readiness (/ready): no auth, rate-limited, one
+      // body. /status answers 200 whenever the node does, so a degraded but
+      // live bridge is not restarted; /ready answers 200 only when every
+      // settlement prerequisite holds, and 503 otherwise.
+      if (req.method === "GET" && (pathname === "/status" || pathname === "/ready")) {
         const statusIp = req.socket.remoteAddress ?? "unknown";
         if (!rateLimiter.allow(statusIp)) {
           sendJson(res, 429, { error: "Too many requests" });
@@ -273,17 +297,44 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           const balance = await readFeeJuice();
           const low =
             opts.minFeeJuice !== undefined && balance !== null && balance < opts.minFeeJuice;
-          sendJson(res, 200, {
-            status: low ? "degraded" : "ok",
+          const settlement = opts.settlement;
+          // Public, so the reason only: the detail can name the account.
+          const journal = settlement?.journal.health();
+          const notReady = [
+            ...(journal === undefined
+              ? ["journal_unconfigured"]
+              : journal.writable
+                ? []
+                : [`journal_${journal.reason}`]),
+            // Listed with or without a settlement context: a bridge with no
+            // journal lacks these too, and the operator needs every gap at once.
+            ...(settlement?.mayBroadcast === undefined ? ["may_broadcast_unconfigured"] : []),
+            ...(settlement?.corridor === undefined ? ["corridor_unconfigured"] : []),
+          ];
+          const ready = notReady.length === 0;
+          sendJson(res, pathname === "/ready" && !ready ? 503 : 200, {
+            status: ready && !low ? "ok" : "degraded",
+            ready,
+            ...(ready ? {} : { notReady }),
             version,
             feeJuice: {
               balance: balance === null ? null : balance.toString(),
               ...(opts.minFeeJuice !== undefined && balance !== null ? { low } : {}),
             },
+            journal:
+              journal === undefined
+                ? { writable: false, reason: "journal_unconfigured" }
+                : journal.writable
+                  ? { writable: true }
+                  : { writable: false, reason: journal.reason },
+            settlement: {
+              mayBroadcast: settlement?.mayBroadcast === undefined ? "unconfigured" : "configured",
+              corridor: settlement?.corridor === undefined ? "unconfigured" : "configured",
+            },
           });
         } catch (err) {
           console.error("[pxe-bridge] Health check failed:", err);
-          sendJson(res, 503, { status: "starting" });
+          sendJson(res, 503, { status: "starting", ready: false });
         }
         return;
       }
@@ -404,9 +455,10 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
         const rpcCtx: RpcContext = {
           limits: opts.limits,
           audit: opts.audit,
-          idempotency: opts.idempotency,
+          settlement: opts.settlement,
           idempotencyKey,
           clientIp: clientIp,
+          signal: responseDeadline.signal,
         };
         const result = await handleRpcRequest(parsed, client, rpcCtx);
         sendJson(res, 200, result);

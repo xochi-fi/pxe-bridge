@@ -1,57 +1,69 @@
 import {
   JsonRpcRequestSchema,
-  CreateNoteParamsSchema,
-  PostSubmissionError,
   RPC_ERRORS,
   SUBMITTED_UNKNOWN_MESSAGE,
+  type BroadcastGate,
   type IAztecClient,
   type JsonRpcResponse,
+  type PreparedTransaction,
+  type TransferOutcome,
 } from "./types.js";
+import {
+  CreateNoteV1Schema,
+  GetSettlementSchema,
+  SETTLEMENT_VERSION,
+  fingerprintTerms,
+  isLegacyCreateNoteParams,
+  termsFrom,
+  type CorridorConfig,
+  type CreateNoteV1,
+  type NodeObservation,
+  type Observation,
+  type SettlementTerms,
+} from "./settlement.js";
+import {
+  JournalUnreadableError,
+  JournalWriteError,
+  type Attempt,
+  type Hold,
+  type JournalHealth,
+  type SettlementJournal,
+  type StoredOperation,
+} from "./journal.js";
+import type { MayBroadcastClient } from "./may-broadcast.js";
 import type { TransactionLimits } from "./limits.js";
-import type { IdempotencyStore, IdempotentOutcome } from "./idempotency.js";
-import type { AuditLogger, AuditEntry } from "./audit.js";
+import type { AuditLogger } from "./audit.js";
+
+export interface SettlementContext {
+  journal: SettlementJournal;
+  /** Unset refuses every createNote: there is nobody to ask. */
+  mayBroadcast: MayBroadcastClient | undefined;
+  /** Unset refuses every createNote: no corridor is approved. */
+  corridor: CorridorConfig | undefined;
+  /** Operations this process is driving right now. */
+  inFlight: Set<string>;
+  /**
+   * Bounds one createNote from the moment it is handled: admission, cooldown,
+   * proving and the may-broadcast query all spend it, and when it passes the
+   * gate closes. Default TX deadline.
+   */
+  timeoutMs: number;
+  now?: () => number;
+}
 
 export interface RpcContext {
   limits?: TransactionLimits | undefined;
   audit?: AuditLogger | undefined;
-  idempotency?: IdempotencyStore | undefined;
+  settlement?: SettlementContext | undefined;
   /** From the `Idempotency-Key` request header, when the caller sent one. */
   idempotencyKey?: string | undefined;
   clientIp?: string | undefined;
-}
-
-function auditBase(
-  params: {
-    recipient: string;
-    token: string;
-    amount: string;
-    chainId: number;
-    tradeId?: string | undefined;
-    subTradeIndex?: number | undefined;
-    totalSubTrades?: number | undefined;
-  },
-  ctx: RpcContext,
-): Omit<AuditEntry, "status" | "txHash" | "error"> {
-  return {
-    timestamp: new Date().toISOString(),
-    method: "aztec_createNote",
-    recipient: params.recipient,
-    token: params.token,
-    amount: params.amount,
-    chainId: params.chainId,
-    tradeId: params.tradeId,
-    subTradeIndex: params.subTradeIndex,
-    totalSubTrades: params.totalSubTrades,
-    idempotencyKey: ctx.idempotencyKey,
-    clientIp: ctx.clientIp ?? "unknown",
-  };
-}
-
-/** Applies a recorded outcome to the id of the request replaying it. */
-function replay(id: number | string, outcome: IdempotentOutcome): JsonRpcResponse {
-  return outcome.kind === "result"
-    ? success(id, outcome.result)
-    : rpcError(id, outcome.code, outcome.message, outcome.data);
+  /**
+   * Aborted when the HTTP response deadline answers the caller (504). Closes
+   * the gate synchronously, before the 504 is written, so nothing this
+   * request started can be marked may-broadcast after the caller gave up.
+   */
+  signal?: AbortSignal | undefined;
 }
 
 function success(id: number | string | null, result: unknown): JsonRpcResponse {
@@ -86,6 +98,8 @@ export async function handleRpcRequest(
   switch (method) {
     case "aztec_createNote":
       return handleCreateNote(id, params, client, ctx);
+    case "aztec_getSettlement":
+      return handleGetSettlement(id, params, client, ctx);
     case "aztec_getVersion":
       return handleGetVersion(id, client);
     default:
@@ -97,6 +111,402 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const TIMED_OUT = Symbol("timed-out");
+
+/**
+ * The one deadline of a createNote (pxe-bridge#45 review): started before
+ * admission and cooldown, not after them, so a request cannot outlive the
+ * HTTP response deadline and mark after its caller was answered. It passes on
+ * the first of `ms` elapsing and `signal` aborting, and passing closes the
+ * attempt's gate synchronously -- the gate is the only thing that marks.
+ */
+class RequestDeadline {
+  expired = false;
+  private gate: { close(): void } | undefined;
+  private readonly timer: ReturnType<typeof setTimeout>;
+  private readonly passed: Promise<typeof TIMED_OUT>;
+  private readonly onAbort: () => void;
+
+  constructor(
+    ms: number,
+    private readonly signal: AbortSignal | undefined,
+  ) {
+    let resolve: (value: typeof TIMED_OUT) => void = () => undefined;
+    this.passed = new Promise((r) => (resolve = r));
+    this.onAbort = () => {
+      if (this.expired) return;
+      this.expired = true;
+      this.gate?.close();
+      resolve(TIMED_OUT);
+    };
+    this.timer = setTimeout(this.onAbort, ms);
+    if (signal?.aborted) this.onAbort();
+    else signal?.addEventListener("abort", this.onAbort, { once: true });
+  }
+
+  /** Closes `gate` the moment the deadline passes (now, if it has). */
+  guard(gate: { close(): void }): void {
+    this.gate = gate;
+    if (this.expired) gate.close();
+  }
+
+  /** Races `promise` against the deadline; the promise keeps running either way. */
+  race<T>(promise: Promise<T>): Promise<T | typeof TIMED_OUT> {
+    return Promise.race([promise, this.passed]);
+  }
+
+  dispose(): void {
+    clearTimeout(this.timer);
+    this.signal?.removeEventListener("abort", this.onAbort);
+  }
+}
+
+function journalHealthWire(health: JournalHealth): Record<string, unknown> {
+  return health.writable
+    ? { writable: true }
+    : { writable: false, reason: health.reason, detail: health.detail };
+}
+
+function journalUnavailable(
+  id: number | string,
+  health: JournalHealth | { writable: false; reason: string; detail: string },
+  operationId?: string,
+): JsonRpcResponse {
+  return rpcError(id, RPC_ERRORS.JOURNAL_UNAVAILABLE, "Settlement journal unavailable", {
+    ...(operationId !== undefined ? { operationId } : {}),
+    journal: journalHealthWire(health as JournalHealth),
+  });
+}
+
+/** Stopped before the gate's may-broadcast mark, deliberately. */
+class Held extends Error {
+  constructor(readonly observation: Observation) {
+    super(`held: ${observation.state}`);
+  }
+}
+
+/** The caller already answered; nothing may broadcast on this path now. */
+class GateClosed extends Error {}
+
+interface DriveState {
+  op: StoredOperation;
+  fingerprint: string;
+  terms: SettlementTerms;
+}
+
+/**
+ * `fresh` proves a new attempt; `resume` re-asks for a journaled, unmarked
+ * attempt; `rebroadcast` resends a marked attempt's exact bytes.
+ */
+type GateMode =
+  | { kind: "fresh" }
+  | { kind: "resume"; attempt: Attempt }
+  | { kind: "rebroadcast"; attempt: Attempt };
+
+/**
+ * The per-attempt broadcast gate: journal the exact transaction, ask Riddler,
+ * mark may-broadcast, in that order, each step durable before the next; then
+ * a synchronous final step right before the node is called.
+ *
+ * `close()` is synchronous and checked synchronously right before the mark,
+ * so once the caller has answered (timeout), a proof that finishes later
+ * cannot broadcast: the only thing that permits a broadcast is a mark that a
+ * closed gate never writes.
+ *
+ * The bounds (`validUntil`, the attempt's protocol expiration) are checked
+ * last in `beforeSend`, which the client calls with no `await` between it and
+ * `sendTx`: the mark is an fsync and the client awaits after the gate, so a
+ * check made before either is stale by the time the node is called.
+ */
+class OperationGate implements BroadcastGate {
+  closed = false;
+  marked = false;
+  attempt: Attempt | undefined;
+
+  constructor(
+    private readonly s: SettlementContext,
+    private readonly state: DriveState,
+    private readonly mode: GateMode,
+    private readonly onMark: () => void,
+  ) {
+    if (mode.kind !== "fresh") this.attempt = mode.attempt;
+    if (mode.kind === "rebroadcast") this.marked = true;
+  }
+
+  close(): void {
+    this.closed = true;
+  }
+
+  async beforeBroadcast(tx: PreparedTransaction): Promise<void> {
+    if (this.closed) throw new GateClosed();
+    const { journal } = this.s;
+    const operationId = this.state.op.operationId;
+
+    if (this.mode.kind !== "fresh") {
+      if (tx.txHash.toLowerCase() !== this.mode.attempt.txHash) {
+        throw new Error("journaled bytes no longer produce the journaled hash");
+      }
+      // Permission was recorded with the mark; an exact re-broadcast of a
+      // marked attempt does not ask again. Its bounds are checked in
+      // beforeSend, after the bytes were reconstructed.
+      if (this.mode.kind === "rebroadcast") return;
+    } else {
+      const attempt = journal.recordPrepared(operationId, tx);
+      this.attempt = {
+        attempt,
+        txHash: tx.txHash.toLowerCase(),
+        expirationTimestamp: tx.expirationTimestamp.toString(),
+        preparedAt: Date.now(),
+        mayBroadcastAt: null,
+      };
+    }
+    const attempt = this.attempt!;
+
+    // Before asking: nothing is bound at Riddler yet, so an attempt past its
+    // protocol expiration can simply be proven again.
+    this.refuseUnmarkedPastBound(attempt, false);
+
+    const answer = await this.s.mayBroadcast!({
+      operationId,
+      fingerprint: this.state.fingerprint,
+      txHash: attempt.txHash,
+    });
+    // Synchronous from here to the mark: nothing can close the gate between
+    // this check and the write that permits the broadcast.
+    if (this.closed) throw new GateClosed();
+    if (answer.decision !== "allow") {
+      const hold: Hold =
+        answer.decision === "deny" ? "may_broadcast_denied" : "may_broadcast_unknown";
+      console.warn(
+        `[rpc] Operation ${operationId} held before may-broadcast: ${answer.decision} (${answer.detail})`,
+      );
+      journal.recordHold(operationId, hold);
+      throw new Held({
+        state: "prepared",
+        txHash: attempt.txHash,
+        expirationTimestamp: attempt.expirationTimestamp,
+        hold,
+      });
+    }
+    // The may-broadcast wait can outlast either bound. Riddler has now bound
+    // this txHash, so an expired attempt cannot be replaced under this
+    // operation: a fresh proof has a new hash, which Riddler denies.
+    this.refuseUnmarkedPastBound(attempt, true);
+    journal.markMayBroadcast(operationId, attempt.attempt, this.state.terms.amount);
+    this.marked = true;
+    this.onMark();
+  }
+
+  /**
+   * The final step, synchronous, immediately before the client calls
+   * `sendTx`. Past either bound the marked attempt is not sent; it was
+   * marked, so it surfaces as submitted_unknown, never not_submitted.
+   */
+  beforeSend(tx: PreparedTransaction): void {
+    const attempt = this.attempt;
+    if (!this.marked || !attempt || tx.txHash.toLowerCase() !== attempt.txHash) {
+      throw new Error("send without a may-broadcast mark for this transaction");
+    }
+    const passed = this.passedBound(attempt);
+    if (passed) throw new BoundPassed(passed);
+  }
+
+  /** Which bound has passed for `attempt`, if any, at this instant. */
+  private passedBound(attempt: Attempt): Bound | undefined {
+    const now = nowSeconds(this.s);
+    if (now >= this.state.terms.validUntil) return "validity_bound_passed";
+    if (BigInt(now) >= BigInt(attempt.expirationTimestamp)) return "expiration_passed";
+    return undefined;
+  }
+
+  /**
+   * An unmarked attempt past a bound provably never broadcast, so it is
+   * recorded not_submitted. Past `validUntil` it is final (revalidate). Past
+   * the protocol expiration it is retryable only while Riddler has not
+   * allowed it; after an `allow` it is `expired_after_allow`, final for this
+   * operation id: requote under a new one.
+   */
+  private refuseUnmarkedPastBound(attempt: Attempt, allowed: boolean): void {
+    const passed = this.passedBound(attempt);
+    if (!passed) return;
+    const reason = passed === "expiration_passed" && allowed ? "expired_after_allow" : passed;
+    const retryable = reason === "expiration_passed";
+    this.s.journal.recordNotSubmitted(this.state.op.operationId, reason, retryable);
+    throw new Held({ state: "not_submitted", reason, retryableAfterRevalidation: retryable });
+  }
+}
+
+type Bound = "validity_bound_passed" | "expiration_passed";
+
+/** A marked attempt reached the send past one of its bounds; nothing was sent. */
+class BoundPassed extends Error {
+  constructor(readonly bound: Bound) {
+    super(`marked attempt not sent: ${bound}`);
+  }
+}
+
+function nowSeconds(s: SettlementContext): number {
+  return Math.floor((s.now ?? Date.now)() / 1000);
+}
+
+/**
+ * Turns what the node said into the wire observation, in the journal's
+ * context. Effects stay uninterpreted evidence: no element is "the" note.
+ */
+function observationFrom(attempt: Attempt, node: NodeObservation, now: number): Observation {
+  const base = { txHash: attempt.txHash, expirationTimestamp: attempt.expirationTimestamp };
+  switch (node.kind) {
+    case "pending":
+      return { state: "pending", ...base };
+    case "dropped":
+      // The node not knowing a hash is not evidence it never landed or never
+      // will: an unfinalized branch can restore it, and another node may hold
+      // it. Unknown, never "not submitted".
+      return { state: "submitted_unknown", ...base, reason: "node_reports_dropped_or_unknown" };
+    case "mined":
+      return {
+        state:
+          node.executionResult === "reverted"
+            ? "reverted"
+            : node.receiptStatus === "finalized"
+              ? "finalized"
+              : "included",
+        ...base,
+        executionResult: node.executionResult,
+        blockHash: node.blockHash,
+        blockNumber: node.blockNumber,
+        receiptStatus: node.receiptStatus,
+        observedAt: Math.floor(now / 1000),
+        effects: node.effects,
+      };
+  }
+}
+
+function currentAttempt(journal: SettlementJournal, op: StoredOperation): Attempt | undefined {
+  if (op.currentAttempt === null) return undefined;
+  return journal.attempts(op.operationId).find((a) => a.attempt === op.currentAttempt);
+}
+
+/**
+ * The operation's observation, reading the node only for a marked operation.
+ * Records a finalized outcome durably when the journal is writable; a read
+ * never fails because that write could not happen.
+ */
+async function observe(
+  s: SettlementContext,
+  client: IAztecClient,
+  op: StoredOperation,
+): Promise<Observation> {
+  switch (op.state) {
+    case "claimed":
+      return {
+        state: "not_submitted",
+        reason: "interrupted_before_prepare",
+        retryableAfterRevalidation: true,
+      };
+    case "not_submitted":
+      return {
+        state: "not_submitted",
+        reason: op.reason ?? "not_submitted",
+        retryableAfterRevalidation: op.retryable,
+      };
+    case "finalized":
+    case "reverted":
+      if (op.observation) return op.observation;
+      return { state: "unknown", reason: "terminal_observation_missing" };
+    case "prepared": {
+      const attempt = currentAttempt(s.journal, op);
+      if (!attempt) return { state: "unknown", reason: "missing_transaction_identity" };
+      return {
+        state: "prepared",
+        txHash: attempt.txHash,
+        expirationTimestamp: attempt.expirationTimestamp,
+        hold: op.hold ?? "interrupted",
+      };
+    }
+    case "may_broadcast": {
+      const attempt = currentAttempt(s.journal, op);
+      if (!attempt) return { state: "unknown", reason: "missing_transaction_identity" };
+      let node: NodeObservation;
+      try {
+        node = await client.observeTx(attempt.txHash);
+      } catch (cause) {
+        console.error(`[rpc] Node read for ${op.operationId} failed:`, cause);
+        return {
+          state: "submitted_unknown",
+          txHash: attempt.txHash,
+          expirationTimestamp: attempt.expirationTimestamp,
+          reason: "node_read_failed",
+        };
+      }
+      const observation = observationFrom(attempt, node, (s.now ?? Date.now)());
+      // Reads record only a finalized outcome, so polling does not churn the
+      // journal; the live observation is always re-read.
+      if (observation.state === "finalized" || observation.state === "reverted") {
+        recordObservation(s, op.operationId, observation);
+      }
+      return observation;
+    }
+  }
+}
+
+/** Best-effort, never decides the answer: the mark is already durable. */
+function recordObservation(s: SettlementContext, operationId: string, observation: Observation): void {
+  if (!s.journal.health().writable) return;
+  try {
+    if (
+      (observation.state === "finalized" || observation.state === "reverted") &&
+      observation.receiptStatus === "finalized"
+    ) {
+      s.journal.recordTerminal(operationId, observation);
+    } else if (observation.state !== "request_in_flight") {
+      s.journal.recordObservation(operationId, observation);
+    }
+  } catch (cause) {
+    console.error(`[rpc] Could not record observation for ${operationId}:`, cause);
+  }
+}
+
+/** The wire answer for an observation of operation `op`. */
+function answer(
+  id: number | string,
+  op: { operationId: string; fingerprint: string },
+  observation: Observation,
+): JsonRpcResponse {
+  const ident = { operationId: op.operationId, fingerprint: op.fingerprint };
+  switch (observation.state) {
+    case "pending":
+    case "included":
+    case "finalized":
+    case "reverted":
+      return success(id, { version: SETTLEMENT_VERSION, ...ident, observation });
+    case "request_in_flight":
+      return rpcError(
+        id,
+        RPC_ERRORS.REQUEST_IN_FLIGHT,
+        "A request with this Idempotency-Key is still in flight",
+        { ...ident, observation },
+      );
+    case "submitted_unknown":
+      return rpcError(id, RPC_ERRORS.SUBMITTED_UNKNOWN, SUBMITTED_UNKNOWN_MESSAGE, {
+        ...ident,
+        txHash: observation.txHash,
+        observation,
+      });
+    case "prepared":
+    case "not_submitted":
+      return rpcError(id, RPC_ERRORS.NOT_SUBMITTED, "Operation not submitted", {
+        ...ident,
+        observation,
+      });
+    case "unknown":
+      return rpcError(id, RPC_ERRORS.SUBMITTED_UNKNOWN, SUBMITTED_UNKNOWN_MESSAGE, {
+        ...ident,
+        observation,
+      });
+  }
+}
+
 async function handleCreateNote(
   id: number | string,
   params: unknown[],
@@ -104,200 +514,556 @@ async function handleCreateNote(
   ctx: RpcContext,
 ): Promise<JsonRpcResponse> {
   const first = params[0];
-  const parsed = CreateNoteParamsSchema.safeParse(first);
-  if (!parsed.success) {
-    console.error("[rpc] Invalid createNote params:", parsed.error.message);
+  if (isLegacyCreateNoteParams(first)) {
+    return rpcError(
+      id,
+      RPC_ERRORS.INVALID_PARAMS,
+      `Legacy aztec_createNote params are refused; send a ${SETTLEMENT_VERSION} operation`,
+      { reason: "legacy_params_refused" },
+    );
+  }
+  const parsed = CreateNoteV1Schema.safeParse(first);
+  if (!parsed.success || params.length !== 1) {
+    console.error("[rpc] Invalid createNote params:", parsed.error?.message ?? "extra params");
     return rpcError(id, RPC_ERRORS.INVALID_PARAMS, "Invalid params for aztec_createNote");
   }
+  const s = ctx.settlement;
+  if (!s) {
+    return journalUnavailable(id, {
+      writable: false,
+      reason: "journal_unconfigured",
+      detail: "PXE_BRIDGE_JOURNAL is not set",
+    });
+  }
+  const deadline = new RequestDeadline(s.timeoutMs, ctx.signal);
+  try {
+    return await createNoteWithin(id, parsed.data, client, ctx, s, deadline);
+  } finally {
+    deadline.dispose();
+  }
+}
 
-  const noteParams = parsed.data;
-  const amount = BigInt(noteParams.amount);
-
-  // Claimed before the limits are touched, so a duplicate neither transfers
-  // nor consumes budget. Claiming is synchronous, so two concurrent requests
-  // carrying the same key cannot both proceed.
-  const key = ctx.idempotency && ctx.idempotencyKey ? ctx.idempotencyKey : undefined;
-  if (ctx.idempotency && key !== undefined) {
-    const lookup = ctx.idempotency.begin(key);
-    if (lookup.state === "settled") {
-      console.log(`[rpc] Replaying idempotency key ${key}`);
-      return replay(id, lookup.outcome);
-    }
-    if (lookup.state === "in-flight") {
-      console.warn(`[rpc] Idempotency key ${key} is already in flight`);
-      return rpcError(
-        id,
-        RPC_ERRORS.REQUEST_IN_FLIGHT,
-        "A request with this Idempotency-Key is still in flight",
-      );
-    }
+async function createNoteWithin(
+  id: number | string,
+  params: CreateNoteV1,
+  client: IAztecClient,
+  ctx: RpcContext,
+  s: SettlementContext,
+  deadline: RequestDeadline,
+): Promise<JsonRpcResponse> {
+  const operationId = params.operationId;
+  // The operation id IS the idempotency key, so a delivery attempt cannot be
+  // replayed under a different operation, or two operations under one key.
+  if (ctx.idempotencyKey !== operationId) {
+    return rpcError(id, RPC_ERRORS.INVALID_PARAMS, "Idempotency-Key must equal operationId", {
+      reason: "operation_id_mismatch",
+    });
   }
 
-  /** Frees the key: nothing moved, so a retry is legitimate. */
-  const abandon = (): void => {
-    if (ctx.idempotency && key !== undefined) ctx.idempotency.abandon(key);
-  };
-  /** Holds the key: a duplicate must replay this rather than transfer again. */
-  const settle = (outcome: IdempotentOutcome): void => {
-    if (ctx.idempotency && key !== undefined) ctx.idempotency.settle(key, outcome);
-  };
+  const terms = termsFrom(params);
+  const fingerprint = fingerprintTerms(terms);
 
-  /**
-   * Records an outcome without letting the write decide the outcome.
-   *
-   * Every call below happens AFTER the decision it describes: the reservation
-   * is committed or released, the key is settled or abandoned, the response is
-   * chosen. A rejected write (ENOSPC, EACCES, EMFILE) used to unwind those
-   * decisions instead of reporting beside them. The damaging case was the
-   * success path: the write sat inside the same `try` as the send, so a failed
-   * write landed in the catch with `landed` false, `abandon()` freed the key of
-   * a transfer that had moved funds, and the caller got "Internal error" with
-   * no txHash. The next retry sent a second transfer.
-   *
-   * Losing the line is survivable in a way that losing the decision is not.
-   * The `submitting` intent is already on disk, so a reader that finds no
-   * successor replays it as `unknown` -- "may have moved funds", which is the
-   * safe direction. Logged loudly rather than swallowed: this is the durable
-   * record failing, and an operator has to know the log is now incomplete.
-   */
-  const logOutcome = async (entry: AuditEntry): Promise<void> => {
-    if (!ctx.audit) return;
+  const health = s.journal.health();
+  if (!health.writable) return journalUnavailable(id, health, operationId);
+
+  // Synchronous from the check to the add: two concurrent duplicates cannot
+  // both get past here.
+  if (s.inFlight.has(operationId)) {
+    let stored: StoredOperation | undefined;
     try {
-      await ctx.audit.log(entry);
-    } catch (cause) {
-      console.error("[rpc] AUDIT WRITE FAILED -- outcome not recorded:", cause);
+      stored = s.journal.get(operationId);
+    } catch {
+      stored = undefined;
     }
-  };
+    if (stored && stored.fingerprint !== fingerprint) {
+      return conflict(id, operationId, fingerprint, stored.fingerprint);
+    }
+    return answer(id, { operationId, fingerprint }, { state: "request_in_flight" });
+  }
+  s.inFlight.add(operationId);
 
-  // A token the account is not pinned to would pass every check below,
-  // prove, and revert only in public, burning fee juice on the way. Refused
-  // here so it neither costs fees nor reserves daily budget.
-  const pinned = client.pinnedToken();
-  if (pinned !== undefined && pinned.toLowerCase() !== noteParams.token.toLowerCase()) {
-    const reason = "token is not the token this bridge is pinned to";
-    console.error(`[rpc] Rejected token ${noteParams.token}: pinned to ${pinned}`);
-    abandon();
-    await logOutcome({ ...auditBase(noteParams, ctx), status: "rejected", error: reason });
-    return rpcError(id, RPC_ERRORS.INVALID_PARAMS, reason);
+  // The claim is released only once the request has answered AND every client
+  // call it started has settled: a call that outlived its deadline is still
+  // proving, and a retry must see "in flight" until it stops.
+  const background = new BackgroundCalls();
+  try {
+    return await driveOperation(id, client, ctx, s, operationId, fingerprint, terms, background, deadline);
+  } finally {
+    background.whenIdle(() => s.inFlight.delete(operationId));
+  }
+}
+
+/** Client calls a request started, counted until each settles. */
+class BackgroundCalls {
+  private pending = 0;
+  private onIdle: (() => void) | undefined;
+
+  track(call: Promise<unknown>): void {
+    this.pending += 1;
+    const settled = (): void => {
+      this.pending -= 1;
+      if (this.pending === 0) this.onIdle?.();
+    };
+    call.then(settled, settled);
   }
 
-  // Enforce transaction limits (ceiling, daily volume, circuit breaker).
-  // reserve() counts the amount against the rolling window immediately, so
-  // concurrent in-flight requests cannot each pass on a stale total and
-  // collectively exceed the daily cap (TOCTOU). The reservation is committed
-  // on success or released on failure below.
+  whenIdle(fn: () => void): void {
+    if (this.pending === 0) fn();
+    else this.onIdle = fn;
+  }
+}
+
+function conflict(
+  id: number | string,
+  operationId: string,
+  fingerprint: string,
+  storedFingerprint: string,
+): JsonRpcResponse {
+  return rpcError(
+    id,
+    RPC_ERRORS.OPERATION_CONFLICT,
+    "Operation id already names different terms",
+    { operationId, fingerprint, storedFingerprint },
+  );
+}
+
+async function driveOperation(
+  id: number | string,
+  client: IAztecClient,
+  ctx: RpcContext,
+  s: SettlementContext,
+  operationId: string,
+  fingerprint: string,
+  terms: SettlementTerms,
+  background: BackgroundCalls,
+  deadline: RequestDeadline,
+): Promise<JsonRpcResponse> {
+  let op: StoredOperation;
+  try {
+    const claim = s.journal.claim(operationId, fingerprint, terms);
+    if (claim.kind === "conflict") {
+      return conflict(id, operationId, fingerprint, claim.operation.fingerprint);
+    }
+    op = claim.operation;
+    if (claim.kind === "existing") {
+      const resumed = await resumeExisting(id, client, ctx, s, op, background, deadline);
+      if (resumed) return resumed;
+      op = s.journal.get(operationId)!;
+    }
+  } catch (cause) {
+    return journalFault(id, s, operationId, cause);
+  }
+
+  const refusal = await admissionRefusal(client, s, terms, deadline);
+  if (refusal) return notSubmitted(id, ctx, s, op, fingerprint, refusal, true);
+
+  return runAttempt(id, client, ctx, s, { op, fingerprint, terms }, { kind: "fresh" }, background, deadline);
+}
+
+/**
+ * Handles an operation the journal already holds. Returns the answer, or
+ * undefined when the operation provably never broadcast and has been
+ * re-armed for a fresh attempt.
+ */
+async function resumeExisting(
+  id: number | string,
+  client: IAztecClient,
+  ctx: RpcContext,
+  s: SettlementContext,
+  op: StoredOperation,
+  background: BackgroundCalls,
+  deadline: RequestDeadline,
+): Promise<JsonRpcResponse | undefined> {
+  const state = { op, fingerprint: op.fingerprint, terms: op.terms };
+  switch (op.state) {
+    case "finalized":
+    case "reverted":
+      return answer(id, op, op.observation ?? { state: "unknown", reason: "terminal_observation_missing" });
+
+    case "not_submitted":
+      if (!op.retryable) return answer(id, op, await observe(s, client, op));
+      s.journal.reclaim(op.operationId);
+      return undefined;
+
+    case "claimed":
+      // Interrupted before anything was prepared: nothing can have broadcast.
+      s.journal.reclaim(op.operationId);
+      return undefined;
+
+    case "prepared": {
+      const attempt = currentAttempt(s.journal, op);
+      if (!attempt) return answer(id, op, { state: "unknown", reason: "missing_transaction_identity" });
+      if (nowSeconds(s) >= op.terms.validUntil) {
+        return notSubmitted(id, ctx, s, op, op.fingerprint, "validity_bound_passed", false);
+      }
+      if (BigInt(nowSeconds(s)) >= BigInt(attempt.expirationTimestamp)) {
+        // Never marked, and the protocol now refuses it: safe to abandon and
+        // prepare a new attempt under the same operation.
+        return undefined;
+      }
+      const refusal = await admissionRefusal(client, s, op.terms, deadline);
+      if (refusal) return notSubmitted(id, ctx, s, op, op.fingerprint, refusal, true);
+      return runAttempt(id, client, ctx, s, state, { kind: "resume", attempt }, background, deadline);
+    }
+
+    case "may_broadcast": {
+      const attempt = currentAttempt(s.journal, op);
+      if (!attempt) return answer(id, op, { state: "unknown", reason: "missing_transaction_identity" });
+      const observed = await deadline.race(observe(s, client, op));
+      const observation: Observation =
+        observed === TIMED_OUT
+          ? {
+              state: "submitted_unknown",
+              txHash: attempt.txHash,
+              expirationTimestamp: attempt.expirationTimestamp,
+              reason: "response_deadline",
+            }
+          : observed;
+      // A re-broadcast needs every bound still open: the protocol's expiry AND
+      // the operation's own `validUntil`. Past `validUntil` the marked attempt
+      // is never resent -- the deal it was admitted for is over -- and it is
+      // never "not submitted" either: it was marked and may be on chain, so
+      // the answer stays submitted_unknown until a node observation settles it.
+      const unseen =
+        observation.state === "submitted_unknown" &&
+        observation.reason === "node_reports_dropped_or_unknown" &&
+        BigInt(nowSeconds(s)) < BigInt(attempt.expirationTimestamp) &&
+        nowSeconds(s) < op.terms.validUntil;
+      if (!unseen) return answer(id, op, observation);
+      // Marked, and the node does not know it: the process may have died
+      // between the mark and the send. Re-broadcast the journaled bytes --
+      // never a rebuilt transaction -- which can land at most once.
+      console.warn(`[rpc] Re-broadcasting journaled attempt ${attempt.attempt} of ${op.operationId}`);
+      return runAttempt(id, client, ctx, s, state, { kind: "rebroadcast", attempt }, background, deadline);
+    }
+  }
+}
+
+/** Every check a fresh or resumed attempt must pass before preparing. */
+async function admissionRefusal(
+  client: IAztecClient,
+  s: SettlementContext,
+  terms: SettlementTerms,
+  deadline: RequestDeadline,
+): Promise<string | undefined> {
+  if (!s.mayBroadcast) return "may_broadcast_unconfigured";
+  const corridor = s.corridor;
+  if (!corridor) return "corridor_unconfigured";
+  if (
+    terms.corridor.corridorId !== corridor.corridorId.toLowerCase() ||
+    terms.corridor.corridorRevision !== corridor.corridorRevision ||
+    terms.corridor.manifestDigest !== corridor.manifestDigest.toLowerCase()
+  ) {
+    return "corridor_mismatch";
+  }
+  if (terms.network.genesisOrNetworkDigest !== corridor.genesisOrNetworkDigest.toLowerCase()) {
+    return "network_mismatch";
+  }
+  if (terms.accountMode !== client.accountMode()) return "account_mode_mismatch";
+  const pinned = client.pinnedToken();
+  if (pinned !== undefined && pinned.toLowerCase() !== terms.token) return "token_mismatch";
+  let network;
+  try {
+    network = await deadline.race(client.networkIdentity());
+  } catch (cause) {
+    console.error("[rpc] Network identity read failed:", cause);
+    return "network_unreadable";
+  }
+  if (network === TIMED_OUT) return "response_deadline";
+  if (
+    network.aztecChainId !== terms.network.aztecChainId ||
+    network.protocolVersion !== terms.network.protocolVersion ||
+    network.rollupAddress !== terms.network.rollupAddress ||
+    network.l1ChainId !== terms.network.l1ChainId
+  ) {
+    return "network_mismatch";
+  }
+  if (nowSeconds(s) >= terms.validUntil) return "validity_bound_passed";
+  return undefined;
+}
+
+async function notSubmitted(
+  id: number | string,
+  ctx: RpcContext,
+  s: SettlementContext,
+  op: StoredOperation,
+  fingerprint: string,
+  reason: string,
+  retryable: boolean,
+): Promise<JsonRpcResponse> {
+  const definitive = reason === "validity_bound_passed" ? false : retryable;
+  try {
+    s.journal.recordNotSubmitted(op.operationId, reason, definitive);
+  } catch (cause) {
+    return journalFault(id, s, op.operationId, cause);
+  }
+  console.warn(`[rpc] Operation ${op.operationId} not submitted: ${reason}`);
+  const observation: Observation = {
+    state: "not_submitted",
+    reason,
+    retryableAfterRevalidation: definitive,
+  };
+  await audit(ctx, op, fingerprint, observation);
+  return answer(id, { operationId: op.operationId, fingerprint }, observation);
+}
+
+function journalFault(
+  id: number | string,
+  s: SettlementContext,
+  operationId: string,
+  cause: unknown,
+): JsonRpcResponse {
+  console.error(`[rpc] Journal fault on ${operationId}:`, cause);
+  if (cause instanceof JournalWriteError) return journalUnavailable(id, cause.health, operationId);
+  if (cause instanceof JournalUnreadableError) {
+    return journalUnavailable(
+      id,
+      { writable: false, reason: "journal_unreadable", detail: cause.message },
+      operationId,
+    );
+  }
+  return journalUnavailable(id, s.journal.health(), operationId);
+}
+
+/**
+ * One attempt through the gate, bounded by the request's `deadline`.
+ *
+ * The gate exists, and is guarded by the deadline, before the cooldown, so a
+ * cooldown or a proof that runs past the deadline cannot mark afterwards; an
+ * attempt the deadline has already ended starts no client call at all.
+ *
+ * Classification is by which side of the may-broadcast mark the failure is
+ * on, never by error type: before it nothing can have been broadcast; after
+ * it everything short of a node observation is `submitted_unknown`.
+ */
+async function runAttempt(
+  id: number | string,
+  client: IAztecClient,
+  ctx: RpcContext,
+  s: SettlementContext,
+  state: DriveState,
+  mode: GateMode,
+  background: BackgroundCalls,
+  deadline: RequestDeadline,
+): Promise<JsonRpcResponse> {
+  const { op, fingerprint, terms } = state;
+  const amount = BigInt(terms.amount);
+  let journaledBytes: Buffer | undefined;
+  if (mode.kind !== "fresh") {
+    try {
+      journaledBytes = s.journal.attemptBytes(op.operationId, mode.attempt.attempt);
+    } catch (cause) {
+      return journalFault(id, s, op.operationId, cause);
+    }
+  }
+
   let reservationId: number | undefined;
-  if (ctx.limits) {
+  let cooldownMs: number | undefined;
+  if (ctx.limits && mode.kind !== "rebroadcast") {
     const reservation = ctx.limits.reserve(amount);
     if (!reservation.allowed) {
-      console.error("[rpc] Limit rejected:", reservation.reason);
-      abandon();
-      await logOutcome({
-        ...auditBase(noteParams, ctx),
-        status: "rejected",
-        error: reservation.reason,
-      });
-      return rpcError(id, RPC_ERRORS.INVALID_PARAMS, reservation.reason);
+      return notSubmitted(id, ctx, s, op, fingerprint, `limits: ${reservation.reason}`, true);
     }
-
     reservationId = reservation.reservationId;
-
-    // Cooldown for large transfers (amount is already reserved, so this
-    // delay does not widen the race window).
-    if (reservation.cooldownMs) {
-      console.log(`[rpc] Cooldown ${reservation.cooldownMs}ms for amount ${noteParams.amount}`);
-      await delay(reservation.cooldownMs);
-    }
+    cooldownMs = reservation.cooldownMs;
   }
 
-  // Intent, written and flushed BEFORE the send. A crash between submitting
-  // and recording the outcome would otherwise leave the log silent about a
-  // transfer that may have landed, and a restart would hand the key back as
-  // fresh. Replaying a `submitting` entry with no successor as "unknown" is
-  // what closes that window, and only this write makes it visible.
-  //
-  // Fail-closed, and the only audit write that still decides control flow. If
-  // the intent cannot be recorded, sending anyway reopens exactly the window
-  // this write exists to close, so we do not send. Unwinding has to undo BOTH
-  // claims: the write used to sit outside the try below, so a throw escaped
-  // the function with the reservation neither committed nor released -- it
-  // counted against the window for 24h -- and with the key held, so every
-  // retry was told a transfer that never happened was still in flight.
-  if (ctx.audit && key !== undefined) {
+  const gate = new OperationGate(s, state, mode, () => {
+    if (ctx.limits && reservationId !== undefined) ctx.limits.commit(reservationId);
+  });
+  deadline.guard(gate);
+
+  let outcome: TransferOutcome | typeof TIMED_OUT | undefined;
+  let failure: unknown;
+  if (cooldownMs) {
+    console.log(`[rpc] Cooldown ${cooldownMs}ms for ${op.operationId}`);
+    await deadline.race(delay(cooldownMs));
+  }
+  if (deadline.expired) {
+    failure = new GateClosed();
+  } else {
+    const call: Promise<TransferOutcome> =
+      journaledBytes === undefined
+        ? client.createNote({ recipient: terms.recipient, token: terms.token, amount: terms.amount }, gate)
+        : client.broadcastPrepared(journaledBytes, gate);
+    background.track(call);
     try {
-      await ctx.audit.log({ ...auditBase(noteParams, ctx), status: "submitting" });
+      outcome = await deadline.race(call);
     } catch (cause) {
-      console.error("[rpc] Intent write failed -- refusing to send:", cause);
-      if (ctx.limits && reservationId !== undefined) ctx.limits.release(reservationId);
-      abandon();
-      return rpcError(id, RPC_ERRORS.INTERNAL_ERROR, "Internal error");
+      failure = cause;
     }
+    if (outcome === TIMED_OUT) failure = new Error(`no outcome within the ${s.timeoutMs}ms request deadline`);
+  }
+  // Whatever happened, nothing on this path may mark from now on.
+  gate.close();
+  if (!gate.marked && ctx.limits && reservationId !== undefined) {
+    ctx.limits.release(reservationId);
   }
 
+  const attempt = gate.attempt;
+  if (failure === undefined && outcome !== undefined && outcome !== TIMED_OUT) {
+    if (!gate.marked || !attempt) {
+      // The client returned without passing the gate: impossible by
+      // construction, and not a state that may be reported as anything known.
+      console.error(`[rpc] ${op.operationId}: broadcast reported without a may-broadcast mark`);
+      return answer(id, op, { state: "unknown", reason: "broadcast_without_mark" });
+    }
+    const observation = observationFrom(attempt, outcome.observation, (s.now ?? Date.now)());
+    recordObservation(s, op.operationId, observation);
+    await audit(ctx, op, fingerprint, observation);
+    return answer(id, { operationId: op.operationId, fingerprint }, observation);
+  }
+
+  if (gate.marked && attempt) {
+    console.error(`[rpc] ${op.operationId} failed after may-broadcast:`, failure);
+    const observation: Observation = {
+      state: "submitted_unknown",
+      txHash: attempt.txHash,
+      expirationTimestamp: attempt.expirationTimestamp,
+      reason:
+        failure instanceof BoundPassed
+          ? failure.bound
+          : deadline.expired
+            ? "response_deadline"
+            : "post_mark_failure",
+    };
+    await audit(ctx, op, fingerprint, observation);
+    return answer(id, { operationId: op.operationId, fingerprint }, observation);
+  }
+
+  if (failure instanceof Held) {
+    await audit(ctx, op, fingerprint, failure.observation);
+    return answer(id, { operationId: op.operationId, fingerprint }, failure.observation);
+  }
+  if (failure instanceof JournalWriteError || failure instanceof JournalUnreadableError) {
+    return journalFault(id, s, op.operationId, failure);
+  }
+
+  console.error(`[rpc] ${op.operationId} failed before may-broadcast:`, failure);
+  if (attempt) {
+    // Prepared and journaled, never marked: provably not broadcast, and the
+    // exact bytes stay available to a retry.
+    try {
+      s.journal.recordHold(op.operationId, "interrupted");
+    } catch (cause) {
+      return journalFault(id, s, op.operationId, cause);
+    }
+    const observation: Observation = {
+      state: "prepared",
+      txHash: attempt.txHash,
+      expirationTimestamp: attempt.expirationTimestamp,
+      hold: "interrupted",
+    };
+    await audit(ctx, op, fingerprint, observation);
+    return answer(id, { operationId: op.operationId, fingerprint }, observation);
+  }
+  return notSubmitted(id, ctx, s, op, fingerprint, deadline.expired ? "response_deadline" : "prepare_failed", true);
+}
+
+/**
+ * Output-only audit line. Never decides control flow: every write it
+ * describes has already happened in the journal.
+ */
+async function audit(
+  ctx: RpcContext,
+  op: { operationId: string; terms: SettlementTerms },
+  fingerprint: string,
+  observation: Observation,
+): Promise<void> {
+  if (!ctx.audit) return;
   try {
-    const result = await client.createNote(noteParams);
-
-    // Finalize the reservation as a permanent spend after successful tx
-    if (ctx.limits && reservationId !== undefined) {
-      ctx.limits.commit(reservationId);
-    }
-
-    settle({ kind: "result", result });
-
-    await logOutcome({
-      ...auditBase(noteParams, ctx),
-      status: "success",
-      txHash: result.l2TxHash,
-      noteHashes: result.noteHashes,
-      nullifiers: result.nullifiers,
+    await ctx.audit.log({
+      timestamp: new Date().toISOString(),
+      method: "aztec_createNote",
+      operationId: op.operationId,
+      fingerprint,
+      recipient: op.terms.recipient,
+      token: op.terms.token,
+      amount: op.terms.amount,
+      clientIp: ctx.clientIp ?? "unknown",
+      observation: observation.state,
+      ...("txHash" in observation ? { txHash: observation.txHash } : {}),
+      ...("reason" in observation ? { reason: observation.reason } : {}),
+      ...("hold" in observation ? { reason: observation.hold } : {}),
     });
-
-    return success(id, result);
   } catch (cause) {
-    console.error("[rpc] aztec_createNote failed:", cause);
-
-    // A PostSubmissionError means the transfer may already be on chain, so the
-    // amount has to stay counted. Releasing it let a caller repeat whatever
-    // caused the failure -- a slow node, most obviously -- and move funds past
-    // the daily cap without the window ever seeing them.
-    const landed = cause instanceof PostSubmissionError;
-    if (ctx.limits && reservationId !== undefined) {
-      if (landed) {
-        ctx.limits.commit(reservationId);
-      } else {
-        ctx.limits.release(reservationId);
-      }
-    }
-
-    // Distinct from a clean rejection: the caller has to reconcile rather than
-    // assume nothing happened. Retrying this blindly sends a second transfer,
-    // which is why the key holds it rather than freeing it.
-    const outcome: IdempotentOutcome = landed
-      ? {
-          kind: "error",
-          code: RPC_ERRORS.SUBMITTED_UNKNOWN,
-          message: SUBMITTED_UNKNOWN_MESSAGE,
-          ...(cause.txHash !== undefined ? { data: { txHash: cause.txHash } } : {}),
-        }
-      : { kind: "error", code: RPC_ERRORS.INTERNAL_ERROR, message: "Internal error" };
-
-    if (landed) {
-      settle(outcome);
-    } else {
-      abandon();
-    }
-
-    await logOutcome({
-      ...auditBase(noteParams, ctx),
-      // "unknown" rather than "error": whether this moved funds is exactly
-      // what is not known, and the replay reader has to tell the two apart.
-      status: landed ? "unknown" : "error",
-      ...(landed && cause.txHash ? { txHash: cause.txHash } : {}),
-      error: cause instanceof Error ? cause.message : "Unknown error",
-    });
-
-    return replay(id, outcome);
+    console.error("[rpc] AUDIT WRITE FAILED (output log only):", cause);
   }
+}
+
+/**
+ * Read-only recovery: the stored terms, every attempt and the current
+ * observation. Served whether or not journal writes are enabled. An operation
+ * the journal does not hold is `unknown` -- never "safe to retry".
+ */
+async function handleGetSettlement(
+  id: number | string,
+  params: unknown[],
+  client: IAztecClient,
+  ctx: RpcContext,
+): Promise<JsonRpcResponse> {
+  const parsed = GetSettlementSchema.safeParse(params[0]);
+  if (!parsed.success || params.length !== 1) {
+    return rpcError(id, RPC_ERRORS.INVALID_PARAMS, "Invalid params for aztec_getSettlement");
+  }
+  const s = ctx.settlement;
+  if (!s) {
+    return journalUnavailable(id, {
+      writable: false,
+      reason: "journal_unconfigured",
+      detail: "PXE_BRIDGE_JOURNAL is not set",
+    });
+  }
+  const { operationId } = parsed.data;
+  let op: StoredOperation | undefined;
+  let attempts: Attempt[] = [];
+  try {
+    op = s.journal.get(operationId);
+    if (op) attempts = s.journal.attempts(operationId);
+  } catch (cause) {
+    return journalFault(id, s, operationId, cause);
+  }
+  const journal = journalHealthWire(s.journal.health());
+  if (!op) {
+    return success(id, {
+      version: SETTLEMENT_VERSION,
+      operationId,
+      found: false,
+      observation: { state: "unknown", reason: "operation_not_journaled" },
+      journal,
+    });
+  }
+  let observation: Observation;
+  try {
+    // A request this process is driving can mark at any moment, so before the
+    // node knows the transaction the answer is "in flight", not a state.
+    const driving = s.inFlight.has(operationId);
+    observation =
+      driving && (op.state === "claimed" || op.state === "prepared")
+        ? { state: "request_in_flight" }
+        : await observe(s, client, op);
+    if (driving && observation.state === "submitted_unknown") {
+      observation = { state: "request_in_flight" };
+    }
+  } catch (cause) {
+    return journalFault(id, s, operationId, cause);
+  }
+  return success(id, {
+    version: SETTLEMENT_VERSION,
+    operationId,
+    found: true,
+    fingerprint: op.fingerprint,
+    terms: op.terms,
+    state: op.state,
+    attempts: attempts.map((a) => ({
+      attempt: a.attempt,
+      txHash: a.txHash,
+      expirationTimestamp: a.expirationTimestamp,
+      mayBroadcast: a.mayBroadcastAt !== null,
+    })),
+    observation,
+    journal,
+  });
 }
 
 async function handleGetVersion(

@@ -18,6 +18,7 @@ import {
   walletDataDirectory,
   FUNDER_KEY,
   registerPublished,
+  recordingGate,
 } from "./helpers.js";
 import { readAccountState, statusExitCode } from "../../scripts/spending-limit-admin.js";
 
@@ -243,16 +244,28 @@ describe("spending limit account (e2e)", () => {
     };
   }
 
+  /**
+   * One gated transfer that throws on a mined revert, as the send did before
+   * createNote started returning the receipt: a limit breach is proven,
+   * included and reverted in public, and these tests assert it did not move.
+   */
+  async function transfer(params: { token: string; recipient: string; amount: string }) {
+    const res = await client.createNote(params, recordingGate());
+    if (res.observation.kind === "mined" && res.observation.executionResult === "reverted") {
+      throw new Error(`transfer ${res.txHash} reverted`);
+    }
+    return res;
+  }
+
   it("transfers within the per-tx limit", async (ctx) => {
     if (deployFailure) return ctx.skip();
-    const res = await client.createNote({
-      chainId: 1,
+    const res = await transfer({
       token: tokenAddress,
       recipient: SEED_RECIPIENT,
       amount: (MAX_PER_TX / 2n).toString(),
     });
-    expect(res.l2TxHash).toBeTruthy();
-    expect(res.noteCommitment).toBeTruthy();
+    expect(res.txHash).toBeTruthy();
+    expect(res.observation).toMatchObject({ kind: "mined", executionResult: "success" });
   });
 
   // PHASE ORDERING. Reverting is necessary but not sufficient: the transfer
@@ -263,8 +276,7 @@ describe("spending limit account (e2e)", () => {
     const before = await balanceOf(client, tokenAddress, accountAddress);
 
     await expect(
-      client.createNote({
-        chainId: 1,
+      transfer({
         token: tokenAddress,
         recipient: SEED_RECIPIENT,
         amount: (MAX_PER_TX + 1n).toString(),
@@ -282,8 +294,7 @@ describe("spending limit account (e2e)", () => {
   it("rejects a recipient that is not allowlisted", async (ctx) => {
     if (deployFailure) return ctx.skip();
     await expect(
-      client.createNote({
-        chainId: 1,
+      transfer({
         token: tokenAddress,
         recipient: UNLISTED_RECIPIENT,
         amount: "1000",
@@ -314,8 +325,7 @@ describe("spending limit account (e2e)", () => {
     expect(await balanceOf(client, otherToken, accountAddress)).toBe(MINT_AMOUNT);
 
     await expect(
-      client.createNote({
-        chainId: 1,
+      transfer({
         token: otherToken,
         recipient: SEED_RECIPIENT,
         amount: "1000",
@@ -374,8 +384,7 @@ describe("spending limit account (e2e)", () => {
     let rejected = false;
     for (let i = 0; i < 8; i++) {
       try {
-        await client.createNote({
-          chainId: 1,
+        await transfer({
           token: tokenAddress,
           recipient: SEED_RECIPIENT,
           amount: MAX_PER_TX.toString(),
@@ -453,8 +462,7 @@ describe("spending limit account (e2e)", () => {
     if (deployFailure) return ctx.skip();
 
     await expect(
-      client.createNote({
-        chainId: 1,
+      transfer({
         token: tokenAddress,
         recipient: SEED_RECIPIENT,
         amount: "1000",

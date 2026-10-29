@@ -1,7 +1,12 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { BridgedFeeJuiceClaim, FeeJuiceClaim } from "../../src/types.js";
+import type {
+  BridgedFeeJuiceClaim,
+  BroadcastGate,
+  FeeJuiceClaim,
+  PreparedTransaction,
+} from "../../src/types.js";
 import { FeeJuiceClaimSchema } from "../../src/types.js";
 import {
   bridgeFeeJuice,
@@ -116,6 +121,22 @@ export function requireTestToken(): string {
       : "E2E_TOKEN_ADDRESS is unset and global-setup recorded no failure, so " +
         "provisioning did not run or did not reach this process",
   );
+}
+
+/**
+ * A broadcast gate for driving AztecClient directly: records every prepared
+ * transaction it is shown, then permits the broadcast, or throws `refuse`.
+ */
+export function recordingGate(refuse?: Error): BroadcastGate & { seen: PreparedTransaction[] } {
+  const seen: PreparedTransaction[] = [];
+  return {
+    seen,
+    async beforeBroadcast(tx) {
+      seen.push(tx);
+      if (refuse) throw refuse;
+    },
+    beforeSend() {},
+  };
 }
 
 export async function waitForNode(url: string, timeoutMs = 120_000): Promise<void> {
