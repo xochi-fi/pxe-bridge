@@ -2,6 +2,7 @@ FROM node:22-bookworm AS builder
 
 WORKDIR /app
 COPY package.json package-lock.json tsconfig.json ./
+COPY vendor/xochi-sdk/xochi-signer-0.5.1.tgz vendor/xochi-sdk/xochi-signer-0.5.1.tgz
 COPY src/ src/
 
 # Prune after building: the runtime stage copies node_modules wholesale, and

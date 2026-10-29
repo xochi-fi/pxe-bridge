@@ -244,6 +244,92 @@ describe("SettlementJournal", () => {
     expect(reopened.get("op-1")?.state).toBe("may_broadcast");
   });
 
+  it("persists an immutable allowlist snapshot identity across restart", () => {
+    const path = tempJournalPath();
+    const root = "0x" + "12".repeat(32);
+    const recipients = [
+      { address: "0x" + "bb".repeat(32), index: 9 },
+      { address: "0x" + "aa".repeat(32), index: 2 },
+    ];
+    const journal = openBoundJournal(path);
+    journal.recordAllowlistSnapshot(root, recipients);
+    const generation = journal.meta().generation;
+    journal.recordAllowlistSnapshot(root.toUpperCase().replace("0X", "0x"), recipients);
+    expect(journal.meta().generation).toBe(generation);
+    journal.close();
+
+    const reopened = SettlementJournal.open(path);
+    reopened.bindAccount(ACCOUNT, true);
+    expect(reopened.allowlistSnapshot(root)).toMatchObject({
+      root,
+      recipients: [
+        { address: recipients[1]!.address, index: 2 },
+        { address: recipients[0]!.address, index: 9 },
+      ],
+    });
+    expect(() =>
+      reopened.recordAllowlistSnapshot(root, [
+        { address: recipients[0]!.address, index: 2 },
+      ]),
+    ).toThrow(/already bound/);
+  });
+
+  it("keeps a RootUpdate outbox entry and retry state across restart", () => {
+    const path = tempJournalPath();
+    const journal = openBoundJournal(path);
+    const entry = {
+      id: "run:root:7",
+      root: "0x" + "12".repeat(32),
+      rootBlock: "7",
+      payload: { primaryType: "RootUpdate", record: { rootBlock: "7" } },
+      idempotencyKey: "0x" + "34".repeat(32),
+    };
+    journal.enqueueRootUpdate(entry);
+    const generation = journal.meta().generation;
+    journal.enqueueRootUpdate(entry);
+    expect(journal.meta().generation).toBe(generation);
+    journal.recordRootUpdateAttempt("run:root:7", {
+      delivered: false,
+      error: "relay unavailable",
+    });
+    journal.close();
+
+    const reopened = SettlementJournal.open(path);
+    reopened.bindAccount(ACCOUNT, true);
+    expect(reopened.pendingRootUpdates()).toMatchObject([
+      {
+        id: "run:root:7",
+        rootBlock: "7",
+        attempts: 1,
+        lastError: "relay unavailable",
+      },
+    ]);
+    reopened.recordRootUpdateAttempt("run:root:7", { delivered: true });
+    expect(reopened.pendingRootUpdates()).toEqual([]);
+  });
+
+  it("migrates a v1 journal atomically without losing recovery state", () => {
+    const path = tempJournalPath();
+    const journal = openBoundJournal(path);
+    marked(journal);
+    journal.close();
+    const db = new Database(path);
+    db.exec(`
+      DROP INDEX root_update_pending;
+      DROP TABLE root_update_outbox;
+      DROP TABLE allowlist_snapshots;
+      UPDATE meta SET value = '1' WHERE key = 'schema_version';
+    `);
+    db.close();
+
+    const migrated = SettlementJournal.open(path);
+    migrated.bindAccount(ACCOUNT, true);
+    expect(migrated.health()).toEqual({ writable: true });
+    expect(migrated.get("op-1")).toMatchObject({ state: "may_broadcast" });
+    migrated.recordAllowlistSnapshot("0x" + "56".repeat(32), []);
+    expect(migrated.allowlistSnapshot("0x" + "56".repeat(32))).toBeDefined();
+  });
+
   it("disables writes on a schema version it does not know", () => {
     const path = tempJournalPath();
     openBoundJournal(path).close();

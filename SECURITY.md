@@ -14,6 +14,23 @@ application-level limits in `src/limits.ts`.
 
 The admin is a separate party from the signing key holder.
 
+### Readiness attestation key
+
+The optional readiness signer is a fourth, secp256k1 key. It cannot submit an
+Aztec transaction, administer the account, or derive allowlist salts. If it is
+compromised, however, an attacker can forge Membership, RecipientDeployment
+and RootUpdate records for the configured corridor until consumers remove the
+pinned signer. It therefore must not reuse the bridge signing key, admin key or
+allowlist seed, and production loads it only from
+`PXE_BRIDGE_ATTESTATION_SECRET_ARN`.
+
+The attestation endpoint has its own bearer credential and limiter. It accepts
+no caller-selected domain, block, root or witness; every signed observation is
+anchored to one exact retained finalized reference. Missing history and root or
+deployment uncertainty are unsigned refusals. Its audit event is deliberately
+limited to method, outcome and typed reason so recipient/root associations and
+descriptor or witness material do not enter logs.
+
 | Lever | Direction | Timing |
 | --- | --- | --- |
 | `pause` / `unpause` | Stop everything | Immediate |

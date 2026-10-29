@@ -18,6 +18,10 @@
     "./types": {
       "types": "./dist/types.d.ts",
       "import": "./dist/types.js"
+    },
+    "./attestation": {
+      "types": "./dist/attestation.d.ts",
+      "import": "./dist/attestation.js"
     }
   },
   "files": [
@@ -45,6 +49,7 @@
     "@aztec-labs/aztec.js": "6.0.0",
     "@aztec-labs/noir-contracts.js": "6.0.0",
     "@aztec-labs/wallets": "6.0.0",
+    "@xochi/signer": "file:vendor/xochi-sdk/xochi-signer-0.5.1.tgz",
     "better-sqlite3": "^12.11.1",
     "viem": "2.57.1",
     "zod": "^3.23.0"
@@ -58,6 +63,6 @@
     "vitest": "^4.1.4"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   }
 }

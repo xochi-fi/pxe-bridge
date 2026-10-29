@@ -1,16 +1,37 @@
 import { describe, it, expect, beforeAll } from "vitest";
+import { z } from "zod";
 import { AztecClient, deriveAccountKeys } from "../../src/aztec-client.js";
 import {
   SpendingLimitAccountContract,
   type SpendingLimitConfig,
 } from "../../src/spending-limit-account.js";
 import { AllowlistTree } from "../../src/allowlist-tree.js";
+import {
+  AttestationParamsSchema,
+  AttestationProducer,
+  AttestationRpcResponseSchema,
+  MembershipResultSchema,
+  RecipientDeploymentResultSchema,
+  RecipientDescriptorSchema,
+  RootUpdateEnvelopeSchema,
+  RootUpdatePublisher,
+} from "../../src/attestation.js";
+import { Secp256k1ReadinessSigner } from "../../src/attestation-secret.js";
+import {
+  hashRecipientDescriptor,
+  recoverReadinessSigner,
+  verifyReadinessRecord,
+  type ReadinessDomainInputs,
+  type RecipientDescriptor,
+} from "@xochi/signer";
 import type { AccountDeployment } from "../../src/types.js";
 import { SCHNORR_CLASS_ID_6_0_0, assertAccountIdentity } from "../../src/account-identity.js";
 import { SettlementJournal } from "../../src/journal.js";
 import { TransactionLimits } from "../../src/limits.js";
 import { createReadinessObserver } from "../../src/readiness.js";
-import { mkdtempSync } from "node:fs";
+import { createApp } from "../../src/server.js";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -99,6 +120,49 @@ const READINESS_CORRIDOR = {
   manifestDigest: "0x" + "d2".repeat(32),
   genesisOrNetworkDigest: "0x" + "e2".repeat(32),
 };
+const ATTESTATION_RECIPIENT_INDEX = 421;
+const ATTESTATION_SIGNER_KEY = "0x" + "31".repeat(32);
+const RecipientFixtureSchema = z.object({
+  descriptor: z.object({
+    vectors: z.array(
+      z.object({
+        name: z.string(),
+        descriptor: RecipientDescriptorSchema,
+      }),
+    ),
+  }),
+  recipientMessage: z.object({
+    bindingMessages: z.array(
+      z.object({
+        name: z.string(),
+        digest: z.string(),
+        signature: z.string(),
+      }),
+    ),
+  }),
+});
+const recipientFixture = RecipientFixtureSchema.parse(
+  JSON.parse(
+    readFileSync(
+      new URL(
+        "../../vendor/xochi-sdk/6626f545eade7e6a4226cb7be69f6196fd98f105/shielded-recipient.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  ),
+);
+const attestationDescriptorVector = recipientFixture.descriptor.vectors.find(
+  ({ name }) => name === "aztec-6.0.0-stock",
+)!;
+const attestationBindingVector = recipientFixture.recipientMessage.bindingMessages.find(
+  ({ name }) => name === "aztec-6.0.0-stock binding",
+)!;
+const ATTESTATION_RECIPIENT = attestationDescriptorVector.descriptor.aztecAddress;
+const DEPLOYED_RECIPIENTS = [
+  { address: SEED_RECIPIENT, index: SEED_RECIPIENT_INDEX },
+  { address: ATTESTATION_RECIPIENT, index: ATTESTATION_RECIPIENT_INDEX },
+] as const;
 
 
 describe("spending limit account (e2e)", () => {
@@ -135,7 +199,7 @@ describe("spending limit account (e2e)", () => {
       admin: adminAddress,
       token: tokenAddress,
       allowlistSeed: ALLOWLIST_SEED,
-      allowlistRecipients: [{ address: SEED_RECIPIENT, index: SEED_RECIPIENT_INDEX }],
+      allowlistRecipients: DEPLOYED_RECIPIENTS,
     };
 
     client = new AztecClient(
@@ -196,7 +260,7 @@ describe("spending limit account (e2e)", () => {
         admin: adminAddress,
         token: tokenAddress,
         allowlistSeed: ALLOWLIST_SEED,
-        allowlistRecipients: [{ address: SEED_RECIPIENT, index: SEED_RECIPIENT_INDEX }],
+        allowlistRecipients: DEPLOYED_RECIPIENTS,
         deployment: await deployedRecord(),
       },
       undefined,
@@ -241,6 +305,161 @@ describe("spending limit account (e2e)", () => {
       expect(withoutFence.ready).toBe(false);
       expect(withoutFence.reasons).toContain("writer_fence_lost");
     } finally {
+      journal.close();
+    }
+  }, 600_000);
+
+  it("attests membership, deployment and RootUpdate from finalized reads", async (ctx) => {
+    if (deployFailure) return ctx.skip();
+    const tree = await AllowlistTree.build(ALLOWLIST_SEED, DEPLOYED_RECIPIENTS);
+    const journal = SettlementJournal.open(
+      join(mkdtempSync(join(tmpdir(), "limit-attestation-journal-")), "settlement.sqlite"),
+    );
+    journal.bindAccount(accountAddress, true, {
+      acknowledgement: `${accountAddress}@${journal.meta().journalId}`,
+    });
+    journal.recordAllowlistSnapshot(tree.root.toString(), DEPLOYED_RECIPIENTS);
+
+    const observed = await client.observeAttestationChain(
+      undefined,
+      READINESS_CORRIDOR.genesisOrNetworkDigest,
+    );
+    expect(observed.state).toBe("known");
+    if (observed.state !== "known") throw new Error(observed.reason);
+    const descriptor = RecipientDescriptorSchema.parse({
+      ...attestationDescriptorVector.descriptor,
+      network: observed.value.network,
+    });
+    const digest = hashRecipientDescriptor(descriptor as RecipientDescriptor);
+    const signer = new Secp256k1ReadinessSigner(ATTESTATION_SIGNER_KEY);
+    const producer = new AttestationProducer({
+      probe: client,
+      journal,
+      allowlistTree: tree,
+      signer,
+      domain: {
+        sourceChainId: "84532",
+        environment: "staging",
+        manifestDigest: READINESS_CORRIDOR.manifestDigest,
+        genesisOrNetworkDigest: READINESS_CORRIDOR.genesisOrNetworkDigest,
+      },
+    });
+    const request = AttestationParamsSchema.parse({
+      descriptor,
+      descriptorDigest: digest,
+      recipient: descriptor.aztecAddress,
+      bindingAuthorization: {
+        bindingDigest: attestationBindingVector.digest,
+        signature: attestationBindingVector.signature,
+      },
+    });
+    const readinessPolicyDomain: ReadinessDomainInputs = {
+      sourceChainId: "84532",
+      environment: "staging",
+      network: observed.value.network,
+      manifestDigest: READINESS_CORRIDOR.manifestDigest,
+    };
+
+    const route = createApp(client, {
+      apiKey: "e2e-rpc-token",
+      attestationApiKey: "e2e-attestation-token",
+      attestation: producer,
+    });
+    await new Promise<void>((resolve) => route.listen(0, "127.0.0.1", resolve));
+    const routeAddress = route.address();
+    if (!routeAddress || typeof routeAddress === "string") {
+      throw new Error("attestation route did not bind");
+    }
+    const invoke = async (method: string): Promise<unknown> => {
+      const response = await fetch(
+        `http://127.0.0.1:${routeAddress.port}/attest/rpc`,
+        {
+          method: "POST",
+          headers: {
+            authorization: "Bearer e2e-attestation-token",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ jsonrpc: "2.0", id: method, method, params: request }),
+        },
+      );
+      expect(response.status).toBe(200);
+      const envelope = AttestationRpcResponseSchema.parse(await response.json());
+      if ("error" in envelope) throw new Error(envelope.error.message);
+      return envelope.result;
+    };
+    try {
+      const membership = MembershipResultSchema.parse(
+        await invoke("aztec_attestMembership"),
+      );
+      expect(membership.status).toBe("signed");
+      if (membership.status !== "signed") throw new Error(membership.reason);
+      expect(
+        verifyReadinessRecord("Membership", membership.record, {
+          domain: readinessPolicyDomain,
+          expectedSigner: signer.address,
+          expected: { descriptorDigest: digest },
+          now: membership.record.attestedAt,
+          maxAgeSeconds: 7_200,
+          maxFutureSkewSeconds: 300,
+          minBlock: observed.value.finalized.blockNumber,
+        }).signer,
+      ).toBe(signer.address);
+
+      const deployment = RecipientDeploymentResultSchema.parse(
+        await invoke("aztec_attestRecipientDeployment"),
+      );
+      expect(deployment).toMatchObject({ status: "signed", record: { deployed: false } });
+      if (deployment.status !== "signed") throw new Error(deployment.reason);
+      expect(
+        recoverReadinessSigner(
+          "RecipientDeployment",
+          deployment.record,
+          producer.domainFor(observed.value.network),
+        ),
+      ).toBe(signer.address);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        route.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+
+    let rootPayload: unknown;
+    const relay = createServer((request_, response) => {
+      let body = "";
+      request_.setEncoding("utf8");
+      request_.on("data", (chunk: string) => (body += chunk));
+      request_.on("end", () => {
+        rootPayload = JSON.parse(body) as unknown;
+        response.writeHead(200).end();
+      });
+    });
+    await new Promise<void>((resolve) => relay.listen(0, "127.0.0.1", resolve));
+    const relayAddress = relay.address();
+    if (!relayAddress || typeof relayAddress === "string") {
+      throw new Error("attestation relay did not bind");
+    }
+    try {
+      await new RootUpdatePublisher(producer, client, journal, {
+        url: `http://127.0.0.1:${relayAddress.port}/root`,
+        token: "e2e-root-token",
+      }).tick();
+      const payload = RootUpdateEnvelopeSchema.parse(rootPayload);
+      expect(
+        verifyReadinessRecord("RootUpdate", payload.record, {
+          domain: readinessPolicyDomain,
+          expectedSigner: signer.address,
+          expected: { root: tree.root.toString() },
+          now: payload.record.attestedAt,
+          maxAgeSeconds: 7_200,
+          maxFutureSkewSeconds: 300,
+          minBlock: observed.value.finalized.blockNumber,
+        }).signer,
+      ).toBe(signer.address);
+      expect(payload.record.rootBlock).toBe(observed.value.finalized.blockNumber);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        relay.close((error) => (error ? reject(error) : resolve())),
+      );
       journal.close();
     }
   }, 600_000);
@@ -345,9 +564,7 @@ describe("spending limit account (e2e)", () => {
 
   /** The record an operator would have persisted from the deployment above. */
   async function deployedRecord(): Promise<AccountDeployment> {
-    const tree = await AllowlistTree.build(ALLOWLIST_SEED, [
-      { address: SEED_RECIPIENT, index: SEED_RECIPIENT_INDEX },
-    ]);
+    const tree = await AllowlistTree.build(ALLOWLIST_SEED, DEPLOYED_RECIPIENTS);
     return {
       address: accountAddress,
       maxAmountPerTx: MAX_PER_TX.toString(),

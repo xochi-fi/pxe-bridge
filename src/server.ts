@@ -5,6 +5,7 @@ import { RPC_ERRORS, type IAztecClient } from "./types.js";
 import type { TransactionLimits } from "./limits.js";
 import type { AuditLogger } from "./audit.js";
 import type { ReadinessObserver } from "./readiness.js";
+import { handleAttestationRpc, type AttestationProducer } from "./attestation.js";
 
 const MAX_BODY_BYTES = 64 * 1024; // 64 KB
 const RATE_LIMIT_WINDOW_MS = 60_000;
@@ -34,6 +35,9 @@ export interface ServerOptions {
    * stopped them. Unset disables the endpoint entirely.
    */
   adminKey?: string | undefined;
+  /** Dedicated Worker/Riddler credential; unset keeps POST /attest/rpc hidden. */
+  attestationApiKey?: string | undefined;
+  attestation?: AttestationProducer | undefined;
   limits?: TransactionLimits | undefined;
   audit?: AuditLogger | undefined;
   /**
@@ -193,6 +197,24 @@ function checkAuth(req: IncomingMessage, apiKey: string): boolean {
 }
 
 export function createApp(client: IAztecClient, opts: ServerOptions = {}): Server {
+  const attestationConfigured =
+    opts.attestationApiKey !== undefined || opts.attestation !== undefined;
+  if (
+    attestationConfigured &&
+    (opts.attestationApiKey === undefined || opts.attestation === undefined)
+  ) {
+    throw new Error("Attestation route requires both its credential and producer");
+  }
+  if (attestationConfigured && opts.apiKey === undefined) {
+    throw new Error("Attestation route requires authenticated main RPC");
+  }
+  if (
+    opts.attestationApiKey !== undefined &&
+    (opts.attestationApiKey === opts.apiKey ||
+      opts.attestationApiKey === opts.adminKey)
+  ) {
+    throw new Error("Attestation credential must differ from RPC and admin credentials");
+  }
   if (
     opts.readiness !== undefined &&
     opts.settlement?.readiness !== undefined &&
@@ -203,6 +225,8 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
   const readinessObserver = opts.readiness ?? opts.settlement?.readiness;
   const rateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const authFailureLimiter = new RateLimiter(AUTH_FAILURE_MAX, RATE_LIMIT_WINDOW_MS);
+  const attestationRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+  const attestationAuthFailureLimiter = new RateLimiter(AUTH_FAILURE_MAX, RATE_LIMIT_WINDOW_MS);
 
   /**
    * Rejects an unauthenticated caller, charging the attempt to its own bucket.
@@ -295,6 +319,51 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           console.error("[pxe-bridge] Readiness observation failed:", err);
           sendJson(res, 503, { ready: false, reasons: ["readiness_observation_failed"] });
         }
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/attest/rpc") {
+        const attestationIp = req.socket.remoteAddress ?? "unknown";
+        if (!opts.attestationApiKey || !opts.attestation) {
+          sendJson(res, 404, { error: "Not found" });
+          return;
+        }
+        if (!checkAuth(req, opts.attestationApiKey)) {
+          if (!attestationAuthFailureLimiter.allow(attestationIp)) {
+            sendJson(res, 429, { error: "Too many requests" });
+            return;
+          }
+          sendJson(res, 401, { error: "Unauthorized" });
+          return;
+        }
+        const contentType = req.headers["content-type"];
+        if (!contentType || !contentType.startsWith("application/json")) {
+          sendJson(res, 415, { error: "Content-Type must be application/json" });
+          return;
+        }
+        if (!attestationRateLimiter.allow(attestationIp)) {
+          sendJson(res, 429, { error: "Too many requests" });
+          return;
+        }
+        let body: string;
+        try {
+          body = await readBody(req);
+        } catch {
+          sendJson(res, 413, { error: "Request body too large" });
+          return;
+        }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(body);
+        } catch {
+          sendJson(res, 400, {
+            jsonrpc: "2.0",
+            id: null,
+            error: { code: -32700, message: "Parse error" },
+          });
+          return;
+        }
+        sendJson(res, 200, await handleAttestationRpc(parsed, opts.attestation));
         return;
       }
 

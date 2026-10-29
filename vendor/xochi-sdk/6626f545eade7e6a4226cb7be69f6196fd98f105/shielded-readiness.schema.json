@@ -1,0 +1,813 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xochi.fi/spec/conformance/shielded-readiness.schema.json",
+  "title": "Shielded settlement v1 readiness attestation vector set",
+  "description": "pxe-bridge readiness attestations (Membership, RecipientDeployment, RootUpdate) as EIP-712 over secp256k1 under the 'Xochi Shielded Readiness' domain, whose salt binds environment, network identity and the corridor revision's manifestDigest (xochi shielded-execution.md §7; xochi-sdk#42). Records are wire form: block heights decimal strings, attestedAt integer seconds, no leaf index/path/witness. Includes cross-type and cross-domain replay refusals and strict record-parse refusals. Generated independently of @xochi/signer; the attester is a public test key.",
+  "$defs": {
+    "Membership": {
+      "type": "object",
+      "required": [
+        "descriptorDigest",
+        "root",
+        "member",
+        "rootBlock",
+        "attestedAt",
+        "signature"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "descriptorDigest": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{64}$"
+        },
+        "root": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{64}$"
+        },
+        "member": {
+          "type": "boolean"
+        },
+        "rootBlock": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "attestedAt": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{130}$"
+        }
+      }
+    },
+    "RecipientDeployment": {
+      "type": "object",
+      "required": [
+        "descriptorDigest",
+        "recipient",
+        "classId",
+        "deployed",
+        "finalBlock",
+        "attestedAt",
+        "signature"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "descriptorDigest": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{64}$"
+        },
+        "recipient": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{64}$"
+        },
+        "classId": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{64}$"
+        },
+        "deployed": {
+          "type": "boolean"
+        },
+        "finalBlock": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "attestedAt": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{130}$"
+        }
+      }
+    },
+    "RootUpdate": {
+      "type": "object",
+      "required": [
+        "root",
+        "rootBlock",
+        "attestedAt",
+        "signature"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "root": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{64}$"
+        },
+        "rootBlock": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "attestedAt": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{130}$"
+        }
+      }
+    }
+  },
+  "type": "object",
+  "required": [
+    "version",
+    "generator",
+    "source",
+    "scope",
+    "domain",
+    "types",
+    "wire",
+    "attesterIsTestKey",
+    "vectors",
+    "replays",
+    "refusals"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "generator": {
+      "type": "string"
+    },
+    "source": {
+      "type": "string"
+    },
+    "scope": {
+      "type": "string"
+    },
+    "domain": {
+      "type": "object",
+      "required": [
+        "typeString",
+        "typehash",
+        "name",
+        "version",
+        "chainId",
+        "salt",
+        "manifestDigest",
+        "vectors"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "typeString": {
+          "const": "EIP712Domain(string name,string version,uint256 chainId,bytes32 salt)"
+        },
+        "typehash": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{64}$"
+        },
+        "name": {
+          "const": "Xochi Shielded Readiness"
+        },
+        "version": {
+          "const": "1"
+        },
+        "chainId": {
+          "type": "string"
+        },
+        "salt": {
+          "type": "string"
+        },
+        "manifestDigest": {
+          "type": "string"
+        },
+        "vectors": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "environment",
+              "chainId",
+              "manifestDigest",
+              "network",
+              "networkIdentityDigest",
+              "salt",
+              "domain",
+              "domainSeparator"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "environment": {
+                "type": "string"
+              },
+              "chainId": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]*)$"
+              },
+              "manifestDigest": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{64}$"
+              },
+              "network": {
+                "type": "object",
+                "required": [
+                  "aztecChainId",
+                  "protocolVersion",
+                  "rollupAddress",
+                  "l1ChainId",
+                  "genesisOrNetworkDigest"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "aztecChainId": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "protocolVersion": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "rollupAddress": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{40}$"
+                  },
+                  "l1ChainId": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "genesisOrNetworkDigest": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  }
+                }
+              },
+              "networkIdentityDigest": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{64}$"
+              },
+              "salt": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{64}$"
+              },
+              "domain": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "version",
+                  "chainId",
+                  "salt"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "version": {
+                    "type": "string"
+                  },
+                  "chainId": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "salt": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  }
+                }
+              },
+              "domainSeparator": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{64}$"
+              }
+            }
+          }
+        }
+      }
+    },
+    "types": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "primaryType",
+          "typeString",
+          "typehash"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "primaryType": {
+            "enum": [
+              "Membership",
+              "RecipientDeployment",
+              "RootUpdate"
+            ]
+          },
+          "typeString": {
+            "type": "string"
+          },
+          "typehash": {
+            "type": "string",
+            "pattern": "^0x[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    "wire": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    },
+    "attesterIsTestKey": {
+      "const": true
+    },
+    "vectors": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "primaryType",
+          "domain",
+          "record",
+          "domainSeparator",
+          "structHash",
+          "digest",
+          "signer"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "primaryType": {
+            "enum": [
+              "Membership",
+              "RecipientDeployment",
+              "RootUpdate"
+            ]
+          },
+          "domain": {
+            "type": "object",
+            "required": [
+              "name",
+              "version",
+              "chainId",
+              "salt"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              },
+              "chainId": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]*)$"
+              },
+              "salt": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{64}$"
+              }
+            }
+          },
+          "record": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": [
+                  "descriptorDigest",
+                  "root",
+                  "member",
+                  "rootBlock",
+                  "attestedAt",
+                  "signature"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "descriptorDigest": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "root": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "member": {
+                    "type": "boolean"
+                  },
+                  "rootBlock": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "attestedAt": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "signature": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{130}$"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "descriptorDigest",
+                  "recipient",
+                  "classId",
+                  "deployed",
+                  "finalBlock",
+                  "attestedAt",
+                  "signature"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "descriptorDigest": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "recipient": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "classId": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "deployed": {
+                    "type": "boolean"
+                  },
+                  "finalBlock": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "attestedAt": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "signature": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{130}$"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "root",
+                  "rootBlock",
+                  "attestedAt",
+                  "signature"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "root": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "rootBlock": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "attestedAt": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "signature": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{130}$"
+                  }
+                }
+              }
+            ]
+          },
+          "domainSeparator": {
+            "type": "string",
+            "pattern": "^0x[0-9a-f]{64}$"
+          },
+          "structHash": {
+            "type": "string",
+            "pattern": "^0x[0-9a-f]{64}$"
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^0x[0-9a-f]{64}$"
+          },
+          "signer": {
+            "type": "string",
+            "pattern": "^0x[0-9a-f]{40}$"
+          }
+        }
+      }
+    },
+    "replays": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "kind",
+          "signedAs",
+          "presentedAs",
+          "record",
+          "digest",
+          "recovered",
+          "attester",
+          "valid"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "wrong_primary_type",
+              "wrong_manifest_digest",
+              "wrong_domain_name",
+              "wrong_environment",
+              "wrong_chain_id"
+            ]
+          },
+          "signedAs": {
+            "type": "object",
+            "required": [
+              "primaryType",
+              "domain"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "primaryType": {
+                "enum": [
+                  "Membership",
+                  "RecipientDeployment",
+                  "RootUpdate"
+                ]
+              },
+              "domain": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "version",
+                  "chainId",
+                  "salt"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "version": {
+                    "type": "string"
+                  },
+                  "chainId": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "salt": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  }
+                }
+              }
+            }
+          },
+          "presentedAs": {
+            "type": "object",
+            "required": [
+              "primaryType",
+              "domain"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "primaryType": {
+                "enum": [
+                  "Membership",
+                  "RecipientDeployment",
+                  "RootUpdate"
+                ]
+              },
+              "domain": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "version",
+                  "chainId",
+                  "salt"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "version": {
+                    "type": "string"
+                  },
+                  "chainId": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "salt": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  }
+                }
+              }
+            }
+          },
+          "record": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": [
+                  "descriptorDigest",
+                  "root",
+                  "member",
+                  "rootBlock",
+                  "attestedAt",
+                  "signature"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "descriptorDigest": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "root": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "member": {
+                    "type": "boolean"
+                  },
+                  "rootBlock": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "attestedAt": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "signature": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{130}$"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "descriptorDigest",
+                  "recipient",
+                  "classId",
+                  "deployed",
+                  "finalBlock",
+                  "attestedAt",
+                  "signature"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "descriptorDigest": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "recipient": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "classId": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "deployed": {
+                    "type": "boolean"
+                  },
+                  "finalBlock": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "attestedAt": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "signature": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{130}$"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "root",
+                  "rootBlock",
+                  "attestedAt",
+                  "signature"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "root": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "rootBlock": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "attestedAt": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "signature": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{130}$"
+                  }
+                }
+              }
+            ]
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^0x[0-9a-f]{64}$"
+          },
+          "recovered": {
+            "type": "string",
+            "pattern": "^0x[0-9a-f]{40}$"
+          },
+          "attester": {
+            "type": "string",
+            "pattern": "^0x[0-9a-f]{40}$"
+          },
+          "valid": {
+            "const": false
+          }
+        }
+      }
+    },
+    "refusals": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "primaryType",
+          "record",
+          "error"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "primaryType": {
+            "enum": [
+              "Membership",
+              "RecipientDeployment",
+              "RootUpdate"
+            ]
+          },
+          "record": {
+            "type": "object"
+          },
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "field"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "enum": [
+                  "missing_field",
+                  "unknown_field",
+                  "forbidden_field",
+                  "not_bytes32",
+                  "aztec_out_of_field",
+                  "aztec_zero",
+                  "not_bool",
+                  "block_not_string",
+                  "uint_not_canonical",
+                  "uint_out_of_range",
+                  "timestamp_not_integer",
+                  "signature_malformed"
+                ]
+              },
+              "field": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
