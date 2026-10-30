@@ -349,11 +349,12 @@ is the only record of what the legacy bridge may have sent.
 | Endpoint | Auth | Answers |
 | --- | --- | --- |
 | `GET /status` | none, separately rate-limited | Public minimal **process liveness** only: 200 `{"status":"ok"}` with no Aztec RPC. The listener serves it while the wallet is still connecting. |
-| `GET /ready` | Bearer `PXE_BRIDGE_API_KEY`, then the normal rate limiter | Operational projection from the authoritative admission predicate: 200 iff `ready: true`, otherwise 503 with stable reasons. During startup it returns 503 `initializing`. A backend observation exceeding 20 seconds returns 503 `readiness_observation_failed`; later probes share that still-running observation rather than starting more Aztec RPCs. Failed authentication is charged to the separate auth-failure limiter and exposes no state. |
+| `GET /ready` | Bearer `PXE_BRIDGE_API_KEY`, then its dedicated readiness limiter | Operational projection from the authoritative admission predicate: 200 iff `ready: true`, otherwise 503 with stable reasons. During startup it returns 503 `initializing`. A backend observation exceeding 20 seconds returns 503 `readiness_observation_failed`; later probes share that still-running observation rather than starting more Aztec RPCs. Failed authentication is charged to the separate auth-failure limiter and exposes no state. |
 
 Backend saturation adds `backend_capacity_exhausted` and returns 503 for new
-admission. Journal-only `aztec_getSettlement` uses its separate bounded pool
-and remains available for reconciliation.
+admission. Journal-only `aztec_getSettlement` has separate rate-limit and
+backend-work capacity, so ordinary RPC load or saturation cannot consume its
+reconciliation budget.
 
 The readiness projection contains the flat checker fields `ready`,
 `nodeVersion`, `l1ChainId`, `rollupVersion`, `account {address,classId}`,

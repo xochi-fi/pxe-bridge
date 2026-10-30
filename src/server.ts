@@ -378,7 +378,10 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
   const readinessObserver: ReadinessObserver | undefined = sourceReadinessObserver
     ? { observe: currentReadinessObservation }
     : undefined;
-  const rateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+  const readinessRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+  const rpcRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+  const recoveryRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+  const invalidRpcRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const adminRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const livenessRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const authFailureLimiter = new RateLimiter(AUTH_FAILURE_MAX, RATE_LIMIT_WINDOW_MS);
@@ -502,7 +505,7 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           return;
         }
         if (rejectedUnauthenticated(req, res, opts.apiKey, readyIp)) return;
-        if (!rateLimiter.allow(readyIp)) {
+        if (!readinessRateLimiter.allow(readyIp)) {
           sendJson(res, 429, { error: "Too many requests" });
           return;
         }
@@ -663,23 +666,26 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
         // Content-Type check (CSRF defense: forces browser preflight which fails without CORS)
         const contentType = req.headers["content-type"];
         if (!contentType || !contentType.startsWith("application/json")) {
+          if (!invalidRpcRateLimiter.allow(clientIp)) {
+            sendJson(res, 429, { error: "Too many requests" });
+            return;
+          }
           sendJson(res, 415, {
             error: "Content-Type must be application/json",
           });
           return;
         }
 
-        // The budget real traffic spends, reached only once the caller has
-        // proved who it is.
-        if (!rateLimiter.allow(clientIp)) {
-          sendJson(res, 429, { error: "Too many requests" });
-          return;
-        }
+
 
         let body: string;
         try {
           body = await readBody(req);
         } catch {
+          if (!invalidRpcRateLimiter.allow(clientIp)) {
+            sendJson(res, 429, { error: "Too many requests" });
+            return;
+          }
           sendJson(res, 413, { error: "Request body too large" });
           return;
         }
@@ -688,6 +694,10 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
         try {
           parsed = JSON.parse(body);
         } catch {
+          if (!invalidRpcRateLimiter.allow(clientIp)) {
+            sendJson(res, 429, { error: "Too many requests" });
+            return;
+          }
           sendJson(res, 400, {
             jsonrpc: "2.0",
             id: null,
@@ -712,6 +722,11 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           parsed !== null &&
           "method" in parsed &&
           parsed.method === "aztec_getSettlement";
+        const requestRateLimiter = recoveryRequest ? recoveryRateLimiter : rpcRateLimiter;
+        if (!requestRateLimiter.allow(clientIp)) {
+          sendJson(res, 429, { error: "Too many requests" });
+          return;
+        }
         const lease = acquireBackendLease(recoveryRequest);
         if (lease === null) {
           sendJson(res, 503, { error: "Service busy" });

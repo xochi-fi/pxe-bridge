@@ -740,7 +740,7 @@ The Docker `HEALTHCHECK` reads only `/status`'s HTTP code (`curl -sf`).
 - Binds to `127.0.0.1` by default -- set `PXE_BRIDGE_HOST=0.0.0.0` only behind a reverse proxy
 - Set `PXE_BRIDGE_API_KEY` for production -- without it, anyone with network access can create notes
 - `Content-Type: application/json` required on POST requests (prevents browser CSRF)
-- Rate limited to 60 RPC requests/min
+- Ordinary RPC and journal reconciliation are each rate limited to 60 requests/min
 - Secret key zeroed from memory after wallet derivation
 - Docker image runs as non-root user
 

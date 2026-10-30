@@ -191,10 +191,10 @@ describe("hard crash mid-broadcast (e2e)", () => {
           headers: { authorization: `Bearer ${RPC_KEY}` },
         });
         const body = await res.text();
-        if (res.status === 200) return { child, url, exited };
+        if (res.status === 200) return { child, url, exited, log: () => log };
         if (startupState === "initialized" && res.status === 503) {
           const reasons = (JSON.parse(body) as { reasons?: string[] }).reasons ?? [];
-          if (!reasons.includes("initializing")) return { child, url, exited };
+          if (!reasons.includes("initializing")) return { child, url, exited, log: () => log };
         }
         lastAnswer = `HTTP ${res.status} ${body}`;
       } catch {

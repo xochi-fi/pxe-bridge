@@ -622,6 +622,16 @@ describe("public liveness isolation", () => {
         ready: false,
         reasons: expect.arrayContaining(["backend_capacity_exhausted"]),
       });
+      for (let i = 0; i < 43; i++) {
+        const saturated = await jsonPost(url, rpcBody("aztec_getVersion", []), {
+          Authorization: `Bearer ${key}`,
+        });
+        expect(saturated.status).toBe(503);
+      }
+      const rateLimited = await jsonPost(url, rpcBody("aztec_getVersion", []), {
+        Authorization: `Bearer ${key}`,
+      });
+      expect(rateLimited.status).toBe(429);
       const recovery = await jsonPost(
         url,
         rpcBody("aztec_getSettlement", [
