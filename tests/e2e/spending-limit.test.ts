@@ -25,7 +25,10 @@ import {
   type RecipientDescriptor,
 } from "@xochi/signer";
 import type { AccountDeployment } from "../../src/types.js";
-import { SCHNORR_CLASS_ID_6_0_0, assertAccountIdentity } from "../../src/account-identity.js";
+import {
+  SCHNORR_CLASS_ID_6_0_0,
+  assertAccountIdentity,
+} from "../../src/account-identity.js";
 import { SettlementJournal } from "../../src/journal.js";
 import { TransactionLimits } from "../../src/limits.js";
 import { createReadinessObserver } from "../../src/readiness.js";
@@ -49,7 +52,10 @@ import {
   registerPublished,
   recordingGate,
 } from "./helpers.js";
-import { readAccountState, statusExitCode } from "../../scripts/spending-limit-admin.js";
+import {
+  readAccountState,
+  statusExitCode,
+} from "../../scripts/spending-limit-admin.js";
 
 /**
  * The first e2e coverage of the on-chain spending-limit account.
@@ -91,11 +97,13 @@ const config = getTestConfig();
 // reduces rather than rejecting, so it is also the only end-to-end coverage of
 // that reduction. The two keys above happen to land in range and would pass
 // either way.
-const OUTSIDER_KEY = "0x000000000000000000000000000000000000000000000000000000000000d00d";
+const OUTSIDER_KEY =
+  "0x000000000000000000000000000000000000000000000000000000000000d00d";
 
 // Never deployed. Used for a deployment record that derives correctly but
 // names an address with nothing at it.
-const UNDEPLOYED_KEY = "0x000000000000000000000000000000000000000000000000000000000000f00d";
+const UNDEPLOYED_KEY =
+  "0x000000000000000000000000000000000000000000000000000000000000f00d";
 
 const MAX_PER_TX = 1_000_000_000_000_000_000_000n; // 1000 tokens at 18 decimals
 const DAILY_LIMIT = 5_000_000_000_000_000_000_000n; // 5000 tokens
@@ -155,15 +163,16 @@ const recipientFixture = RecipientFixtureSchema.parse(
 const attestationDescriptorVector = recipientFixture.descriptor.vectors.find(
   ({ name }) => name === "aztec-6.0.0-stock",
 )!;
-const attestationBindingVector = recipientFixture.recipientMessage.bindingMessages.find(
-  ({ name }) => name === "aztec-6.0.0-stock binding",
-)!;
-const ATTESTATION_RECIPIENT = attestationDescriptorVector.descriptor.aztecAddress;
+const attestationBindingVector =
+  recipientFixture.recipientMessage.bindingMessages.find(
+    ({ name }) => name === "aztec-6.0.0-stock binding",
+  )!;
+const ATTESTATION_RECIPIENT =
+  attestationDescriptorVector.descriptor.aztecAddress;
 const DEPLOYED_RECIPIENTS = [
   { address: SEED_RECIPIENT, index: SEED_RECIPIENT_INDEX },
   { address: ATTESTATION_RECIPIENT, index: ATTESTATION_RECIPIENT_INDEX },
 ] as const;
-
 
 describe("spending limit account (e2e)", () => {
   let client: AztecClient;
@@ -217,7 +226,13 @@ describe("spending limit account (e2e)", () => {
     try {
       await client.connect();
       accountAddress = client.getAddress()!;
-      await mintTo(funderWallet, tokenAddress, accountAddress, MINT_AMOUNT, adminAddress);
+      await mintTo(
+        funderWallet,
+        tokenAddress,
+        accountAddress,
+        MINT_AMOUNT,
+        adminAddress,
+      );
       // Must happen after deployment: the account pays for its own transfers
       // out of a pre-existing fee juice balance and has no way to acquire one
       // itself. See fundFeeJuice.
@@ -229,9 +244,8 @@ describe("spending limit account (e2e)", () => {
         FEE_JUICE_AMOUNT,
         () => mintOne(funderWallet, tokenAddress, adminAddress),
       );
-      await advanceFinalizedTip(
-        config.nodeUrl,
-        () => mintOne(funderWallet, tokenAddress, adminAddress),
+      await advanceFinalizedTip(config.nodeUrl, () =>
+        mintOne(funderWallet, tokenAddress, adminAddress),
       );
     } catch (err) {
       deployFailure = err;
@@ -270,7 +284,10 @@ describe("spending limit account (e2e)", () => {
     const trustedNow = await finalizedTimestampMs(config.nodeUrl);
 
     const journal = SettlementJournal.open(
-      join(mkdtempSync(join(tmpdir(), "limit-readiness-journal-")), "settlement.sqlite"),
+      join(
+        mkdtempSync(join(tmpdir(), "limit-readiness-journal-")),
+        "settlement.sqlite",
+      ),
     );
     journal.bindAccount(accountAddress, observed.accountPreexisted(), {
       acknowledgement: `${accountAddress}@${journal.meta().journalId}`,
@@ -313,7 +330,10 @@ describe("spending limit account (e2e)", () => {
     if (deployFailure) return ctx.skip();
     const tree = await AllowlistTree.build(ALLOWLIST_SEED, DEPLOYED_RECIPIENTS);
     const journal = SettlementJournal.open(
-      join(mkdtempSync(join(tmpdir(), "limit-attestation-journal-")), "settlement.sqlite"),
+      join(
+        mkdtempSync(join(tmpdir(), "limit-attestation-journal-")),
+        "settlement.sqlite",
+      ),
     );
     journal.bindAccount(accountAddress, true, {
       acknowledgement: `${accountAddress}@${journal.meta().journalId}`,
@@ -342,9 +362,14 @@ describe("spending limit account (e2e)", () => {
       READINESS_CORRIDOR.genesisOrNetworkDigest,
     );
     const clockDeadline = Date.now() + 15 * 60_000;
-    while (observed.state === "unknown" && observed.reason === "finalized_tip_from_future") {
+    while (
+      observed.state === "unknown" &&
+      observed.reason === "finalized_tip_from_future"
+    ) {
       if (Date.now() >= clockDeadline) {
-        throw new Error("local finalized tip did not return inside the 300-second skew policy");
+        throw new Error(
+          "local finalized tip did not return inside the 300-second skew policy",
+        );
       }
       // An external Anvil clock cannot be advanced with Vitest fake timers.
       // Wait on the policy condition; never weaken the policy.
@@ -419,11 +444,18 @@ describe("spending limit account (e2e)", () => {
             authorization: "Bearer e2e-attestation-token",
             "content-type": "application/json",
           },
-          body: JSON.stringify({ jsonrpc: "2.0", id: method, method, params: request }),
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: method,
+            method,
+            params: request,
+          }),
         },
       );
       expect(response.status).toBe(200);
-      const envelope = AttestationRpcResponseSchema.parse(await response.json());
+      const envelope = AttestationRpcResponseSchema.parse(
+        await response.json(),
+      );
       if ("error" in envelope) throw new Error(envelope.error.message);
       return envelope.result;
     };
@@ -484,7 +516,9 @@ describe("spending limit account (e2e)", () => {
       }).tick();
       const envelope = RootUpdateEnvelopeSchema.parse(rootPayload);
       expect(envelope.corridor_id).toBe(READINESS_CORRIDOR.corridorId);
-      expect(envelope.corridor_revision).toBe(READINESS_CORRIDOR.corridorRevision);
+      expect(envelope.corridor_revision).toBe(
+        READINESS_CORRIDOR.corridorRevision,
+      );
       const payload = envelope.record;
       expect(
         verifyReadinessRecord("RootUpdate", payload, {
@@ -528,7 +562,10 @@ describe("spending limit account (e2e)", () => {
     await drifted.connect();
     const trustedNow = await finalizedTimestampMs(config.nodeUrl);
     const journal = SettlementJournal.open(
-      join(mkdtempSync(join(tmpdir(), "limit-root-drift-journal-")), "settlement.sqlite"),
+      join(
+        mkdtempSync(join(tmpdir(), "limit-root-drift-journal-")),
+        "settlement.sqlite",
+      ),
     );
     journal.bindAccount(accountAddress, drifted.accountPreexisted(), {
       acknowledgement: `${accountAddress}@${journal.meta().journalId}`,
@@ -560,10 +597,17 @@ describe("spending limit account (e2e)", () => {
   it("restarts at the recorded address after the allowlist and limits change", async (ctx) => {
     if (deployFailure) return ctx.skip();
 
-    const restarted = new AztecClient(config.nodeUrl, config.secretKey, undefined, {
-      ...changedConfig(),
-      deployment: await deployedRecord(),
-    }, undefined, walletDataDirectory("limit-restarted"));
+    const restarted = new AztecClient(
+      config.nodeUrl,
+      config.secretKey,
+      undefined,
+      {
+        ...changedConfig(),
+        deployment: await deployedRecord(),
+      },
+      undefined,
+      walletDataDirectory("limit-restarted"),
+    );
     await restarted.connect();
     expect(restarted.getAddress()).toBe(accountAddress);
   }, 600_000);
@@ -572,10 +616,17 @@ describe("spending limit account (e2e)", () => {
     if (deployFailure) return ctx.skip();
 
     const record = await deployedRecord();
-    const drifted = new AztecClient(config.nodeUrl, config.secretKey, undefined, {
-      ...changedConfig(),
-      deployment: { ...record, dailyLimit: (DAILY_LIMIT + 1n).toString() },
-    }, undefined, walletDataDirectory("limit-drifted"));
+    const drifted = new AztecClient(
+      config.nodeUrl,
+      config.secretKey,
+      undefined,
+      {
+        ...changedConfig(),
+        deployment: { ...record, dailyLimit: (DAILY_LIMIT + 1n).toString() },
+      },
+      undefined,
+      walletDataDirectory("limit-drifted"),
+    );
     await expect(drifted.connect()).rejects.toThrow(
       `Deployment record names account ${accountAddress}`,
     );
@@ -592,16 +643,30 @@ describe("spending limit account (e2e)", () => {
       maxAmountPerTx: MAX_PER_TX,
       dailyLimit: DAILY_LIMIT,
     };
-    const { secret, salt, signingKey } = await deriveAccountKeys(UNDEPLOYED_KEY);
+    const { secret, salt, signingKey } =
+      await deriveAccountKeys(UNDEPLOYED_KEY);
     const contract = new SpendingLimitAccountContract(signingKey, base);
-    const manager = await contract.accountManager(undefined as never, secret, salt);
+    const manager = await contract.accountManager(
+      undefined as never,
+      secret,
+      salt,
+    );
     const address = manager.address.toString();
 
-    const recorded = new AztecClient(config.nodeUrl, UNDEPLOYED_KEY, undefined, {
-      ...base,
-      deployment: await contract.deploymentRecord(address),
-    }, undefined, walletDataDirectory("limit-recorded"));
-    await expect(recorded.connect()).rejects.toThrow("no initialized contract exists there");
+    const recorded = new AztecClient(
+      config.nodeUrl,
+      UNDEPLOYED_KEY,
+      undefined,
+      {
+        ...base,
+        deployment: await contract.deploymentRecord(address),
+      },
+      undefined,
+      walletDataDirectory("limit-recorded"),
+    );
+    await expect(recorded.connect()).rejects.toThrow(
+      "no initialized contract exists there",
+    );
   }, 600_000);
 
   /** The record an operator would have persisted from the deployment above. */
@@ -634,9 +699,16 @@ describe("spending limit account (e2e)", () => {
    * createNote started returning the receipt: a limit breach is proven,
    * included and reverted in public, and these tests assert it did not move.
    */
-  async function transfer(params: { token: string; recipient: string; amount: string }) {
+  async function transfer(params: {
+    token: string;
+    recipient: string;
+    amount: string;
+  }) {
     const res = await client.createNote(params, recordingGate());
-    if (res.observation.kind === "mined" && res.observation.executionResult === "reverted") {
+    if (
+      res.observation.kind === "mined" &&
+      res.observation.executionResult === "reverted"
+    ) {
       throw new Error(`transfer ${res.txHash} reverted`);
     }
     return res;
@@ -650,7 +722,10 @@ describe("spending limit account (e2e)", () => {
       amount: (MAX_PER_TX / 2n).toString(),
     });
     expect(res.txHash).toBeTruthy();
-    expect(res.observation).toMatchObject({ kind: "mined", executionResult: "success" });
+    expect(res.observation).toMatchObject({
+      kind: "mined",
+      executionResult: "success",
+    });
   });
 
   // PHASE ORDERING. Reverting is necessary but not sufficient: the transfer
@@ -706,8 +781,16 @@ describe("spending limit account (e2e)", () => {
     if (deployFailure) return ctx.skip();
 
     const otherToken = await deployTestToken(funderWallet, adminAddress);
-    await mintTo(funderWallet, otherToken, accountAddress, MINT_AMOUNT, adminAddress);
-    expect(await balanceOf(client, otherToken, accountAddress)).toBe(MINT_AMOUNT);
+    await mintTo(
+      funderWallet,
+      otherToken,
+      accountAddress,
+      MINT_AMOUNT,
+      adminAddress,
+    );
+    expect(await balanceOf(client, otherToken, accountAddress)).toBe(
+      MINT_AMOUNT,
+    );
 
     await expect(
       transfer({
@@ -719,7 +802,9 @@ describe("spending limit account (e2e)", () => {
 
     // Funded, allowlisted recipient, amount well under both limits, and still
     // nothing moved. The pin is the only remaining explanation.
-    expect(await balanceOf(client, otherToken, accountAddress)).toBe(MINT_AMOUNT);
+    expect(await balanceOf(client, otherToken, accountAddress)).toBe(
+      MINT_AMOUNT,
+    );
   }, 600_000);
 
   // AUTHWIT KILL-SWITCH. A valid third-party authwit would let a token contract
@@ -754,10 +839,13 @@ describe("spending limit account (e2e)", () => {
     );
     expect(BigInt(String(validity))).toBe(0n);
 
-    const lookup = await simulateAccount(client, funderWallet, adminAddress, "lookup_validity", [
-      UNLISTED_RECIPIENT,
-      innerHash,
-    ]);
+    const lookup = await simulateAccount(
+      client,
+      funderWallet,
+      adminAddress,
+      "lookup_validity",
+      [UNLISTED_RECIPIENT, innerHash],
+    );
     expect(lookup).toBe(false);
   }, 600_000);
 
@@ -805,16 +893,34 @@ describe("spending limit account (e2e)", () => {
   it("invalidates a transfer proven before the recipient was revoked", async (ctx) => {
     if (deployFailure) return ctx.skip();
 
-    const control = await proveTransfer(client, tokenAddress, SEED_RECIPIENT, 1000n);
-    const revoked = await proveTransfer(client, tokenAddress, SEED_RECIPIENT, 1000n);
+    const control = await proveTransfer(
+      client,
+      tokenAddress,
+      SEED_RECIPIENT,
+      1000n,
+    );
+    const revoked = await proveTransfer(
+      client,
+      tokenAddress,
+      SEED_RECIPIENT,
+      1000n,
+    );
 
     // With nothing revoked, this shape lands. Also rules out the negative
     // result below being proveTransfer building a broken transaction.
     const before = await balanceOf(client, tokenAddress, accountAddress);
     expect(await control.submit()).toBe("success");
-    expect(await balanceOf(client, tokenAddress, accountAddress)).toBe(before - 1000n);
+    expect(await balanceOf(client, tokenAddress, accountAddress)).toBe(
+      before - 1000n,
+    );
 
-    await revokeRecipient(funderWallet, client, accountAddress, SEED_RECIPIENT, adminAddress);
+    await revokeRecipient(
+      funderWallet,
+      client,
+      accountAddress,
+      SEED_RECIPIENT,
+      adminAddress,
+    );
 
     // "reverted", not a refusal at admission, is the result that carries the
     // claim: the proof was valid, the node accepted the transaction and put it
@@ -824,7 +930,9 @@ describe("spending limit account (e2e)", () => {
     // removal -- shows up here instead of passing quietly.
     const afterControl = await balanceOf(client, tokenAddress, accountAddress);
     expect(await revoked.submit()).toBe("reverted");
-    expect(await balanceOf(client, tokenAddress, accountAddress)).toBe(afterControl);
+    expect(await balanceOf(client, tokenAddress, accountAddress)).toBe(
+      afterControl,
+    );
   }, 600_000);
 
   // L2 REVOCATION, the weak half: once revoked, a transfer built from scratch
@@ -846,13 +954,15 @@ describe("spending limit account (e2e)", () => {
   it("stops transfers once the admin revokes the recipient", async (ctx) => {
     if (deployFailure) return ctx.skip();
 
+    const before = await balanceOf(client, tokenAddress, accountAddress);
     await expect(
       transfer({
         token: tokenAddress,
         recipient: SEED_RECIPIENT,
         amount: "1000",
       }),
-    ).rejects.toThrow("Allowlist root mismatch");
+    ).rejects.toThrow();
+    expect(await balanceOf(client, tokenAddress, accountAddress)).toBe(before);
   }, 600_000);
 
   // ADMIN AUTH. apply_limits originally had no caller check at all, so anyone
@@ -888,16 +998,21 @@ describe("spending limit account (e2e)", () => {
       walletDataDirectory("limit-outsider"),
     );
     await outsiderClient.connect();
-    const outsiderWallet = (outsiderClient as unknown as { wallet: unknown }).wallet;
+    const outsiderWallet = (outsiderClient as unknown as { wallet: unknown })
+      .wallet;
     const outsiderAddress = outsiderClient.getAddress()!;
 
     // Valid under assert_limits_valid, and far enough from the live values that
     // applying them would be a material change rather than a no-op.
     expect(
-      await callAccount(client, accountAddress, funderWallet, adminAddress, "propose_limits", [
-        MAX_PER_TX * 2n,
-        DAILY_LIMIT * 2n,
-      ]),
+      await callAccount(
+        client,
+        accountAddress,
+        funderWallet,
+        adminAddress,
+        "propose_limits",
+        [MAX_PER_TX * 2n, DAILY_LIMIT * 2n],
+      ),
     ).toBe("success");
 
     // The only check of `status` slot decoding against real storage.
@@ -928,7 +1043,14 @@ describe("spending limit account (e2e)", () => {
     expect(admin).toMatch(/Timelock not expired/);
 
     expect(
-      await callAccount(client, accountAddress, funderWallet, adminAddress, "cancel_limits", []),
+      await callAccount(
+        client,
+        accountAddress,
+        funderWallet,
+        adminAddress,
+        "cancel_limits",
+        [],
+      ),
     ).toBe("success");
 
     const cancelled = await readAccountState(config.nodeUrl, accountAddress);
@@ -962,9 +1084,9 @@ describe("spending limit account (e2e)", () => {
     );
 
     // A slot read from any other contract means nothing, so it is refused.
-    await expect(readAccountState(config.nodeUrl, tokenAddress)).rejects.toThrow(
-      /contract class mismatch/,
-    );
+    await expect(
+      readAccountState(config.nodeUrl, tokenAddress),
+    ).rejects.toThrow(/contract class mismatch/);
   });
 });
 
@@ -985,14 +1107,24 @@ async function simulateAccount(
 ): Promise<unknown> {
   const { Contract } = await import("@aztec-labs/aztec.js/contracts");
   const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
-  const slc = (client as unknown as {
-    spendingLimitContract: { getContractArtifact: () => Promise<unknown> };
-  }).spendingLimitContract;
-  await registerPublished(wallet, client.getAddress()!, await slc.getContractArtifact());
+  const slc = (
+    client as unknown as {
+      spendingLimitContract: { getContractArtifact: () => Promise<unknown> };
+    }
+  ).spendingLimitContract;
+  await registerPublished(
+    wallet,
+    client.getAddress()!,
+    await slc.getContractArtifact(),
+  );
 
   const c = await (
     Contract as unknown as {
-      at: (a: unknown, art: unknown, w: unknown) => Promise<{
+      at: (
+        a: unknown,
+        art: unknown,
+        w: unknown,
+      ) => Promise<{
         methods: Record<
           string,
           (...a: unknown[]) => {
@@ -1038,19 +1170,33 @@ async function callAccount(
 ): Promise<string> {
   const { Contract } = await import("@aztec-labs/aztec.js/contracts");
   const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
-  const slc = (client as unknown as {
-    spendingLimitContract: { getContractArtifact: () => Promise<unknown> };
-  }).spendingLimitContract;
+  const slc = (
+    client as unknown as {
+      spendingLimitContract: { getContractArtifact: () => Promise<unknown> };
+    }
+  ).spendingLimitContract;
   const artifact = await slc.getContractArtifact();
   await registerPublished(wallet, account, artifact);
   const c = await (
     Contract as unknown as {
-      at: (a: unknown, art: unknown, w: unknown) => Promise<{
+      at: (
+        a: unknown,
+        art: unknown,
+        w: unknown,
+      ) => Promise<{
         methods: Record<
           string,
           (...a: unknown[]) => {
-            send: (o: { from: unknown; fee: unknown; wait: unknown }) => Promise<{
-              receipt: { status: string; executionResult?: string; error?: string };
+            send: (o: {
+              from: unknown;
+              fee: unknown;
+              wait: unknown;
+            }) => Promise<{
+              receipt: {
+                status: string;
+                executionResult?: string;
+                error?: string;
+              };
             }>;
           }
         >;
@@ -1091,7 +1237,9 @@ interface WalletInternals {
     proveTx: (
       request: unknown,
       opts: unknown,
-    ) => Promise<{ toTx: () => Promise<{ getTxHash: () => { toString: () => string } }> }>;
+    ) => Promise<{
+      toTx: () => Promise<{ getTxHash: () => { toString: () => string } }>;
+    }>;
   };
   aztecNode: {
     sendTx: (tx: unknown) => Promise<void>;
@@ -1129,7 +1277,9 @@ async function proveTransfer(
     wallet: WalletInternals;
     solverAddress: unknown;
     spendingLimitContract: {
-      allowlistTree: () => Promise<import("../../src/allowlist-tree.js").AllowlistTree>;
+      allowlistTree: () => Promise<
+        import("../../src/allowlist-tree.js").AllowlistTree
+      >;
     };
   };
   const wallet = inner.wallet;
@@ -1145,10 +1295,15 @@ async function proveTransfer(
 
   const contract = await (
     TokenContract as unknown as {
-      at: (a: unknown, w: unknown) => Promise<{
+      at: (
+        a: unknown,
+        w: unknown,
+      ) => Promise<{
         methods: Record<
           string,
-          (...a: unknown[]) => { request: (o: { from: unknown }) => Promise<{ feePayer: unknown }> }
+          (...a: unknown[]) => {
+            request: (o: { from: unknown }) => Promise<{ feePayer: unknown }>;
+          }
         >;
       }>;
     }
@@ -1159,7 +1314,10 @@ async function proveTransfer(
     amount,
   ).request({ from });
 
-  const feeOptions = await wallet.completeFeeOptions({ from, feePayer: payload.feePayer });
+  const feeOptions = await wallet.completeFeeOptions({
+    from,
+    feePayer: payload.feePayer,
+  });
   const txRequest = await wallet.createTxExecutionRequestFromPayloadAndFee(
     payload,
     from,
@@ -1198,7 +1356,9 @@ async function waitForExecution(
     if (receipt.executionResult !== undefined) {
       // The reason distinguishes "the guard rejected this" from "it reverted
       // for some unrelated reason", which is the whole value of the assertion.
-      return receipt.error ? `${receipt.executionResult}: ${receipt.error}` : receipt.executionResult;
+      return receipt.error
+        ? `${receipt.executionResult}: ${receipt.error}`
+        : receipt.executionResult;
     }
     if (receipt.status === "dropped") {
       return "dropped";
@@ -1233,21 +1393,28 @@ async function revokeRecipient(
   const { Fr } = await import("@aztec-labs/foundation/curves/bn254");
   const { allowlistLeaf } = await import("../../src/allowlist-tree.js");
 
-  const slc = (client as unknown as {
-    spendingLimitContract: {
-      getContractArtifact: () => Promise<unknown>;
-      allowlistTree: () => Promise<
-        import("../../src/allowlist-tree.js").AllowlistTree
-      >;
-    };
-  }).spendingLimitContract;
+  const slc = (
+    client as unknown as {
+      spendingLimitContract: {
+        getContractArtifact: () => Promise<unknown>;
+        allowlistTree: () => Promise<
+          import("../../src/allowlist-tree.js").AllowlistTree
+        >;
+      };
+    }
+  ).spendingLimitContract;
 
   const tree = await slc.allowlistTree();
   const witness = tree.witnessFor(recipient);
   if (witness === undefined) {
-    throw new Error(`cannot revoke ${recipient}: it is not in the configured allowlist`);
+    throw new Error(
+      `cannot revoke ${recipient}: it is not in the configured allowlist`,
+    );
   }
-  const oldLeaf = await allowlistLeaf(Fr.fromString(recipient), witness.leafSalt);
+  const oldLeaf = await allowlistLeaf(
+    Fr.fromString(recipient),
+    witness.leafSalt,
+  );
   // A distinct salt, so the new empty is not recognisable as one. A literal
   // zero leaf is rejected by the contract for exactly that reason.
   const newLeaf = await allowlistLeaf(Fr.ZERO, new Fr(0x9abcn));
@@ -1256,11 +1423,17 @@ async function revokeRecipient(
   await registerPublished(wallet, account, artifact);
   const c = await (
     Contract as unknown as {
-      at: (a: unknown, art: unknown, w: unknown) => Promise<{
+      at: (
+        a: unknown,
+        art: unknown,
+        w: unknown,
+      ) => Promise<{
         methods: Record<
-        string,
-        (...a: unknown[]) => { send: (o: { from: unknown; fee: unknown }) => Promise<unknown> }
-      >;
+          string,
+          (...a: unknown[]) => {
+            send: (o: { from: unknown; fee: unknown }) => Promise<unknown>;
+          }
+        >;
       }>;
     }
   ).at(AztecAddress.fromStringUnsafe(account), artifact, wallet);
@@ -1286,8 +1459,14 @@ async function balanceOf(
   await registerPublished(wallet, token, TokenContract.artifact);
   const contract = await (
     TokenContract as unknown as {
-      at: (a: unknown, w: unknown) => Promise<{
-        methods: Record<string, (...a: unknown[]) => { simulate: (o?: unknown) => Promise<unknown> }>;
+      at: (
+        a: unknown,
+        w: unknown,
+      ) => Promise<{
+        methods: Record<
+          string,
+          (...a: unknown[]) => { simulate: (o?: unknown) => Promise<unknown> }
+        >;
       }>;
     }
   ).at(AztecAddress.fromStringUnsafe(token), wallet);

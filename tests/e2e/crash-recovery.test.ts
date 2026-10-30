@@ -59,7 +59,7 @@ const RPC_KEY = "smoke-rpc-key";
 const MAX_PER_TX = 1_000_000n;
 const DAILY_LIMIT = 10_000_000n;
 const INVENTORY = 100_000_000n;
-const ALLOWLIST_SEED = "0x" + "47".repeat(32);
+const ALLOWLIST_SEED = "0x" + "07".repeat(32);
 const FEE_JUICE_AMOUNT = 1_000_000_000_000_000_000_000n;
 const RECIPIENT = "0x" + "48".repeat(32);
 
@@ -92,8 +92,11 @@ function readBody(req: IncomingMessage): Promise<Buffer> {
 function sendsTx(raw: Buffer, encoding: string | undefined): boolean {
   try {
     const text = (encoding === "gzip" ? gunzipSync(raw) : raw).toString("utf8");
-    const body = JSON.parse(text) as { method?: string } | { method?: string }[];
-    return (Array.isArray(body) ? body : [body]).some((c) => c.method === "aztec_sendTx");
+    const body = JSON.parse(text) as
+      { method?: string } | { method?: string }[];
+    return (Array.isArray(body) ? body : [body]).some(
+      (c) => c.method === "aztec_sendTx",
+    );
   } catch {
     return false;
   }
@@ -118,18 +121,27 @@ describe("hard crash mid-broadcast (e2e)", () => {
   let killed = 0;
 
   async function publicBalance(): Promise<bigint> {
-    const { TokenContract } = await import("@aztec-labs/noir-contracts.js/Token");
+    const { TokenContract } =
+      await import("@aztec-labs/noir-contracts.js/Token");
     const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
     const wallet = (observer as unknown as { wallet: unknown }).wallet;
     await registerPublished(wallet, token, TokenContract.artifact);
     const contract = await (
       TokenContract as unknown as {
-        at: (a: unknown, w: unknown) => Promise<{
-          methods: Record<string, (...a: unknown[]) => { simulate: (o?: unknown) => Promise<unknown> }>;
+        at: (
+          a: unknown,
+          w: unknown,
+        ) => Promise<{
+          methods: Record<
+            string,
+            (...a: unknown[]) => { simulate: (o?: unknown) => Promise<unknown> }
+          >;
         }>;
       }
     ).at(AztecAddress.fromStringUnsafe(token), wallet);
-    const raw = await contract.methods["balance_of_public"]!(AztecAddress.fromStringUnsafe(account)).simulate({
+    const raw = await contract.methods["balance_of_public"]!(
+      AztecAddress.fromStringUnsafe(account),
+    ).simulate({
       from: AztecAddress.fromStringUnsafe(account),
     });
     const value = (raw as { result?: unknown })?.result ?? raw;
@@ -156,7 +168,9 @@ describe("hard crash mid-broadcast (e2e)", () => {
         PXE_BRIDGE_SPENDING_LIMIT_ADMIN: admin,
         PXE_BRIDGE_SPENDING_LIMIT_TOKEN: token,
         PXE_BRIDGE_ALLOWLIST_SEED: ALLOWLIST_SEED,
-        PXE_BRIDGE_ALLOWLIST_RECIPIENTS: JSON.stringify([{ address: RECIPIENT, index: 347 }]),
+        PXE_BRIDGE_ALLOWLIST_RECIPIENTS: JSON.stringify([
+          { address: RECIPIENT, index: 347 },
+        ]),
         PXE_BRIDGE_ACCOUNT_DEPLOYMENT: JSON.stringify(deployment),
         PXE_BRIDGE_MAX_AMOUNT: MAX_PER_TX.toString(),
         PXE_BRIDGE_DAILY_LIMIT: DAILY_LIMIT.toString(),
@@ -173,17 +187,23 @@ describe("hard crash mid-broadcast (e2e)", () => {
     let log = "";
     child.stdout?.on("data", (c: Buffer) => (log += c.toString()));
     child.stderr?.on("data", (c: Buffer) => (log += c.toString()));
-    const exited = new Promise<number | null>((done) => child.on("exit", (code) => done(code)));
+    const exited = new Promise<number | null>((done) =>
+      child.on("exit", (code) => done(code)),
+    );
     const url = `http://127.0.0.1:${port}`;
     const deadline = Date.now() + 170_000;
     while (Date.now() < deadline) {
-      if (child.exitCode !== null) throw new Error(`bridge exited during startup:\n${log}`);
+      if (child.exitCode !== null)
+        throw new Error(`bridge exited during startup:\n${log}`);
       try {
-        const res = await fetch(`${url}${requireReadiness ? "/ready" : "/status"}`, {
-          ...(requireReadiness
-            ? { headers: { authorization: `Bearer ${RPC_KEY}` } }
-            : {}),
-        });
+        const res = await fetch(
+          `${url}${requireReadiness ? "/ready" : "/status"}`,
+          {
+            ...(requireReadiness
+              ? { headers: { authorization: `Bearer ${RPC_KEY}` } }
+              : {}),
+          },
+        );
         if (res.status === 200) return { child, url, exited };
       } catch {
         // not listening yet
@@ -194,7 +214,12 @@ describe("hard crash mid-broadcast (e2e)", () => {
     throw new Error(`bridge did not become ready:\n${log}`);
   }
 
-  async function rpc(url: string, method: string, params: unknown, operationId?: string) {
+  async function rpc(
+    url: string,
+    method: string,
+    params: unknown,
+    operationId?: string,
+  ) {
     const res = await fetch(url, {
       method: "POST",
       headers: {
@@ -205,7 +230,9 @@ describe("hard crash mid-broadcast (e2e)", () => {
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: [params] }),
     });
     return (await res.json()) as {
-      result?: Record<string, unknown> & { observation: { state: string; txHash?: string } };
+      result?: Record<string, unknown> & {
+        observation: { state: string; txHash?: string };
+      };
       error?: { code: number; data?: { observation?: { state: string } } };
     };
   }
@@ -215,7 +242,10 @@ describe("hard crash mid-broadcast (e2e)", () => {
     return {
       version: SETTLEMENT_VERSION,
       operationId,
-      network: { ...network, genesisOrNetworkDigest: CORRIDOR.genesisOrNetworkDigest },
+      network: {
+        ...network,
+        genesisOrNetworkDigest: CORRIDOR.genesisOrNetworkDigest,
+      },
       corridor: {
         corridorId: CORRIDOR.corridorId,
         corridorRevision: CORRIDOR.corridorRevision,
@@ -263,7 +293,8 @@ describe("hard crash mid-broadcast (e2e)", () => {
     );
     await observer.connect();
     account = observer.getAddress()!;
-    const { TokenContract } = await import("@aztec-labs/noir-contracts.js/Token");
+    const { TokenContract } =
+      await import("@aztec-labs/noir-contracts.js/Token");
     await registerPublished(funderWallet, token, TokenContract.artifact);
     await mintTo(funderWallet, token, account, INVENTORY, admin);
     await fundFeeJuice(
@@ -274,9 +305,8 @@ describe("hard crash mid-broadcast (e2e)", () => {
       FEE_JUICE_AMOUNT,
       () => mintOne(funderWallet, token, admin),
     );
-    await advanceFinalizedTip(
-      config.nodeUrl,
-      () => mintOne(funderWallet, token, admin),
+    await advanceFinalizedTip(config.nodeUrl, () =>
+      mintOne(funderWallet, token, admin),
     );
     const tree = await AllowlistTree.build(ALLOWLIST_SEED, [
       { address: RECIPIENT, index: 347 },
@@ -292,7 +322,9 @@ describe("hard crash mid-broadcast (e2e)", () => {
 
     // The may-broadcast endpoint Riddler would serve: allow, authenticated.
     gate = createServer(async (req, res) => {
-      const body = JSON.parse((await readBody(req)).toString("utf8")) as { operationId: string };
+      const body = JSON.parse((await readBody(req)).toString("utf8")) as {
+        operationId: string;
+      };
       const ok = req.headers["authorization"] === `Bearer ${SERVICE_TOKEN}`;
       gateCalls.push(body.operationId);
       if (killOnGate) {
@@ -304,7 +336,11 @@ describe("hard crash mid-broadcast (e2e)", () => {
       }
       res.writeHead(ok ? 200 : 401, { "content-type": "application/json" });
       res.end(
-        JSON.stringify({ version: MAY_BROADCAST_VERSION, operationId: body.operationId, decision: "allow" }),
+        JSON.stringify({
+          version: MAY_BROADCAST_VERSION,
+          operationId: body.operationId,
+          decision: "allow",
+        }),
       );
     });
     gateUrl = `http://127.0.0.1:${await listen(gate)}/xochi/aztec/may-broadcast`;
@@ -314,7 +350,8 @@ describe("hard crash mid-broadcast (e2e)", () => {
     proxy = createServer(async (req, res) => {
       const raw = await readBody(req);
       const encoding = req.headers["content-encoding"];
-      const broadcasting = killPoint !== undefined && sendsTx(raw, encoding as string | undefined);
+      const broadcasting =
+        killPoint !== undefined && sendsTx(raw, encoding as string | undefined);
       if (broadcasting && killPoint === "before_node_sees") {
         killPoint = undefined;
         killed += 1;
@@ -366,7 +403,9 @@ describe("hard crash mid-broadcast (e2e)", () => {
   function adoptedJournal(workDir: string): string {
     const path = join(workDir, "journal.sqlite");
     const journal = SettlementJournal.open(path);
-    journal.bindAccount(account, true, { acknowledgement: `${account}@${journal.meta().journalId}` });
+    journal.bindAccount(account, true, {
+      acknowledgement: `${account}@${journal.meta().journalId}`,
+    });
     expect(journal.health()).toEqual({ writable: true });
     journal.close();
     return path;
@@ -382,10 +421,16 @@ describe("hard crash mid-broadcast (e2e)", () => {
       const before = await publicBalance();
       bridge = await startBridge(workDir, journal);
       killPoint = point;
-      const first = await rpc(bridge.url, "aztec_createNote", params, operationId).catch(
-        (err: unknown) => err,
-      );
-      expect(first, "the first response must be lost to the kill").toBeInstanceOf(Error);
+      const first = await rpc(
+        bridge.url,
+        "aztec_createNote",
+        params,
+        operationId,
+      ).catch((err: unknown) => err);
+      expect(
+        first,
+        "the first response must be lost to the kill",
+      ).toBeInstanceOf(Error);
       expect(await bridge.exited).toBeNull();
       expect(killed).toBeGreaterThan(0);
 
@@ -396,13 +441,25 @@ describe("hard crash mid-broadcast (e2e)", () => {
         version: SETTLEMENT_VERSION,
         operationId,
       });
-      expect(recovered.result).toMatchObject({ found: true, state: "may_broadcast" });
-      const attempts = recovered.result!["attempts"] as { mayBroadcast: boolean }[];
+      expect(recovered.result).toMatchObject({
+        found: true,
+        state: "may_broadcast",
+      });
+      const attempts = recovered.result!["attempts"] as {
+        mayBroadcast: boolean;
+      }[];
       expect(attempts).toHaveLength(1);
       expect(attempts[0]!.mayBroadcast).toBe(true);
 
-      const retry = await rpc(bridge.url, "aztec_createNote", params, operationId);
-      expect(["pending", "included", "finalized"]).toContain(retry.result?.observation.state);
+      const retry = await rpc(
+        bridge.url,
+        "aztec_createNote",
+        params,
+        operationId,
+      );
+      expect(["pending", "included", "finalized"]).toContain(
+        retry.result?.observation.state,
+      );
 
       // Poll until the node has it mined, then check the one credit.
       const deadline = Date.now() + 120_000;
@@ -410,15 +467,25 @@ describe("hard crash mid-broadcast (e2e)", () => {
       while (state === "pending" && Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 2_000));
         state = (
-          await rpc(bridge.url, "aztec_getSettlement", { version: SETTLEMENT_VERSION, operationId })
+          await rpc(bridge.url, "aztec_getSettlement", {
+            version: SETTLEMENT_VERSION,
+            operationId,
+          })
         ).result?.observation.state;
       }
       expect(["included", "finalized"]).toContain(state);
       expect(before - (await publicBalance())).toBe(BigInt(AMOUNT));
 
       // A further retry still sends nothing.
-      const again = await rpc(bridge.url, "aztec_createNote", params, operationId);
-      expect(again.result?.observation.txHash).toBe(retry.result?.observation.txHash);
+      const again = await rpc(
+        bridge.url,
+        "aztec_createNote",
+        params,
+        operationId,
+      );
+      expect(again.result?.observation.txHash).toBe(
+        retry.result?.observation.txHash,
+      );
       expect(before - (await publicBalance())).toBe(BigInt(AMOUNT));
       expect(gateCalls.filter((id) => id === operationId)).toHaveLength(1);
 
@@ -437,39 +504,63 @@ describe("hard crash mid-broadcast (e2e)", () => {
     const before = await publicBalance();
     bridge = await startBridge(workDir, journal);
     killOnGate = true;
-    const first = await rpc(bridge.url, "aztec_createNote", params, operationId).catch(
-      (err: unknown) => err,
+    const first = await rpc(
+      bridge.url,
+      "aztec_createNote",
+      params,
+      operationId,
+    ).catch((err: unknown) => err);
+    expect(first, "the first response must be lost to the kill").toBeInstanceOf(
+      Error,
     );
-    expect(first, "the first response must be lost to the kill").toBeInstanceOf(Error);
     expect(await bridge.exited).toBeNull();
 
     // Restart under another corridor revision: the operation's own corridor no
     // longer admits new work, which must not stop its recovery.
-    bridge = await startBridge(workDir, journal, true, { ...CORRIDOR, corridorRevision: 2 });
+    bridge = await startBridge(workDir, journal, true, {
+      ...CORRIDOR,
+      corridorRevision: 2,
+    });
     const held = await rpc(bridge.url, "aztec_getSettlement", {
       version: SETTLEMENT_VERSION,
       operationId,
     });
     expect(held.result).toMatchObject({ found: true, state: "prepared" });
-    const preparedAttempts = held.result!["attempts"] as { txHash: string; mayBroadcast: boolean }[];
+    const preparedAttempts = held.result!["attempts"] as {
+      txHash: string;
+      mayBroadcast: boolean;
+    }[];
     expect(preparedAttempts).toHaveLength(1);
     expect(preparedAttempts[0]!.mayBroadcast).toBe(false);
 
     const freshId = `crash-gate-fresh-${randomBytes(4).toString("hex")}`;
-    const fresh = await rpc(bridge.url, "aztec_createNote", await terms(freshId), freshId);
+    const fresh = await rpc(
+      bridge.url,
+      "aztec_createNote",
+      await terms(freshId),
+      freshId,
+    );
     expect(fresh.error?.data?.observation).toMatchObject({
       state: "not_submitted",
       reason: "corridor_mismatch",
     });
 
-    const retry = await rpc(bridge.url, "aztec_createNote", params, operationId);
+    const retry = await rpc(
+      bridge.url,
+      "aztec_createNote",
+      params,
+      operationId,
+    );
     expect(retry.result?.observation.txHash).toBe(preparedAttempts[0]!.txHash);
     const deadline = Date.now() + 120_000;
     let state = retry.result?.observation.state;
     while (state === "pending" && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 2_000));
       state = (
-        await rpc(bridge.url, "aztec_getSettlement", { version: SETTLEMENT_VERSION, operationId })
+        await rpc(bridge.url, "aztec_getSettlement", {
+          version: SETTLEMENT_VERSION,
+          operationId,
+        })
       ).result?.observation.state;
     }
     expect(["included", "finalized"]).toContain(state);
@@ -497,7 +588,9 @@ describe("hard crash mid-broadcast (e2e)", () => {
     closeSync(fd);
 
     bridge = await startBridge(workDir, journal, false);
-    expect(await (await fetch(`${bridge.url}/status`)).json()).toEqual({ status: "ok" });
+    expect(await (await fetch(`${bridge.url}/status`)).json()).toEqual({
+      status: "ok",
+    });
     const readiness = await fetch(`${bridge.url}/ready`, {
       headers: { authorization: `Bearer ${RPC_KEY}` },
     });
@@ -507,7 +600,12 @@ describe("hard crash mid-broadcast (e2e)", () => {
       reasons: expect.arrayContaining(["journal_unwritable"]),
     });
     const params = await terms("corrupt-op");
-    const refused = await rpc(bridge.url, "aztec_createNote", params, "corrupt-op");
+    const refused = await rpc(
+      bridge.url,
+      "aztec_createNote",
+      params,
+      "corrupt-op",
+    );
     expect(refused.error?.code).toBe(-32004);
     bridge.child.kill("SIGTERM");
     await bridge.exited;
