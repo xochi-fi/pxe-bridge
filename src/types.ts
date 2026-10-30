@@ -216,4 +216,6 @@ export const RPC_ERRORS = {
   JOURNAL_UNAVAILABLE: -32004,
   /** Provably not broadcast (refused, or held before may-broadcast). */
   NOT_SUBMITTED: -32005,
+  /** The authoritative readiness predicate refused new admission. */
+  NOT_READY: -32006,
 } as const;

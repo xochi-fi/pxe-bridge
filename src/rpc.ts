@@ -33,6 +33,7 @@ import {
 import type { MayBroadcastClient } from "./may-broadcast.js";
 import type { TransactionLimits } from "./limits.js";
 import type { AuditLogger } from "./audit.js";
+import type { OperationalReadiness, ReadinessObserver, ReadinessReason } from "./readiness.js";
 
 export interface SettlementContext {
   journal: SettlementJournal;
@@ -48,6 +49,8 @@ export interface SettlementContext {
    * gate closes. Default TX deadline.
    */
   timeoutMs: number;
+  /** Same instance exposed by authenticated GET /ready. */
+  readiness?: ReadinessObserver | undefined;
   now?: () => number;
 }
 
@@ -55,6 +58,8 @@ export interface RpcContext {
   limits?: TransactionLimits | undefined;
   audit?: AuditLogger | undefined;
   settlement?: SettlementContext | undefined;
+  /** The same authoritative observer served by authenticated GET /ready. */
+  readiness?: ReadinessObserver | undefined;
   /** From the `Idempotency-Key` request header, when the caller sent one. */
   idempotencyKey?: string | undefined;
   clientIp?: string | undefined;
@@ -382,6 +387,31 @@ function observationFrom(attempt: Attempt, node: NodeObservation, now: number): 
   }
 }
 
+type MinedObservation = Extract<Observation, { observedAt: number }>;
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i += 1) {
+    if (left[i] !== right[i]) return false;
+  }
+  return true;
+}
+
+function sameCanonicalOutcome(left: MinedObservation, right: MinedObservation): boolean {
+  return (
+    left.state === right.state &&
+    left.txHash === right.txHash &&
+    left.expirationTimestamp === right.expirationTimestamp &&
+    left.executionResult === right.executionResult &&
+    left.blockHash === right.blockHash &&
+    left.blockNumber === right.blockNumber &&
+    left.receiptStatus === right.receiptStatus &&
+    left.effects.state === right.effects.state &&
+    sameStrings(left.effects.noteHashes, right.effects.noteHashes) &&
+    sameStrings(left.effects.nullifiers, right.effects.nullifiers)
+  );
+}
+
 function currentAttempt(journal: SettlementJournal, op: StoredOperation): Attempt | undefined {
   if (op.currentAttempt === null) return undefined;
   return journal.attempts(op.operationId).find((a) => a.attempt === op.currentAttempt);
@@ -439,10 +469,25 @@ async function observe(
           reason: "node_read_failed",
         };
       }
-      const observation = observationFrom(attempt, node, (s.now ?? Date.now)());
-      // Reads record only a finalized outcome, so polling does not churn the
-      // journal; the live observation is always re-read.
-      if (observation.state === "finalized" || observation.state === "reverted") {
+      let observation = observationFrom(attempt, node, (s.now ?? Date.now)());
+      let unchanged = false;
+      if (
+        "observedAt" in observation &&
+        op.observation != null &&
+        "observedAt" in op.observation &&
+        sameCanonicalOutcome(op.observation, observation)
+      ) {
+        observation = { ...observation, observedAt: op.observation.observedAt };
+        unchanged = true;
+      }
+      // Reads record a finalized outcome, and a mined outcome the journal does
+      // not hold yet, so an unchanged outcome keeps its first observedAt across
+      // polls and restarts without a write per poll.
+      if (
+        observation.state === "finalized" ||
+        observation.state === "reverted" ||
+        ("observedAt" in observation && !unchanged)
+      ) {
         recordObservation(s, op.operationId, observation);
       }
       return observation;
@@ -564,7 +609,44 @@ async function createNoteWithin(
   const fingerprint = fingerprintTerms(terms);
 
   const health = s.journal.health();
-  if (!health.writable) return journalUnavailable(id, health, operationId);
+  if (!health.writable) {
+    let existing: StoredOperation | undefined;
+    try {
+      existing = s.journal.get(operationId);
+    } catch (cause) {
+      return journalFault(id, s, operationId, cause);
+    }
+    if (!existing) return journalUnavailable(id, health, operationId);
+    if (existing.fingerprint !== fingerprint) {
+      return conflict(id, operationId, fingerprint, existing.fingerprint);
+    }
+    if (
+      existing.state !== "may_broadcast" &&
+      existing.state !== "finalized" &&
+      existing.state !== "reverted"
+    ) {
+      return journalUnavailable(id, health, operationId);
+    }
+    if (s.inFlight.has(operationId)) {
+      return answer(id, existing, { state: "request_in_flight" });
+    }
+    s.inFlight.add(operationId);
+    const background = new BackgroundCalls();
+    try {
+      const resumed = await resumeExisting(
+        id,
+        client,
+        ctx,
+        s,
+        existing,
+        background,
+        deadline,
+      );
+      return resumed ?? journalUnavailable(id, health, operationId);
+    } finally {
+      background.whenIdle(() => s.inFlight.delete(operationId));
+    }
+  }
 
   // Synchronous from the check to the add: two concurrent duplicates cannot
   // both get past here.
@@ -654,8 +736,12 @@ async function driveOperation(
     return journalFault(id, s, operationId, cause);
   }
 
-  const refusal = await admissionRefusal(client, s, terms, deadline);
-  if (refusal) return notSubmitted(id, ctx, s, op, fingerprint, refusal, true);
+  const refusal = await admissionRefusal(ctx, s, terms, deadline);
+  if (refusal) {
+    return refusal.kind === "not_ready"
+      ? notReady(id, ctx, s, op, fingerprint, refusal)
+      : notSubmitted(id, ctx, s, op, fingerprint, refusal.reason, true);
+  }
 
   return runAttempt(id, client, ctx, s, { op, fingerprint, terms }, { kind: "fresh" }, background, deadline);
 }
@@ -701,8 +787,12 @@ async function resumeExisting(
         // prepare a new attempt under the same operation.
         return undefined;
       }
-      const refusal = await admissionRefusal(client, s, op.terms, deadline);
-      if (refusal) return notSubmitted(id, ctx, s, op, op.fingerprint, refusal, true);
+      // Already admitted: recovery is not gated on admission readiness, only
+      // on facts that make this exact transaction unsendable or certain to fail.
+      const hold = await preparedHoldReasons(ctx, s, op.terms, deadline);
+      if (hold.length > 0) {
+        return notReady(id, ctx, s, op, op.fingerprint, { kind: "not_ready", reasons: hold });
+      }
       return runAttempt(id, client, ctx, s, state, { kind: "resume", attempt }, background, deadline);
     }
 
@@ -739,47 +829,190 @@ async function resumeExisting(
   }
 }
 
-/** Every check a fresh or resumed attempt must pass before preparing. */
+type AdmissionRefusal =
+  | { kind: "terms"; reason: string }
+  | {
+      kind: "not_ready";
+      reasons: ReadinessReason[];
+      readiness?: OperationalReadiness;
+    };
+
+/** Every check a fresh or unmarked resumed attempt must pass before preparing. */
 async function admissionRefusal(
-  client: IAztecClient,
+  ctx: RpcContext,
   s: SettlementContext,
   terms: SettlementTerms,
   deadline: RequestDeadline,
-): Promise<string | undefined> {
-  if (!s.mayBroadcast) return "may_broadcast_unconfigured";
+): Promise<AdmissionRefusal | undefined> {
+  const observer = ctx.readiness ?? s.readiness;
+  if (!observer) {
+    return { kind: "not_ready", reasons: ["readiness_observation_failed"] };
+  }
+
+  let readiness: OperationalReadiness | typeof TIMED_OUT;
+  try {
+    readiness = await deadline.race(observer.observe());
+  } catch (cause) {
+    console.error("[rpc] Authoritative readiness observation failed:", cause);
+    return { kind: "not_ready", reasons: ["readiness_observation_failed"] };
+  }
+  if (readiness === TIMED_OUT) {
+    return { kind: "terms", reason: "response_deadline" };
+  }
+  if (!readiness.ready) {
+    return { kind: "not_ready", reasons: readiness.reasons, readiness };
+  }
+
   const corridor = s.corridor;
-  if (!corridor) return "corridor_unconfigured";
+  if (!s.mayBroadcast || !corridor) {
+    // A ready projection and missing local prerequisites cannot coexist. Fail
+    // closed rather than introducing a second definition of readiness.
+    return { kind: "not_ready", reasons: ["readiness_observation_failed"] };
+  }
   if (
     terms.corridor.corridorId !== corridor.corridorId.toLowerCase() ||
     terms.corridor.corridorRevision !== corridor.corridorRevision ||
     terms.corridor.manifestDigest !== corridor.manifestDigest.toLowerCase()
   ) {
-    return "corridor_mismatch";
+    return { kind: "terms", reason: "corridor_mismatch" };
   }
   if (terms.network.genesisOrNetworkDigest !== corridor.genesisOrNetworkDigest.toLowerCase()) {
-    return "network_mismatch";
+    return { kind: "terms", reason: "network_mismatch" };
   }
-  if (terms.accountMode !== client.accountMode()) return "account_mode_mismatch";
-  const pinned = client.pinnedToken();
-  if (pinned !== undefined && pinned.toLowerCase() !== terms.token) return "token_mismatch";
-  let network;
-  try {
-    network = await deadline.race(client.networkIdentity());
-  } catch (cause) {
-    console.error("[rpc] Network identity read failed:", cause);
-    return "network_unreadable";
+  if (terms.accountMode !== readiness.accountMode) {
+    return { kind: "terms", reason: "account_mode_mismatch" };
   }
-  if (network === TIMED_OUT) return "response_deadline";
+  if (readiness.token === null || readiness.token.toLowerCase() !== terms.token) {
+    return { kind: "terms", reason: "token_mismatch" };
+  }
   if (
-    network.aztecChainId !== terms.network.aztecChainId ||
-    network.protocolVersion !== terms.network.protocolVersion ||
-    network.rollupAddress !== terms.network.rollupAddress ||
-    network.l1ChainId !== terms.network.l1ChainId
+    readiness.network.aztecChainId !== terms.network.aztecChainId ||
+    readiness.network.protocolVersion !== terms.network.protocolVersion ||
+    readiness.network.rollupContract !== terms.network.rollupAddress ||
+    readiness.l1ChainId !== terms.network.l1ChainId
   ) {
-    return "network_mismatch";
+    return { kind: "terms", reason: "network_mismatch" };
   }
-  if (nowSeconds(s) >= terms.validUntil) return "validity_bound_passed";
+  if (nowSeconds(s) >= terms.validUntil) {
+    return { kind: "terms", reason: "validity_bound_passed" };
+  }
   return undefined;
+}
+
+/**
+ * Why an admitted, journaled, unmarked attempt is not sent now. Admission
+ * readiness -- the /ready verdict, fee runway, finalized-tip freshness,
+ * corridor admission -- closes NEW admission only and is not consulted: an
+ * attempt already admitted keeps recovering through the may-broadcast query
+ * and the exact journaled bytes. It holds only on a fact that makes this
+ * transaction unsendable or certain to fail; each leaves it prepared with the
+ * same bytes and hash, resumed by the next call. A fact that cannot be
+ * observed is not a hold: the node and the account still decide.
+ */
+async function preparedHoldReasons(
+  ctx: RpcContext,
+  s: SettlementContext,
+  terms: SettlementTerms,
+  deadline: RequestDeadline,
+): Promise<ReadinessReason[]> {
+  const reasons: ReadinessReason[] = [];
+  if (!s.journal.health().writable) reasons.push("journal_unwritable");
+  if (!s.journal.writerFenceHeld()) reasons.push("writer_fence_lost");
+  if (!s.mayBroadcast) reasons.push("may_broadcast_unconfigured");
+  if (reasons.length > 0) return reasons;
+
+  const observer = ctx.readiness ?? s.readiness;
+  if (!observer) return reasons;
+  let readiness: OperationalReadiness | typeof TIMED_OUT;
+  try {
+    readiness = await deadline.race(observer.observe());
+  } catch (cause) {
+    console.error("[rpc] Readiness observation for a prepared attempt failed:", cause);
+    return reasons;
+  }
+  // The request deadline is spent, so the gate would close before any mark.
+  if (readiness === TIMED_OUT) return ["readiness_observation_failed"];
+
+  const network = readiness.network;
+  if (
+    network.aztecChainId !== null &&
+    (network.aztecChainId !== terms.network.aztecChainId ||
+      network.protocolVersion !== terms.network.protocolVersion ||
+      network.rollupContract?.toLowerCase() !== terms.network.rollupAddress.toLowerCase() ||
+      readiness.l1ChainId !== terms.network.l1ChainId)
+  ) {
+    reasons.push("network_identity_mismatch");
+  }
+  if (readiness.policy.paused === true) reasons.push("account_paused");
+  // The attempt was proven against the configured tree; the account checks
+  // its witness against the on-chain root at inclusion.
+  if (
+    readiness.policy.allowlistRoot !== null &&
+    readiness.policy.configuredAllowlistRoot !== null &&
+    readiness.policy.allowlistRoot.toLowerCase() !==
+      readiness.policy.configuredAllowlistRoot.toLowerCase()
+  ) {
+    reasons.push("allowlist_root_mismatch");
+  }
+  if (
+    readiness.inventory.observed !== null &&
+    BigInt(readiness.inventory.observed) < BigInt(terms.amount)
+  ) {
+    reasons.push("inventory_insufficient");
+  }
+  return reasons;
+}
+
+async function notReady(
+  id: number | string,
+  ctx: RpcContext,
+  s: SettlementContext,
+  op: StoredOperation,
+  fingerprint: string,
+  refusal: Extract<AdmissionRefusal, { kind: "not_ready" }>,
+): Promise<JsonRpcResponse> {
+  const primaryReason = refusal.reasons[0] ?? "readiness_observation_failed";
+  let observation: Observation;
+  if (op.state === "prepared") {
+    const attempt = currentAttempt(s.journal, op);
+    if (!attempt) {
+      return journalFault(
+        id,
+        s,
+        op.operationId,
+        new JournalUnreadableError(`current attempt of prepared operation ${op.operationId} missing`),
+      );
+    }
+    observation = {
+      state: "prepared",
+      txHash: attempt.txHash,
+      expirationTimestamp: attempt.expirationTimestamp,
+      hold: op.hold ?? "interrupted",
+    };
+  } else {
+    try {
+      s.journal.recordNotSubmitted(op.operationId, primaryReason, true);
+    } catch (cause) {
+      return journalFault(id, s, op.operationId, cause);
+    }
+    observation = {
+      state: "not_submitted",
+      reason: primaryReason,
+      retryableAfterRevalidation: true,
+    };
+  }
+  await audit(ctx, op, fingerprint, observation);
+  return rpcError(id, RPC_ERRORS.NOT_READY, "Bridge is not ready for new settlement admission", {
+    reason: "bridge_not_ready",
+    reasons: refusal.reasons,
+    observation,
+    ...(refusal.readiness
+      ? {
+          finalized: refusal.readiness.finalized,
+          observedAt: refusal.readiness.observedAt,
+        }
+      : {}),
+  });
 }
 
 async function notSubmitted(
@@ -862,6 +1095,22 @@ async function runAttempt(
   if (ctx.limits && mode.kind !== "rebroadcast") {
     const reservation = ctx.limits.reserve(amount);
     if (!reservation.allowed) {
+      if (mode.kind === "resume") {
+        // Already admitted and journaled. Abandoning it here would re-prove
+        // under a new hash, which Riddler refuses once it has bound this one;
+        // the exact bytes stay held until the window has room again.
+        console.warn(
+          `[rpc] Holding prepared ${op.operationId}: limits: ${reservation.reason}`,
+        );
+        const observation: Observation = {
+          state: "prepared",
+          txHash: mode.attempt.txHash,
+          expirationTimestamp: mode.attempt.expirationTimestamp,
+          hold: op.hold ?? "interrupted",
+        };
+        await audit(ctx, op, fingerprint, observation);
+        return answer(id, { operationId: op.operationId, fingerprint }, observation);
+      }
       return notSubmitted(id, ctx, s, op, fingerprint, `limits: ${reservation.reason}`, true);
     }
     reservationId = reservation.reservationId;
@@ -1044,6 +1293,13 @@ async function handleGetSettlement(
         : await observe(s, client, op);
     if (driving && observation.state === "submitted_unknown") {
       observation = { state: "request_in_flight" };
+    }
+    // The observation may have just committed a terminal outcome (or lost
+    // that commit to a concurrent one): answer from the durable row.
+    op = s.journal.get(operationId) ?? op;
+    attempts = s.journal.attempts(operationId);
+    if ((op.state === "finalized" || op.state === "reverted") && op.observation) {
+      observation = op.observation;
     }
   } catch (cause) {
     return journalFault(id, s, operationId, cause);

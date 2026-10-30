@@ -5,12 +5,23 @@ import { resolve } from "node:path";
 import { EmbeddedWallet } from "@aztec-labs/wallets/embedded";
 import { TokenContract } from "@aztec-labs/noir-contracts.js/Token";
 import { SponsoredFPCContract } from "@aztec-labs/noir-contracts.js/SponsoredFPC";
-import type { AztecAddress } from "@aztec-labs/aztec.js/addresses";
+import { FEE_JUICE_BALANCES_SLOT } from "@aztec-labs/constants";
+import { AztecAddress } from "@aztec-labs/aztec.js/addresses";
 import type { FeePaymentMethod } from "@aztec-labs/aztec.js/fee";
-import type { Fr } from "@aztec-labs/aztec.js/fields";
-import type { GasFees } from "@aztec-labs/stdlib/gas";
+import { Fr } from "@aztec-labs/aztec.js/fields";
 import type { AztecNode } from "@aztec-labs/aztec.js/node";
 import type { Tx, TxReceipt } from "@aztec-labs/aztec.js/tx";
+import type { BlockNumber } from "@aztec-labs/foundation/branded-types";
+import { ProtocolContractAddress } from "@aztec-labs/protocol-contracts";
+import type { ContractArtifact } from "@aztec-labs/stdlib/abi";
+import { BlockHash } from "@aztec-labs/stdlib/block";
+import { getContractClassFromArtifact } from "@aztec-labs/stdlib/contract";
+import type { NodeInfo } from "@aztec-labs/stdlib/contract";
+import { ManaUsageEstimate, type GasFees } from "@aztec-labs/stdlib/gas";
+import {
+  computeSiloedPrivateInitializationNullifier,
+  deriveStorageSlotInMap,
+} from "@aztec-labs/stdlib/hash";
 import { ACCOUNT_ADDRESS_ENV, assertAccountIdentity } from "./account-identity.js";
 import type {
   BroadcastGate,
@@ -21,11 +32,21 @@ import type {
   TransferOutcome,
   TransferParams,
 } from "./types.js";
+import {
+  finalizedTimeReason,
+  known,
+  unknown,
+  type AccountStateObservation,
+  type ChainReadinessFacts,
+  type ReadinessFact,
+  type ReadinessReason,
+} from "./readiness.js";
 import type { AccountMode, NodeObservation } from "./settlement.js";
 import {
   SpendingLimitAccountContract,
   type SpendingLimitConfig,
 } from "./spending-limit-account.js";
+import type { AttestationObservation } from "./attestation.js";
 
 const MAX_TOKEN_CACHE_SIZE = 100;
 export const TX_TIMEOUT_MS = 120_000; // 2 minutes
@@ -36,6 +57,20 @@ export const TX_TIMEOUT_MS = 120_000; // 2 minutes
 // allowance for not failing during a congestion spike, and that trade is the
 // same for any send.
 const FEE_HEADROOM = 10n;
+
+/**
+ * NodeInfo exposes no separate Aztec chain-id member in SDK 6.0.0. Aztec's tx
+ * context uses the L1 chain id, while rollupVersion is the protocol version.
+ * Keep readiness and request admission on this one mapping.
+ */
+function settlementNetworkFromNodeInfo(info: NodeInfo): NodeNetwork {
+  return {
+    aztecChainId: String(info.l1ChainId),
+    protocolVersion: String(info.rollupVersion),
+    rollupAddress: info.l1ContractAddresses.rollupAddress.toString().toLowerCase(),
+    l1ChainId: String(info.l1ChainId),
+  };
+}
 
 /**
  * `maxFeesPerGas` with headroom over the worst fee predicted for the inclusion
@@ -1126,27 +1161,22 @@ export class AztecClient implements IAztecClient {
     if (!this.wallet || !this.solverAddress || !this.node) {
       throw new Error("Client not connected");
     }
-    const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
     const tokenAddress = AztecAddress.fromStringUnsafe(params.token);
     const recipientAddress = AztecAddress.fromStringUnsafe(params.recipient);
     const amount = BigInt(params.amount);
     const from = this.solverAddress;
     const token = await this.getToken(tokenAddress);
+    const gasSettings = await headroomGasSettings(this.nodeUrl);
 
-    if (this.spendingLimitContract) {
-      // Reconcile before spending a fee. The bridge holds the allowlist off
-      // chain, so a drift between its copy and the account's stored root would
-      // otherwise surface as every transfer reverting in public, with nothing
-      // on chain to say which side is stale. The entrypoint derives the
-      // declared amount, recipient and witness from the payload it signs, so
-      // there is no per-call state for a concurrent send to overwrite.
-      await this.assertAllowlistRootCurrent();
-    }
 
     const sent = await broadcastGates.run(gate, () =>
       token.methods
         .transfer_to_private(recipientAddress, amount)
-        .send({ from, wait: { dontThrowOnRevert: true } }),
+        .send({
+          from,
+          fee: { gasSettings },
+          wait: { dontThrowOnRevert: true },
+        }),
     );
     const txHash = sent.receipt.txHash.toString();
     return { txHash, observation: await this.observeTx(txHash) };
@@ -1191,13 +1221,7 @@ export class AztecClient implements IAztecClient {
    */
   async networkIdentity(): Promise<NodeNetwork> {
     if (!this.node) throw new Error("Client not connected");
-    const info = await this.node.getNodeInfo();
-    return {
-      aztecChainId: String(info.l1ChainId),
-      protocolVersion: String(info.rollupVersion),
-      rollupAddress: info.l1ContractAddresses.rollupAddress.toString().toLowerCase(),
-      l1ChainId: String(info.l1ChainId),
-    };
+    return settlementNetworkFromNodeInfo(await this.node.getNodeInfo());
   }
 
   accountMode(): AccountMode {
@@ -1210,6 +1234,434 @@ export class AztecClient implements IAztecClient {
 
   pinnedToken(): string | undefined {
     return this.spendingLimitConfig?.token;
+  }
+
+  async observeAttestationChain(
+    recipient: string | undefined,
+    genesisOrNetworkDigest: string,
+  ): Promise<AttestationObservation> {
+    if (!this.node || !this.solverAddress || !this.spendingLimitContract) {
+      return { state: "unknown", reason: "finalized_history_unavailable" };
+    }
+    const deployment = this.spendingLimitConfig?.deployment;
+    if (
+      !deployment ||
+      deployment.address.toLowerCase() !== this.solverAddress.toString().toLowerCase()
+    ) {
+      return { state: "unknown", reason: "account_address_mismatch" };
+    }
+    let observationStage = "node_state";
+    try {
+      const [nodeInfo, worldState, tips] = await Promise.all([
+        this.node.getNodeInfo(),
+        this.node.getWorldStateSyncStatus(),
+        this.node.getChainTips(),
+      ]);
+      const tip = tips.finalized.block;
+      const number = Number(tip.number);
+      if (
+        !Number.isSafeInteger(number) ||
+        number <= 0 ||
+        !/^0x[0-9a-fA-F]{64}$/.test(tip.hash) ||
+        BigInt(tip.hash) === 0n
+      ) {
+        return { state: "unknown", reason: "finalized_reference_invalid" };
+      }
+      if (
+        !worldState.treesAreSynched ||
+        Number(worldState.latestBlockNumber) < number ||
+        Number(worldState.finalizedBlockNumber) < number ||
+        Number(worldState.oldestHistoricBlockNumber) > number
+      ) {
+        return { state: "unknown", reason: "finalized_history_unavailable" };
+      }
+      const reference = { number: tip.number, hash: BlockHash.fromString(tip.hash) };
+      observationStage = "finalized_block";
+      const block = await this.node.getBlockData(reference);
+      if (
+        !block ||
+        Number(block.header.globalVariables.blockNumber) !== number ||
+        block.blockHash.toString().toLowerCase() !== tip.hash.toLowerCase()
+      ) {
+        return { state: "unknown", reason: "finalized_reference_invalid" };
+      }
+      const timeReason = finalizedTimeReason(
+        block.header.globalVariables.timestamp,
+        Math.floor(Date.now() / 1_000),
+      );
+      if (timeReason !== undefined) return { state: "unknown", reason: timeReason };
+
+      observationStage = "solver_artifact";
+      const artifact = await this.spendingLimitContract.getContractArtifact();
+      const initializedLayout = artifact.storageLayout["initialized"];
+      const rootLayout = artifact.storageLayout["allowlist_root"];
+      if (!initializedLayout || !rootLayout) {
+        return { state: "unknown", reason: "finalized_history_unavailable" };
+      }
+      const expectedClassId = (await getContractClassFromArtifact(artifact)).id
+        .toString()
+        .toLowerCase();
+      observationStage = "solver_instance";
+      const solverInstance = await this.node.getContract(this.solverAddress, reference);
+      if (!solverInstance) {
+        return { state: "unknown", reason: "account_not_initialized" };
+      }
+      if (
+        solverInstance.currentContractClassId.toString().toLowerCase() !==
+        expectedClassId
+      ) {
+        return { state: "unknown", reason: "account_class_mismatch" };
+      }
+      observationStage = "solver_initialization";
+      const initialized = await this.node.getPublicStorageAt(
+        reference,
+        this.solverAddress,
+        initializedLayout.slot,
+      );
+      if (initialized.toBigInt() !== 1n) {
+        return { state: "unknown", reason: "account_not_initialized" };
+      }
+      observationStage = "allowlist_root";
+      const root = await this.node.getPublicStorageAt(
+        reference,
+        this.solverAddress,
+        rootLayout.slot,
+      );
+      let recipientDeployment:
+        | { state: "absent" }
+        | { state: "present"; classId: string; initialized: boolean }
+        | undefined;
+      if (recipient !== undefined) {
+        const address = AztecAddress.fromStringUnsafe(recipient);
+        observationStage = "recipient_instance";
+        const instance = await this.node.getContract(address, reference);
+        if (instance) {
+          observationStage = "recipient_initialization";
+          const initializationNullifier = await computeSiloedPrivateInitializationNullifier(
+            address,
+            instance.initializationHash,
+          );
+          const initializationWitness = await this.node.getNullifierMembershipWitness(
+            reference,
+            initializationNullifier,
+          );
+          recipientDeployment = {
+            state: "present",
+            classId: instance.currentContractClassId.toString().toLowerCase(),
+            initialized: initializationWitness !== undefined,
+          };
+        } else {
+          recipientDeployment = { state: "absent" };
+        }
+      }
+      const network = settlementNetworkFromNodeInfo(nodeInfo);
+      return {
+        state: "known",
+        value: {
+          network: { ...network, genesisOrNetworkDigest: genesisOrNetworkDigest.toLowerCase() },
+          finalized: {
+            blockNumber: String(number),
+            blockHash: tip.hash.toLowerCase(),
+            timestamp: block.header.globalVariables.timestamp.toString(),
+          },
+          allowlistRoot: root.toString().toLowerCase(),
+          ...(recipientDeployment ? { recipientDeployment } : {}),
+        },
+      };
+    } catch {
+      console.error(
+        `[pxe-bridge] Attestation finalized observation failed at ${observationStage}`,
+      );
+      return { state: "unknown", reason: "finalized_history_unavailable" };
+    }
+  }
+
+  /**
+   * Observes every chain-backed readiness fact against one exact, nonzero
+   * finalized tip. No read in this method falls back to proven or latest.
+   * Independent node/network facts are retained when a later storage read
+   * fails, so operators see the exact finalized reference they must diagnose.
+   */
+  async observeReadinessChain(): Promise<ChainReadinessFacts> {
+    const observedAt = Math.floor(Date.now() / 1_000);
+    const config = this.spendingLimitConfig;
+    const deployment = config?.deployment;
+    const derivedAddress = this.solverAddress?.toString() ?? null;
+    const configuredAddress = deployment?.address.toLowerCase() ?? null;
+    const configuredToken = config?.token.toLowerCase() ?? null;
+
+    const failed = <T>(
+      stage: string,
+      reason: ReadinessReason,
+      cause?: unknown,
+    ): ReadinessFact<T> => {
+      if (cause !== undefined) {
+        console.error(`[pxe-bridge] Readiness ${stage} failed:`, cause);
+      }
+      return unknown(reason);
+    };
+
+    let configuredAllowlistRoot: string | null = null;
+    let expectedAccountClassId: string | null = null;
+    let expectedTokenClassId: string | null = null;
+    let accountArtifact: ContractArtifact | null = null;
+    try {
+      if (this.spendingLimitContract) {
+        // Loaded lazily by the account wrapper because the compiled artifact is
+        // an operator-provided runtime file.
+        accountArtifact = await this.spendingLimitContract.getContractArtifact();
+        expectedAccountClassId = (
+          await getContractClassFromArtifact(accountArtifact)
+        ).id.toString();
+        expectedTokenClassId = (
+          await getContractClassFromArtifact(TokenContract.artifact)
+        ).id.toString();
+        configuredAllowlistRoot = (
+          await this.spendingLimitContract.allowlistTree()
+        ).root.toString();
+      }
+    } catch (cause) {
+      console.error("[pxe-bridge] Readiness artifact/configuration observation failed:", cause);
+    }
+
+    let network: ChainReadinessFacts["network"] = unknown("network_identity_unknown");
+    let nodeInfo: NodeInfo | null = null;
+    if (this.node) {
+      try {
+        nodeInfo = await this.node.getNodeInfo();
+        const settlementNetwork = settlementNetworkFromNodeInfo(nodeInfo);
+        network = known({
+          nodeVersion: nodeInfo.nodeVersion,
+          aztecChainId: settlementNetwork.aztecChainId,
+          protocolVersion: settlementNetwork.protocolVersion,
+          rollupContract: settlementNetwork.rollupAddress,
+          l1ChainId: settlementNetwork.l1ChainId,
+          rollupVersion: String(nodeInfo.rollupVersion),
+        });
+      } catch (cause) {
+        network = failed("network identity read", "network_identity_unknown", cause);
+      }
+    }
+
+    let nodeAcceptingTransactions: ChainReadinessFacts["nodeAcceptingTransactions"] =
+      unknown("node_readiness_unknown");
+    if (this.node) {
+      try {
+        nodeAcceptingTransactions = known(await this.node.isReady());
+      } catch (cause) {
+        nodeAcceptingTransactions = failed(
+          "transaction readiness read",
+          "node_readiness_unknown",
+          cause,
+        );
+      }
+    }
+
+    let worldState: ChainReadinessFacts["worldState"] = unknown("world_state_unknown");
+    if (this.node) {
+      try {
+        const status = await this.node.getWorldStateSyncStatus();
+        worldState = known({
+          latestBlockNumber: Number(status.latestBlockNumber),
+          finalizedBlockNumber: Number(status.finalizedBlockNumber),
+          oldestHistoricBlockNumber: Number(status.oldestHistoricBlockNumber),
+          treesAreSynched: status.treesAreSynched,
+        });
+      } catch (cause) {
+        worldState = failed("world-state read", "world_state_unknown", cause);
+      }
+    }
+
+    let finalized: ChainReadinessFacts["finalized"] = unknown("finalized_tip_unknown");
+    let reference: { number: BlockNumber; hash: BlockHash } | null = null;
+    if (this.node) {
+      try {
+        const tip = (await this.node.getChainTips()).finalized.block;
+        if (Number(tip.number) === 0 || BigInt(tip.hash) === 0n) {
+          finalized = unknown("finalized_tip_zero");
+        } else {
+          reference = { number: tip.number, hash: BlockHash.fromString(tip.hash) };
+          const block = await this.node.getBlockData(reference);
+          if (
+            !block ||
+            Number(block.header.globalVariables.blockNumber) !== Number(tip.number) ||
+            block.blockHash.toString() !== tip.hash
+          ) {
+            reference = null;
+            finalized = unknown("finalized_tip_mismatch");
+          } else {
+            finalized = known({
+              number: Number(tip.number),
+              hash: tip.hash,
+              timestamp: block.header.globalVariables.timestamp,
+            });
+          }
+        }
+      } catch (cause) {
+        reference = null;
+        finalized = failed("finalized tip read", "finalized_tip_unknown", cause);
+      }
+    }
+
+    let accountContractClassId: ChainReadinessFacts["accountContractClassId"] =
+      unknown("account_class_unknown");
+    let accountState: ChainReadinessFacts["accountState"] =
+      unknown("account_state_unknown");
+    let tokenContractClassId: ChainReadinessFacts["tokenContractClassId"] =
+      unknown("token_class_unknown");
+    let inventory: ChainReadinessFacts["inventory"] = unknown("inventory_unknown");
+    let feeRunway: ChainReadinessFacts["feeRunway"] = unknown("fee_runway_unknown");
+
+    if (
+      this.node &&
+      reference &&
+      this.solverAddress &&
+      config &&
+      accountArtifact &&
+      expectedAccountClassId
+    ) {
+      try {
+        const instance = await this.node.getContract(this.solverAddress, reference);
+        if (!instance) {
+          accountContractClassId = unknown("account_class_unknown");
+        } else {
+          const actualClassId = instance.currentContractClassId.toString();
+          accountContractClassId = known(actualClassId);
+          if (actualClassId === expectedAccountClassId) {
+            const names = [
+              "initialized",
+              "paused",
+              "max_amount_per_tx",
+              "daily_limit",
+              "allowlist_root",
+              "permitted_token",
+            ] as const;
+            const entries = await Promise.all(
+              names.map(async (name) => {
+                const layout = accountArtifact!.storageLayout[name];
+                if (!layout) throw new Error(`compiled artifact has no storage field ${name}`);
+                const value = await this.node!.getPublicStorageAt(
+                  reference!,
+                  this.solverAddress!,
+                  layout.slot,
+                );
+                return [name, value.toBigInt()] as const;
+              }),
+            );
+            const raw = Object.fromEntries(entries) as Record<(typeof names)[number], bigint>;
+            const bool = (name: "initialized" | "paused"): boolean => {
+              const value = raw[name];
+              if (value !== 0n && value !== 1n) {
+                throw new Error(`${name} holds ${value}, not a boolean`);
+              }
+              return value === 1n;
+            };
+            const allowlistRoot = `0x${raw.allowlist_root.toString(16).padStart(64, "0")}`;
+            const permittedToken = `0x${raw.permitted_token.toString(16).padStart(64, "0")}`;
+            const state: AccountStateObservation = {
+              initialized: bool("initialized"),
+              paused: bool("paused"),
+              maxAmount: raw.max_amount_per_tx,
+              dailyLimit: raw.daily_limit,
+              allowlistRoot,
+              permittedToken,
+            };
+            accountState = known(state);
+          }
+        }
+      } catch (cause) {
+        accountState = failed("account state read", "account_state_unknown", cause);
+      }
+    }
+
+    if (this.node && reference && this.solverAddress && configuredToken) {
+      try {
+        const tokenAddress = AztecAddress.fromStringUnsafe(configuredToken);
+        const instance = await this.node.getContract(tokenAddress, reference);
+        if (!instance) {
+          tokenContractClassId = unknown("token_class_unknown");
+        } else {
+          const actualClassId = instance.currentContractClassId.toString();
+          tokenContractClassId = known(actualClassId);
+          if (expectedTokenClassId !== null && actualClassId === expectedTokenClassId) {
+            const layout = TokenContract.artifact.storageLayout["public_balances"];
+            if (!layout) throw new Error("compiled Token artifact has no public_balances storage map");
+            const slot = await deriveStorageSlotInMap(layout.slot, this.solverAddress);
+            inventory = known(
+              (
+                await this.node.getPublicStorageAt(reference, tokenAddress, slot)
+              ).toBigInt(),
+            );
+          }
+        }
+      } catch (cause) {
+        inventory = failed("token inventory read", "inventory_unknown", cause);
+      }
+    }
+
+    if (this.node && reference && this.solverAddress && nodeInfo) {
+      try {
+        const feeSlot = await deriveStorageSlotInMap(
+          new Fr(FEE_JUICE_BALANCES_SLOT),
+          this.solverAddress,
+        );
+        const observed = (
+          await this.node.getPublicStorageAt(
+            reference,
+            ProtocolContractAddress.FeeJuice,
+            feeSlot,
+          )
+        ).toBigInt();
+        const predicted = await this.node.getPredictedMinFees(ManaUsageEstimate.Limit);
+        if (predicted.length === 0) {
+          throw new Error("node returned no predicted fee samples");
+        }
+        const maxFeePerDaGas =
+          predicted.reduce(
+            (maximum, fees) =>
+              fees.feePerDaGas > maximum ? fees.feePerDaGas : maximum,
+            0n,
+          ) * FEE_HEADROOM;
+        const maxFeePerL2Gas =
+          predicted.reduce(
+            (maximum, fees) =>
+              fees.feePerL2Gas > maximum ? fees.feePerL2Gas : maximum,
+            0n,
+          ) * FEE_HEADROOM;
+        const perTransferFeeLimit =
+          BigInt(nodeInfo.txsLimits.gas.daGas) * maxFeePerDaGas +
+          BigInt(nodeInfo.txsLimits.gas.l2Gas) * maxFeePerL2Gas;
+        if (perTransferFeeLimit <= 0n) {
+          throw new Error("node returned a non-positive per-transfer fee limit");
+        }
+        feeRunway = known({ observed, perTransferFeeLimit });
+      } catch (cause) {
+        feeRunway = failed("fee runway read", "fee_runway_unknown", cause);
+      }
+    }
+
+    return {
+      observedAt,
+      accountMode: this.accountMode(),
+      deploymentRecordPresent: deployment !== undefined,
+      derivedAccountAddress: derivedAddress,
+      configuredAccountAddress: configuredAddress,
+      expectedAccountClassId,
+      configuredToken,
+      configuredAllowlistRoot,
+      configuredMaxAmount: config?.maxAmountPerTx ?? null,
+      configuredDailyLimit: config?.dailyLimit ?? null,
+      network,
+      nodeAcceptingTransactions,
+      worldState,
+      finalized,
+      accountContractClassId,
+      accountState,
+      expectedTokenClassId,
+      tokenContractClassId,
+      inventory,
+      feeRunway,
+    };
   }
 
   async getVersion(): Promise<string> {
@@ -1226,56 +1678,6 @@ export class AztecClient implements IAztecClient {
     return "unknown";
   }
 
-  /**
-   * Checks the configured allowlist against the account's stored root.
-   *
-   * Replaces the old readAllowlist. There is no set on chain to read any more,
-   * so this reconciles in the other direction: the bridge asserts that the tree
-   * it holds is the one the account is enforcing.
-   *
-   * This is checkable rather than trusted, which matters for monitoring. A
-   * compromised admin cannot publish one set and commit another, because the
-   * root commits to exactly the set that produces it.
-   */
-  private async assertAllowlistRootCurrent(): Promise<void> {
-    if (!this.wallet || !this.solverAddress || !this.spendingLimitContract) {
-      throw new Error("Spending limit account not initialized");
-    }
-    const { Contract } = await import("@aztec-labs/aztec.js/contracts");
-    const artifact = await this.spendingLimitContract.getContractArtifact();
-    const account = await Contract.at(
-      this.solverAddress as Parameters<typeof Contract.at>[0],
-      artifact as Parameters<typeof Contract.at>[1],
-      this.wallet as unknown as Parameters<typeof Contract.at>[2],
-    );
-    // `from` scopes the utility execution. Without it PXE throws, and its own
-    // error formatter then crashes on undefined args, masking the cause.
-    const raw = (await account.methods["get_allowlist_root"]!().simulate({
-      from: this.solverAddress,
-    })) as unknown;
-
-    // simulate() resolves to { result, offchainEffects, offchainMessages };
-    // the utility's Field return value is under `result`.
-    const value = (raw as { result?: unknown })?.result ?? raw;
-    if (value === undefined || value === null) {
-      throw new Error("get_allowlist_root returned nothing");
-    }
-    const onChain =
-      typeof value === "bigint" ? value : BigInt((value as { toString(): string }).toString());
-
-    const tree = await this.spendingLimitContract.allowlistTree();
-    const local = tree.root.toBigInt();
-    if (onChain !== local) {
-      throw new Error(
-        `Allowlist root mismatch: the account is enforcing ` +
-          `0x${onChain.toString(16).padStart(64, "0")} but the configured allowlist produces ` +
-          `0x${local.toString(16).padStart(64, "0")}. Either an admin changed the allowlist ` +
-          `and this bridge's configuration was not updated, or the configuration is for a ` +
-          `different account. Reconcile before sending; no transfer can succeed until the ` +
-          `two agree.`,
-      );
-    }
-  }
 
   /** The account's fee juice, read from the node's public FeeJuice balance. */
   async getFeeJuiceBalance(): Promise<bigint> {

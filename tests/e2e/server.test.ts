@@ -4,6 +4,8 @@ import { AztecClient, TX_TIMEOUT_MS } from "../../src/aztec-client.js";
 import { createApp } from "../../src/server.js";
 import { SettlementJournal } from "../../src/journal.js";
 import { SETTLEMENT_VERSION } from "../../src/settlement.js";
+import { TransactionLimits } from "../../src/limits.js";
+import { createReadinessObserver } from "../../src/readiness.js";
 import { getTestConfig, requireTestToken, walletDataDirectory } from "./helpers.js";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,6 +19,7 @@ const CORRIDOR = {
 };
 
 const config = getTestConfig();
+const API_KEY = "e2e-readiness-key";
 
 describe("HTTP server (e2e)", () => {
   let client: AztecClient;
@@ -40,13 +43,24 @@ describe("HTTP server (e2e)", () => {
     journal.bindAccount(client.getAddress()!, client.accountPreexisted(), {
       acknowledgement: `${client.getAddress()!}@${journal.meta().journalId}`,
     });
+    const limits = new TransactionLimits({ maxAmount: 1_000n, dailyLimit: 10_000n });
+    const readiness = createReadinessObserver(client, {
+      journal,
+      limits,
+      mayBroadcastConfigured: true,
+      corridor: CORRIDOR,
+    });
     server = createApp(client, {
+      apiKey: API_KEY,
+      limits,
+      readiness,
       settlement: {
         journal,
         mayBroadcast: async () => ({ decision: "allow", detail: "e2e" }),
         corridor: CORRIDOR,
         inFlight: new Set<string>(),
         timeoutMs: TX_TIMEOUT_MS,
+        readiness,
       },
     });
     await new Promise<void>((resolve) => {
@@ -70,21 +84,22 @@ describe("HTTP server (e2e)", () => {
     return JSON.stringify({ jsonrpc: "2.0", id, method, params });
   }
 
-  describe("GET /status", () => {
-    it("returns ok with live node version", async () => {
+  describe("GET /status and /ready", () => {
+    it("returns only minimal public liveness", async () => {
       const res = await fetch(`${baseUrl}/status`);
       expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ status: "ok" });
+    });
 
-      const body = (await res.json()) as {
-        status: string;
-        version: string;
-        feeJuice: { balance: string | null };
-      };
-      expect(body.status).toBe("ok");
-      expect(body.version).toBeTruthy();
-      expect(body.version).not.toBe("unknown");
-      // Read from the node's public FeeJuice storage for the solver account.
-      expect(body.feeJuice.balance).toMatch(/^\d+$/);
+    it("reports the live standard account not ready for design-A", async () => {
+      const res = await fetch(`${baseUrl}/ready`, {
+        headers: { authorization: `Bearer ${API_KEY}` },
+      });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toMatchObject({
+        ready: false,
+        reasons: expect.arrayContaining(["account_mode_not_spending_limit"]),
+      });
     });
   });
 
@@ -92,7 +107,10 @@ describe("HTTP server (e2e)", () => {
     it("returns version from live node via POST /", async () => {
       const res = await fetch(baseUrl, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${API_KEY}`,
+        },
         body: rpcBody("aztec_getVersion"),
       });
       expect(res.status).toBe(200);
@@ -111,7 +129,10 @@ describe("HTTP server (e2e)", () => {
     it("works via POST /api/rpc alias", async () => {
       const res = await fetch(`${baseUrl}/api/rpc`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${API_KEY}`,
+        },
         body: rpcBody("aztec_getVersion"),
       });
       expect(res.status).toBe(200);
@@ -148,27 +169,38 @@ describe("HTTP server (e2e)", () => {
         method: "POST",
         headers: {
           "content-type": "application/json",
+          authorization: `Bearer ${API_KEY}`,
           ...(operationId ? { "idempotency-key": operationId } : {}),
         },
         body: rpcBody(method, [body]),
       });
       expect(res.status).toBe(200);
       return (await res.json()) as {
-        result?: { observation: { state: string; txHash: string }; found?: boolean };
-        error?: { code: number; data?: { observation?: { state: string; reason?: string } } };
+        result?: {
+          observation: { state: string; txHash?: string; reason?: string };
+          found?: boolean;
+        };
+        error?: {
+          code: number;
+          data?: {
+            observation?: { state: string; reason?: string };
+            reasons?: string[];
+          };
+        };
       };
     }
 
-    it("creates a note via full HTTP round-trip, then recovers it read-only", async () => {
+    it("blocks a standard-account payout and keeps recovery readable", async () => {
       const body = await call("aztec_createNote", await params("e2e-http-1"), "e2e-http-1");
-      expect(body.result?.observation.state).toBe("included");
+      expect(body.error?.code).toBe(-32006);
+      expect(body.error?.data?.reasons).toContain("account_mode_not_spending_limit");
       const read = await call("aztec_getSettlement", {
         version: SETTLEMENT_VERSION,
         operationId: "e2e-http-1",
       });
       expect(read.result).toMatchObject({
         found: true,
-        observation: { txHash: body.result!.observation.txHash },
+        observation: { state: "not_submitted", reason: "bridge_not_ready" },
       });
     });
 
@@ -181,18 +213,14 @@ describe("HTTP server (e2e)", () => {
       expect(body.error?.code).toBe(-32602);
     });
 
-    it("answers not_submitted for a non-existent token, provably before any broadcast", async () => {
+    it("does not let an unmarked operation bypass hard readiness", async () => {
       const fake = "0x" + "0dead".padEnd(64, "0");
       const body = await call(
         "aztec_createNote",
         await params("e2e-http-2", { token: fake, recipient: fake }),
         "e2e-http-2",
       );
-      expect(body.error?.code).toBe(-32005);
-      expect(body.error?.data?.observation).toMatchObject({
-        state: "not_submitted",
-        reason: "prepare_failed",
-      });
+      expect(body.error?.code).toBe(-32006);
     });
   });
 
@@ -200,7 +228,10 @@ describe("HTTP server (e2e)", () => {
     it("returns METHOD_NOT_FOUND for unknown method", async () => {
       const res = await fetch(baseUrl, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${API_KEY}`,
+        },
         body: rpcBody("unknown_method"),
       });
       expect(res.status).toBe(200);

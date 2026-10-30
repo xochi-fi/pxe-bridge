@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import { writeFileSync } from "node:fs";
 import Database from "better-sqlite3";
 import { handleRpcRequest, type RpcContext, type SettlementContext } from "../src/rpc.js";
 import { RPC_ERRORS, SUBMITTED_UNKNOWN_MESSAGE } from "../src/types.js";
@@ -12,6 +13,7 @@ import {
   fakeMayBroadcast,
   openBoundJournal,
   rpcBody,
+  readyObserver,
   settlementContext,
   tempJournalPath,
   v1Params,
@@ -120,6 +122,35 @@ describe("aztec_createNote: the versioned payload", () => {
   });
 });
 
+  it("returns typed not-ready data before proving or reserving", async () => {
+    s.readiness = readyObserver({
+      ready: false,
+      reasons: ["account_paused", "fee_runway_insufficient"],
+      policy: {
+        initialized: true,
+        paused: true,
+        allowlistRoot: "0x" + "c".repeat(64),
+        configuredAllowlistRoot: "0x" + "c".repeat(64),
+      },
+    });
+    const limits = new TransactionLimits({ maxAmount: 1000n, dailyLimit: 10_000n });
+    const res = await createNote(client, { settlement: s, limits });
+
+    expect(res.error?.code).toBe(RPC_ERRORS.NOT_READY);
+    expect(res.error?.data).toMatchObject({
+      reason: "bridge_not_ready",
+      reasons: ["account_paused", "fee_runway_insufficient"],
+      finalized: { blockNumber: "7" },
+    });
+    expect(res.error?.data?.observation).toEqual({
+      state: "not_submitted",
+      reason: "account_paused",
+      retryableAfterRevalidation: true,
+    });
+    expect(client.proofs).toBe(0);
+    expect(limits.windowStatus().reserved).toBe(0n);
+  });
+
 describe("aztec_createNote: the broadcast gate", () => {
   it("journals, asks, marks, then broadcasts once and returns the observation", async () => {
     const res = await createNote(client, ctx);
@@ -183,6 +214,111 @@ describe("aztec_createNote: the broadcast gate", () => {
     expect(client.sends).toEqual([held]);
   });
 
+  it.each([
+    ["denied", "deny", "may_broadcast_denied"],
+    ["unknown", "unknown", "may_broadcast_unknown"],
+  ] as const)(
+    "preserves a %s prepared attempt through a per-operation hold and recovery",
+    async (_name, decision, hold) => {
+      gate.decision = decision;
+      await createNote(client, ctx);
+      const beforeOperation = journal.get("op-1")!;
+      const beforeAttempts = journal.attempts("op-1");
+      const beforeBytes = journal.attemptBytes("op-1", beforeOperation.currentAttempt!);
+      const beforeGeneration = journal.meta().generation;
+      expect(beforeOperation).toMatchObject({
+        fingerprint: fingerprintTerms(termsFrom(CreateNoteV1Schema.parse(v1Params()))),
+        terms: { recipient: v1Params()["recipient"] },
+        state: "prepared",
+        hold,
+        currentAttempt: 1,
+      });
+
+      s.readiness = readyObserver({
+        ready: false,
+        reasons: ["account_paused"],
+        policy: {
+          initialized: true,
+          paused: true,
+          allowlistRoot: "0x" + "c".repeat(64),
+          configuredAllowlistRoot: "0x" + "c".repeat(64),
+        },
+      });
+      const refused = await createNote(client, ctx);
+      expect(refused.error?.code).toBe(RPC_ERRORS.NOT_READY);
+      expect(refused.error?.data?.["reasons"]).toEqual(["account_paused"]);
+      expect(refused.error?.data?.observation).toEqual({
+        state: "prepared",
+        txHash: beforeAttempts[0]!.txHash,
+        expirationTimestamp: beforeAttempts[0]!.expirationTimestamp,
+        hold,
+      });
+      expect(journal.meta().generation).toBe(beforeGeneration);
+      expect(journal.get("op-1")).toEqual(beforeOperation);
+      expect(journal.attempts("op-1")).toEqual(beforeAttempts);
+      expect(journal.attemptBytes("op-1", beforeOperation.currentAttempt!)).toEqual(beforeBytes);
+      expect(client.proofs).toBe(1);
+      expect(client.sends).toEqual([]);
+
+      const readWhileNotReady = await getSettlement(client, ctx);
+      expect(readWhileNotReady).toMatchObject({
+        fingerprint: beforeOperation.fingerprint,
+        terms: { recipient: beforeOperation.terms.recipient },
+        state: "prepared",
+        observation: { state: "prepared", txHash: beforeAttempts[0]!.txHash, hold },
+      });
+
+      s.readiness = readyObserver();
+      gate.decision = "allow";
+      const recovered = await createNote(client, ctx);
+      expect(recovered.result?.observation).toMatchObject({
+        state: "included",
+        txHash: beforeAttempts[0]!.txHash,
+      });
+      expect(client.proofs).toBe(1);
+      expect(client.sends).toEqual([beforeAttempts[0]!.txHash]);
+      expect(journal.attemptBytes("op-1", beforeOperation.currentAttempt!)).toEqual(beforeBytes);
+      expect(journal.get("op-1")).toMatchObject({
+        fingerprint: beforeOperation.fingerprint,
+        terms: { recipient: beforeOperation.terms.recipient },
+        currentAttempt: beforeOperation.currentAttempt,
+      });
+    },
+  );
+
+  it("preserves a prepared attempt when readiness observation reaches the request deadline", async () => {
+    gate.decision = "unknown";
+    await createNote(client, ctx);
+    const beforeOperation = journal.get("op-1")!;
+    const beforeAttempts = journal.attempts("op-1");
+    const beforeBytes = journal.attemptBytes("op-1", beforeOperation.currentAttempt!);
+    const beforeGeneration = journal.meta().generation;
+
+    s.readiness = { observe: () => new Promise(() => undefined) };
+    const refused = await createNote(client, { settlement: { ...s, timeoutMs: 50 } });
+    expect(refused.error?.code).toBe(RPC_ERRORS.NOT_READY);
+    expect(refused.error?.data?.observation).toEqual({
+      state: "prepared",
+      txHash: beforeAttempts[0]!.txHash,
+      expirationTimestamp: beforeAttempts[0]!.expirationTimestamp,
+      hold: "may_broadcast_unknown",
+    });
+    expect(journal.meta().generation).toBe(beforeGeneration);
+    expect(journal.get("op-1")).toEqual(beforeOperation);
+    expect(journal.attempts("op-1")).toEqual(beforeAttempts);
+    expect(journal.attemptBytes("op-1", beforeOperation.currentAttempt!)).toEqual(beforeBytes);
+
+    s.readiness = readyObserver();
+    gate.decision = "allow";
+    const recovered = await createNote(client, ctx);
+    expect(recovered.result?.observation).toMatchObject({
+      state: "included",
+      txHash: beforeAttempts[0]!.txHash,
+    });
+    expect(client.proofs).toBe(1);
+    expect(client.sends).toEqual([beforeAttempts[0]!.txHash]);
+  });
+
   it("refuses a same-id request with changed terms and does no work", async () => {
     await createNote(client, ctx);
     const res = await createNote(client, ctx, v1Params({ amount: "999" }));
@@ -202,7 +338,7 @@ describe("aztec_createNote: the broadcast gate", () => {
 
   it.each([
     ["corridor_mismatch", () => ({ corridor: { ...(v1Params()["corridor"] as object), corridorRevision: 2 } })],
-    ["account_mode_mismatch", () => ({ accountMode: "spending_limit" })],
+    ["account_mode_mismatch", () => ({ accountMode: "standard" })],
   ])("refuses %s before preparing", async (reason, override) => {
     const res = await createNote(client, ctx, v1Params(override()));
     expect(res.error?.code).toBe(RPC_ERRORS.NOT_SUBMITTED);
@@ -210,21 +346,29 @@ describe("aztec_createNote: the broadcast gate", () => {
     expect(client.proofs).toBe(0);
   });
 
-  it("refuses a node on another network", async () => {
-    client.network = { ...client.network, rollupAddress: "0x" + "9".repeat(40) };
+  it("refuses a request for a network other than authoritative readiness", async () => {
+    const projected = await readyObserver().observe();
+    s.readiness = readyObserver({
+      network: { ...projected.network, rollupContract: "0x" + "9".repeat(40) },
+    });
     const res = await createNote(client, ctx);
     expect(res.error?.data?.observation).toMatchObject({ reason: "network_mismatch" });
     expect(client.proofs).toBe(0);
   });
 
-  it("refuses a token other than the pinned one", async () => {
-    client.pinned = "0x" + "e".repeat(64);
+  it("refuses a token other than the readiness-pinned one", async () => {
+    s.readiness = readyObserver({ token: "0x" + "e".repeat(64) });
     const res = await createNote(client, ctx);
     expect(res.error?.data?.observation).toMatchObject({ reason: "token_mismatch" });
   });
 
   it("refuses when no may-broadcast endpoint is configured", async () => {
+    s.readiness = readyObserver({
+      ready: false,
+      reasons: ["may_broadcast_unconfigured"],
+    });
     const res = await createNote(client, { settlement: { ...s, mayBroadcast: undefined } });
+    expect(res.error?.code).toBe(RPC_ERRORS.NOT_READY);
     expect(res.error?.data?.observation).toMatchObject({ reason: "may_broadcast_unconfigured" });
     expect(client.proofs).toBe(0);
   });
@@ -266,6 +410,48 @@ describe("aztec_createNote: the broadcast gate", () => {
     expect(client.sends).toHaveLength(1);
   });
 
+  it("keeps recovering an admitted prepared attempt while new admission is closed", async () => {
+    gate.decision = "deny";
+    await createNote(client, ctx);
+    const held = journal.attempts("op-1")[0]!.txHash;
+    s.readiness = readyObserver({
+      ready: false,
+      reasons: ["fee_runway_insufficient", "finalized_tip_stale"],
+    });
+
+    const fresh = await createNote(client, ctx, v1Params({ operationId: "op-2" }));
+    expect(fresh.error?.code).toBe(RPC_ERRORS.NOT_READY);
+    expect(client.proofs).toBe(1);
+
+    gate.decision = "allow";
+    const recovered = await createNote(client, ctx);
+    expect(recovered.result?.observation).toMatchObject({ state: "included", txHash: held });
+    expect(client.proofs).toBe(1);
+    expect(client.sends).toEqual([held]);
+  });
+
+  it("holds a resumed prepared attempt the window cannot take, never re-proving it", async () => {
+    const limits = new TransactionLimits({ maxAmount: 5000n, dailyLimit: 1500n });
+    gate.decision = "deny";
+    await createNote(client, { settlement: s, limits });
+    const held = journal.attempts("op-1")[0]!.txHash;
+    gate.decision = "allow";
+    await createNote(client, { settlement: s, limits }, v1Params({ operationId: "op-2" }));
+    expect(limits.windowStatus().committed).toBe(1000n);
+
+    const denied = await createNote(client, { settlement: s, limits });
+    expect(denied.error?.code).toBe(RPC_ERRORS.NOT_SUBMITTED);
+    expect(denied.error?.data?.observation).toMatchObject({ state: "prepared", txHash: held });
+    expect(journal.get("op-1")?.state).toBe("prepared");
+    expect(journal.attempts("op-1")).toHaveLength(1);
+    expect(client.proofs).toBe(2);
+
+    const nextWindow = new TransactionLimits({ maxAmount: 5000n, dailyLimit: 1500n });
+    const recovered = await createNote(client, { settlement: s, limits: nextWindow });
+    expect(recovered.result?.observation).toMatchObject({ state: "included", txHash: held });
+    expect(client.proofs).toBe(2);
+  });
+
   it("reports a mined revert as `reverted`, not as a failure", async () => {
     client.revert = true;
     const res = await createNote(client, ctx);
@@ -293,6 +479,27 @@ describe("ambiguity after the mark is submitted_unknown, never a retryable error
     expect(res.error?.data?.observation).toMatchObject({ reason: "response_deadline" });
   });
 
+  it("keeps the first observedAt across polls and answers lookups from the committed row", async () => {
+    client.behaviour = "lose_response";
+    await createNote(client, ctx);
+    let clock = 1_000_000;
+    const timed = { settlement: { ...s, now: () => clock } };
+
+    const first = await getSettlement(client, timed);
+    expect(first.observation).toMatchObject({ state: "included", observedAt: 1_000 });
+    clock = 2_000_000;
+    expect(journal.get("op-1")?.observation).toMatchObject({ observedAt: 1_000 });
+    expect((await getSettlement(client, timed)).observation).toMatchObject({
+      state: "included",
+      observedAt: 1_000,
+    });
+
+    client.finalizeAll();
+    const settled = await getSettlement(client, timed);
+    expect(settled.state).toBe("finalized");
+    expect(settled.observation).toMatchObject({ state: "finalized" });
+  });
+
   it("recovers a lost response through aztec_getSettlement, and a retry does not send again", async () => {
     client.behaviour = "lose_response";
     await createNote(client, ctx);
@@ -317,6 +524,10 @@ describe("ambiguity after the mark is submitted_unknown, never a retryable error
     expect(first.error?.code).toBe(RPC_ERRORS.SUBMITTED_UNKNOWN);
     expect(client.sends).toHaveLength(0);
     const marked = journal.attempts("op-1")[0]!.txHash;
+    s.readiness = readyObserver({
+      ready: false,
+      reasons: ["finalized_history_unavailable"],
+    });
     expect((await getSettlement(client, ctx)).observation).toMatchObject({
       state: "submitted_unknown",
       reason: "node_reports_dropped_or_unknown",
@@ -350,7 +561,7 @@ describe("ambiguity after the mark is submitted_unknown, never a retryable error
     expect((await getSettlement(client, late)).observation.state).toBe("submitted_unknown");
   });
 
-  it("refuses every replay once the startup invariant fails", async () => {
+  it("keeps exact-byte recovery available when readiness loses journal writes", async () => {
     const path = tempJournalPath();
     const first = openBoundJournal(path);
     client.behaviour = "die_after_mark";
@@ -365,8 +576,8 @@ describe("ambiguity after the mark is submitted_unknown, never a retryable error
     expect(reopened.health()).toMatchObject({ writable: false, reason: "journal_inconsistent" });
     client.behaviour = "land";
     const retry = await createNote(client, { settlement: settlementContext(reopened, gate.client) });
-    expect(retry.error?.code).toBe(RPC_ERRORS.JOURNAL_UNAVAILABLE);
-    expect(client.sends).toHaveLength(0);
+    expect(retry.result?.observation.state).toBe("included");
+    expect(client.sends).toHaveLength(1);
     expect(client.proofs).toBe(1);
   });
 
@@ -577,10 +788,13 @@ describe("one deadline for the whole request", () => {
     expect(gate.calls).toEqual([]);
   });
 
-  it("counts admission against it: a node that will not answer ends the request", async () => {
-    client.networkIdentity = () => new Promise(() => undefined);
+  it("counts readiness observation against the request deadline", async () => {
+    s.readiness = { observe: () => new Promise(() => undefined) };
     const res = await createNote(client, { settlement: { ...s, timeoutMs: 50 } });
-    expect(res.error?.data?.observation).toMatchObject({ state: "not_submitted", reason: "response_deadline" });
+    expect(res.error?.data?.observation).toMatchObject({
+      state: "not_submitted",
+      reason: "response_deadline",
+    });
     expect(client.proofs).toBe(0);
   });
 
@@ -661,22 +875,22 @@ describe("aztec_getSettlement", () => {
     expect(read.observation).toMatchObject({ state: "prepared", hold: "may_broadcast_denied" });
   });
 
-  it("keeps serving reads while writes are disabled", async () => {
+  it("keeps serving settlement reads while a malformed high-water mark halts writes", async () => {
     await createNote(client, ctx);
     const path = journal.path;
     journal.close();
+    writeFileSync(`${path}.hwm`, "null");
     const reopened = SettlementJournal.open(path);
-    reopened.bindAccount("0x" + "f".repeat(64), true);
-    expect(reopened.health()).toMatchObject({ writable: false, reason: "account_mismatch" });
+    expect(reopened.health()).toMatchObject({ writable: false, reason: "rollback_detected" });
     const readOnly = { settlement: settlementContext(reopened, gate.client) };
     const write = await createNote(client, readOnly, v1Params({ operationId: "op-2" }));
     expect(write.error?.code).toBe(RPC_ERRORS.JOURNAL_UNAVAILABLE);
-    expect(write.error?.data).toMatchObject({ journal: { writable: false, reason: "account_mismatch" } });
+    expect(write.error?.data).toMatchObject({ journal: { writable: false, reason: "rollback_detected" } });
     const read = await getSettlement(client, readOnly);
     expect(read).toMatchObject({
       found: true,
       observation: { state: "included" },
-      journal: { writable: false, reason: "account_mismatch" },
+      journal: { writable: false, reason: "rollback_detected" },
     });
   });
 });

@@ -15,6 +15,7 @@ import { SETTLEMENT_VERSION } from "../src/settlement.js";
 import { SettlementJournal } from "../src/journal.js";
 import type { MayBroadcastClient, MayBroadcastDecision } from "../src/may-broadcast.js";
 import type { SettlementContext } from "../src/rpc.js";
+import type { OperationalReadiness, ReadinessObserver } from "../src/readiness.js";
 
 // Field values must sit below the BN254 modulus (0x3064...), so they lead with 0x0.
 export const ACCOUNT = "0x0" + "1".repeat(63);
@@ -54,7 +55,7 @@ export function v1Params(overrides: Record<string, unknown> = {}): Record<string
       corridorRevision: CORRIDOR.corridorRevision,
       manifestDigest: CORRIDOR.manifestDigest,
     },
-    accountMode: "standard",
+    accountMode: "spending_limit",
     recipient: RECIPIENT,
     recipientDescriptorDigest: DESCRIPTOR_DIGEST,
     token: TOKEN,
@@ -114,6 +115,63 @@ export function bindingMayBroadcast(): { client: MayBroadcastClient; answers: st
   return { client, answers };
 }
 
+export function readyObserver(
+  overrides: Partial<OperationalReadiness> = {},
+): ReadinessObserver {
+  const readiness: OperationalReadiness = {
+    ready: true,
+    reasons: [],
+    observedAt: Math.floor(Date.now() / 1_000),
+    nodeVersion: "6.0.0",
+    l1ChainId: NETWORK.l1ChainId,
+    rollupVersion: NETWORK.protocolVersion,
+    accountMode: "spending_limit",
+    account: { address: ACCOUNT, classId: "0x" + "a".repeat(64) },
+    token: TOKEN,
+    maxAmount: "1000",
+    dailyLimit: "10000",
+    network: {
+      aztecChainId: NETWORK.aztecChainId,
+      protocolVersion: NETWORK.protocolVersion,
+      rollupContract: NETWORK.rollupAddress,
+      genesisOrNetworkDigest: NETWORK.genesisOrNetworkDigest,
+    },
+    node: {
+      acceptingTransactions: true,
+      worldStateSynced: true,
+      finalizedHistoryAvailable: true,
+    },
+    finalized: {
+      blockNumber: "7",
+      blockHash: "0x" + "b".repeat(64),
+      timestamp: String(Math.floor(Date.now() / 1_000)),
+      ageSeconds: 0,
+      maxAgeSeconds: 7_200,
+    },
+    policy: {
+      initialized: true,
+      paused: false,
+      allowlistRoot: "0x" + "c".repeat(64),
+      configuredAllowlistRoot: "0x" + "c".repeat(64),
+    },
+    inventory: { observed: "10000", required: "10000" },
+    rollingWindow: {
+      committed: "0",
+      reserved: "0",
+      headroom: "10000",
+      inFlightTransfers: 0,
+    },
+    feeRunway: {
+      observed: "100000",
+      required: "10000",
+      perTransferFeeLimit: "1000",
+    },
+    journal: { writable: true, writerFenceHeld: true },
+    ...overrides,
+  };
+  return { observe: async () => readiness };
+}
+
 export function settlementContext(
   journal: SettlementJournal,
   mayBroadcast: MayBroadcastClient | undefined = fakeMayBroadcast().client,
@@ -125,6 +183,7 @@ export function settlementContext(
     corridor: CORRIDOR,
     inFlight: new Set<string>(),
     timeoutMs: 2_000,
+    readiness: readyObserver(),
     ...overrides,
   };
 }
@@ -154,8 +213,8 @@ export type FakeBehaviour =
  */
 export class FakeAztecClient implements IAztecClient {
   behaviour: FakeBehaviour = "land";
-  mode: AccountMode = "standard";
-  pinned: string | undefined = undefined;
+  mode: AccountMode = "spending_limit";
+  pinned: string | undefined = TOKEN;
   network: NodeNetwork = { ...NETWORK };
   expiration = BigInt(Math.floor(Date.now() / 1000) + 86_400);
   /** Every transaction handed to the node, duplicates included. */

@@ -1,11 +1,13 @@
 # Settlement operation contract (`pxe-bridge.settlement.v1`)
 
-xochi-fi/pxe-bridge#45; consumer axol-io/Riddler#1351 (tracker #1356). Decisions: xochi
-`docs/planning/shielded-execution.md` §7 "Decided 2026-10-24" (binding-revocation
-signal), the 2026-10-25 second set (SQLite store, versioned payload,
-bridge-owned fingerprint, may-broadcast query), and the 2026-10-27 integrator
-decisions D-A (single-use may-broadcast), D-B (legacy migration) and D-C
-(term encodings), recorded where each applies below.
+xochi-fi/pxe-bridge#45 and #46; consumer axol-io/Riddler#1351 (tracker issue
+1356). Decisions: xochi `docs/planning/shielded-execution.md` §7 "Decided
+2026-10-24" (binding-revocation signal), the 2026-10-25 second set (SQLite
+store, versioned payload, bridge-owned fingerprint, may-broadcast query), and
+the 2026-10-27 integrator decisions D-A (single-use may-broadcast), D-B
+(legacy migration) and D-C (term encodings), recorded where each applies
+below. Issue #46 adds the finalized-only hard-readiness gate described under
+Deployment.
 
 ## Methods
 
@@ -16,6 +18,10 @@ decisions D-A (single-use may-broadcast), D-B (legacy migration) and D-C
 
 Legacy `{recipient, token, amount, chainId, ...}` params are refused
 (`-32602`, `data.reason: "legacy_params_refused"`).
+
+Although the frozen wire enum retains `standard` for decoding and conflict
+recovery, hard readiness admits new work only when `accountMode` is
+`spending_limit` and the durable deployment record is present.
 
 ## Frozen encodings (D-C)
 
@@ -83,6 +89,7 @@ corridor.
 | -32003 | operation_conflict | same `operationId`, different fingerprint; no work done | `operationId, fingerprint, storedFingerprint` |
 | -32004 | journal_unavailable | journal writes disabled or unreadable; this request sent nothing | `operationId?, journal {writable: false, reason, detail}` |
 | -32005 | not_submitted | provably not broadcast (refused, or held before may-broadcast) | `operationId, fingerprint, observation` (`not_submitted` or `prepared`) |
+| -32006 | bridge_not_ready | authoritative hard-readiness predicate refused new admission before proving/broadcast | `reason: "bridge_not_ready", reasons, observation {state: "not_submitted", reason: <primary readiness reason>, retryableAfterRevalidation: true}, finalized?, observedAt?` |
 
 ## Observations
 
@@ -267,17 +274,19 @@ If the window cannot be rebuilt at startup (unreadable rows, a restore that
 fails) writes are disabled with `spend_window_unreadable`: the bridge never
 serves with an empty window.
 
-Writes are disabled (reads continue, `/ready` is 503, `/status` reports
-`degraded` with the reason) on: `corrupt`, `rollback_detected` (generation
-below `<journal>.hwm`, a different journal id, or the mark missing beside a
-used journal), `empty_journal_for_existing_account` (fresh journal next to an
-account that already existed; see "Legacy drain and adoption"),
-`legacy_audit_unresolved`, `account_mismatch`, `missing_transaction_identity`,
-`journal_inconsistent`, `spend_window_unreadable`, `unknown_schema_version`,
-`write_failed`. With writes
-disabled every createNote -- replays of marked attempts included -- is refused
-`-32004`. None clears itself: restore the exact journal, or reconcile and
-start a new one through the adoption procedure.
+Writes are disabled (authenticated recovery reads continue, `/ready` is 503,
+and public `/status` remains minimal liveness) on: `corrupt`,
+`rollback_detected` (generation below `<journal>.hwm`, a different journal id,
+or the mark missing beside a used journal), `empty_journal_for_existing_account`
+(fresh journal next to an account that already existed; see "Legacy drain and
+adoption"), `legacy_audit_unresolved`, `account_mismatch`,
+`missing_transaction_identity`, `journal_inconsistent`,
+`spend_window_unreadable`, `unknown_schema_version`, `write_failed`. With
+writes disabled, new and unmarked `createNote` attempts are refused `-32004`.
+An existing marked operation remains observable and may rebroadcast its exact
+journaled bytes; terminal operations and `aztec_getSettlement` remain readable.
+None clears itself: restore the exact journal, or reconcile and start a new one
+through the adoption procedure.
 
 ## Legacy drain and adoption (D-B)
 
@@ -332,22 +341,22 @@ Procedure:
 Do not point `PXE_BRIDGE_AUDIT_LOG` somewhere else to get past the check; it
 is the only record of what the legacy bridge may have sent.
 
-## Health
+## Liveness and readiness
 
 | Endpoint | Auth | Answers |
 | --- | --- | --- |
-| `GET /status` | none, rate-limited | **liveness**: 200 whenever the node answers (503 `{status: "starting", ready: false}` until then). `status` is `ok` only when ready AND fee juice is not below `PXE_BRIDGE_MIN_FEE_JUICE`, otherwise `degraded` |
-| `GET /ready` | none, rate-limited | **readiness**: same body; 200 only when every settlement prerequisite holds, 503 otherwise |
+| `GET /status` | none, rate-limited | Public minimal **liveness** only: 200 `{"status":"ok"}` whenever the node answers; otherwise 503 `{"status":"starting"}`. |
+| `GET /ready` | Bearer `PXE_BRIDGE_API_KEY`, then the normal rate limiter | Operational projection from the authoritative admission predicate: 200 iff `ready: true`, otherwise 503 with stable reasons. Failed authentication is charged to the separate auth-failure limiter and exposes no state. |
 
-Body: `{status, ready, notReady?, version, feeJuice {balance, low?},
-journal {writable, reason?}, settlement {mayBroadcast, corridor}}`.
-`notReady` lists every unmet prerequisite: `journal_unconfigured`,
-`journal_<reason>` (writes disabled, including `journal_account_unbound`
-before connect), `may_broadcast_unconfigured`, `corridor_unconfigured`; a
-bridge with no journal reports all three it lacks. Low
-fee juice degrades without making the bridge unready. Public, so only reasons:
-details can name the account. Point container restarts at `/status` and
-traffic/deploy gates at `/ready`.
+The readiness projection contains the flat checker fields `ready`,
+`nodeVersion`, `l1ChainId`, `rollupVersion`, `account {address,classId}`,
+`token`, `maxAmount` and `dailyLimit`, plus finalized reference, policy,
+inventory, rolling-window, fee-runway, node and journal observations. No
+nested object other than `account` has an `address` member.
+
+Point container restarts at `/status` and traffic/deploy gates at `/ready`.
+Never restart merely because readiness is false: recovery for already marked
+operations must stay online.
 
 ## Configuration
 
@@ -390,10 +399,145 @@ Riddler's side: `SHIELDED_MAY_BROADCAST_TOKEN`, `SHIELDED_NAMESPACE` (distinct
 per environment, shared by blue/green colours) and
 `RECOVERY_STATE_BACKEND=redis`.
 
-**Readiness.** Gate deploys and traffic on `GET /ready` (200 = ready). Keep
-the container healthcheck on `GET /status` (liveness): a journal with writes
-disabled must stay up to serve `aztec_getSettlement`, so it must not be
-restarted for being unready.
+**Readiness.** Gate deploys and new settlement traffic on authenticated
+`GET /ready` (200 = ready; Bearer `PXE_BRIDGE_API_KEY`). Its projection is the
+same typed predicate `aztec_createNote` invokes before proving or broadcasting
+new work. `GET /status` remains public minimal liveness only. Keep the
+container healthcheck on `/status`: a journal with writes disabled or another
+readiness fault must not restart the service, because `aztec_getSettlement`,
+marked-operation observation and exact-byte rebroadcast remain available.
+
+The predicate admits only design-A spending-limit deployments with a durable
+deployment record. It checks the configured/derived address and compiled class,
+initialization and pause state, permitted token, local/on-chain allowlist root
+and limits, finalized token inventory, rolling-window headroom, fee runway,
+journal write health and exclusive fence, complete network identity, node
+transaction readiness, and synchronized retained world-state history. One
+exact nonzero `finalized` block number/hash is captured and supplied to every
+contract and storage observation; `proven` and `latest` are never fallbacks.
+The finalized block timestamp must be at most 7,200 seconds old and no more
+than 300 seconds ahead of local time. Unknowns and read failures are explicit
+not-ready reasons.
+
+Required fee juice is `(pre-mark in-flight reservations + durable
+may-broadcast operations + ceil(admissible rolling-window headroom / live
+max-per-tx)) * per-transfer fee limit`; a marked operation counts until it
+becomes terminal. The per-transfer limit is the SDK transaction gas limits
+multiplied by predicted maximum fees per gas. The projection exposes observed
+and required fee juice, observed finalized token inventory and required
+admissible volume, and the exact finalized reference.
+Readiness loss blocks only new admission. An already may-broadcast-marked
+operation keeps its normal lookup, observation and exact-byte rebroadcast path.
+An already admitted `prepared` operation keeps recovering too: the
+may-broadcast query and the send of its exact journaled bytes are not gated on
+the `/ready` verdict, fee runway, finalized-tip freshness or corridor
+admission. It is held, still `prepared` with the same bytes and hash and
+resumed by the next call, only while one of these per-operation facts holds:
+
+| Hold (`data.reasons`) | Source |
+| --- | --- |
+| `journal_unwritable`, `writer_fence_lost` | local journal |
+| `may_broadcast_unconfigured` | local configuration |
+| `network_identity_mismatch` | node identity vs the operation's `network` |
+| `account_paused` | finalized `paused` read by the readiness probe |
+| `allowlist_root_mismatch` | finalized on-chain root vs the configured tree the attempt was proven against |
+| `inventory_insufficient` | finalized public token balance below the operation's amount |
+| in-memory rolling window full | `TransactionLimits.reserve`; answered `prepared`, never re-proved |
+
+A fact the probe could not read is not a hold: the node and the account
+decide. Past `validUntil` the operation is `not_submitted`; past the attempt's
+protocol expiry a new attempt is prepared, as before.
+
+## Recipient readiness attestations
+
+The optional Worker/Riddler interface is `POST /api/attestation`,
+authenticated only by `Bearer PXE_BRIDGE_ATTESTATION_API_KEY`. RPC/admin
+credentials do not work there, and the attestation credential does not work on
+RPC/admin routes. The feature is hidden with 404 when every attestation setting
+is absent; any partial configuration fails startup. Enabling it also requires
+the separately authenticated main RPC, durable journal, settlement corridor,
+spending-limit account and its durable `PXE_BRIDGE_ACCOUNT_DEPLOYMENT` record.
+
+Only `aztec_attestRecipientMembership` and
+`aztec_attestRecipientDeployment` are accepted. Both take exactly:
+
+```json
+{
+  "descriptor": "<@xochi/signer RecipientDescriptor object>",
+  "descriptorDigest": "0x<32 bytes>",
+  "recipient": "0x<32 bytes>",
+  "network": "<@xochi/signer NetworkIdentity object>",
+  "corridor": {
+    "corridorId": "0x<32 bytes>",
+    "corridorRevision": 1,
+    "manifestDigest": "0x<32 bytes>"
+  },
+  "recipientAuthorization": {
+    "digest": "0x<32 bytes>",
+    "signature": "0x<64-byte Aztec Schnorr signature>"
+  }
+}
+```
+
+These params are the `params` member of a strict JSON-RPC 2.0 request with an
+`id` and one of the two method names. On success, `result` is the exact signed
+Membership or RecipientDeployment record. A typed refusal is HTTP 503 with
+JSON-RPC error code `-32010`, message `Readiness attestation refused`, and
+`data: {signed:false, refusal}`. Consumers import the strict schemas and
+inferred types from `@xochi-fi/pxe-bridge/attestation`.
+
+Every object is strict. In particular, source wallet/chain/binding identifiers,
+block selectors, witnesses, salts, indexes and unknown members are forbidden.
+Network and corridor are accepted only for comparison with the descriptor,
+locally configured corridor and node observation; callers cannot select the
+domain or observation. Before any observation or signature, `@xochi/signer`
+validates the descriptor, its digest, the derived recipient, the pinned
+`aztec-6.0.0` class/profile/network and the recipient message wrapper/Schnorr
+authorization.
+
+Membership is positive only when the durable local snapshot's complete
+`(address,index)` mapping equals the mapping that built the in-memory tree, that
+tree reproduces the exact finalized root, and the recipient witness verifies.
+It is negative only when the same authoritative snapshot/root proves absence.
+RecipientDeployment is positive only for the exact descriptor recipient and
+class in initialized finalized state; authoritative absence or
+non-initialization is negative, while a different subject/class is a refusal.
+Before either finalized root or deployment read, the bridge validates the
+recorded solver address, pinned compiled current class, initialized state,
+synchronized retained history, exact nonzero finalized number/hash, and the
+shared 7,200-second maximum age / 300-second future-skew limits. Missing
+history, root drift, failed reads and every other uncertainty return the
+unsigned refusal with no record or signature.
+
+Success records are the exact SDK Membership and RecipientDeployment wire
+shapes, signed over `readinessDigest` by a dedicated secp256k1 key. Consumers
+verify them with `verifyReadinessRecord`, `maxAgeSeconds: 7200` and
+`maxFutureSkewSeconds: 300`. The signer is
+`PXE_BRIDGE_ATTESTATION_SECRET_ARN` in production or dev-only
+`PXE_BRIDGE_ATTESTATION_SECRET_KEY`; resolved key material may not equal any
+spend/admin/allowlist custody value or RPC, admin, may-broadcast, attestation or
+RootUpdate relay bearer token.
+
+The SQLite journal schema stores the local allowlist snapshot identity and
+exact RootUpdate relay envelope. The payload is durable before HTTP send,
+retains one idempotency key across uncertain delivery, and retries after
+restart. Every tick delivers the pending envelopes, in order, even when the
+chain observation (bounded to 20 seconds) or the enqueue fails, and an attempt
+that cannot be recorded is resent under the same key. Only the configured
+URL's own `204` is durable acceptance; redirects are refused. A new signed
+record, from a fresh finalized observation and with a new idempotency key, is
+enqueued when the finalized root differs from the latest envelope's, when the
+corridor changed, when the latest record's `attestedAt` is 3,600 seconds old
+(half the consumers' 7,200-second maximum age, so an unchanged root never
+lapses), and once per process after restart. If the latest envelope already
+names the current root and is undelivered, that exact envelope and key is the
+restart push. The relay HTTP body is
+`{corridor_id,corridor_revision,record:<signed RootUpdate>}` and is configured
+separately by `PXE_BRIDGE_ATTESTATION_RELAY_URL` / `_TOKEN`; only HTTPS or
+loopback HTTP is accepted. Attestation audit output contains only method,
+outcome and typed reason—never recipient, descriptor/digest/signature, root
+association, witness/salt/index or L2 transaction data.
+
 
 **xochimilco.** The `aztec_testnet` role (`roles/aztec_testnet`, branch
 `feat/pxe-bridge-journal`) carries this: journal path and audit log on the
