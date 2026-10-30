@@ -178,6 +178,8 @@ describe("hard crash mid-broadcast (e2e)", () => {
     const exited = new Promise<number | null>((done) => child.on("exit", (code) => done(code)));
     const url = `http://127.0.0.1:${port}`;
     const deadline = Date.now() + 170_000;
+    // The last readiness answer, so a bridge that never becomes ready names why.
+    let lastAnswer = "no answer";
     while (Date.now() < deadline) {
       if (child.exitCode !== null) throw new Error(`bridge exited during startup:\n${log}`);
       try {
@@ -187,13 +189,15 @@ describe("hard crash mid-broadcast (e2e)", () => {
             : {}),
         });
         if (res.status === 200) return { child, url, exited };
+        lastAnswer = `HTTP ${res.status} ${await res.text()}`;
       } catch {
         // not listening yet
       }
+      // Polls a separate process; there is no in-process signal to await.
       await new Promise((r) => setTimeout(r, 1_000));
     }
     child.kill("SIGKILL");
-    throw new Error(`bridge did not become ready:\n${log}`);
+    throw new Error(`bridge did not become ready; last answer: ${lastAnswer}\n${log}`);
   }
 
   async function rpc(url: string, method: string, params: unknown, operationId?: string) {
