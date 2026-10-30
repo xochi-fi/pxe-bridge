@@ -284,6 +284,26 @@ describe("hard crash mid-broadcast (e2e)", () => {
       config.nodeUrl,
       () => mintOne(funderWallet, token, admin),
     );
+    // This setup's own traffic drives the sandbox clock ahead of wall time
+    // (about +600 s on a fresh sandbox, 2026-10-30), and every bridge below
+    // must pass hard readiness, which refuses a finalized tip more than 300 s
+    // in the future. Wait for the wall to catch up to the tip, leaving the
+    // tests' own traffic the full 300 s; never relax the policy. An external
+    // Anvil clock cannot be advanced with fake timers.
+    const skewDeadline = Date.now() + 20 * 60_000;
+    for (;;) {
+      const facts = await observer.observeReadinessChain();
+      if (
+        facts.finalized.state === "known" &&
+        Number(facts.finalized.value.timestamp) <= Math.floor(Date.now() / 1000)
+      ) {
+        break;
+      }
+      if (Date.now() >= skewDeadline) {
+        throw new Error("finalized tip did not return to wall time within 20 minutes");
+      }
+      await new Promise((r) => setTimeout(r, 5_000));
+    }
     const tree = await AllowlistTree.build(ALLOWLIST_SEED, [
       { address: RECIPIENT, index: 347 },
     ]);
@@ -356,7 +376,7 @@ describe("hard crash mid-broadcast (e2e)", () => {
       upstream.end(raw);
     });
     proxyUrl = `http://127.0.0.1:${await listen(proxy)}`;
-  }, 600_000);
+  }, 1_800_000);
 
   afterAll(async () => {
     bridge?.child.kill("SIGKILL");
