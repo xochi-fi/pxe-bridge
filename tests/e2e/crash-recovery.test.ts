@@ -136,6 +136,23 @@ describe("hard crash mid-broadcast (e2e)", () => {
     return BigInt((value as { toString(): string }).toString());
   }
 
+  async function sandboxClockFloorMs(): Promise<number> {
+    const observerInternals = observer as unknown as {
+      node: {
+        getBlockData: (
+          tag: "latest",
+        ) => Promise<
+          | { header: { globalVariables: { timestamp: { toString(): string } } } }
+          | undefined
+        >;
+      };
+    };
+    const node = observerInternals.node;
+    const latest = await node.getBlockData("latest");
+    if (!latest) throw new Error("sandbox returned no proposed block for the test clock");
+    return Number(BigInt(latest.header.globalVariables.timestamp.toString()) * 1_000n);
+  }
+
   async function startBridge(
     workDir: string,
     journal: string,
@@ -145,9 +162,17 @@ describe("hard crash mid-broadcast (e2e)", () => {
     const probe = createServer();
     const port = await listen(probe);
     await new Promise<void>((done) => probe.close(() => done()));
+    const clockFloorMs = await sandboxClockFloorMs();
     const child = spawn(process.execPath, [join(REPO, "dist/index.js")], {
       cwd: workDir,
       env: {
+        NODE_OPTIONS: [
+          process.env["NODE_OPTIONS"] ?? "",
+          `--require=${join(REPO, "tests/e2e/sandbox-clock.cjs")}`,
+        ]
+          .filter(Boolean)
+          .join(" "),
+        PXE_BRIDGE_TEST_CLOCK_FLOOR_MS: String(clockFloorMs),
         PATH: process.env["PATH"] ?? "",
         AZTEC_NODE_URL: proxyUrl,
         PXE_BRIDGE_SECRET_KEY: config.secretKey,
@@ -206,7 +231,10 @@ describe("hard crash mid-broadcast (e2e)", () => {
   }
 
   async function terms(operationId: string) {
-    const network = await observer.networkIdentity();
+    const [network, clockFloorMs] = await Promise.all([
+      observer.networkIdentity(),
+      sandboxClockFloorMs(),
+    ]);
     return {
       version: SETTLEMENT_VERSION,
       operationId,
@@ -221,7 +249,7 @@ describe("hard crash mid-broadcast (e2e)", () => {
       recipientDescriptorDigest: "0x" + "ab".repeat(32),
       token,
       amount: AMOUNT,
-      validUntil: Math.floor(Date.now() / 1000) + 3600,
+      validUntil: Math.floor(Math.max(Date.now(), clockFloorMs) / 1_000) + 3_600,
     };
   }
 
