@@ -2,49 +2,33 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import type { Server } from "node:http";
 import { createApp, type ServerOptions } from "../src/server.js";
 import { TransactionLimits } from "../src/limits.js";
-import { IdempotencyStore } from "../src/idempotency.js";
-import type { CreateNoteParams, CreateNoteResult, IAztecClient } from "../src/types.js";
+import { SettlementJournal } from "../src/journal.js";
+import type { MayBroadcastClient } from "../src/may-broadcast.js";
 import { rpcJson } from "./helpers.js";
+import {
+  FakeAztecClient as SettlementFakeClient,
+  openBoundJournal,
+  settlementContext,
+  tempJournalPath,
+  v1Params,
+} from "./settlement-fixtures.js";
 
-const VALID_ADDR = "0x" + "a".repeat(64);
 const JSON_HEADERS = { "Content-Type": "application/json" };
 
-class FakeAztecClient implements IAztecClient {
-  createNoteResult: CreateNoteResult = {
-    // Two note hashes and three nullifiers, matching what a real
-    // transfer_to_private emits: a fake with one of each would hide the reason
-    // the scalar fields below are ambiguous.
-    noteHashes: ["0xcommit", "0xcommit2"],
-    nullifiers: ["0xnullifier", "0xnullifier2", "0xnullifier3"],
-    l2TxHash: "0xtx",
-    noteCommitment: "0xcommit",
-    nullifierHash: "0xnullifier",
-  };
+/** The settlement fake, plus the knobs /status needs. */
+class FakeAztecClient extends SettlementFakeClient {
   versionResult = "4.1.3";
   versionError: Error | null = null;
-  /** Counts real executions, so a replay is distinguishable from a re-run. */
-  createNoteCalls = 0;
 
-  async connect(): Promise<void> {}
-
-  async createNote(_params: CreateNoteParams): Promise<CreateNoteResult> {
-    this.createNoteCalls++;
-    return this.createNoteResult;
-  }
-
-  async getVersion(): Promise<string> {
+  override async getVersion(): Promise<string> {
     if (this.versionError) throw this.versionError;
     return this.versionResult;
-  }
-
-  pinnedToken(): string | undefined {
-    return undefined;
   }
 
   feeJuiceBalance = 1000n;
   feeJuiceError: Error | null = null;
   feeJuiceReads = 0;
-  async getFeeJuiceBalance(): Promise<bigint> {
+  override async getFeeJuiceBalance(): Promise<bigint> {
     this.feeJuiceReads++;
     if (this.feeJuiceError) throw this.feeJuiceError;
     return this.feeJuiceBalance;
@@ -57,7 +41,7 @@ let baseUrl: string;
 
 beforeAll(async () => {
   client = new FakeAztecClient();
-  server = createApp(client);
+  server = createApp(client, { settlement: settlementContext(openBoundJournal()) });
   await new Promise<void>((resolve) => {
     server.listen(0, () => {
       const addr = server.address();
@@ -91,7 +75,14 @@ describe("HTTP server", () => {
       const res = await fetch(`${baseUrl}/status`);
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body).toEqual({ status: "ok", version: "4.1.3", feeJuice: { balance: "1000" } });
+      expect(body).toEqual({
+        status: "ok",
+        ready: true,
+        version: "4.1.3",
+        feeJuice: { balance: "1000" },
+        journal: { writable: true },
+        settlement: { mayBroadcast: "configured", corridor: "configured" },
+      });
     });
 
     it("returns 503 when client errors", async () => {
@@ -99,13 +90,29 @@ describe("HTTP server", () => {
       const res = await fetch(`${baseUrl}/status`);
       expect(res.status).toBe(503);
       const body = await res.json();
-      expect(body).toEqual({ status: "starting" });
+      expect(body).toEqual({ status: "starting", ready: false });
       client.versionError = null;
     });
 
     it("handles query string on /status", async () => {
       const res = await fetch(`${baseUrl}/status?check=true`);
       expect(res.status).toBe(200);
+    });
+  });
+
+  describe("GET /ready", () => {
+    it("answers 200 only when every settlement prerequisite holds", async () => {
+      const res = await fetch(`${baseUrl}/ready`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ status: "ok", ready: true });
+    });
+
+    it("answers 503 while the node is not answering", async () => {
+      client.versionError = new Error("not ready");
+      const res = await fetch(`${baseUrl}/ready`);
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ status: "starting", ready: false });
+      client.versionError = null;
     });
   });
 
@@ -133,16 +140,21 @@ describe("HTTP server", () => {
     });
 
     it("handles aztec_createNote", async () => {
-      const params = {
-        recipient: VALID_ADDR,
-        token: VALID_ADDR,
-        amount: "1000",
-        chainId: 1,
-      };
-      const res = await jsonPost(baseUrl, rpcBody("aztec_createNote", [params]));
+      const res = await jsonPost(baseUrl, rpcBody("aztec_createNote", [v1Params()]), {
+        "Idempotency-Key": "op-1",
+      });
       expect(res.status).toBe(200);
-      const body = await rpcJson<CreateNoteResult>(res);
-      expect(body.result).toEqual(client.createNoteResult);
+      const body = await rpcJson<{ observation: { state: string } }>(res);
+      expect(body.result?.observation.state).toBe("included");
+    });
+
+    it("handles aztec_getSettlement", async () => {
+      const res = await jsonPost(
+        baseUrl,
+        rpcBody("aztec_getSettlement", [{ version: "pxe-bridge.settlement.v1", operationId: "op-1" }]),
+      );
+      const body = await rpcJson<{ found: boolean }>(res);
+      expect(body.result?.found).toBe(true);
     });
   });
 
@@ -392,7 +404,7 @@ describe("GET /status fee juice", () => {
     close: () => Promise<void>;
   }> {
     const c = new FakeAztecClient();
-    const srv = createApp(c, opts);
+    const srv = createApp(c, { settlement: settlementContext(openBoundJournal()), ...opts });
     await new Promise<void>((resolve) => srv.listen(0, resolve));
     const addr = srv.address();
     const port = addr && typeof addr === "object" ? addr.port : 0;
@@ -411,8 +423,12 @@ describe("GET /status fee juice", () => {
       c.feeJuiceBalance = 999n;
       expect(await status(url)).toEqual({
         status: "degraded",
+        // Low fee juice degrades the bridge without making it unready.
+        ready: true,
         version: "4.1.3",
         feeJuice: { balance: "999", low: true },
+        journal: { writable: true },
+        settlement: { mayBroadcast: "configured", corridor: "configured" },
       });
 
       c.feeJuiceBalance = 1000n;
@@ -445,11 +461,135 @@ describe("GET /status fee juice", () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({
         status: "ok",
+        ready: true,
         version: "4.1.3",
         feeJuice: { balance: null },
+        journal: { writable: true },
+        settlement: { mayBroadcast: "configured", corridor: "configured" },
       });
     } finally {
       await close();
+    }
+  });
+});
+
+describe("GET /status journal", () => {
+  it("reports a journal with writes disabled as degraded, naming only the reason", async () => {
+    const journal = openBoundJournal();
+    const path = journal.path;
+    journal.close();
+    const readOnly = SettlementJournal.open(path);
+    readOnly.bindAccount("0x" + "9".repeat(64), true);
+    const srv = createApp(new FakeAztecClient(), { settlement: settlementContext(readOnly) });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const port = addr && typeof addr === "object" ? addr.port : 0;
+    try {
+      const body = await (await fetch(`http://127.0.0.1:${port}/status`)).json();
+      expect(body).toMatchObject({
+        status: "degraded",
+        journal: { writable: false, reason: "account_mismatch" },
+      });
+      expect(JSON.stringify(body)).not.toContain("9999");
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+  it("reports a bridge with no journal as degraded", async () => {
+    const srv = createApp(new FakeAztecClient());
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const port = addr && typeof addr === "object" ? addr.port : 0;
+    try {
+      const body = await (await fetch(`http://127.0.0.1:${port}/status`)).json();
+      expect(body).toMatchObject({
+        status: "degraded",
+        journal: { writable: false, reason: "journal_unconfigured" },
+      });
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+});
+
+describe("GET /ready: every settlement prerequisite", () => {
+  async function probe(opts: ServerOptions): Promise<{ live: number; ready: number; body: unknown }> {
+    const srv = createApp(new FakeAztecClient(), opts);
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+    try {
+      const live = (await fetch(`${url}/status`)).status;
+      const res = await fetch(`${url}/ready`);
+      return { live, ready: res.status, body: await res.json() };
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  }
+
+  it.each([
+    [
+      "no may-broadcast endpoint",
+      () => ({ settlement: settlementContext(openBoundJournal(), undefined, { mayBroadcast: undefined }) }),
+      ["may_broadcast_unconfigured"],
+    ],
+    [
+      "no corridor",
+      () => ({ settlement: settlementContext(openBoundJournal(), undefined, { corridor: undefined }) }),
+      ["corridor_unconfigured"],
+    ],
+    [
+      "no journal",
+      () => ({}),
+      ["journal_unconfigured", "may_broadcast_unconfigured", "corridor_unconfigured"],
+    ],
+    [
+      "an unbound journal",
+      () => ({ settlement: settlementContext(SettlementJournal.open(tempJournalPath())) }),
+      ["journal_account_unbound"],
+    ],
+  ] as const)("is not ready with %s: /status stays 200 but says degraded", async (_name, opts, notReady) => {
+    const { live, ready, body } = await probe(opts());
+    expect(live).toBe(200);
+    expect(ready).toBe(503);
+    expect(body).toMatchObject({ status: "degraded", ready: false, notReady });
+  });
+});
+
+describe("HTTP response deadline", () => {
+  it("closes the gate before the 504, so an answer arriving later cannot mark", async () => {
+    const client = new FakeAztecClient();
+    const journal = openBoundJournal();
+    let release: (decision: "allow") => void = () => undefined;
+    let asked: () => void = () => undefined;
+    const askedOnce = new Promise<void>((r) => (asked = r));
+    const late: MayBroadcastClient = () => {
+      asked();
+      return new Promise((resolve) => {
+        release = (decision) => resolve({ decision, detail: "late" });
+      });
+    };
+    const srv = createApp(client, {
+      settlement: settlementContext(journal, late, { timeoutMs: 60_000 }),
+      responseTimeoutMs: 200,
+    });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+    try {
+      const res = await jsonPost(url, rpcBody("aztec_createNote", [v1Params()]), {
+        "Idempotency-Key": "op-1",
+      });
+      expect(res.status).toBe(504);
+      await askedOnce;
+      release("allow");
+      await new Promise((r) => setImmediate(r));
+      expect(client.sends).toHaveLength(0);
+      expect(journal.get("op-1")?.state).toBe("prepared");
+      expect(journal.spendsSince(0)).toEqual([]);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
     }
   });
 });
@@ -461,7 +601,7 @@ describe("Idempotency-Key header", () => {
     close: () => Promise<void>;
   }> {
     const c = new FakeAztecClient();
-    const srv = createApp(c, { idempotency: new IdempotencyStore() });
+    const srv = createApp(c, { settlement: settlementContext(openBoundJournal()) });
     await new Promise<void>((resolve) => srv.listen(0, resolve));
     const addr = srv.address();
     const port = addr && typeof addr === "object" ? addr.port : 0;
@@ -472,31 +612,30 @@ describe("Idempotency-Key header", () => {
     };
   }
 
-  const noteBody = () =>
-    rpcBody("aztec_createNote", [
-      { recipient: VALID_ADDR, token: VALID_ADDR, amount: "1000", chainId: 1 },
-    ]);
+  const noteBody = (operationId: string) =>
+    rpcBody("aztec_createNote", [v1Params({ operationId })]);
 
-  it("carries the header through to replay a duplicate", async () => {
-    const { url, close } = await boot();
+  it("answers a duplicate from the journal without sending again", async () => {
+    const { url, client: c, close } = await boot();
     try {
-      const first = await jsonPost(url, noteBody(), { "Idempotency-Key": "trade-1" });
-      const second = await jsonPost(url, noteBody(), { "Idempotency-Key": "trade-1" });
+      const first = await jsonPost(url, noteBody("trade-1"), { "Idempotency-Key": "trade-1" });
+      const second = await jsonPost(url, noteBody("trade-1"), { "Idempotency-Key": "trade-1" });
 
       expect(await rpcJson(first)).toEqual(await rpcJson(second));
+      expect(c.sends).toHaveLength(1);
     } finally {
       await close();
     }
   });
 
-  it("treats different keys as different requests", async () => {
-    const { url, close } = await boot();
+  it("treats different operation ids as different operations", async () => {
+    const { url, client: c, close } = await boot();
     try {
-      await jsonPost(url, noteBody(), { "Idempotency-Key": "trade-1" });
-      const other = await jsonPost(url, noteBody(), { "Idempotency-Key": "trade-2" });
+      await jsonPost(url, noteBody("trade-1"), { "Idempotency-Key": "trade-1" });
+      const other = await jsonPost(url, noteBody("trade-2"), { "Idempotency-Key": "trade-2" });
 
-      expect(other.status).toBe(200);
       expect("result" in (await rpcJson(other))).toBe(true);
+      expect(c.sends).toHaveLength(2);
     } finally {
       await close();
     }
@@ -513,7 +652,7 @@ describe("Idempotency-Key header", () => {
     const { url, close } = await boot();
     try {
       for (const bad of ["", "   ", "x".repeat(129), "tab\there"]) {
-        const res = await jsonPost(url, noteBody(), { "Idempotency-Key": bad });
+        const res = await jsonPost(url, noteBody("trade-1"), { "Idempotency-Key": bad });
         expect(res.status, `should reject ${JSON.stringify(bad)}`).toBe(400);
       }
     } finally {
@@ -521,22 +660,23 @@ describe("Idempotency-Key header", () => {
     }
   });
 
-  it("accepts a key at the length limit", async () => {
+  it("accepts an operation id at the length limit", async () => {
     const { url, close } = await boot();
     try {
-      const res = await jsonPost(url, noteBody(), { "Idempotency-Key": "x".repeat(128) });
-      expect(res.status).toBe(200);
+      const id = "x".repeat(128);
+      const res = await jsonPost(url, noteBody(id), { "Idempotency-Key": id });
+      expect("result" in (await rpcJson(res))).toBe(true);
     } finally {
       await close();
     }
   });
 
-  it("runs normally when no key is sent", async () => {
-    const { url, client, close } = await boot();
+  it("refuses a createNote with no key: the key is the operation id", async () => {
+    const { url, client: c, close } = await boot();
     try {
-      await jsonPost(url, noteBody());
-      await jsonPost(url, noteBody());
-      expect(client.createNoteCalls).toBe(2);
+      const body = await rpcJson(await jsonPost(url, noteBody("trade-1")));
+      expect(body.error).toMatchObject({ code: -32602, data: { reason: "operation_id_mismatch" } });
+      expect(c.sends).toHaveLength(0);
     } finally {
       await close();
     }

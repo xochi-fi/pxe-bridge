@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { mkdirSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
@@ -8,9 +9,19 @@ import type { AztecAddress } from "@aztec-labs/aztec.js/addresses";
 import type { FeePaymentMethod } from "@aztec-labs/aztec.js/fee";
 import type { Fr } from "@aztec-labs/aztec.js/fields";
 import type { GasFees } from "@aztec-labs/stdlib/gas";
-import { PostSubmissionError } from "./types.js";
+import type { AztecNode } from "@aztec-labs/aztec.js/node";
+import type { Tx, TxReceipt } from "@aztec-labs/aztec.js/tx";
 import { ACCOUNT_ADDRESS_ENV, assertAccountIdentity } from "./account-identity.js";
-import type { CreateNoteParams, CreateNoteResult, FeeJuiceClaim, IAztecClient } from "./types.js";
+import type {
+  BroadcastGate,
+  FeeJuiceClaim,
+  IAztecClient,
+  NodeNetwork,
+  PreparedTransaction,
+  TransferOutcome,
+  TransferParams,
+} from "./types.js";
+import type { AccountMode, NodeObservation } from "./settlement.js";
 import {
   SpendingLimitAccountContract,
   type SpendingLimitConfig,
@@ -371,20 +382,69 @@ export async function feeJuiceMessageHash(
     .hash()
     .toString();
 }
-/** The slice of AztecNode createNote needs to read a tx effect back. */
-interface TxEffectFields {
-  noteHashes?: { toString(): string }[];
-  nullifiers?: { toString(): string }[];
-}
-interface AztecNodeLike {
-  getTxReceipt(
-    txHash: never,
-    options: { includeTxEffect: true },
-  ): Promise<{ txEffect?: (TxEffectFields & { data?: TxEffectFields }) | undefined } | undefined>;
+/**
+ * Which operation's gate a broadcast on this async path belongs to. The
+ * wallet's `sendTx` proves, derives the hash, then calls `aztecNode.sendTx`;
+ * the node is wrapped so that last call first runs the gate bound here.
+ */
+const broadcastGates = new AsyncLocalStorage<BroadcastGate>();
+
+/** The proven transaction as the gate and journal see it. */
+async function preparedTransaction(tx: Tx): Promise<PreparedTransaction> {
+  return {
+    txHash: (await tx.getTxHash()).toString(),
+    txBytes: tx.toBuffer(),
+    expirationTimestamp: tx.data.expirationTimestamp,
+  };
 }
 
-/** Distinguishable so createNote can tell a deadline from a rejection. */
-class TimeoutError extends Error {}
+/**
+ * Wraps a node so `sendTx` runs the gate bound to the current async path.
+ * Calls outside any gate (account deployment, fee juice claims) pass through:
+ * those are not settlement operations.
+ */
+function gatedNode(node: AztecNode): AztecNode {
+  return new Proxy(node, {
+    get(target, property, receiver) {
+      if (property === "sendTx") {
+        return async (tx: Tx) => {
+          const gate = broadcastGates.getStore();
+          if (gate) {
+            const prepared = await preparedTransaction(tx);
+            await gate.beforeBroadcast(prepared);
+            // No await from here to the call: the final bound check and the
+            // send happen in one synchronous run.
+            gate.beforeSend(prepared);
+          }
+          return target.sendTx(tx);
+        };
+      }
+      const value: unknown = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+/** Maps a node receipt onto the settlement vocabulary, effects uninterpreted. */
+function nodeObservation(receipt: TxReceipt): NodeObservation {
+  if (receipt.isPending()) return { kind: "pending" };
+  if (!receipt.isMined()) return { kind: "dropped" };
+  const effect = receipt.txEffect;
+  const noteHashes = (effect?.noteHashes ?? []).map((h) => h.toString());
+  const nullifiers = (effect?.nullifiers ?? []).map((n) => n.toString());
+  return {
+    kind: "mined",
+    executionResult: receipt.hasExecutionReverted() ? "reverted" : "success",
+    blockHash: receipt.blockHash.toString(),
+    blockNumber: receipt.blockNumber.toString(),
+    receiptStatus: `${receipt.status}`,
+    effects: {
+      state: effect && nullifiers.length > 0 ? "available" : "unavailable",
+      noteHashes,
+      nullifiers,
+    },
+  };
+}
 
 /** What the account derivation produces, named so callers cannot swap two Frs. */
 export interface AccountKeys {
@@ -457,14 +517,6 @@ export async function deriveDeployerKeys(secretKey: string): Promise<AccountKeys
   return { ...keys, salt: await deployerSalt(keys.salt) };
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout>;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new TimeoutError("Operation timed out")), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
-
 /**
  * Wraps Aztec SDK v4 for server-side shielded note creation.
  *
@@ -487,6 +539,9 @@ export class AztecClient implements IAztecClient {
   private readonly expectedAccountAddress: string | undefined;
   /** Set once this client holds its directory; a retried connect() reuses it. */
   private claimedDataDirectory: string | null = null;
+  /** Node client for reads and exact re-broadcasts; set in connect(). */
+  private node: AztecNode | null = null;
+  private preexisted = false;
 
   constructor(
     private readonly nodeUrl: string,
@@ -538,6 +593,14 @@ export class AztecClient implements IAztecClient {
       pxe: { proverEnabled: true, dataDirectory: this.claimedDataDirectory },
     });
     console.log("[pxe-bridge] EmbeddedWallet created");
+    const { createAztecNodeClient } = await import("@aztec-labs/aztec.js/node");
+    this.node = createAztecNodeClient(this.nodeUrl);
+    // The wallet's own sendTx proves, derives the hash, then calls
+    // aztecNode.sendTx. Wrapping that one call is what lets a settlement
+    // journal the exact transaction and ask before anything is broadcast,
+    // without re-implementing the wallet's fee and authwit handling.
+    const walletInternals = this.wallet as unknown as { aztecNode: AztecNode };
+    walletInternals.aztecNode = gatedNode(walletInternals.aztecNode);
 
     const secretKey = this.secretKey;
     this.secretKey = null; // clear string reference immediately
@@ -581,6 +644,7 @@ export class AztecClient implements IAztecClient {
     const { ContractInitializationStatus } = await import("@aztec-labs/aztec.js/wallet");
     const alreadyDeployed =
       metadata.initializationStatus === ContractInitializationStatus.INITIALIZED;
+    this.preexisted = alreadyDeployed;
 
     // A recorded account is never deployed here. The record says the account
     // exists, and accountManager() has already checked that it derives this
@@ -1050,134 +1114,98 @@ export class AztecClient implements IAztecClient {
     return this.solverAddress ? this.solverAddress.toString() : null;
   }
 
-  async createNote(params: CreateNoteParams): Promise<CreateNoteResult> {
-    if (!this.wallet || !this.solverAddress) {
+  /**
+   * Proves one `transfer_to_private` and broadcasts it through `gate`.
+   *
+   * The send waits for a proposed block and does not throw on a revert, so a
+   * mined revert comes back as an observation rather than an exception. No
+   * timeout here: the caller bounds the whole call and closes its gate, which
+   * is what keeps a late proof from broadcasting after the caller answered.
+   */
+  async createNote(params: TransferParams, gate: BroadcastGate): Promise<TransferOutcome> {
+    if (!this.wallet || !this.solverAddress || !this.node) {
       throw new Error("Client not connected");
     }
-
     const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
-
     const tokenAddress = AztecAddress.fromStringUnsafe(params.token);
     const recipientAddress = AztecAddress.fromStringUnsafe(params.recipient);
     const amount = BigInt(params.amount);
     const from = this.solverAddress;
-
     const token = await this.getToken(tokenAddress);
 
-    if (params.tradeId !== undefined) {
-      console.log(
-        "[pxe-bridge] Creating note for chainId:",
-        params.chainId,
-        "tradeId:",
-        params.tradeId,
-        "subTrade:",
-        params.subTradeIndex + "/" + params.totalSubTrades,
-      );
-    } else {
-      console.log("[pxe-bridge] Creating note for chainId:", params.chainId);
+    if (this.spendingLimitContract) {
+      // Reconcile before spending a fee. The bridge holds the allowlist off
+      // chain, so a drift between its copy and the account's stored root would
+      // otherwise surface as every transfer reverting in public, with nothing
+      // on chain to say which side is stale. The entrypoint derives the
+      // declared amount, recipient and witness from the payload it signs, so
+      // there is no per-call state for a concurrent send to overwrite.
+      await this.assertAllowlistRootCurrent();
     }
 
-    const submit = async () => {
-      if (this.spendingLimitContract) {
-        // Reconcile before spending a fee. The bridge holds the allowlist off
-        // chain now, so a drift between its copy and the account's stored root
-        // would otherwise surface as every transfer reverting in public, with
-        // nothing on chain to say which side is stale.
-        //
-        // Cheap: one utility read, the same shape the allowlist read used to
-        // be. The tree itself is built once and cached.
-        //
-        // Neither the declared amount and recipient nor the membership witness
-        // are pushed in here. The entrypoint derives all three from the payload
-        // it is signing, so there is no per-call state for a concurrent send to
-        // overwrite and nothing to serialize around.
-        await this.assertAllowlistRootCurrent();
-      }
-
-      return withTimeout(
-        token.methods.transfer_to_private(recipientAddress, amount).send({ from }),
-        TX_TIMEOUT_MS,
-      );
-    };
-
-    let result: unknown;
-    try {
-      result = await submit();
-    } catch (err) {
-      // A deadline is the one ambiguous case: send() may already have
-      // broadcast. Everything else here failed while building, proving or
-      // simulating, before the network saw anything, or landed as a revert
-      // that moved no funds.
-      if (err instanceof TimeoutError) {
-        throw new PostSubmissionError(
-          `Transaction did not confirm within ${TX_TIMEOUT_MS}ms and may still be included`,
-          undefined,
-          { cause: err },
-        );
-      }
-      throw err;
-    }
-
-    // Past this point the transfer is on chain. Everything below reads the
-    // result back, so a failure here is a reporting failure over a transfer
-    // that already happened, and must not be reported as a clean rejection.
-    return await this.readNoteResult(result);
+    const sent = await broadcastGates.run(gate, () =>
+      token.methods
+        .transfer_to_private(recipientAddress, amount)
+        .send({ from, wait: { dontThrowOnRevert: true } }),
+    );
+    const txHash = sent.receipt.txHash.toString();
+    return { txHash, observation: await this.observeTx(txHash) };
   }
 
   /**
-   * Turns a settled send into a CreateNoteResult.
-   *
-   * Split out so every throw on this path is a PostSubmissionError: the
-   * transfer has landed by the time any of it runs.
+   * Sends journaled bytes as they are. The gate runs first, exactly as for a
+   * fresh send; then the node gets the identical transaction, which carries
+   * the identical hash and protocol nullifier and so lands at most once.
    */
-  private async readNoteResult(result: unknown): Promise<CreateNoteResult> {
-    const raw = result as unknown as Record<string, unknown>;
-    const receiptInner =
-      typeof raw["receipt"] === "object" && raw["receipt"] !== null
-        ? (raw["receipt"] as Record<string, unknown>)
-        : raw;
+  async broadcastPrepared(txBytes: Buffer, gate: BroadcastGate): Promise<TransferOutcome> {
+    if (!this.node) throw new Error("Client not connected");
+    const { Tx, TxStatus } = await import("@aztec-labs/aztec.js/tx");
+    const { waitForTx } = await import("@aztec-labs/aztec.js/node");
+    const tx = Tx.fromBuffer(txBytes);
+    const prepared = await preparedTransaction(tx);
+    await gate.beforeBroadcast(prepared);
+    // Synchronous from the final check to the call (see BroadcastGate).
+    gate.beforeSend(prepared);
+    await this.node.sendTx(tx);
+    await waitForTx(this.node, tx.getTxHash(), {
+      waitForStatus: TxStatus.PROPOSED,
+      dontThrowOnRevert: true,
+      timeout: TX_TIMEOUT_MS / 1000,
+    });
+    return { txHash: prepared.txHash, observation: await this.observeTx(prepared.txHash) };
+  }
 
-    const rawTxHash = receiptInner["txHash"] ?? raw["txHash"];
-    if (rawTxHash === undefined || rawTxHash === null) {
-      throw new PostSubmissionError("Missing txHash in transaction receipt");
-    }
-    const txHash = String(rawTxHash);
+  async observeTx(txHash: string): Promise<NodeObservation> {
+    if (!this.node) throw new Error("Client not connected");
+    const { TxHash } = await import("@aztec-labs/aztec.js/tx");
+    const receipt = await this.node.getTxReceipt(TxHash.fromString(txHash), {
+      includeTxEffect: true,
+    });
+    return nodeObservation(receipt);
+  }
 
-    // v5 dropped noteCommitments/nullifierHashes from the receipt. The note
-    // hashes and nullifiers live on the tx effect, which send() does not
-    // attach, so it has to be fetched. Reading the old fields silently yielded
-    // undefined and every successful transfer reported "Incomplete transaction
-    // receipt".
-    const node = (this.wallet as unknown as { aztecNode: AztecNodeLike }).aztecNode;
-    let detailed;
-    try {
-      detailed = await node.getTxReceipt(rawTxHash as never, { includeTxEffect: true });
-    } catch (err) {
-      throw new PostSubmissionError(
-        "Transfer landed but its effects could not be read back",
-        txHash,
-        { cause: err },
-      );
-    }
-    const effect = detailed?.txEffect?.data ?? detailed?.txEffect;
+  /**
+   * Aztec's protocol chain id is the L1 chain id (the tx context's `chainId`
+   * is set from it), so both members read `l1ChainId`; `protocolVersion` is
+   * the numeric rollup version (approved 2026-10-19).
+   */
+  async networkIdentity(): Promise<NodeNetwork> {
+    if (!this.node) throw new Error("Client not connected");
+    const info = await this.node.getNodeInfo();
+    return {
+      aztecChainId: String(info.l1ChainId),
+      protocolVersion: String(info.rollupVersion),
+      rollupAddress: info.l1ContractAddresses.rollupAddress.toString().toLowerCase(),
+      l1ChainId: String(info.l1ChainId),
+    };
+  }
 
-    // A transfer_to_private emits 2 note hashes and 3 nullifiers, so no single
-    // value identifies the note. Return both sets and let the caller choose,
-    // rather than picking an index here and calling it "the" note.
-    const noteHashes = (effect?.noteHashes ?? []).map((h) => h.toString());
-    const nullifiers = (effect?.nullifiers ?? []).map((n) => n.toString());
+  accountMode(): AccountMode {
+    return this.spendingLimitConfig ? "spending_limit" : "standard";
+  }
 
-    const noteCommitment = noteHashes[0];
-    const nullifierHash = nullifiers[0];
-    if (!noteCommitment || !nullifierHash) {
-      // The node has the transaction but not yet its effects. The transfer
-      // happened; only this read is early.
-      throw new PostSubmissionError("Incomplete transaction receipt", txHash);
-    }
-
-    console.log("[pxe-bridge] Note created, txHash:", txHash);
-
-    return { noteHashes, nullifiers, l2TxHash: txHash, noteCommitment, nullifierHash };
+  accountPreexisted(): boolean {
+    return this.preexisted;
   }
 
   pinnedToken(): string | undefined {

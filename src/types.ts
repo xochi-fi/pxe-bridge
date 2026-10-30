@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { AccountMode, NodeObservation } from "./settlement.js";
 
 // JSON-RPC envelope
 export const JsonRpcRequestSchema = z.object({
@@ -21,73 +22,54 @@ export type JsonRpcResponse =
       error: { code: number; message: string; data?: unknown };
     };
 
-// aztec_createNote params
-export const CreateNoteParamsSchema = z
-  .object({
-    recipient: z
-      .string()
-      .regex(/^0x[0-9a-fA-F]{64}$/, "Must be 32-byte hex address")
-      .refine((s) => !/^0x0{64}$/.test(s), "Recipient must not be the zero address"),
-    token: z.string().regex(/^0x[0-9a-fA-F]{64}$/, "Must be 32-byte hex address"),
-    amount: z
-      .string()
-      .regex(/^[1-9]\d*$/, "Must be positive integer without leading zeros")
-      .refine((s) => s.length <= 78, "Amount exceeds uint256 max (78 digits)"),
-    chainId: z.number().int().positive(),
-    // XIP-1 trade context (optional, but all-or-nothing)
-    tradeId: z
-      .string()
-      .regex(/^0x[0-9a-fA-F]{64}$/, "Must be 32-byte hex identifier")
-      .optional(),
-    subTradeIndex: z.number().int().min(0).optional(),
-    totalSubTrades: z.number().int().min(2).max(100).optional(),
-  })
-  .refine(
-    (data) => {
-      const fields = [data.tradeId, data.subTradeIndex, data.totalSubTrades];
-      const provided = fields.filter((f) => f !== undefined).length;
-      return provided === 0 || provided === 3;
-    },
-    {
-      message: "tradeId, subTradeIndex, and totalSubTrades must all be provided together",
-    },
-  )
-  .refine(
-    (data) => {
-      if (data.subTradeIndex !== undefined && data.totalSubTrades !== undefined) {
-        return data.subTradeIndex < data.totalSubTrades;
-      }
-      return true;
-    },
-    { message: "subTradeIndex must be less than totalSubTrades" },
-  );
+/**
+ * What the client moves: one `transfer_to_private` of `amount` of `token` to
+ * `recipient`. Validated upstream by `CreateNoteV1Schema` (settlement.ts); the
+ * client never sees the operation terms it does not need.
+ */
+export interface TransferParams {
+  recipient: string;
+  token: string;
+  amount: string;
+}
 
-export type CreateNoteParams = z.infer<typeof CreateNoteParamsSchema>;
+/** The exact transaction the bridge journals before anything may send it. */
+export interface PreparedTransaction {
+  txHash: string;
+  txBytes: Buffer;
+  /** Protocol expiry (unix seconds): the node refuses inclusion after it. */
+  expirationTimestamp: bigint;
+}
 
-export interface CreateNoteResult {
-  /**
-   * Every note hash the transaction emitted, in emission order. A
-   * `transfer_to_private` emits two, so a single value cannot identify "the"
-   * note without the caller deciding which one it means.
-   */
-  noteHashes: string[];
-  /**
-   * Every nullifier the transaction emitted, in emission order. Index 0 is the
-   * protocol (transaction) nullifier rather than a note's: this transfer
-   * spends the public balance and so nullifies no note.
-   */
-  nullifiers: string[];
-  l2TxHash: string;
-  /**
-   * @deprecated `noteHashes[0]`. Kept so existing callers keep parsing, but the
-   * pick is arbitrary; read `noteHashes` and choose deliberately.
-   */
-  noteCommitment: string;
-  /**
-   * @deprecated `nullifiers[0]`, which is the protocol nullifier and not the
-   * nullifier of any note this transfer created. Read `nullifiers` instead.
-   */
-  nullifierHash: string;
+/**
+ * Two steps around handing the exact proven transaction to the node.
+ *
+ * `beforeBroadcast` runs first and may wait: this is where rpc.ts journals
+ * the transaction, asks Riddler, and marks may-broadcast. Throwing stops the
+ * broadcast.
+ *
+ * `beforeSend` is the final step and is SYNCHRONOUS: the client calls it and
+ * then invokes `sendTx` in the same synchronous run, with no `await` between
+ * them, so a bound it checks (rpc.ts: `validUntil` and the protocol
+ * expiration) still holds when the node is called. Throwing stops the send.
+ */
+export interface BroadcastGate {
+  beforeBroadcast(tx: PreparedTransaction): Promise<void>;
+  beforeSend(tx: PreparedTransaction): void;
+}
+
+/** A broadcast that reached a proposed block, with what the node reports. */
+export interface TransferOutcome {
+  txHash: string;
+  observation: NodeObservation;
+}
+
+/** Network identity the node reports; `genesisOrNetworkDigest` is config. */
+export interface NodeNetwork {
+  aztecChainId: string;
+  protocolVersion: string;
+  rollupAddress: string;
+  l1ChainId: string;
 }
 
 // Fee Juice claim from L1->L2 bridge (one-time account deployment)
@@ -164,34 +146,30 @@ export const AccountDeploymentSchema = z
 
 export type AccountDeployment = z.infer<typeof AccountDeploymentSchema>;
 
-/**
- * Raised when createNote fails at a point where the transfer may already be on
- * chain: the send deadline expired, or the transfer succeeded and only reading
- * the result back failed.
- *
- * The caller must not treat this as "nothing happened". `rpc.ts` counts it
- * against the daily window instead of releasing the reservation, because
- * releasing a transfer that landed lets the same failure be repeated past the
- * cap.
- *
- * Lives here rather than in `aztec-client.ts` so `rpc.ts` can narrow on it
- * without importing the Aztec SDK.
- */
-export class PostSubmissionError extends Error {
-  constructor(
-    message: string,
-    readonly txHash?: string,
-    options?: { cause?: unknown },
-  ) {
-    super(message, options);
-    this.name = "PostSubmissionError";
-  }
-}
-
 // Abstraction over AztecClient for testability
 export interface IAztecClient {
   connect(): Promise<void>;
-  createNote(params: CreateNoteParams): Promise<CreateNoteResult>;
+  /**
+   * Proves a transfer and broadcasts it through `gate`. Everything thrown
+   * before `gate.beforeBroadcast` resolves happened before the network saw
+   * anything; the caller tracks which side of the gate a failure is on.
+   */
+  createNote(params: TransferParams, gate: BroadcastGate): Promise<TransferOutcome>;
+  /**
+   * Broadcasts journaled bytes exactly as prepared, through `gate`. Never
+   * rebuilds or re-proves: the same bytes carry the same transaction hash and
+   * nullifiers, so they can be included at most once.
+   */
+  broadcastPrepared(txBytes: Buffer, gate: BroadcastGate): Promise<TransferOutcome>;
+  /** Read-only: what the node currently says about `txHash`. */
+  observeTx(txHash: string): Promise<NodeObservation>;
+  /** Live read of the node's network identity. */
+  networkIdentity(): Promise<NodeNetwork>;
+  /** Which account class signs: decided by configuration at construction. */
+  accountMode(): AccountMode;
+  /** Whether the account was already initialized on chain before connect(). */
+  accountPreexisted(): boolean;
+  getAddress(): string | null;
   getVersion(): Promise<string>;
   /**
    * The only token the account can move, or undefined when it is not pinned.
@@ -205,10 +183,9 @@ export interface IAztecClient {
 }
 
 /**
- * Answer for a transfer that may be on chain but whose result could not be
- * read back. Shared, because `rpc.ts` produces it live and `audit.ts`
- * reconstructs it when replaying a key after a restart, and a caller matching
- * on the string must see the same one either way.
+ * Answer for a transfer that may be on chain but whose outcome is not known.
+ * Carried by every `submitted_unknown` and `unknown` observation, so a caller
+ * matching on the string sees the same one from a live send and a recovery.
  */
 export const SUBMITTED_UNKNOWN_MESSAGE =
   "Transaction submitted, result unknown -- do not retry without reconciling";
@@ -229,4 +206,14 @@ export const RPC_ERRORS = {
   // them, which is not an interface.
   REQUEST_IN_FLIGHT: -32001,
   SUBMITTED_UNKNOWN: -32002,
+  // Settlement operation contract (docs/settlement-operations.md).
+  /** Same operation id, different fingerprint: no work was done. */
+  OPERATION_CONFLICT: -32003,
+  /**
+   * Journal writes are disabled, or it cannot be read. This request sent
+   * nothing; it says nothing about earlier requests for the operation.
+   */
+  JOURNAL_UNAVAILABLE: -32004,
+  /** Provably not broadcast (refused, or held before may-broadcast). */
+  NOT_SUBMITTED: -32005,
 } as const;
