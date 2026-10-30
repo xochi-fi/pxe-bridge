@@ -605,10 +605,6 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           sendJson(res, 415, { error: "Content-Type must be application/json" });
           return;
         }
-        if (!attestationRateLimiter.allow(attestationIp)) {
-          sendJson(res, 429, { error: "Too many requests" });
-          return;
-        }
         const releaseBody = acquireBodyLease();
         if (releaseBody === null) {
           sendJson(res, 503, { error: "Service busy" });
@@ -643,6 +639,10 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           }
         } finally {
           releaseBody();
+        }
+        if (!attestationRateLimiter.allow(attestationIp)) {
+          sendJson(res, 429, { error: "Too many requests" });
+          return;
         }
         const lease = acquireBackendLease();
         if (lease === null) {

@@ -552,18 +552,44 @@ describe("readiness attestation producer", () => {
     if (!address || typeof address === "string") throw new Error("server did not bind");
     const url = `http://127.0.0.1:${address.port}/api/attestation`;
     try {
-      for (let i = 0; i < 60; i++) {
+      for (let i = 0; i < 30; i++) {
         const response = await fetch(url, {
           method: "POST",
           headers: { authorization: "Bearer attest-invalid-key" },
         });
         expect(response.status).toBe(415);
       }
+      for (let i = 0; i < 30; i++) {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: {
+            authorization: "Bearer attest-invalid-key",
+            "content-type": "application/json",
+          },
+          body: "{",
+        });
+        expect(response.status).toBe(400);
+      }
       const rateLimited = await fetch(url, {
         method: "POST",
         headers: { authorization: "Bearer attest-invalid-key" },
       });
       expect(rateLimited.status).toBe(429);
+
+      const valid = await fetch(url, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer attest-invalid-key",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "aztec_attestRecipientMembership",
+          params: params(),
+        }),
+      });
+      expect(valid.status).toBe(200);
     } finally {
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),

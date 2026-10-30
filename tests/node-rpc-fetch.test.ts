@@ -38,6 +38,32 @@ describe("boundedNodeFetch", () => {
     });
   });
 
+  it("preserves JSON-RPC errors returned with a non-success status", async () => {
+    const server = createServer((_req, res) => {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          error: { code: -32000, message: "Existing nullifier" },
+        }),
+      );
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("server did not bind TCP");
+
+    const transport = boundedNodeFetch(1_000);
+    await expect(
+      transport(`http://127.0.0.1:${address.port}`, {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "node_sendTx",
+      }),
+    ).rejects.toThrow("Aztec node returned HTTP 400: Existing nullifier");
+  });
+
   it("composes the caller cancellation with its transport deadline", async () => {
     const server = createServer(() => {});
     servers.push(server);

@@ -59,6 +59,14 @@ type NodeRpcFetch = (
   noRetry?: boolean,
 ) => Promise<{ response: unknown; headers: Headers }>;
 
+function nodeRpcErrorMessage(decoded: unknown): string | undefined {
+  if (typeof decoded !== "object" || decoded === null || !("error" in decoded)) return undefined;
+  const error = decoded.error;
+  if (typeof error !== "object" || error === null || !("message" in error)) return undefined;
+  const message = error.message;
+  return typeof message === "string" && message.length <= 1_024 ? message : undefined;
+}
+
 /**
  * Aztec's default JSON-RPC transport has no deadline. Every client used by the
  * bridge gets this transport so a dead HTTP peer cannot retain readiness,
@@ -99,7 +107,12 @@ export function boundedNodeFetch(
         );
       }
       if (!response.ok) {
-        throw new Error(`Aztec node returned HTTP ${response.status}`);
+        const message = nodeRpcErrorMessage(decoded);
+        throw new Error(
+          message
+            ? `Aztec node returned HTTP ${response.status}: ${message}`
+            : `Aztec node returned HTTP ${response.status}`,
+        );
       }
       return { response: decoded, headers: response.headers };
     } catch (cause) {
