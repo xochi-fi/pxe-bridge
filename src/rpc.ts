@@ -470,6 +470,7 @@ async function observe(
         };
       }
       let observation = observationFrom(attempt, node, (s.now ?? Date.now)());
+      let unchanged = false;
       if (
         "observedAt" in observation &&
         op.observation != null &&
@@ -477,10 +478,16 @@ async function observe(
         sameCanonicalOutcome(op.observation, observation)
       ) {
         observation = { ...observation, observedAt: op.observation.observedAt };
+        unchanged = true;
       }
-      // Reads record only a finalized outcome, so polling does not churn the
-      // journal; a changed canonical outcome is still returned immediately.
-      if (observation.state === "finalized" || observation.state === "reverted") {
+      // Reads record a finalized outcome, and a mined outcome the journal does
+      // not hold yet, so an unchanged outcome keeps its first observedAt across
+      // polls and restarts without a write per poll.
+      if (
+        observation.state === "finalized" ||
+        observation.state === "reverted" ||
+        ("observedAt" in observation && !unchanged)
+      ) {
         recordObservation(s, op.operationId, observation);
       }
       return observation;
@@ -1031,6 +1038,22 @@ async function runAttempt(
   if (ctx.limits && mode.kind !== "rebroadcast") {
     const reservation = ctx.limits.reserve(amount);
     if (!reservation.allowed) {
+      if (mode.kind === "resume") {
+        // Already admitted and journaled. Abandoning it here would re-prove
+        // under a new hash, which Riddler refuses once it has bound this one;
+        // the exact bytes stay held until the window has room again.
+        console.warn(
+          `[rpc] Holding prepared ${op.operationId}: limits: ${reservation.reason}`,
+        );
+        const observation: Observation = {
+          state: "prepared",
+          txHash: mode.attempt.txHash,
+          expirationTimestamp: mode.attempt.expirationTimestamp,
+          hold: op.hold ?? "interrupted",
+        };
+        await audit(ctx, op, fingerprint, observation);
+        return answer(id, { operationId: op.operationId, fingerprint }, observation);
+      }
       return notSubmitted(id, ctx, s, op, fingerprint, `limits: ${reservation.reason}`, true);
     }
     reservationId = reservation.reservationId;
@@ -1213,6 +1236,13 @@ async function handleGetSettlement(
         : await observe(s, client, op);
     if (driving && observation.state === "submitted_unknown") {
       observation = { state: "request_in_flight" };
+    }
+    // The observation may have just committed a terminal outcome (or lost
+    // that commit to a concurrent one): answer from the durable row.
+    op = s.journal.get(operationId) ?? op;
+    attempts = s.journal.attempts(operationId);
+    if ((op.state === "finalized" || op.state === "reverted") && op.observation) {
+      observation = op.observation;
     }
   } catch (cause) {
     return journalFault(id, s, operationId, cause);
