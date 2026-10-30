@@ -117,6 +117,51 @@ describe("SettlementJournal", () => {
     expect(reopened.get("op-1")?.state).toBe("may_broadcast");
   });
 
+  it.each([
+    ["null", (_journalId: string, _generation: number) => null],
+    ["an array", (journalId: string, generation: number) => [journalId, generation]],
+    ["a missing journal id", (_journalId: string, generation: number) => ({ generation })],
+    ["a missing generation", (journalId: string, _generation: number) => ({ journalId })],
+    ["an extra property", (journalId: string, generation: number) => ({ journalId, generation, extra: true })],
+    ["a non-string journal id", (_journalId: string, generation: number) => ({ journalId: 7, generation })],
+    ["a non-number generation", (journalId: string, _generation: number) => ({ journalId, generation: "1" })],
+    ["a fractional generation", (journalId: string, generation: number) => ({ journalId, generation: generation + 0.5 })],
+    ["a negative generation", (journalId: string, _generation: number) => ({ journalId, generation: -1 })],
+    ["an unsafe generation", (journalId: string, _generation: number) => ({
+      journalId,
+      generation: Number.MAX_SAFE_INTEGER + 1,
+    })],
+  ] satisfies ReadonlyArray<readonly [string, (journalId: string, generation: number) => unknown]>)(
+    "halts writes but keeps reads when the high-water mark is %s",
+    (_name, malformed) => {
+      const path = tempJournalPath();
+      const journal = openBoundJournal(path);
+      journal.claim("op-1", fingerprint, terms);
+      const { journalId, generation } = journal.meta();
+      journal.close();
+      writeFileSync(`${path}.hwm`, JSON.stringify(malformed(journalId, generation)));
+
+      const reopened = SettlementJournal.open(path);
+      expect(reopened.health()).toMatchObject({ writable: false, reason: "rollback_detected" });
+      expect(reopened.get("op-1")).toMatchObject({ fingerprint, terms, state: "claimed" });
+      expect(() => reopened.claim("op-2", fingerprint, terms)).toThrow(JournalWriteError);
+    },
+  );
+
+  it("preserves journal-id mismatch rollback detection for a valid high-water shape", () => {
+    const path = tempJournalPath();
+    const journal = openBoundJournal(path);
+    const generation = journal.meta().generation;
+    journal.close();
+    writeFileSync(`${path}.hwm`, JSON.stringify({ journalId: "another-journal", generation }));
+
+    expect(SettlementJournal.open(path).health()).toMatchObject({
+      writable: false,
+      reason: "rollback_detected",
+      detail: expect.stringContaining("is not the high-water mark's another-journal"),
+    });
+  });
+
   it("halts writes visibly on a corrupt file, and says it cannot read", () => {
     const path = tempJournalPath();
     writeFileSync(path, Buffer.alloc(4096, 0x5a));

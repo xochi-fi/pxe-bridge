@@ -868,16 +868,35 @@ async function notReady(
   refusal: Extract<AdmissionRefusal, { kind: "not_ready" }>,
 ): Promise<JsonRpcResponse> {
   const primaryReason = refusal.reasons[0] ?? "readiness_observation_failed";
-  try {
-    s.journal.recordNotSubmitted(op.operationId, primaryReason, true);
-  } catch (cause) {
-    return journalFault(id, s, op.operationId, cause);
+  let observation: Observation;
+  if (op.state === "prepared") {
+    const attempt = currentAttempt(s.journal, op);
+    if (!attempt) {
+      return journalFault(
+        id,
+        s,
+        op.operationId,
+        new JournalUnreadableError(`current attempt of prepared operation ${op.operationId} missing`),
+      );
+    }
+    observation = {
+      state: "prepared",
+      txHash: attempt.txHash,
+      expirationTimestamp: attempt.expirationTimestamp,
+      hold: op.hold ?? "interrupted",
+    };
+  } else {
+    try {
+      s.journal.recordNotSubmitted(op.operationId, primaryReason, true);
+    } catch (cause) {
+      return journalFault(id, s, op.operationId, cause);
+    }
+    observation = {
+      state: "not_submitted",
+      reason: primaryReason,
+      retryableAfterRevalidation: true,
+    };
   }
-  const observation: Observation = {
-    state: "not_submitted",
-    reason: primaryReason,
-    retryableAfterRevalidation: true,
-  };
   await audit(ctx, op, fingerprint, observation);
   return rpcError(id, RPC_ERRORS.NOT_READY, "Bridge is not ready for new settlement admission", {
     reason: "bridge_not_ready",

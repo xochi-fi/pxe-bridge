@@ -209,11 +209,6 @@ interface AttemptRow {
   may_broadcast_at: number | null;
 }
 
-interface HighWaterMark {
-  journalId: string;
-  generation: number;
-}
-
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS operations (
@@ -471,9 +466,9 @@ export class SettlementJournal {
    */
   private checkHighWaterMark(): void {
     if (this.fresh) return;
-    let mark: HighWaterMark;
+    let parsed: unknown;
     try {
-      mark = JSON.parse(readFileSync(this.hwmPath, "utf8")) as HighWaterMark;
+      parsed = JSON.parse(readFileSync(this.hwmPath, "utf8")) as unknown;
     } catch (cause) {
       const missing = (cause as NodeJS.ErrnoException).code === "ENOENT";
       this.disable(
@@ -484,15 +479,42 @@ export class SettlementJournal {
       );
       return;
     }
-    if (mark.journalId !== this.journalId) {
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed) ||
+      Object.keys(parsed).length !== 2 ||
+      !Object.hasOwn(parsed, "journalId") ||
+      !Object.hasOwn(parsed, "generation")
+    ) {
       this.disable(
         "rollback_detected",
-        `journal id ${this.journalId} is not the high-water mark's ${mark.journalId}`,
+        `high-water mark ${this.hwmPath} is not an exact journalId/generation object`,
       );
-    } else if (this.generation < mark.generation) {
+      return;
+    }
+    const mark = parsed as Record<string, unknown>;
+    if (
+      typeof mark["journalId"] !== "string" ||
+      typeof mark["generation"] !== "number" ||
+      !Number.isSafeInteger(mark["generation"]) ||
+      mark["generation"] < 0
+    ) {
       this.disable(
         "rollback_detected",
-        `journal generation ${this.generation} is below the high-water mark ${mark.generation}`,
+        `high-water mark ${this.hwmPath} has an invalid journal id or generation`,
+      );
+      return;
+    }
+    if (mark["journalId"] !== this.journalId) {
+      this.disable(
+        "rollback_detected",
+        `journal id ${this.journalId} is not the high-water mark's ${mark["journalId"]}`,
+      );
+    } else if (this.generation < mark["generation"]) {
+      this.disable(
+        "rollback_detected",
+        `journal generation ${this.generation} is below the high-water mark ${mark["generation"]}`,
       );
     }
   }
@@ -1063,6 +1085,17 @@ export class SettlementJournal {
         at,
       );
     });
+  }
+
+  latestRootUpdate(): { id: string; root: string } | undefined {
+    return this.read((db) =>
+      db
+        .prepare(
+          `SELECT id, root FROM root_update_outbox
+           ORDER BY rowid DESC LIMIT 1`,
+        )
+        .get(),
+    ) as { id: string; root: string } | undefined;
   }
 
   pendingRootUpdates(): RootUpdateOutboxEntry[] {
