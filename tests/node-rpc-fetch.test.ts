@@ -37,4 +37,23 @@ describe("boundedNodeFetch", () => {
       response: { jsonrpc: "2.0", id: 1, result: "ready" },
     });
   });
+
+  it("composes the caller cancellation with its transport deadline", async () => {
+    const server = createServer(() => {});
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("server did not bind TCP");
+
+    const caller = new AbortController();
+    const transport = boundedNodeFetch(60_000, caller.signal);
+    const pending = transport(`http://127.0.0.1:${address.port}`, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "node_getNodeInfo",
+    });
+    caller.abort(new Error("readiness deadline exceeded"));
+
+    await expect(pending).rejects.toThrow("readiness deadline exceeded");
+  });
 });

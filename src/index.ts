@@ -9,6 +9,7 @@ import {
   type SponsoredFpcSetting,
 } from "./aztec-client.js";
 import {
+  assertDistinctCredentials,
   createApp,
   createInitializationApp,
   RESPONSE_TIMEOUT_MS,
@@ -280,8 +281,19 @@ if (MAY_BROADCAST_URL && MAY_BROADCAST_TOKEN) {
 // Key for POST /admin/resume. Separate from the RPC key on purpose; see
 // ServerOptions.adminKey.
 const ADMIN_KEY = process.env["PXE_BRIDGE_ADMIN_KEY"];
-if (API_KEY !== undefined && ADMIN_KEY !== undefined && API_KEY === ADMIN_KEY) {
-  console.error("[pxe-bridge] PXE_BRIDGE_ADMIN_KEY must differ from PXE_BRIDGE_API_KEY");
+try {
+  assertDistinctCredentials([
+    ["PXE_BRIDGE_API_KEY", API_KEY],
+    ["PXE_BRIDGE_ADMIN_KEY", ADMIN_KEY],
+    ["PXE_BRIDGE_MAY_BROADCAST_TOKEN", MAY_BROADCAST_TOKEN],
+    ["PXE_BRIDGE_ATTESTATION_API_KEY", process.env["PXE_BRIDGE_ATTESTATION_API_KEY"]],
+    [
+      "PXE_BRIDGE_ATTESTATION_RELAY_TOKEN",
+      process.env["PXE_BRIDGE_ATTESTATION_RELAY_TOKEN"],
+    ],
+  ]);
+} catch (err) {
+  console.error(`[pxe-bridge] ${err instanceof Error ? err.message : String(err)}`);
   process.exit(1);
 }
 if (limits && !ADMIN_KEY) {

@@ -64,9 +64,18 @@ type NodeRpcFetch = (
  * bridge gets this transport so a dead HTTP peer cannot retain readiness,
  * recovery, or version calls after their HTTP request has ended.
  */
-export function boundedNodeFetch(timeoutMs = NODE_RPC_TIMEOUT_MS): NodeRpcFetch {
+export function boundedNodeFetch(
+  timeoutMs = NODE_RPC_TIMEOUT_MS,
+  callerSignal?: AbortSignal,
+): NodeRpcFetch {
   return async (host, body, extraHeaders = {}) => {
     const controller = new AbortController();
+    const abortForCaller = (): void => controller.abort(callerSignal?.reason);
+    if (callerSignal?.aborted) {
+      abortForCaller();
+    } else {
+      callerSignal?.addEventListener("abort", abortForCaller, { once: true });
+    }
     const timer = setTimeout(
       () => controller.abort(new Error("Aztec node request timed out")),
       timeoutMs,
@@ -94,12 +103,14 @@ export function boundedNodeFetch(timeoutMs = NODE_RPC_TIMEOUT_MS): NodeRpcFetch 
       }
       return { response: decoded, headers: response.headers };
     } catch (cause) {
+      if (callerSignal?.aborted) callerSignal.throwIfAborted();
       if (controller.signal.aborted) {
         throw new Error("Aztec node request timed out", { cause });
       }
       throw cause;
     } finally {
       clearTimeout(timer);
+      callerSignal?.removeEventListener("abort", abortForCaller);
     }
   };
 }
@@ -1448,6 +1459,14 @@ export class AztecClient implements IAztecClient {
    */
   async observeReadinessChain(signal?: AbortSignal): Promise<ChainReadinessFacts> {
     signal?.throwIfAborted();
+    let readinessNode = this.node;
+    if (readinessNode && signal) {
+      const { createAztecNodeClient } = await import("@aztec-labs/aztec.js/node");
+      signal.throwIfAborted();
+      readinessNode = createAztecNodeClient(this.nodeUrl, {
+        fetch: boundedNodeFetch(NODE_RPC_TIMEOUT_MS, signal),
+      });
+    }
     const observedAt = Math.floor(Date.now() / 1_000);
     const config = this.spendingLimitConfig;
     const deployment = config?.deployment;
@@ -1460,6 +1479,7 @@ export class AztecClient implements IAztecClient {
       reason: ReadinessReason,
       cause?: unknown,
     ): ReadinessFact<T> => {
+      if (signal?.aborted) signal.throwIfAborted();
       if (cause !== undefined) {
         console.error(`[pxe-bridge] Readiness ${stage} failed:`, cause);
       }
@@ -1492,9 +1512,9 @@ export class AztecClient implements IAztecClient {
     let network: ChainReadinessFacts["network"] = unknown("network_identity_unknown");
     let nodeInfo: NodeInfo | null = null;
     signal?.throwIfAborted();
-    if (this.node) {
+    if (readinessNode) {
       try {
-        nodeInfo = await this.node.getNodeInfo();
+        nodeInfo = await readinessNode.getNodeInfo();
         const settlementNetwork = settlementNetworkFromNodeInfo(nodeInfo);
         network = known({
           nodeVersion: nodeInfo.nodeVersion,
@@ -1512,9 +1532,9 @@ export class AztecClient implements IAztecClient {
     let nodeAcceptingTransactions: ChainReadinessFacts["nodeAcceptingTransactions"] =
       unknown("node_readiness_unknown");
     signal?.throwIfAborted();
-    if (this.node) {
+    if (readinessNode) {
       try {
-        nodeAcceptingTransactions = known(await this.node.isReady());
+        nodeAcceptingTransactions = known(await readinessNode.isReady());
       } catch (cause) {
         nodeAcceptingTransactions = failed(
           "transaction readiness read",
@@ -1526,9 +1546,9 @@ export class AztecClient implements IAztecClient {
 
     let worldState: ChainReadinessFacts["worldState"] = unknown("world_state_unknown");
     signal?.throwIfAborted();
-    if (this.node) {
+    if (readinessNode) {
       try {
-        const status = await this.node.getWorldStateSyncStatus();
+        const status = await readinessNode.getWorldStateSyncStatus();
         worldState = known({
           latestBlockNumber: Number(status.latestBlockNumber),
           finalizedBlockNumber: Number(status.finalizedBlockNumber),
@@ -1543,14 +1563,14 @@ export class AztecClient implements IAztecClient {
     let finalized: ChainReadinessFacts["finalized"] = unknown("finalized_tip_unknown");
     let reference: { number: BlockNumber; hash: BlockHash } | null = null;
     signal?.throwIfAborted();
-    if (this.node) {
+    if (readinessNode) {
       try {
-        const tip = (await this.node.getChainTips()).finalized.block;
+        const tip = (await readinessNode.getChainTips()).finalized.block;
         if (Number(tip.number) === 0 || BigInt(tip.hash) === 0n) {
           finalized = unknown("finalized_tip_zero");
         } else {
           reference = { number: tip.number, hash: BlockHash.fromString(tip.hash) };
-          const block = await this.node.getBlockData(reference);
+          const block = await readinessNode.getBlockData(reference);
           if (
             !block ||
             Number(block.header.globalVariables.blockNumber) !== Number(tip.number) ||
@@ -1583,7 +1603,7 @@ export class AztecClient implements IAztecClient {
 
     signal?.throwIfAborted();
     if (
-      this.node &&
+      readinessNode &&
       reference &&
       this.solverAddress &&
       config &&
@@ -1591,7 +1611,7 @@ export class AztecClient implements IAztecClient {
       expectedAccountClassId
     ) {
       try {
-        const instance = await this.node.getContract(this.solverAddress, reference);
+        const instance = await readinessNode.getContract(this.solverAddress, reference);
         if (!instance) {
           accountContractClassId = unknown("account_class_unknown");
         } else {
@@ -1610,7 +1630,7 @@ export class AztecClient implements IAztecClient {
               names.map(async (name) => {
                 const layout = accountArtifact!.storageLayout[name];
                 if (!layout) throw new Error(`compiled artifact has no storage field ${name}`);
-                const value = await this.node!.getPublicStorageAt(
+                const value = await readinessNode.getPublicStorageAt(
                   reference!,
                   this.solverAddress!,
                   layout.slot,
@@ -1645,10 +1665,10 @@ export class AztecClient implements IAztecClient {
     }
 
     signal?.throwIfAborted();
-    if (this.node && reference && this.solverAddress && configuredToken) {
+    if (readinessNode && reference && this.solverAddress && configuredToken) {
       try {
         const tokenAddress = AztecAddress.fromStringUnsafe(configuredToken);
-        const instance = await this.node.getContract(tokenAddress, reference);
+        const instance = await readinessNode.getContract(tokenAddress, reference);
         if (!instance) {
           tokenContractClassId = unknown("token_class_unknown");
         } else {
@@ -1660,7 +1680,7 @@ export class AztecClient implements IAztecClient {
             const slot = await deriveStorageSlotInMap(layout.slot, this.solverAddress);
             inventory = known(
               (
-                await this.node.getPublicStorageAt(reference, tokenAddress, slot)
+                await readinessNode.getPublicStorageAt(reference, tokenAddress, slot)
               ).toBigInt(),
             );
           }
@@ -1671,20 +1691,20 @@ export class AztecClient implements IAztecClient {
     }
 
     signal?.throwIfAborted();
-    if (this.node && reference && this.solverAddress && nodeInfo) {
+    if (readinessNode && reference && this.solverAddress && nodeInfo) {
       try {
         const feeSlot = await deriveStorageSlotInMap(
           new Fr(FEE_JUICE_BALANCES_SLOT),
           this.solverAddress,
         );
         const observed = (
-          await this.node.getPublicStorageAt(
+          await readinessNode.getPublicStorageAt(
             reference,
             ProtocolContractAddress.FeeJuice,
             feeSlot,
           )
         ).toBigInt();
-        const predicted = await this.node.getPredictedMinFees(ManaUsageEstimate.Limit);
+        const predicted = await readinessNode.getPredictedMinFees(ManaUsageEstimate.Limit);
         if (predicted.length === 0) {
           throw new Error("node returned no predicted fee samples");
         }

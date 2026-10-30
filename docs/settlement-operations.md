@@ -233,8 +233,9 @@ One deadline bounds a whole `aztec_createNote`, started when the request is
 handled (`SETTLEMENT_DEADLINE_MS`, 145 s = the 150 s HTTP response deadline
 less 5 s): admission, cooldown, proving, the may-broadcast query and send all
 spend it. Every Aztec JSON-RPC call has its own aborting 10 s transport
-deadline, and the HTTP server admits at most 16 concurrent JSON-RPC handlers,
-so reads that outlive a caller cannot accumulate backend work. When the
+deadline, and the HTTP server admits at most 16 concurrent JSON-RPC backend
+leases. A lease stays held until tracked proving or send work actually settles,
+so work that outlives its caller cannot accumulate without bound. When the
 settlement deadline passes, the attempt's gate closes synchronously -- the
 gate is the only thing that marks -- so nothing the request started can be
 marked afterwards; a cooldown that outlasts it starts no proof. The HTTP

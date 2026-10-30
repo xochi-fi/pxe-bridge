@@ -540,6 +540,58 @@ describe("readiness attestation producer", () => {
     }
   });
 
+  it("shares the backend concurrency cap with the main RPC route", async () => {
+    const ctx = await setup([{ address: recipient, index: 137 }]);
+    let releaseObservation!: () => void;
+    const held = new Promise<void>((resolve) => {
+      releaseObservation = resolve;
+    });
+    let started = 0;
+    let allStarted!: () => void;
+    const sixteenStarted = new Promise<void>((resolve) => {
+      allStarted = resolve;
+    });
+    ctx.probe.observeAttestationChain = async () => {
+      started += 1;
+      if (started === 16) allStarted();
+      await held;
+      return ctx.probe.observation;
+    };
+    const server = createApp(new FakeAztecClient(), {
+      apiKey: "rpc-cap-key",
+      attestationApiKey: "attest-cap-key",
+      attestation: ctx.producer,
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("server did not bind");
+    const url = `http://127.0.0.1:${address.port}/api/attestation`;
+    const requestOptions = {
+      method: "POST",
+      headers: {
+        authorization: "Bearer attest-cap-key",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "aztec_attestRecipientMembership",
+        params: params(),
+      }),
+    };
+    const pending = Array.from({ length: 16 }, () => fetch(url, requestOptions));
+    try {
+      await sixteenStarted;
+      expect((await fetch(url, requestOptions)).status).toBe(503);
+    } finally {
+      releaseObservation();
+      await Promise.all(pending);
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
   it("isolates the attestation route and credential from RPC and admin", async () => {
     const ctx = await setup([{ address: recipient, index: 137 }]);
     const server = createApp(new FakeAztecClient(), {

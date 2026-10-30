@@ -209,6 +209,20 @@ function checkAuth(req: IncomingMessage, apiKey: string): boolean {
   return match && actual.length === expected.length;
 }
 
+export function assertDistinctCredentials(
+  credentials: readonly (readonly [name: string, value: string | undefined])[],
+): void {
+  const namesByValue = new Map<string, string>();
+  for (const [name, value] of credentials) {
+    if (value === undefined) continue;
+    const existing = namesByValue.get(value);
+    if (existing !== undefined) {
+      throw new Error(`${name} must differ from ${existing}`);
+    }
+    namesByValue.set(value, name);
+  }
+}
+
 type ReadinessProjection = Awaited<ReturnType<ReadinessObserver["observe"]>>;
 
 async function observeReadiness(
@@ -239,16 +253,21 @@ export function createInitializationApp(apiKey?: string): Server {
   const livenessRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const readinessRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const startupRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+  const malformedTargetRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const authFailureLimiter = new RateLimiter(AUTH_FAILURE_MAX, RATE_LIMIT_WINDOW_MS);
   const server = createServer((req, res) => {
+    const ip = req.socket.remoteAddress ?? "unknown";
     let pathname: string;
     try {
       pathname = new URL(req.url ?? "/", "http://localhost").pathname;
     } catch {
+      if (!malformedTargetRateLimiter.allow("malformed-target")) {
+        sendJson(res, 429, { error: "Too many requests" });
+        return;
+      }
       sendJson(res, 400, { error: "Invalid request target" });
       return;
     }
-    const ip = req.socket.remoteAddress ?? "unknown";
 
     if (req.method === "GET" && pathname === "/status") {
       if (!livenessRateLimiter.allow(ip)) {
@@ -365,7 +384,37 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
   const attestationRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const attestationAuthFailureLimiter = new RateLimiter(AUTH_FAILURE_MAX, RATE_LIMIT_WINDOW_MS);
   const startupRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+  const malformedTargetRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   let rpcInFlight = 0;
+  const acquireBackendLease = (): {
+    trackBackground: (call: Promise<unknown>) => void;
+    finish: () => void;
+  } | null => {
+    if (rpcInFlight >= MAX_RPC_IN_FLIGHT) return null;
+    rpcInFlight += 1;
+    let backgroundPending = 0;
+    let handlerFinished = false;
+    let capacityReleased = false;
+    const releaseCapacity = (): void => {
+      if (capacityReleased || !handlerFinished || backgroundPending !== 0) return;
+      capacityReleased = true;
+      rpcInFlight -= 1;
+    };
+    return {
+      trackBackground(call): void {
+        backgroundPending += 1;
+        const settled = (): void => {
+          backgroundPending -= 1;
+          releaseCapacity();
+        };
+        call.then(settled, settled);
+      },
+      finish(): void {
+        handlerFinished = true;
+        releaseCapacity();
+      },
+    };
+  };
 
   /**
    * Rejects an unauthenticated caller, charging the attempt to its own bucket.
@@ -391,6 +440,17 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
 
 
   const server = createServer(async (req, res) => {
+    let pathname: string;
+    try {
+      pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+    } catch {
+      if (!malformedTargetRateLimiter.allow("malformed-target")) {
+        sendJson(res, 429, { error: "Too many requests" });
+        return;
+      }
+      sendJson(res, 400, { error: "Invalid request target" });
+      return;
+    }
     // Nothing otherwise bounded how long a connection could stay open waiting
     // for a reply, so a stalled node held sockets indefinitely.
     //
@@ -414,7 +474,6 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
     });
 
     try {
-      const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
 
       // Public liveness is deliberately process-local. It exposes no funded
       // account detail and performs no Aztec RPC that an unauthenticated caller
@@ -510,8 +569,17 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           });
           return;
         }
-        const response = await handleAttestationRpc(parsed, opts.attestation);
-        sendJson(res, attestationHttpStatus(response), response);
+        const lease = acquireBackendLease();
+        if (lease === null) {
+          sendJson(res, 503, { error: "Service busy" });
+          return;
+        }
+        try {
+          const response = await handleAttestationRpc(parsed, opts.attestation);
+          sendJson(res, attestationHttpStatus(response), response);
+        } finally {
+          lease.finish();
+        }
         return;
       }
 
@@ -628,11 +696,11 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           return;
         }
 
-        if (rpcInFlight >= MAX_RPC_IN_FLIGHT) {
+        const lease = acquireBackendLease();
+        if (lease === null) {
           sendJson(res, 503, { error: "Service busy" });
           return;
         }
-        rpcInFlight += 1;
         try {
           const rpcCtx: RpcContext = {
             limits: opts.limits,
@@ -641,11 +709,12 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
             readiness: readinessObserver,
             idempotencyKey,
             signal: responseDeadline.signal,
+            trackBackground: lease.trackBackground,
           };
           const result = await handleRpcRequest(parsed, client, rpcCtx);
           sendJson(res, 200, result);
         } finally {
-          rpcInFlight -= 1;
+          lease.finish();
         }
         return;
       }

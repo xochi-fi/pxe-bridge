@@ -68,6 +68,8 @@ export interface RpcContext {
    * request started can be marked may-broadcast after the caller gave up.
    */
   signal?: AbortSignal | undefined;
+  /** Keeps the server's global backend-work lease until `call` actually settles. */
+  trackBackground?: ((call: Promise<unknown>) => void) | undefined;
 }
 
 function success(id: number | string | null, result: unknown): JsonRpcResponse {
@@ -623,7 +625,7 @@ async function createNoteWithin(
       return answer(id, existing, { state: "request_in_flight" });
     }
     s.inFlight.add(operationId);
-    const background = new BackgroundCalls();
+    const background = new BackgroundCalls(ctx.trackBackground);
     try {
       const resumed = await resumeExisting(
         id,
@@ -659,7 +661,7 @@ async function createNoteWithin(
   // The claim is released only once the request has answered AND every client
   // call it started has settled: a call that outlived its deadline is still
   // proving, and a retry must see "in flight" until it stops.
-  const background = new BackgroundCalls();
+  const background = new BackgroundCalls(ctx.trackBackground);
   try {
     return await driveOperation(id, client, ctx, s, operationId, fingerprint, terms, background, deadline);
   } finally {
@@ -672,7 +674,10 @@ class BackgroundCalls {
   private pending = 0;
   private onIdle: (() => void) | undefined;
 
+  constructor(private readonly trackForRequest?: (call: Promise<unknown>) => void) {}
+
   track(call: Promise<unknown>): void {
+    this.trackForRequest?.(call);
     this.pending += 1;
     const settled = (): void => {
       this.pending -= 1;

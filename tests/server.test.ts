@@ -1,12 +1,18 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { request, type Server } from "node:http";
-import { createApp, createInitializationApp, type ServerOptions } from "../src/server.js";
+import {
+  assertDistinctCredentials,
+  createApp,
+  createInitializationApp,
+  type ServerOptions,
+} from "../src/server.js";
 import { TransactionLimits } from "../src/limits.js";
 import type { MayBroadcastClient } from "../src/may-broadcast.js";
 import { rpcJson } from "./helpers.js";
 import {
   FakeAztecClient as SettlementFakeClient,
   openBoundJournal,
+  fakeMayBroadcast,
   readyObserver,
   settlementContext,
   v1Params,
@@ -58,6 +64,38 @@ function jsonPost(url: string, body: string, extraHeaders: Record<string, string
     body,
   });
 }
+
+function rawStatus(port: number, path: string): Promise<number | undefined> {
+  return new Promise((resolve, reject) => {
+    const req = request({ host: "127.0.0.1", port, method: "GET", path });
+    req.on("response", (response) => {
+      response.resume();
+      response.on("end", () => resolve(response.statusCode));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+describe("bearer credential isolation", () => {
+  it("requires every configured bearer credential to be distinct", () => {
+    expect(() =>
+      assertDistinctCredentials([
+        ["PXE_BRIDGE_API_KEY", "shared"],
+        ["PXE_BRIDGE_MAY_BROADCAST_TOKEN", "shared"],
+      ])
+    ).toThrow(
+      "PXE_BRIDGE_MAY_BROADCAST_TOKEN must differ from PXE_BRIDGE_API_KEY",
+    );
+    expect(() =>
+      assertDistinctCredentials([
+        ["PXE_BRIDGE_API_KEY", "rpc"],
+        ["PXE_BRIDGE_ADMIN_KEY", "admin"],
+        ["PXE_BRIDGE_MAY_BROADCAST_TOKEN", "outbound"],
+      ])
+    ).not.toThrow();
+  });
+});
 
 describe("HTTP server", () => {
   describe("GET /status", () => {
@@ -495,21 +533,28 @@ describe("public liveness isolation", () => {
     if (!addr || typeof addr === "string") throw new Error("server did not bind TCP");
 
     try {
-      const status = await new Promise<number | undefined>((resolve, reject) => {
-        const req = request({
-          host: "127.0.0.1",
-          port: addr.port,
-          method: "GET",
-          path: "http://localhost:99999/",
-        });
-        req.on("response", (response) => {
-          response.resume();
-          response.on("end", () => resolve(response.statusCode));
-        });
-        req.on("error", reject);
-        req.end();
-      });
-      expect(status).toBe(400);
+      for (let i = 0; i < 60; i++) {
+        expect(await rawStatus(addr.port, "http://localhost:99999/")).toBe(400);
+      }
+      expect(await rawStatus(addr.port, "http://localhost:99999/")).toBe(429);
+      expect((await fetch(`http://127.0.0.1:${addr.port}/status`)).status).toBe(200);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+
+  it("rate-limits malformed targets after application assembly", async () => {
+    const srv = createApp(new FakeAztecClient());
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    if (!addr || typeof addr === "string") throw new Error("server did not bind TCP");
+
+    try {
+      for (let i = 0; i < 60; i++) {
+        expect(await rawStatus(addr.port, "http://localhost:99999/")).toBe(400);
+      }
+      expect(await rawStatus(addr.port, "http://localhost:99999/")).toBe(429);
       expect((await fetch(`http://127.0.0.1:${addr.port}/status`)).status).toBe(200);
     } finally {
       await new Promise<void>((resolve) => srv.close(() => resolve()));
@@ -536,6 +581,39 @@ describe("public liveness isolation", () => {
       const timedOut = await Promise.all(Array.from({ length: 16 }, call));
       expect(timedOut.every((response) => response.status === 504)).toBe(true);
       expect((await call()).status).toBe(503);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+  it("holds backend capacity for settlement work after its response", async () => {
+    const key = "settlement-background-cap-key";
+    const stuck = new FakeAztecClient();
+    stuck.createNote = () => new Promise<never>(() => {});
+    const gate = fakeMayBroadcast("allow");
+    const settlement = settlementContext(openBoundJournal(), gate.client);
+    settlement.timeoutMs = 10;
+    const srv = createApp(stuck, {
+      apiKey: key,
+      readiness: settlement.readiness,
+      settlement,
+      responseTimeoutMs: 1_000,
+    });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+    const call = (index: number) => {
+      const operationId = `background-${index}`;
+      return jsonPost(url, rpcBody("aztec_createNote", [v1Params({ operationId })]), {
+        Authorization: `Bearer ${key}`,
+        "Idempotency-Key": operationId,
+      });
+    };
+
+    try {
+      const answered = await Promise.all(Array.from({ length: 16 }, (_, i) => call(i)));
+      expect(answered.every((response) => response.status === 200)).toBe(true);
+      expect((await call(16)).status).toBe(503);
     } finally {
       await new Promise<void>((resolve) => srv.close(() => resolve()));
     }
