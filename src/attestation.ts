@@ -20,13 +20,15 @@ import { Fr } from "@aztec-labs/foundation/curves/bn254";
 import { rootFromSiblingPath } from "./allowlist-tree.js";
 import type { AllowlistTree } from "./allowlist-tree.js";
 import type { SettlementJournal } from "./journal.js";
-import { NetworkIdentitySchema } from "./settlement.js";
+import { CorridorSchema, NetworkIdentitySchema } from "./settlement.js";
 import type { ReadinessSigner } from "./attestation-secret.js";
+import { finalizedTimeReason } from "./readiness.js";
 
 
 const HEX32 = /^0x[0-9a-fA-F]{64}$/;
 const HEX64 = /^0x[0-9a-fA-F]{128}$/;
 const HEX65 = /^0x[0-9a-fA-F]{130}$/;
+const NONNEGATIVE_DECIMAL = /^(?:0|[1-9]\d*)$/;
 const POSITIVE_DECIMAL = /^[1-9]\d*$/;
 const ROOT_UPDATE_RELAY_TIMEOUT_MS = 10_000;
 
@@ -51,9 +53,9 @@ export const RecipientDescriptorSchema = z
   })
   .strict();
 
-export const BindingAuthorizationSchema = z
+export const RecipientAuthorizationSchema = z
   .object({
-    bindingDigest: Hex32Schema,
+    digest: Hex32Schema,
     signature: z.string().regex(HEX64).transform((value) => value.toLowerCase()),
   })
   .strict();
@@ -63,12 +65,14 @@ export const AttestationParamsSchema = z
     descriptor: RecipientDescriptorSchema,
     descriptorDigest: Hex32Schema,
     recipient: Hex32Schema,
-    bindingAuthorization: BindingAuthorizationSchema,
+    network: NetworkIdentitySchema,
+    corridor: CorridorSchema,
+    recipientAuthorization: RecipientAuthorizationSchema,
   })
   .strict();
 
 export const AttestationMethodSchema = z.enum([
-  "aztec_attestMembership",
+  "aztec_attestRecipientMembership",
   "aztec_attestRecipientDeployment",
 ]);
 
@@ -115,16 +119,30 @@ export const RootUpdateRecordSchema = z
   })
   .strict();
 
+export const RootUpdateEnvelopeSchema = z
+  .object({
+    corridor_id: Hex32Schema,
+    corridor_revision: z.number().int().min(0).max(0xffffffff),
+    record: RootUpdateRecordSchema,
+  })
+  .strict();
+
 export const AttestationRefusalReasonSchema = z.enum([
   "invalid_descriptor",
   "descriptor_digest_mismatch",
   "recipient_mismatch",
   "profile_mismatch",
   "class_mismatch",
+  "corridor_mismatch",
   "network_mismatch",
   "binding_authorization_invalid",
   "finalized_history_unavailable",
   "finalized_reference_invalid",
+  "finalized_tip_stale",
+  "finalized_tip_from_future",
+  "account_address_mismatch",
+  "account_class_mismatch",
+  "account_not_initialized",
   "allowlist_snapshot_unavailable",
   "allowlist_root_mismatch",
   "membership_uncertain",
@@ -138,20 +156,41 @@ export const AttestationRefusalSchema = z
   .object({ status: z.literal("refused"), reason: AttestationRefusalReasonSchema })
   .strict();
 
-export const MembershipResultSchema = z.discriminatedUnion("status", [
-  z.object({ status: z.literal("signed"), primaryType: z.literal("Membership"), record: MembershipRecordSchema }).strict(),
+export const MembershipResultSchema = z.union([
+  MembershipRecordSchema,
   AttestationRefusalSchema,
 ]);
 
-export const RecipientDeploymentResultSchema = z.discriminatedUnion("status", [
-  z.object({ status: z.literal("signed"), primaryType: z.literal("RecipientDeployment"), record: RecipientDeploymentRecordSchema }).strict(),
+export const RecipientDeploymentResultSchema = z.union([
+  RecipientDeploymentRecordSchema,
   AttestationRefusalSchema,
 ]);
 
 export const AttestationRpcResultSchema = z.union([
-  MembershipResultSchema,
-  RecipientDeploymentResultSchema,
+  MembershipRecordSchema,
+  RecipientDeploymentRecordSchema,
 ]);
+
+export const AttestationRefusalDataSchema = z
+  .object({
+    signed: z.literal(false),
+    refusal: AttestationRefusalReasonSchema,
+  })
+  .strict();
+
+export const AttestationRpcRefusalResponseSchema = z
+  .object({
+    jsonrpc: z.literal("2.0"),
+    id: RpcIdSchema,
+    error: z
+      .object({
+        code: z.literal(-32010),
+        message: z.literal("Readiness attestation refused"),
+        data: AttestationRefusalDataSchema,
+      })
+      .strict(),
+  })
+  .strict();
 
 export const AttestationRpcResponseSchema = z.union([
   z
@@ -161,6 +200,7 @@ export const AttestationRpcResponseSchema = z.union([
       result: AttestationRpcResultSchema,
     })
     .strict(),
+  AttestationRpcRefusalResponseSchema,
   z
     .object({
       jsonrpc: z.literal("2.0"),
@@ -172,12 +212,6 @@ export const AttestationRpcResponseSchema = z.union([
     .strict(),
 ]);
 
-export const RootUpdateEnvelopeSchema = z
-  .object({
-    primaryType: z.literal("RootUpdate"),
-    record: RootUpdateRecordSchema,
-  })
-  .strict();
 
 export type SdkNetworkIdentity = NetworkIdentity;
 export type SdkRecipientDescriptor = RecipientDescriptor;
@@ -185,20 +219,20 @@ export type SdkMembershipAttestation = MembershipAttestation;
 export type SdkRecipientDeploymentAttestation = RecipientDeploymentAttestation;
 export type SdkRootUpdateAttestation = RootUpdateAttestation;
 export type RecipientDescriptorInput = z.infer<typeof RecipientDescriptorSchema>;
-export type BindingAuthorization = z.infer<typeof BindingAuthorizationSchema>;
+export type RecipientAuthorization = z.infer<typeof RecipientAuthorizationSchema>;
 export type AttestationParams = z.infer<typeof AttestationParamsSchema>;
 export type AttestationMethod = z.infer<typeof AttestationMethodSchema>;
 export type AttestationRpcRequest = z.infer<typeof AttestationRpcRequestSchema>;
 export type MembershipRecord = z.infer<typeof MembershipRecordSchema>;
 export type RecipientDeploymentRecord = z.infer<typeof RecipientDeploymentRecordSchema>;
 export type RootUpdateRecord = z.infer<typeof RootUpdateRecordSchema>;
+export type RootUpdateEnvelope = z.infer<typeof RootUpdateEnvelopeSchema>;
 export type AttestationRefusalReason = z.infer<typeof AttestationRefusalReasonSchema>;
 export type AttestationRefusal = z.infer<typeof AttestationRefusalSchema>;
 export type MembershipResult = z.infer<typeof MembershipResultSchema>;
 export type RecipientDeploymentResult = z.infer<typeof RecipientDeploymentResultSchema>;
 export type AttestationRpcResult = z.infer<typeof AttestationRpcResultSchema>;
 export type AttestationRpcResponse = z.infer<typeof AttestationRpcResponseSchema>;
-export type RootUpdateEnvelope = z.infer<typeof RootUpdateEnvelopeSchema>;
 
 export interface FinalizedAttestationObservation {
   network: NetworkIdentity;
@@ -213,7 +247,14 @@ export type AttestationObservation =
   | { state: "known"; value: FinalizedAttestationObservation }
   | {
       state: "unknown";
-      reason: "finalized_history_unavailable" | "finalized_reference_invalid";
+      reason:
+        | "finalized_history_unavailable"
+        | "finalized_reference_invalid"
+        | "finalized_tip_stale"
+        | "finalized_tip_from_future"
+        | "account_address_mismatch"
+        | "account_class_mismatch"
+        | "account_not_initialized";
     };
 
 export interface AttestationChainProbe {
@@ -226,6 +267,8 @@ export interface AttestationChainProbe {
 export interface AttestationDomainConfig {
   sourceChainId: string;
   environment: string;
+  corridorId: string;
+  corridorRevision: number;
   manifestDigest: string;
   genesisOrNetworkDigest: string;
 }
@@ -287,19 +330,21 @@ export function readAttestationEnvironment(
   ]
     .filter((value): value is string => value !== undefined)
     .map(normalizeKeyMaterial);
-  if (
-    (secretKey !== undefined &&
-      custodyValues.includes(normalizeKeyMaterial(secretKey))) ||
-    (arn !== undefined && arn === env["PXE_BRIDGE_SECRET_ARN"])
-  ) {
-    throw new Error(
-      "Attestation secret custody must not reuse the spend, admin or allowlist secret",
-    );
-  }
-  assertRelayUrl(relayUrl);
   const credentials = [apiKey, relayToken, ...otherCredentials].filter(
     (value): value is string => value !== undefined,
   );
+  if (
+    (secretKey !== undefined &&
+      [...custodyValues, ...credentials.map(normalizeKeyMaterial)].includes(
+        normalizeKeyMaterial(secretKey),
+      )) ||
+    (arn !== undefined && arn === env["PXE_BRIDGE_SECRET_ARN"])
+  ) {
+    throw new Error(
+      "Attestation secret custody must not reuse any spend, admin, allowlist, or bearer secret",
+    );
+  }
+  assertRelayUrl(relayUrl);
   if (new Set(credentials).size !== credentials.length) {
     throw new Error(
       "Attestation API, relay, main RPC, admin and outbound credentials must all differ",
@@ -357,28 +402,32 @@ export class AttestationProducer {
   }
 
   async attestMembership(params: AttestationParams): Promise<MembershipResult> {
-    const validated = await this.validateRequest(params, "aztec_attestMembership");
+    const validated = await this.validateRequest(params, "aztec_attestRecipientMembership");
     if (validated.status === "refused") return validated;
     const { observation, descriptorDigest } = validated;
     const root = observation.allowlistRoot.toLowerCase();
     const localRoot = this.options.allowlistTree.root.toString().toLowerCase();
-    if (root !== localRoot) return this.refuse("aztec_attestMembership", "allowlist_root_mismatch");
+    if (root !== localRoot) {
+      return this.refuse("aztec_attestRecipientMembership", "allowlist_root_mismatch");
+    }
 
     let snapshot;
     try {
       snapshot = this.options.journal.allowlistSnapshot(root);
     } catch {
-      return this.refuse("aztec_attestMembership", "journal_unavailable");
+      return this.refuse("aztec_attestRecipientMembership", "journal_unavailable");
     }
-    if (!snapshot) return this.refuse("aztec_attestMembership", "allowlist_snapshot_unavailable");
+    if (!snapshot) {
+      return this.refuse("aztec_attestRecipientMembership", "allowlist_snapshot_unavailable");
+    }
+    if (!this.options.allowlistTree.matchesRecipients(snapshot.recipients)) {
+      return this.refuse("aztec_attestRecipientMembership", "membership_uncertain");
+    }
 
     const listed = snapshot.recipients.some(
       ({ address }) => address.toLowerCase() === params.recipient.toLowerCase(),
     );
     const witness = this.options.allowlistTree.witnessFor(params.recipient);
-    if (listed !== (witness !== undefined)) {
-      return this.refuse("aztec_attestMembership", "membership_uncertain");
-    }
     if (witness) {
       try {
         const reproduced = await rootFromSiblingPath(
@@ -388,10 +437,10 @@ export class AttestationProducer {
           witness.siblingPath,
         );
         if (reproduced.toString().toLowerCase() !== root) {
-          return this.refuse("aztec_attestMembership", "membership_uncertain");
+          return this.refuse("aztec_attestRecipientMembership", "membership_uncertain");
         }
       } catch {
-        return this.refuse("aztec_attestMembership", "membership_uncertain");
+        return this.refuse("aztec_attestRecipientMembership", "membership_uncertain");
       }
     }
 
@@ -403,9 +452,9 @@ export class AttestationProducer {
       attestedAt: this.now(),
     };
     const record = await this.sign("Membership", attestation, observation.network);
-    if (!record) return this.refuse("aztec_attestMembership", "signer_failed");
-    this.audit({ method: "aztec_attestMembership", outcome: "signed" });
-    return { status: "signed", primaryType: "Membership", record };
+    if (!record) return this.refuse("aztec_attestRecipientMembership", "signer_failed");
+    this.audit({ method: "aztec_attestRecipientMembership", outcome: "signed" });
+    return record;
   }
 
   async attestRecipientDeployment(
@@ -439,10 +488,25 @@ export class AttestationProducer {
     );
     if (!record) return this.refuse("aztec_attestRecipientDeployment", "signer_failed");
     this.audit({ method: "aztec_attestRecipientDeployment", outcome: "signed" });
-    return { status: "signed", primaryType: "RecipientDeployment", record };
+    return record;
   }
 
   async rootUpdate(observation: FinalizedAttestationObservation): Promise<RootUpdateRecord | null> {
+    try {
+      if (
+        !POSITIVE_DECIMAL.test(observation.finalized.blockNumber) ||
+        !HEX32.test(observation.finalized.blockHash) ||
+        BigInt(observation.finalized.blockHash) === 0n ||
+        !NONNEGATIVE_DECIMAL.test(observation.finalized.timestamp) ||
+        finalizedTimeReason(BigInt(observation.finalized.timestamp), this.now()) !== undefined ||
+        observation.network.genesisOrNetworkDigest.toLowerCase() !==
+          this.options.domain.genesisOrNetworkDigest.toLowerCase()
+      ) {
+        return null;
+      }
+    } catch {
+      return null;
+    }
     const attestation: RootUpdateAttestation = {
       root: observation.allowlistRoot.toLowerCase() as Hex,
       rootBlock: BigInt(observation.finalized.blockNumber),
@@ -486,8 +550,20 @@ export class AttestationProducer {
     ) {
       return this.refuse(method, "recipient_mismatch");
     }
+    if (
+      params.corridor.corridorId.toLowerCase() !==
+        this.options.domain.corridorId.toLowerCase() ||
+      params.corridor.corridorRevision !== this.options.domain.corridorRevision ||
+      params.corridor.manifestDigest.toLowerCase() !==
+        this.options.domain.manifestDigest.toLowerCase()
+    ) {
+      return this.refuse(method, "corridor_mismatch");
+    }
+    if (!sameNetwork(params.descriptor.network, params.network)) {
+      return this.refuse(method, "network_mismatch");
+    }
     try {
-      const wrapped = recipientMessage(params.bindingAuthorization.bindingDigest);
+      const wrapped = recipientMessage(params.recipientAuthorization.digest);
       if (
         !verifyRecipientSchnorr(
           {
@@ -495,7 +571,7 @@ export class AttestationProducer {
             y: params.descriptor.signingPublicKeyY,
           },
           wrapped.messageField,
-          params.bindingAuthorization.signature,
+          params.recipientAuthorization.signature,
         )
       ) {
         return this.refuse(method, "binding_authorization_invalid");
@@ -514,7 +590,28 @@ export class AttestationProducer {
       return this.refuse(method, "finalized_history_unavailable");
     }
     if (observed.state === "unknown") return this.refuse(method, observed.reason);
-    if (!sameNetwork(params.descriptor.network, observed.value.network)) {
+    const { finalized } = observed.value;
+    let finalizedTimestamp: bigint;
+    try {
+      if (
+        !POSITIVE_DECIMAL.test(finalized.blockNumber) ||
+        !HEX32.test(finalized.blockHash) ||
+        BigInt(finalized.blockHash) === 0n ||
+        !NONNEGATIVE_DECIMAL.test(finalized.timestamp)
+      ) {
+        return this.refuse(method, "finalized_reference_invalid");
+      }
+      finalizedTimestamp = BigInt(finalized.timestamp);
+    } catch {
+      return this.refuse(method, "finalized_reference_invalid");
+    }
+    const timeReason = finalizedTimeReason(finalizedTimestamp, this.now());
+    if (timeReason !== undefined) return this.refuse(method, timeReason);
+    if (
+      !sameNetwork(params.network, observed.value.network) ||
+      observed.value.network.genesisOrNetworkDigest.toLowerCase() !==
+        this.options.domain.genesisOrNetworkDigest.toLowerCase()
+    ) {
       return this.refuse(method, "network_mismatch");
     }
     return { status: "ok", observation: observed.value, descriptorDigest };
@@ -640,7 +737,15 @@ export class RootUpdatePublisher {
       );
       if (observation.state === "known") {
         const identity = observation.value.allowlistRoot.toLowerCase();
-        if (identity !== this.lastFinalizedRoot) {
+        const pendingCurrent = this.journal
+          .pendingRootUpdates()
+          .some((entry) => entry.root.toLowerCase() === identity);
+        if (pendingCurrent) {
+          // A crash may have left the current root's exact signed payload
+          // uncertain. Retry it and its idempotency key; never replace it with
+          // a freshly signed startup payload.
+          this.lastFinalizedRoot = identity;
+        } else if (identity !== this.lastFinalizedRoot) {
           const record = await this.producer.rootUpdate(observation.value);
           if (record) {
             const digest = readinessDigest(
@@ -652,14 +757,16 @@ export class RootUpdatePublisher {
               },
               this.producer.domainFor(observation.value.network),
             );
+            const payload = RootUpdateEnvelopeSchema.parse({
+              corridor_id: this.producer.domainConfig.corridorId,
+              corridor_revision: this.producer.domainConfig.corridorRevision,
+              record,
+            });
             this.journal.enqueueRootUpdate({
               id: `${this.runId}:${identity}:${record.rootBlock}`,
               root: record.root,
               rootBlock: record.rootBlock,
-              payload: RootUpdateEnvelopeSchema.parse({
-                primaryType: "RootUpdate",
-                record,
-              }),
+              payload,
               idempotencyKey: digest,
             });
             this.lastFinalizedRoot = identity;
@@ -696,7 +803,7 @@ export class RootUpdatePublisher {
             "content-type": "application/json",
             "idempotency-key": entry.idempotencyKey,
           },
-          body: JSON.stringify(entry.payload),
+          body: JSON.stringify(RootUpdateEnvelopeSchema.parse(entry.payload)),
           signal: AbortSignal.timeout(ROOT_UPDATE_RELAY_TIMEOUT_MS),
         });
         if (!response.ok) throw new Error(`relay returned ${response.status}`);
@@ -724,17 +831,38 @@ export function attestationRpcError(
 ): { jsonrpc: "2.0"; id: string | number | null; error: { code: number; message: string } } {
   return { jsonrpc: "2.0", id, error: { code, message } };
 }
+export function attestationRpcRefusal(
+  id: string | number | null,
+  refusalReason: AttestationRefusalReason,
+): z.infer<typeof AttestationRpcRefusalResponseSchema> {
+  return {
+    jsonrpc: "2.0",
+    id,
+    error: {
+      code: -32010,
+      message: "Readiness attestation refused",
+      data: { signed: false, refusal: refusalReason },
+    },
+  };
+}
+
+export function attestationHttpStatus(response: unknown): 200 | 503 {
+  return AttestationRpcRefusalResponseSchema.safeParse(response).success ? 503 : 200;
+}
+
 
 export async function handleAttestationRpc(
   raw: unknown,
   producer: AttestationProducer,
-): Promise<unknown> {
+): Promise<AttestationRpcResponse> {
   const parsed = AttestationRpcRequestSchema.safeParse(raw);
   if (!parsed.success) return attestationRpcError(null, -32600, "Invalid request");
   const { id, method, params } = parsed.data;
   const result =
-    method === "aztec_attestMembership"
+    method === "aztec_attestRecipientMembership"
       ? await producer.attestMembership(params)
       : await producer.attestRecipientDeployment(params);
-  return { jsonrpc: "2.0", id, result };
+  return "status" in result
+    ? attestationRpcRefusal(id, result.reason)
+    : { jsonrpc: "2.0", id, result };
 }

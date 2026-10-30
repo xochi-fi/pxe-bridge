@@ -110,7 +110,7 @@ export async function resolveAttestationSecret(
   });
   if (reused) {
     throw new Error(
-      "Attestation secret custody must not reuse the spend, admin or allowlist secret",
+      "Attestation secret custody must not reuse any spend, admin, allowlist, or bearer secret",
     );
   }
   const signer = new Secp256k1ReadinessSigner(normalized);

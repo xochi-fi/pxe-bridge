@@ -25,7 +25,11 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "vendor/xochi-sdk/xochi-signer-0.5.1.tgz"
+  ],
+  "bundleDependencies": [
+    "@xochi/signer"
   ],
   "scripts": {
     "build": "tsc",

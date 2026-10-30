@@ -226,6 +226,28 @@ export class AllowlistTree {
   }
 
   /**
+   * Whether an untrusted durable snapshot names this complete address/position
+   * mapping. The tree never exposes its secret salts, leaves, or recipient set.
+   */
+  matchesRecipients(recipients: readonly AllowlistRecipient[]): boolean {
+    if (recipients.length !== this.byAddress.size) return false;
+    const seen = new Set<string>();
+    for (const { address, index } of recipients) {
+      const normalized = address.toLowerCase();
+      if (
+        !ADDRESS_RE.test(address) ||
+        !Number.isInteger(index) ||
+        seen.has(normalized) ||
+        this.byAddress.get(normalized) !== index
+      ) {
+        return false;
+      }
+      seen.add(normalized);
+    }
+    return true;
+  }
+
+  /**
    * Witness for a POSITION, occupied or not.
    *
    * The admin path needs this: an addition proves the old leaf, which is the

@@ -281,7 +281,12 @@ describe("SettlementJournal", () => {
       id: "run:root:7",
       root: "0x" + "12".repeat(32),
       rootBlock: "7",
-      payload: { primaryType: "RootUpdate", record: { rootBlock: "7" } },
+      payload: {
+        root: "0x" + "12".repeat(32),
+        rootBlock: "7",
+        attestedAt: 1,
+        signature: "0x" + "34".repeat(65),
+      },
       idempotencyKey: "0x" + "34".repeat(32),
     };
     journal.enqueueRootUpdate(entry);

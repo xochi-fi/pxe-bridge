@@ -5,7 +5,11 @@ import { RPC_ERRORS, type IAztecClient } from "./types.js";
 import type { TransactionLimits } from "./limits.js";
 import type { AuditLogger } from "./audit.js";
 import type { ReadinessObserver } from "./readiness.js";
-import { handleAttestationRpc, type AttestationProducer } from "./attestation.js";
+import {
+  attestationHttpStatus,
+  handleAttestationRpc,
+  type AttestationProducer,
+} from "./attestation.js";
 
 const MAX_BODY_BYTES = 64 * 1024; // 64 KB
 const RATE_LIMIT_WINDOW_MS = 60_000;
@@ -35,7 +39,7 @@ export interface ServerOptions {
    * stopped them. Unset disables the endpoint entirely.
    */
   adminKey?: string | undefined;
-  /** Dedicated Worker/Riddler credential; unset keeps POST /attest/rpc hidden. */
+  /** Dedicated Worker/Riddler credential; unset keeps POST /api/attestation hidden. */
   attestationApiKey?: string | undefined;
   attestation?: AttestationProducer | undefined;
   limits?: TransactionLimits | undefined;
@@ -322,7 +326,7 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
         return;
       }
 
-      if (req.method === "POST" && pathname === "/attest/rpc") {
+      if (req.method === "POST" && pathname === "/api/attestation") {
         const attestationIp = req.socket.remoteAddress ?? "unknown";
         if (!opts.attestationApiKey || !opts.attestation) {
           sendJson(res, 404, { error: "Not found" });
@@ -363,7 +367,8 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           });
           return;
         }
-        sendJson(res, 200, await handleAttestationRpc(parsed, opts.attestation));
+        const response = await handleAttestationRpc(parsed, opts.attestation);
+        sendJson(res, attestationHttpStatus(response), response);
         return;
       }
 

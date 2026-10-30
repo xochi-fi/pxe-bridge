@@ -57,10 +57,10 @@ EVM Solver --JSON-RPC--> pxe-bridge --Aztec SDK--> Aztec L2 Node
 | `PXE_BRIDGE_PORT`       | No       | `8547`                  | HTTP listen port (0-65535)                     |
 | `PXE_BRIDGE_ACCOUNT_ADDRESS` | Prod | --                   | The bridge account's recorded address; startup refuses any other |
 | `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY` | Prod, first deploy only | -- | `1` lets production start without a recorded address |
-| `PXE_BRIDGE_ACCOUNT_DEPLOYMENT` | Operational settlement | -- | Durable spending-limit deployment record; hard readiness refuses new settlements without it |
-| `PXE_BRIDGE_ATTESTATION_API_KEY` | With attestations | -- | Dedicated Bearer token for `POST /attest/rpc`; must differ from RPC/admin/outbound tokens |
-| `PXE_BRIDGE_ATTESTATION_SECRET_ARN` | Prod attestations | -- | AWS Secrets Manager secp256k1 key used only for readiness records |
-| `PXE_BRIDGE_ATTESTATION_SECRET_KEY` | Dev attestations | -- | Dev-only nonzero secp256k1 scalar; refused in production |
+| `PXE_BRIDGE_ACCOUNT_DEPLOYMENT` | Operational settlement and attestations | -- | Durable spending-limit deployment record; startup refuses attestations and hard readiness refuses new settlements without it |
+| `PXE_BRIDGE_ATTESTATION_API_KEY` | With attestations | -- | Dedicated Bearer token for `POST /api/attestation`; must differ from RPC/admin/outbound tokens |
+| `PXE_BRIDGE_ATTESTATION_SECRET_ARN` | Prod attestations | -- | AWS Secrets Manager secp256k1 key used only for readiness records; resolved material must differ from all custody and bearer secrets |
+| `PXE_BRIDGE_ATTESTATION_SECRET_KEY` | Dev attestations | -- | Dev-only nonzero secp256k1 scalar with the same separation rule; refused in production |
 | `PXE_BRIDGE_ATTESTATION_SOURCE_CHAIN_ID` / `PXE_BRIDGE_ATTESTATION_ENVIRONMENT` | With attestations | -- | Trusted readiness EIP-712 domain inputs |
 | `PXE_BRIDGE_ATTESTATION_RELAY_URL` / `PXE_BRIDGE_ATTESTATION_RELAY_TOKEN` | With attestations | -- | RootUpdate relay (HTTPS or loopback HTTP) and separate outbound credential |
 
@@ -79,21 +79,29 @@ console.log("0x" + k);'
 
 Attestations are optional and hidden (`404`) unless every attestation variable
 above is configured together with the main RPC key, journal, settlement
-corridor and spending-limit account. `POST /attest/rpc` accepts only
-`aztec_attestMembership` and `aztec_attestRecipientDeployment`. Its strict
-params are `{descriptor, descriptorDigest, recipient, bindingAuthorization:
-{bindingDigest, signature}}`; source-wallet/chain fields, block selectors,
-witnesses, salts, indexes and unknown fields are refused.
+corridor, spending-limit account and durable account deployment record.
+`POST /api/attestation` accepts only `aztec_attestRecipientMembership` and
+`aztec_attestRecipientDeployment`. Its strict params are `{descriptor,
+descriptorDigest, recipient, network, corridor,
+recipientAuthorization:{digest,signature}}`; source-wallet/chain/binding
+fields, block selectors, witnesses, salts, indexes and unknown fields are
+refused. Network and corridor are compared with trusted local state; they
+cannot select the signing domain or finalized observation.
 
 The bridge validates the pinned `aztec-6.0.0` descriptor, derived recipient,
-trusted finalized network and recipient Schnorr authorization before reading
-or signing. It signs exact `@xochi/signer` Membership and
-RecipientDeployment records with the dedicated secp256k1 key. Uncertain
-history, roots or deployment state return an unsigned typed refusal. The
-journal stores durable allowlist snapshots and a write-before-send RootUpdate
-outbox; pending deliveries retry after restart, and the current finalized root
-is pushed once per process start. Attestation audit lines contain only method,
-outcome and typed reason.
+recorded solver identity/class/initialization, synchronized retained finalized
+history and recipient Schnorr authorization before reading the finalized root
+or recipient deployment. The exact finalized number/hash is nonzero and its
+timestamp uses the shared 7,200-second age and 300-second future-skew policy.
+A successful JSON-RPC `result` is the exact signed `@xochi/signer` Membership
+or RecipientDeployment record; uncertainty returns HTTP 503 with JSON-RPC
+error `-32010` and unsigned typed `data: {signed:false,refusal}`. The journal
+stores durable allowlist snapshots and a write-before-send RootUpdate outbox.
+The relay POST body is
+`{corridor_id,corridor_revision,record:<signed RootUpdate>}`; an undelivered
+current-root envelope retries unchanged after restart, while each later process
+still pushes the current root once. Attestation audit lines contain only
+method, outcome and typed reason.
 
 Riddler/Worker consumers import the strict Zod schemas and inferred types from
 `@xochi-fi/pxe-bridge/attestation`; readiness policy is maximum age 7,200
@@ -693,7 +701,8 @@ The fee runway shown by `/ready` reports both observed and required fee juice.
 Required fee juice is:
 
 ```
-(in-flight transfers + ceil(rolling-window headroom / live per-tx cap))
+(pre-mark in-flight reservations + durable may-broadcast operations
+  + ceil(rolling-window headroom / live per-tx cap))
   * (transaction gas limits * predicted maximum fees per gas)
 ```
 

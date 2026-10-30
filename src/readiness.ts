@@ -5,6 +5,27 @@ import type { CorridorConfig } from "./settlement.js";
 export const FINALIZED_MAX_AGE_SECONDS = 7_200;
 export const FINALIZED_MAX_FUTURE_SKEW_SECONDS = 300;
 
+export type FinalizedTimeReason =
+  | "finalized_tip_from_future"
+  | "finalized_tip_stale";
+
+/** Shared age policy for readiness and every signed finalized observation. */
+export function finalizedTimeReason(
+  timestamp: bigint,
+  nowSeconds: number,
+): FinalizedTimeReason | undefined {
+  const ageSeconds = nowSeconds - Number(timestamp);
+  if (
+    !Number.isSafeInteger(ageSeconds) ||
+    ageSeconds < -FINALIZED_MAX_FUTURE_SKEW_SECONDS
+  ) {
+    return "finalized_tip_from_future";
+  }
+  return ageSeconds > FINALIZED_MAX_AGE_SECONDS
+    ? "finalized_tip_stale"
+    : undefined;
+}
+
 export type ReadinessReason =
   | "account_mode_not_spending_limit"
   | "deployment_record_missing"
@@ -248,14 +269,11 @@ export function evaluateReadiness(
       reasons.add("finalized_tip_zero");
     }
     finalizedAgeSeconds = Math.floor(nowMs / 1_000) - Number(finalized.timestamp);
-    if (
-      !Number.isSafeInteger(finalizedAgeSeconds) ||
-      finalizedAgeSeconds < -FINALIZED_MAX_FUTURE_SKEW_SECONDS
-    ) {
-      reasons.add("finalized_tip_from_future");
-    } else if (finalizedAgeSeconds > FINALIZED_MAX_AGE_SECONDS) {
-      reasons.add("finalized_tip_stale");
-    }
+    const timeReason = finalizedTimeReason(
+      finalized.timestamp,
+      Math.floor(nowMs / 1_000),
+    );
+    if (timeReason !== undefined) reasons.add(timeReason);
   }
 
   const worldState = addUnknown(reasons, facts.worldState);
@@ -349,15 +367,26 @@ export function evaluateReadiness(
 
   const fee = addUnknown(reasons, facts.feeRunway);
   if (fee !== null && fee.perTransferFeeLimit <= 0n) reasons.add("fee_runway_unknown");
+  let markedTransfers: number | null = null;
+  if (options.journal !== undefined) {
+    try {
+      markedTransfers = options.journal.mayBroadcastOperationCount();
+    } catch {
+      reasons.add("journal_unwritable");
+    }
+  }
   let requiredFee: bigint | null = null;
   if (
     fee !== null &&
     fee.perTransferFeeLimit > 0n &&
     window?.remaining !== undefined &&
     window.maxAmount !== undefined &&
-    window.maxAmount > 0n
+    window.maxAmount > 0n &&
+    markedTransfers !== null
   ) {
-    const transferCount = BigInt(window.inFlightTransfers) + transfersFor(window.remaining, window.maxAmount);
+    const transferCount =
+      BigInt(window.inFlightTransfers + markedTransfers) +
+      transfersFor(window.remaining, window.maxAmount);
     requiredFee = transferCount * fee.perTransferFeeLimit;
     if (fee.observed < requiredFee) reasons.add("fee_runway_insufficient");
   } else if (fee !== null) {

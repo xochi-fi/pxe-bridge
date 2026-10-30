@@ -319,13 +319,45 @@ describe("spending limit account (e2e)", () => {
       acknowledgement: `${accountAddress}@${journal.meta().journalId}`,
     });
     journal.recordAllowlistSnapshot(tree.root.toString(), DEPLOYED_RECIPIENTS);
+    const attestationClient = new AztecClient(
+      config.nodeUrl,
+      config.secretKey,
+      undefined,
+      {
+        maxAmountPerTx: MAX_PER_TX,
+        dailyLimit: DAILY_LIMIT,
+        admin: adminAddress,
+        token: tokenAddress,
+        allowlistSeed: ALLOWLIST_SEED,
+        allowlistRecipients: DEPLOYED_RECIPIENTS,
+        deployment: await deployedRecord(),
+      },
+      undefined,
+      walletDataDirectory("limit-attestation-account"),
+    );
+    await attestationClient.connect();
 
-    const observed = await client.observeAttestationChain(
+    let observed = await attestationClient.observeAttestationChain(
       undefined,
       READINESS_CORRIDOR.genesisOrNetworkDigest,
     );
+    const clockDeadline = Date.now() + 15 * 60_000;
+    while (observed.state === "unknown" && observed.reason === "finalized_tip_from_future") {
+      if (Date.now() >= clockDeadline) {
+        throw new Error("local finalized tip did not return inside the 300-second skew policy");
+      }
+      // An external Anvil clock cannot be advanced with Vitest fake timers.
+      // Wait on the policy condition; never weaken the policy.
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      observed = await attestationClient.observeAttestationChain(
+        undefined,
+        READINESS_CORRIDOR.genesisOrNetworkDigest,
+      );
+    }
+    if (observed.state !== "known") {
+      throw new Error(`attestation observation refused: ${observed.reason}`);
+    }
     expect(observed.state).toBe("known");
-    if (observed.state !== "known") throw new Error(observed.reason);
     const descriptor = RecipientDescriptorSchema.parse({
       ...attestationDescriptorVector.descriptor,
       network: observed.value.network,
@@ -333,13 +365,15 @@ describe("spending limit account (e2e)", () => {
     const digest = hashRecipientDescriptor(descriptor as RecipientDescriptor);
     const signer = new Secp256k1ReadinessSigner(ATTESTATION_SIGNER_KEY);
     const producer = new AttestationProducer({
-      probe: client,
+      probe: attestationClient,
       journal,
       allowlistTree: tree,
       signer,
       domain: {
         sourceChainId: "84532",
         environment: "staging",
+        corridorId: READINESS_CORRIDOR.corridorId,
+        corridorRevision: READINESS_CORRIDOR.corridorRevision,
         manifestDigest: READINESS_CORRIDOR.manifestDigest,
         genesisOrNetworkDigest: READINESS_CORRIDOR.genesisOrNetworkDigest,
       },
@@ -348,8 +382,14 @@ describe("spending limit account (e2e)", () => {
       descriptor,
       descriptorDigest: digest,
       recipient: descriptor.aztecAddress,
-      bindingAuthorization: {
-        bindingDigest: attestationBindingVector.digest,
+      network: observed.value.network,
+      corridor: {
+        corridorId: READINESS_CORRIDOR.corridorId,
+        corridorRevision: READINESS_CORRIDOR.corridorRevision,
+        manifestDigest: READINESS_CORRIDOR.manifestDigest,
+      },
+      recipientAuthorization: {
+        digest: attestationBindingVector.digest,
         signature: attestationBindingVector.signature,
       },
     });
@@ -360,7 +400,7 @@ describe("spending limit account (e2e)", () => {
       manifestDigest: READINESS_CORRIDOR.manifestDigest,
     };
 
-    const route = createApp(client, {
+    const route = createApp(attestationClient, {
       apiKey: "e2e-rpc-token",
       attestationApiKey: "e2e-attestation-token",
       attestation: producer,
@@ -372,7 +412,7 @@ describe("spending limit account (e2e)", () => {
     }
     const invoke = async (method: string): Promise<unknown> => {
       const response = await fetch(
-        `http://127.0.0.1:${routeAddress.port}/attest/rpc`,
+        `http://127.0.0.1:${routeAddress.port}/api/attestation`,
         {
           method: "POST",
           headers: {
@@ -389,16 +429,15 @@ describe("spending limit account (e2e)", () => {
     };
     try {
       const membership = MembershipResultSchema.parse(
-        await invoke("aztec_attestMembership"),
+        await invoke("aztec_attestRecipientMembership"),
       );
-      expect(membership.status).toBe("signed");
-      if (membership.status !== "signed") throw new Error(membership.reason);
+      if ("status" in membership) throw new Error(membership.reason);
       expect(
-        verifyReadinessRecord("Membership", membership.record, {
+        verifyReadinessRecord("Membership", membership, {
           domain: readinessPolicyDomain,
           expectedSigner: signer.address,
           expected: { descriptorDigest: digest },
-          now: membership.record.attestedAt,
+          now: membership.attestedAt,
           maxAgeSeconds: 7_200,
           maxFutureSkewSeconds: 300,
           minBlock: observed.value.finalized.blockNumber,
@@ -408,12 +447,12 @@ describe("spending limit account (e2e)", () => {
       const deployment = RecipientDeploymentResultSchema.parse(
         await invoke("aztec_attestRecipientDeployment"),
       );
-      expect(deployment).toMatchObject({ status: "signed", record: { deployed: false } });
-      if (deployment.status !== "signed") throw new Error(deployment.reason);
+      expect(deployment).toMatchObject({ deployed: false });
+      if ("status" in deployment) throw new Error(deployment.reason);
       expect(
         recoverReadinessSigner(
           "RecipientDeployment",
-          deployment.record,
+          deployment,
           producer.domainFor(observed.value.network),
         ),
       ).toBe(signer.address);
@@ -439,23 +478,26 @@ describe("spending limit account (e2e)", () => {
       throw new Error("attestation relay did not bind");
     }
     try {
-      await new RootUpdatePublisher(producer, client, journal, {
+      await new RootUpdatePublisher(producer, attestationClient, journal, {
         url: `http://127.0.0.1:${relayAddress.port}/root`,
         token: "e2e-root-token",
       }).tick();
-      const payload = RootUpdateEnvelopeSchema.parse(rootPayload);
+      const envelope = RootUpdateEnvelopeSchema.parse(rootPayload);
+      expect(envelope.corridor_id).toBe(READINESS_CORRIDOR.corridorId);
+      expect(envelope.corridor_revision).toBe(READINESS_CORRIDOR.corridorRevision);
+      const payload = envelope.record;
       expect(
-        verifyReadinessRecord("RootUpdate", payload.record, {
+        verifyReadinessRecord("RootUpdate", payload, {
           domain: readinessPolicyDomain,
           expectedSigner: signer.address,
           expected: { root: tree.root.toString() },
-          now: payload.record.attestedAt,
+          now: payload.attestedAt,
           maxAgeSeconds: 7_200,
           maxFutureSkewSeconds: 300,
           minBlock: observed.value.finalized.blockNumber,
         }).signer,
       ).toBe(signer.address);
-      expect(payload.record.rootBlock).toBe(observed.value.finalized.blockNumber);
+      expect(payload.rootBlock).toBe(observed.value.finalized.blockNumber);
     } finally {
       await new Promise<void>((resolve, reject) =>
         relay.close((error) => (error ? reject(error) : resolve())),
