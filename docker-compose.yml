@@ -18,9 +18,13 @@ services:
     # No `--block-time`: anvil automines, which is what the 6.0.0 local network
     # runs against (`aztec start --local-network` starts a bare `anvil`). Its
     # automine sequencer advances L1 time by one 12-second slot per transaction.
-    # Start five minutes behind wall time so setup bursts do not put the
-    # finalized tip beyond the production 300-second future-skew limit; the
-    # 7,200-second age limit still catches a stalled local chain.
+    # Start an hour behind wall time. The full e2e suite drives chain time far
+    # ahead of the wall: CI run 41004463168 (started 300 s behind) went from
+    # -191 s to +2,870 s, about 3,100 s of drift, so every crash-recovery bridge
+    # saw its finalized tip >300 s in the future and never became ready.
+    # -3,600 s leaves ~3,900 s of forward drift before the production 300-second
+    # future-skew limit while staying inside the 7,200-second age limit, which
+    # still catches a chain idle for more than an hour.
     # Under `--block-time 1`, checkpoint proposals reverted
     # `Rollup__SlotAlreadyInChain` in a loop.
     #
@@ -33,7 +37,7 @@ services:
       - >-
         exec anvil --host 0.0.0.0 --chain-id 31337
         --block-base-fee-per-gas 0 --slots-in-an-epoch 1
-        --timestamp "$$(($$(date +%s) - 300))"
+        --timestamp "$$(($$(date +%s) - 3600))"
     ports:
       - "${L1_PORT:-8545}:8545"
     healthcheck:
@@ -69,7 +73,7 @@ services:
     environment:
       ETHEREUM_HOSTS: http://anvil:8545
       L1_CHAIN_ID: "31337"
-      # Local Anvil deliberately starts five minutes behind wall time (above).
+      # Local Anvil deliberately starts an hour behind wall time (above).
       # Production keeps the node's 300-second default; the bridge still
       # enforces its own 7,200/300 finalized-tip policy in this sandbox.
       MAX_ALLOWED_ETH_CLIENT_DRIFT_SECONDS: "0"
