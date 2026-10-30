@@ -54,6 +54,9 @@ jobs:
     # it produces.
     env:
       AZTEC_COMPILE_VERSION: "6.0.0"
+      # aztec-up otherwise replaces itself with the latest copy on its first
+      # run (no .last_update_check), undoing the pin below.
+      AZTEC_NO_AUTO_UPDATE: "1"
     steps:
       - uses: actions/checkout@v4
       # Needed by the class ID check below, which loads the artifact through
@@ -65,11 +68,20 @@ jobs:
           node-version: 24.15.0
           cache: npm
       - run: npm ci
-      # install.aztec.network now 301s here; aztec-up itself fetches from
-      # install.aztec-labs.com.
-      - name: Install Aztec toolchain
+      # Only aztec-up, fetched from the pinned release's directory, not the
+      # root installer at https://install.aztec-labs.com. That one installs the
+      # latest release before anything else (`aztec-up install latest`, 5.3.0
+      # on 2026-10-30), and that release's per-version installer resolves its
+      # npm tree with an unlocked `npm install`. On 2026-10-30 that 404'd on
+      # tslib 2.9.1, published 27 s before the run (run 41122380004). The 6.0.0
+      # per-version installer installs from the release's own lock
+      # (`packages.tar.gz`, then `npm ci`), and the step below runs only that.
+      - name: Install aztec-up
         run: |
-          curl -fsSL https://install.aztec-labs.com | bash
+          mkdir -p "$HOME/.aztec/bin"
+          curl -fsSL "https://install.aztec-labs.com/$AZTEC_COMPILE_VERSION/aztec-up" \
+            -o "$HOME/.aztec/bin/aztec-up"
+          chmod +x "$HOME/.aztec/bin/aztec-up"
           echo "$HOME/.aztec/bin" >> "$GITHUB_PATH"
       - name: Pin toolchain and expose it on PATH
         run: |
@@ -83,8 +95,9 @@ jobs:
           #
           # This job compiles a Noir contract. It never touches Foundry. The
           # same commit that passed on 19 Aug fails this way now, from a
-          # version we pin, because `aztec-up install 5.1.0` pins the toolchain
-          # and not the installer that fetches it. That is the build supply
+          # version we pin, because `aztec-up install 5.1.0` pinned the
+          # toolchain and not the per-version installer it fetches from
+          # install.aztec-labs.com/<version>/install. That is the build supply
           # chain risk in SECURITY.md arriving in practice.
           #
           # So record the installer's verdict and then check for the two
@@ -99,13 +112,13 @@ jobs:
             echo "::warning::aztec-up exited $status; continuing only if the needed binaries are present"
           fi
           # Searched under the pinned version directory, not all of ~/.aztec.
-          # install.aztec.network installs the latest release before `aztec-up
-          # install` pins ours, so ~/.aztec holds both. A search across the
-          # whole tree took whichever the walk reached first, and on
-          # 2026-08-26 that was 5.2.0: `aztec --version` reported 5.2.0 with
-          # nargo 1.0.0-beta.25, under which aztec-nr 5.1.0's own test helpers
-          # do not compile. The job failed with 277 errors inside
-          # macros/oracle_testing.nr and none in this contract.
+          # The root installer this job used to run installed the latest
+          # release before `aztec-up install` pinned ours, so ~/.aztec held
+          # both. A search across the whole tree took whichever the walk
+          # reached first, and on 2026-08-26 that was 5.2.0: `aztec --version`
+          # reported 5.2.0 with nargo 1.0.0-beta.25, under which aztec-nr
+          # 5.1.0's own test helpers do not compile. The job failed with 277
+          # errors inside macros/oracle_testing.nr and none in this contract.
           root="$HOME/.aztec/versions/$AZTEC_COMPILE_VERSION"
           if [ ! -d "$root" ]; then
             echo "$AZTEC_COMPILE_VERSION is not installed (aztec-up exited $status); tree under ~/.aztec:"
