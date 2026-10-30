@@ -588,7 +588,7 @@ describe("public liveness isolation", () => {
 
   it("bounds request bodies before method classification", async () => {
     const key = "body-cap-key";
-    const srv = createApp(new FakeAztecClient(), { apiKey: key });
+    const srv = createApp(new FakeAztecClient(), { apiKey: key, readiness: readyObserver() });
     await new Promise<void>((resolve) => srv.listen(0, resolve));
     const addr = srv.address();
     const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
@@ -609,7 +609,7 @@ describe("public liveness isolation", () => {
           req.once("socket", (socket) => {
             const sendPartialBody = (): void => {
               req.flushHeaders();
-              req.write("{");
+              req.write(Buffer.alloc(64 * 1024 + 1, "x"));
               resolve();
             };
             if (socket.connecting) socket.once("connect", sendPartialBody);
@@ -619,10 +619,26 @@ describe("public liveness isolation", () => {
         await new Promise((resolve) => setImmediate(resolve));
       }
 
-      const overflow = await jsonPost(url, rpcBody("aztec_getSettlement", [{}]), {
+      const ready = await fetch(`${url}/ready`, {
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      expect(ready.status).toBe(503);
+      expect(await ready.json()).toMatchObject({
+        ready: false,
+        reasons: expect.arrayContaining(["backend_capacity_exhausted"]),
+      });
+
+      const overflow = await jsonPost(url, rpcBody("aztec_getVersion", []), {
         Authorization: `Bearer ${key}`,
       });
       expect(overflow.status).toBe(503);
+
+      const recovery = await jsonPost(
+        `${url}/api/recovery`,
+        rpcBody("aztec_getSettlement", [{}]),
+        { Authorization: `Bearer ${key}` },
+      );
+      expect(recovery.status).toBe(200);
     } finally {
       for (const req of held) req.destroy();
       await new Promise<void>((resolve) => srv.close(() => resolve()));

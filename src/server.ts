@@ -126,24 +126,37 @@ export class RateLimiter {
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let size = 0;
-    let rejected = false;
+    let tooLarge = false;
+    let settled = false;
     const chunks: Buffer[] = [];
+    const fail = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
     req.on("data", (chunk: Buffer) => {
-      if (rejected) return;
+      if (tooLarge) return;
       size += chunk.length;
       if (size > MAX_BODY_BYTES) {
-        rejected = true;
-        req.resume(); // drain remaining data without buffering
-        reject(new Error("Request body too large"));
+        tooLarge = true;
+        chunks.length = 0;
         return;
       }
       chunks.push(chunk);
     });
     req.on("end", () => {
-      if (!rejected) resolve(Buffer.concat(chunks).toString());
+      if (settled) return;
+      if (tooLarge) {
+        fail(new Error("Request body too large"));
+        return;
+      }
+      settled = true;
+      resolve(Buffer.concat(chunks).toString());
     });
-    req.on("error", (err) => {
-      if (!rejected) reject(err);
+    req.on("aborted", () => fail(new Error("Request body aborted")));
+    req.on("error", (error) => fail(error));
+    req.on("close", () => {
+      if (!req.complete) fail(new Error("Request body closed"));
     });
   });
 }
@@ -388,11 +401,26 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
   const authFailureLimiter = new RateLimiter(AUTH_FAILURE_MAX, RATE_LIMIT_WINDOW_MS);
   const attestationRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const attestationAuthFailureLimiter = new RateLimiter(AUTH_FAILURE_MAX, RATE_LIMIT_WINDOW_MS);
+  const attestationInvalidRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const startupRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const malformedTargetRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   let backendInFlight = 0;
   let recoveryInFlight = 0;
-  let rpcBodyInFlight = 0;
+  let ordinaryBodyInFlight = 0;
+  let recoveryBodyInFlight = 0;
+  const acquireBodyLease = (recovery = false): (() => void) | null => {
+    const active = recovery ? recoveryBodyInFlight : ordinaryBodyInFlight;
+    if (active >= MAX_RPC_BODY_IN_FLIGHT) return null;
+    if (recovery) recoveryBodyInFlight += 1;
+    else ordinaryBodyInFlight += 1;
+    let released = false;
+    return (): void => {
+      if (released) return;
+      released = true;
+      if (recovery) recoveryBodyInFlight -= 1;
+      else ordinaryBodyInFlight -= 1;
+    };
+  };
   const acquireBackendLease = (recovery = false): {
     trackBackground: (call: Promise<unknown>) => void;
     finish: () => void;
@@ -522,7 +550,8 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
         try {
           const readiness = await currentReadinessObservation();
           const projected =
-            backendInFlight >= MAX_RPC_IN_FLIGHT
+            backendInFlight >= MAX_RPC_IN_FLIGHT ||
+            ordinaryBodyInFlight >= MAX_RPC_BODY_IN_FLIGHT
               ? {
                   ...readiness,
                   ready: false,
@@ -533,7 +562,12 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
         } catch {
           console.error("[pxe-bridge] Readiness observation failed");
           const reasons = ["readiness_observation_failed"];
-          if (backendInFlight >= MAX_RPC_IN_FLIGHT) reasons.push("backend_capacity_exhausted");
+          if (
+            backendInFlight >= MAX_RPC_IN_FLIGHT ||
+            ordinaryBodyInFlight >= MAX_RPC_BODY_IN_FLIGHT
+          ) {
+            reasons.push("backend_capacity_exhausted");
+          }
           sendJson(res, 503, { ready: false, reasons });
         }
         return;
@@ -564,6 +598,10 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
         }
         const contentType = req.headers["content-type"];
         if (!contentType || !contentType.startsWith("application/json")) {
+          if (!attestationInvalidRateLimiter.allow(attestationIp)) {
+            sendJson(res, 429, { error: "Too many requests" });
+            return;
+          }
           sendJson(res, 415, { error: "Content-Type must be application/json" });
           return;
         }
@@ -571,23 +609,40 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           sendJson(res, 429, { error: "Too many requests" });
           return;
         }
-        let body: string;
-        try {
-          body = await readBody(req);
-        } catch {
-          sendJson(res, 413, { error: "Request body too large" });
+        const releaseBody = acquireBodyLease();
+        if (releaseBody === null) {
+          sendJson(res, 503, { error: "Service busy" });
           return;
         }
         let parsed: unknown;
         try {
-          parsed = JSON.parse(body);
-        } catch {
-          sendJson(res, 400, {
-            jsonrpc: "2.0",
-            id: null,
-            error: { code: -32700, message: "Parse error" },
-          });
-          return;
+          let body: string;
+          try {
+            body = await readBody(req);
+          } catch {
+            if (!attestationInvalidRateLimiter.allow(attestationIp)) {
+              sendJson(res, 429, { error: "Too many requests" });
+              return;
+            }
+            sendJson(res, 413, { error: "Request body too large" });
+            return;
+          }
+          try {
+            parsed = JSON.parse(body);
+          } catch {
+            if (!attestationInvalidRateLimiter.allow(attestationIp)) {
+              sendJson(res, 429, { error: "Too many requests" });
+              return;
+            }
+            sendJson(res, 400, {
+              jsonrpc: "2.0",
+              id: null,
+              error: { code: -32700, message: "Parse error" },
+            });
+            return;
+          }
+        } finally {
+          releaseBody();
         }
         const lease = acquireBackendLease();
         if (lease === null) {
@@ -657,8 +712,13 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
         return;
       }
 
-      // JSON-RPC endpoint
-      if (req.method === "POST" && (pathname === "/" || pathname === "/api/rpc")) {
+      // JSON-RPC endpoints. Reconciliation has a dedicated intake route so
+      // ordinary slow bodies cannot consume its reserved receive capacity.
+      if (
+        req.method === "POST" &&
+        (pathname === "/" || pathname === "/api/rpc" || pathname === "/api/recovery")
+      ) {
+        const recoveryEndpoint = pathname === "/api/recovery";
         const clientIp = req.socket.remoteAddress ?? "unknown";
 
         // A failed key is charged to the auth-failure bucket, so guessing is
@@ -699,11 +759,11 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
         // Method-specific limits require the parsed JSON-RPC body. Bound that
         // pre-classification work separately so slow or concurrent bodies
         // cannot accumulate outside the backend pools.
-        if (rpcBodyInFlight >= MAX_RPC_BODY_IN_FLIGHT) {
+        const releaseBody = acquireBodyLease(recoveryEndpoint);
+        if (releaseBody === null) {
           sendJson(res, 503, { error: "Service busy" });
           return;
         }
-        rpcBodyInFlight += 1;
         let parsed: unknown;
         try {
           let body: string;
@@ -733,7 +793,7 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
             return;
           }
         } finally {
-          rpcBodyInFlight -= 1;
+          releaseBody();
         }
 
         const recoveryRequest =
@@ -741,12 +801,21 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           parsed !== null &&
           "method" in parsed &&
           parsed.method === "aztec_getSettlement";
-        const requestRateLimiter = recoveryRequest ? recoveryRateLimiter : rpcRateLimiter;
+        const usesRecoveryCapacity = recoveryEndpoint || recoveryRequest;
+        const requestRateLimiter = usesRecoveryCapacity ? recoveryRateLimiter : rpcRateLimiter;
         if (!requestRateLimiter.allow(clientIp)) {
           sendJson(res, 429, { error: "Too many requests" });
           return;
         }
-        const lease = acquireBackendLease(recoveryRequest);
+        if (recoveryEndpoint && !recoveryRequest) {
+          sendJson(res, 400, {
+            jsonrpc: "2.0",
+            id: null,
+            error: { code: -32600, message: "Recovery endpoint requires aztec_getSettlement" },
+          });
+          return;
+        }
+        const lease = acquireBackendLease(usesRecoveryCapacity);
         if (lease === null) {
           sendJson(res, 503, { error: "Service busy" });
           return;

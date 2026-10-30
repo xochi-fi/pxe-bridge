@@ -586,7 +586,7 @@ See `SECURITY.md` for the incident runbook.
 
 ## API Reference
 
-All methods use JSON-RPC 2.0 over HTTP POST to `/` or `/api/rpc`. Requests require `Content-Type: application/json`. When `PXE_BRIDGE_API_KEY` is set, include `Authorization: Bearer <key>`.
+Methods use JSON-RPC 2.0 over HTTP POST to `/` or `/api/rpc`; use the dedicated `/api/recovery` route for `aztec_getSettlement` so reconciliation retains reserved body, rate-limit, and backend capacity. The legacy routes still accept reconciliation requests. Requests require `Content-Type: application/json`. When `PXE_BRIDGE_API_KEY` is set, include `Authorization: Bearer <key>`.
 
 ### `aztec_createNote`
 
@@ -741,7 +741,7 @@ The Docker `HEALTHCHECK` reads only `/status`'s HTTP code (`curl -sf`).
 - Set `PXE_BRIDGE_API_KEY` for production -- without it, anyone with network access can create notes
 - `Content-Type: application/json` required on POST requests (prevents browser CSRF)
 - Ordinary RPC and journal reconciliation are each rate limited to 60 requests/min
-- At most 16 authenticated JSON-RPC bodies are received or parsed concurrently
+- At most 16 ordinary/attestation bodies and 16 recovery bodies are received or parsed concurrently
 - Secret key zeroed from memory after wallet derivation
 - Docker image runs as non-root user
 

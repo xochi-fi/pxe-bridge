@@ -1,4 +1,4 @@
-import { createServer, type RequestListener } from "node:http";
+import { createServer, request, type RequestListener } from "node:http";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -534,6 +534,106 @@ describe("readiness attestation producer", () => {
       );
       expect(response.status).toBe(404);
     } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
+  it("rate limits malformed attestation content", async () => {
+    const ctx = await setup([{ address: recipient, index: 137 }]);
+    const server = createApp(new FakeAztecClient(), {
+      apiKey: "attest-invalid-rpc-key",
+      attestationApiKey: "attest-invalid-key",
+      attestation: ctx.producer,
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("server did not bind");
+    const url = `http://127.0.0.1:${address.port}/api/attestation`;
+    try {
+      for (let i = 0; i < 60; i++) {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: { authorization: "Bearer attest-invalid-key" },
+        });
+        expect(response.status).toBe(415);
+      }
+      const rateLimited = await fetch(url, {
+        method: "POST",
+        headers: { authorization: "Bearer attest-invalid-key" },
+      });
+      expect(rateLimited.status).toBe(429);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
+  it("shares bounded body intake with the main RPC route", async () => {
+    const ctx = await setup([{ address: recipient, index: 137 }]);
+    const server = createApp(new FakeAztecClient(), {
+      apiKey: "body-rpc-key",
+      attestationApiKey: "body-attest-key",
+      attestation: ctx.producer,
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("server did not bind");
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+    const held: ReturnType<typeof request>[] = [];
+    try {
+      for (let i = 0; i < 16; i++) {
+        const req = request(`${baseUrl}/api/attestation`, {
+          method: "POST",
+          headers: {
+            authorization: "Bearer body-attest-key",
+            "content-type": "application/json",
+          },
+        });
+        held.push(req);
+        await new Promise<void>((resolve, reject) => {
+          req.once("error", reject);
+          req.once("socket", (socket) => {
+            const sendPartialBody = (): void => {
+              req.flushHeaders();
+              req.write(Buffer.alloc(64 * 1024 + 1, "x"));
+              resolve();
+            };
+            if (socket.connecting) socket.once("connect", sendPartialBody);
+            else sendPartialBody();
+          });
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+
+      const rpc = await fetch(`${baseUrl}/api/rpc`, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer body-rpc-key",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "aztec_getVersion", params: [] }),
+      });
+      expect(rpc.status).toBe(503);
+
+      const recovery = await fetch(`${baseUrl}/api/recovery`, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer body-rpc-key",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "aztec_getSettlement",
+          params: [{}],
+        }),
+      });
+      expect(recovery.status).toBe(200);
+    } finally {
+      for (const req of held) req.destroy();
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),
       );

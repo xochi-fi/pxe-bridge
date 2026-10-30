@@ -16,6 +16,11 @@ Deployment.
 | `aztec_createNote` | one object: `version: "pxe-bridge.settlement.v1"`, `operationId` (1-128 printable ASCII, MUST equal the `Idempotency-Key` header), `network` (§7 `NetworkIdentity`), `corridor {corridorId, corridorRevision, manifestDigest}`, `accountMode` (`spending_limit` \| `standard`), `recipient`, `recipientDescriptorDigest`, `token`, `amount`, `validUntil` (unix seconds). Encodings: "Frozen encodings" below. Unknown keys refused. | `result {version, operationId, fingerprint, observation}` for `pending`/`included`/`finalized`/`reverted`; otherwise a JSON-RPC error below. |
 | `aztec_getSettlement` | `{version, operationId}` | `result {version, operationId, found, fingerprint?, terms?, state?, attempts?: [{attempt, txHash, expirationTimestamp, mayBroadcast}], observation, journal {writable, reason?, detail?}}`. Read-only; served while journal writes are disabled. `found: false` answers `observation {state: "unknown", reason: "operation_not_journaled"}`: absence never means "no payout". |
 
+Send `aztec_getSettlement` to `POST /api/recovery` to use the reconciliation
+body-intake reserve. `/` and `/api/rpc` remain accepted for compatibility, but
+share their pre-classification body capacity with fund-moving and attestation
+traffic.
+
 Legacy `{recipient, token, amount, chainId, ...}` params are refused
 (`-32602`, `data.reason: "legacy_params_refused"`).
 
@@ -351,11 +356,12 @@ is the only record of what the legacy bridge may have sent.
 | `GET /status` | none, separately rate-limited | Public minimal **process liveness** only: 200 `{"status":"ok"}` with no Aztec RPC. The listener serves it while the wallet is still connecting. |
 | `GET /ready` | Bearer `PXE_BRIDGE_API_KEY`, then its dedicated readiness limiter | Operational projection from the authoritative admission predicate: 200 iff `ready: true`, otherwise 503 with stable reasons. During startup it returns 503 `initializing`. A backend observation exceeding 20 seconds returns 503 `readiness_observation_failed`; later probes share that still-running observation rather than starting more Aztec RPCs. Failed authentication is charged to the separate auth-failure limiter and exposes no state. |
 
-Backend saturation adds `backend_capacity_exhausted` and returns 503 for new
-admission. Body receipt and JSON parsing share a 16-request pre-classification
-ceiling. After classification, journal-only `aztec_getSettlement` has separate
-rate-limit and backend-work capacity, so ordinary RPC execution cannot consume
-its reconciliation budget.
+Backend or ordinary body-intake saturation adds
+`backend_capacity_exhausted` and returns 503 for new admission. Body receipt and
+JSON parsing have separate 16-request ordinary/attestation and reconciliation
+ceilings. `POST /api/recovery` accepts only `aztec_getSettlement`, whose
+rate-limit and backend-work capacity are separate too, so ordinary RPC execution
+cannot consume its reconciliation budget.
 
 The readiness projection contains the flat checker fields `ready`,
 `nodeVersion`, `l1ChainId`, `rollupVersion`, `account {address,classId}`,
