@@ -61,7 +61,7 @@ const DAILY_LIMIT = 10_000_000n;
 const INVENTORY = 100_000_000n;
 const ALLOWLIST_SEED = "0x" + "07".repeat(32);
 const FEE_JUICE_AMOUNT = 1_000_000_000_000_000_000_000n;
-const RECIPIENT = "0x" + "48".repeat(32);
+const RECIPIENT = "0x" + "08".repeat(32);
 
 type KillPoint = "after_node_accepts" | "before_node_sees";
 
