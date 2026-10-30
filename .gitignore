@@ -4,6 +4,11 @@ dist/
 .env
 docker-compose.override.yml
 .claude/settings.local.json
+.claude/worktrees/
+
+# Local planning notes and private auditor correspondence. Never committed.
+.planning/
+
 # PXE and wallet state. The nested form is what `aztec-wallet` writes: the
 # stores inside it are named with a hyphen (pxe_data-stores), so the underscore
 # patterns above do not reach them and the parent has to be named outright.
