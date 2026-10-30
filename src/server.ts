@@ -59,6 +59,8 @@ export interface ServerOptions {
   responseTimeoutMs?: number | undefined;
   /** Readiness observation deadline; READINESS_TIMEOUT_MS unless a test shortens it. */
   readinessTimeoutMs?: number | undefined;
+  /** False while startup is still connecting/binding; only public /status is served. */
+  initialized?: (() => boolean) | undefined;
 }
 
 
@@ -206,16 +208,18 @@ function checkAuth(req: IncomingMessage, apiKey: string): boolean {
   return match && actual.length === expected.length;
 }
 
+type ReadinessProjection = Awaited<ReturnType<ReadinessObserver["observe"]>>;
+
 async function observeReadiness(
-  observer: ReadinessObserver,
+  observation: Promise<ReadinessProjection>,
   timeoutMs: number,
-): Promise<Awaited<ReturnType<ReadinessObserver["observe"]>>> {
+): Promise<ReadinessProjection> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error("readiness observation timed out")), timeoutMs);
   });
   try {
-    return await Promise.race([observer.observe(), timeout]);
+    return await Promise.race([observation, timeout]);
   } finally {
     clearTimeout(timer);
   }
@@ -248,6 +252,21 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
     throw new Error("Server and settlement must share one readiness observer");
   }
   const readinessObserver = opts.readiness ?? opts.settlement?.readiness;
+  let readinessObservation: Promise<ReadinessProjection> | undefined;
+  const currentReadinessObservation = (): Promise<ReadinessProjection> => {
+    if (!readinessObserver) {
+      return Promise.reject(new Error("readiness observer is not configured"));
+    }
+    if (readinessObservation) return readinessObservation;
+
+    const observation = Promise.resolve().then(() => readinessObserver.observe());
+    readinessObservation = observation;
+    const clear = () => {
+      if (readinessObservation === observation) readinessObservation = undefined;
+    };
+    void observation.then(clear, clear);
+    return observation;
+  };
   const rateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const livenessRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const authFailureLimiter = new RateLimiter(AUTH_FAILURE_MAX, RATE_LIMIT_WINDOW_MS);
@@ -315,6 +334,14 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
         sendJson(res, 200, { status: "ok" });
         return;
       }
+      if (opts.initialized && !opts.initialized()) {
+        if (req.method === "GET" && pathname === "/ready") {
+          sendJson(res, 503, { ready: false, reasons: ["initializing"] });
+        } else {
+          sendJson(res, 503, { error: "Service initializing" });
+        }
+        return;
+      }
 
       // Operational readiness contains funded-account and policy detail, so it
       // is authenticated before spending the real-traffic rate-limit budget.
@@ -335,7 +362,7 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
         }
         try {
           const readiness = await observeReadiness(
-            readinessObserver,
+            currentReadinessObservation(),
             opts.readinessTimeoutMs ?? READINESS_TIMEOUT_MS,
           );
           sendJson(res, readiness.ready ? 200 : 503, readiness);

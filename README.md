@@ -675,17 +675,21 @@ Returns the connected Aztec node version string.
 ### Liveness and operational readiness
 
 `GET /status` is the public, unauthenticated, process-local liveness endpoint.
-It exposes only `{"status":"ok"}` (HTTP 200) and performs no Aztec RPC. Keep
-container restarts on this route: a bridge that has lost settlement readiness
-must remain up to observe and reconcile already marked operations.
+The listener starts before the Aztec wallet connects; while initialization is
+incomplete, `/status` still returns `{"status":"ok"}` (HTTP 200), `/ready`
+returns 503 `initializing`, and every other route returns 503. `/status`
+performs no Aztec RPC. Keep container restarts on this route: a bridge that has
+lost settlement readiness must remain up to observe and reconcile already
+marked operations.
 
 `GET /ready` is the authenticated operational endpoint. It requires the same
 `Authorization: Bearer <PXE_BRIDGE_API_KEY>` header as JSON-RPC and returns the
 authoritative readiness projection. A backend observation that exceeds 20
-seconds fails closed as HTTP 503 `readiness_observation_failed`. HTTP 200 means
-new settlement admission is allowed; HTTP 503 means it is not. Authentication
-failures use the separate auth-failure rate limiter and expose no operational
-state.
+seconds fails closed as HTTP 503 `readiness_observation_failed`. Timed-out
+callers share the same still-running observation, so probes cannot accumulate
+unbounded Aztec RPCs. HTTP 200 means new settlement admission is allowed; HTTP
+503 means it is not. Authentication failures use the separate auth-failure
+rate limiter and expose no operational state.
 
 Hard readiness requires design-A `spending_limit` mode and its durable
 deployment record; the exact derived account address and compiled class;

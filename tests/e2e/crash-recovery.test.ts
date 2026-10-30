@@ -143,7 +143,7 @@ describe("hard crash mid-broadcast (e2e)", () => {
   async function startBridge(
     workDir: string,
     journal: string,
-    requireReadiness = true,
+    startupState: "ready" | "initialized" = "ready",
     corridor: typeof CORRIDOR = CORRIDOR,
   ): Promise<Bridge> {
     // A port the OS just handed out, released for the bridge to bind.
@@ -185,13 +185,19 @@ describe("hard crash mid-broadcast (e2e)", () => {
     while (Date.now() < deadline) {
       if (child.exitCode !== null) throw new Error(`bridge exited during startup:\n${log}`);
       try {
-        const res = await fetch(`${url}${requireReadiness ? "/ready" : "/status"}`, {
-          ...(requireReadiness
-            ? { headers: { authorization: `Bearer ${RPC_KEY}` } }
-            : {}),
+        const res = await fetch(`${url}/ready`, {
+          signal: AbortSignal.timeout(
+            Math.max(1, Math.min(10_000, deadline - Date.now())),
+          ),
+          headers: { authorization: `Bearer ${RPC_KEY}` },
         });
+        const body = await res.text();
         if (res.status === 200) return { child, url, exited };
-        lastAnswer = `HTTP ${res.status} ${await res.text()}`;
+        if (startupState === "initialized" && res.status === 503) {
+          const reasons = (JSON.parse(body) as { reasons?: string[] }).reasons ?? [];
+          if (!reasons.includes("initializing")) return { child, url, exited };
+        }
+        lastAnswer = `HTTP ${res.status} ${body}`;
       } catch {
         // not listening yet
       }
@@ -494,7 +500,7 @@ describe("hard crash mid-broadcast (e2e)", () => {
 
     // Restart under another corridor revision: the operation's own corridor no
     // longer admits new work, which must not stop its recovery.
-    bridge = await startBridge(workDir, journal, false, {
+    bridge = await startBridge(workDir, journal, "initialized", {
       ...CORRIDOR,
       corridorRevision: 2,
     });
@@ -548,7 +554,7 @@ describe("hard crash mid-broadcast (e2e)", () => {
     writeSync(fd, Buffer.alloc(100, 0x5a), 0, 100, 0);
     closeSync(fd);
 
-    bridge = await startBridge(workDir, journal, false);
+    bridge = await startBridge(workDir, journal, "initialized");
     expect(await (await fetch(`${bridge.url}/status`)).json()).toEqual({ status: "ok" });
     const readiness = await fetch(`${bridge.url}/ready`, {
       headers: { authorization: `Bearer ${RPC_KEY}` },

@@ -364,9 +364,15 @@ describe("public liveness isolation", () => {
     }
   });
 
-  it("returns a typed 503 when the authenticated readiness probe hangs", async () => {
+  it("bounds a hung readiness observation to one backend call", async () => {
     const key = "bounded-readiness-key";
-    const readiness = { observe: () => new Promise<never>(() => {}) };
+    let observations = 0;
+    const readiness = {
+      observe: () => {
+        observations += 1;
+        return new Promise<never>(() => {});
+      },
+    };
     const client = new FakeAztecClient();
     const srv = createApp(client, {
       apiKey: key,
@@ -379,14 +385,46 @@ describe("public liveness isolation", () => {
     const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
 
     try {
-      const response = await fetch(`${url}/ready`, {
+      for (let i = 0; i < 2; i++) {
+        const response = await fetch(`${url}/ready`, {
+          headers: { Authorization: `Bearer ${key}` },
+        });
+        expect(response.status).toBe(503);
+        expect(await response.json()).toEqual({
+          ready: false,
+          reasons: ["readiness_observation_failed"],
+        });
+      }
+      expect(observations).toBe(1);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+  it("serves only process liveness while initialization is incomplete", async () => {
+    const key = "initializing-key";
+    const client = new FakeAztecClient();
+    const srv = createApp(client, {
+      apiKey: key,
+      initialized: () => false,
+    });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+
+    try {
+      expect(await (await fetch(`${url}/status`)).json()).toEqual({ status: "ok" });
+      const ready = await fetch(`${url}/ready`, {
         headers: { Authorization: `Bearer ${key}` },
       });
-      expect(response.status).toBe(503);
-      expect(await response.json()).toEqual({
-        ready: false,
-        reasons: ["readiness_observation_failed"],
+      expect(ready.status).toBe(503);
+      expect(await ready.json()).toEqual({ ready: false, reasons: ["initializing"] });
+
+      const rpc = await jsonPost(url, rpcBody("aztec_getVersion"), {
+        Authorization: `Bearer ${key}`,
       });
+      expect(rpc.status).toBe(503);
+      expect(await rpc.json()).toEqual({ error: "Service initializing" });
     } finally {
       await new Promise<void>((resolve) => srv.close(() => resolve()));
     }
