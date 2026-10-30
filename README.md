@@ -741,6 +741,7 @@ The Docker `HEALTHCHECK` reads only `/status`'s HTTP code (`curl -sf`).
 - Set `PXE_BRIDGE_API_KEY` for production -- without it, anyone with network access can create notes
 - `Content-Type: application/json` required on POST requests (prevents browser CSRF)
 - Ordinary RPC and journal reconciliation are each rate limited to 60 requests/min
+- At most 16 authenticated JSON-RPC bodies are received or parsed concurrently
 - Secret key zeroed from memory after wallet derivation
 - Docker image runs as non-root user
 

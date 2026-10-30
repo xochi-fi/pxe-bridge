@@ -15,6 +15,7 @@ const MAX_BODY_BYTES = 64 * 1024; // 64 KB
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = 60;
 const MAX_RPC_IN_FLIGHT = 16;
+const MAX_RPC_BODY_IN_FLIGHT = 16;
 // Bounds RECEIVING the request. Node's server.requestTimeout covers headers
 // plus body, not the response, which is why it was never the protection the
 // docs claimed it was.
@@ -391,6 +392,7 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
   const malformedTargetRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   let backendInFlight = 0;
   let recoveryInFlight = 0;
+  let rpcBodyInFlight = 0;
   const acquireBackendLease = (recovery = false): {
     trackBackground: (call: Promise<unknown>) => void;
     finish: () => void;
@@ -678,39 +680,10 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           return;
         }
 
-
-
-        let body: string;
-        try {
-          body = await readBody(req);
-        } catch {
-          if (!invalidRpcRateLimiter.allow(clientIp)) {
-            sendJson(res, 429, { error: "Too many requests" });
-            return;
-          }
-          sendJson(res, 413, { error: "Request body too large" });
-          return;
-        }
-
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(body);
-        } catch {
-          if (!invalidRpcRateLimiter.allow(clientIp)) {
-            sendJson(res, 429, { error: "Too many requests" });
-            return;
-          }
-          sendJson(res, 400, {
-            jsonrpc: "2.0",
-            id: null,
-            error: { code: -32700, message: "Parse error" },
-          });
-          return;
-        }
-
         // A header rather than an RPC param: it is a property of the delivery
         // attempt, not of the note being created, and it has to work for
-        // callers that send no XIP-1 trade context.
+        // callers that send no XIP-1 trade context. Validate it before reading
+        // the body so invalid headers cannot bypass every request bound.
         const idempotencyKey = readIdempotencyKey(req.headers["idempotency-key"]);
         if (idempotencyKey === INVALID_KEY) {
           if (!invalidRpcRateLimiter.allow(clientIp)) {
@@ -721,6 +694,46 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
             error: `Idempotency-Key must be 1-${MAX_IDEMPOTENCY_KEY_LENGTH} printable ASCII characters`,
           });
           return;
+        }
+
+        // Method-specific limits require the parsed JSON-RPC body. Bound that
+        // pre-classification work separately so slow or concurrent bodies
+        // cannot accumulate outside the backend pools.
+        if (rpcBodyInFlight >= MAX_RPC_BODY_IN_FLIGHT) {
+          sendJson(res, 503, { error: "Service busy" });
+          return;
+        }
+        rpcBodyInFlight += 1;
+        let parsed: unknown;
+        try {
+          let body: string;
+          try {
+            body = await readBody(req);
+          } catch {
+            if (!invalidRpcRateLimiter.allow(clientIp)) {
+              sendJson(res, 429, { error: "Too many requests" });
+              return;
+            }
+            sendJson(res, 413, { error: "Request body too large" });
+            return;
+          }
+
+          try {
+            parsed = JSON.parse(body);
+          } catch {
+            if (!invalidRpcRateLimiter.allow(clientIp)) {
+              sendJson(res, 429, { error: "Too many requests" });
+              return;
+            }
+            sendJson(res, 400, {
+              jsonrpc: "2.0",
+              id: null,
+              error: { code: -32700, message: "Parse error" },
+            });
+            return;
+          }
+        } finally {
+          rpcBodyInFlight -= 1;
         }
 
         const recoveryRequest =

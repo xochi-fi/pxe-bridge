@@ -586,6 +586,49 @@ describe("public liveness isolation", () => {
     }
   });
 
+  it("bounds request bodies before method classification", async () => {
+    const key = "body-cap-key";
+    const srv = createApp(new FakeAztecClient(), { apiKey: key });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+    const held: ReturnType<typeof request>[] = [];
+
+    try {
+      for (let i = 0; i < 16; i++) {
+        const req = request(url, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${key}`,
+            "Content-Type": "application/json",
+          },
+        });
+        held.push(req);
+        await new Promise<void>((resolve, reject) => {
+          req.once("error", reject);
+          req.once("socket", (socket) => {
+            const sendPartialBody = (): void => {
+              req.flushHeaders();
+              req.write("{");
+              resolve();
+            };
+            if (socket.connecting) socket.once("connect", sendPartialBody);
+            else sendPartialBody();
+          });
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+
+      const overflow = await jsonPost(url, rpcBody("aztec_getSettlement", [{}]), {
+        Authorization: `Bearer ${key}`,
+      });
+      expect(overflow.status).toBe(503);
+    } finally {
+      for (const req of held) req.destroy();
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
   it("holds backend capacity for settlement work after its response", async () => {
     const key = "settlement-background-cap-key";
     const stuck = new FakeAztecClient();
