@@ -8,6 +8,7 @@ import {
 } from "../src/server.js";
 import { TransactionLimits } from "../src/limits.js";
 import type { MayBroadcastClient } from "../src/may-broadcast.js";
+import { RPC_ERRORS } from "../src/types.js";
 import { rpcJson } from "./helpers.js";
 import {
   FakeAztecClient as SettlementFakeClient,
@@ -641,6 +642,54 @@ describe("public liveness isolation", () => {
       expect(recovery.status).toBe(200);
     } finally {
       for (const req of held) req.destroy();
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+  it("preserves dedicated recovery rate capacity for valid requests", async () => {
+    const key = "recovery-invalid-budget-key";
+    const srv = createApp(new FakeAztecClient(), { apiKey: key });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+    const headers = { Authorization: `Bearer ${key}` };
+
+    try {
+      for (let i = 0; i < 30; i++) {
+        const invalidMethod = await jsonPost(
+          `${url}/api/recovery`,
+          rpcBody("aztec_getVersion", []),
+          headers,
+        );
+        expect(invalidMethod.status).toBe(400);
+      }
+      for (let i = 0; i < 30; i++) {
+        const invalidParams = await jsonPost(
+          `${url}/api/recovery`,
+          rpcBody("aztec_getSettlement", [{}]),
+          headers,
+        );
+        expect(invalidParams.status).toBe(200);
+        expect(await invalidParams.json()).toMatchObject({
+          error: { code: RPC_ERRORS.INVALID_PARAMS },
+        });
+      }
+      const invalidRateLimited = await jsonPost(
+        `${url}/api/recovery`,
+        rpcBody("aztec_getVersion", []),
+        headers,
+      );
+      expect(invalidRateLimited.status).toBe(429);
+
+      const recovery = await jsonPost(
+        `${url}/api/recovery`,
+        rpcBody("aztec_getSettlement", [
+          { version: "pxe-bridge.settlement.v1", operationId: "recover-valid" },
+        ]),
+        headers,
+      );
+      expect(recovery.status).toBe(200);
+    } finally {
       await new Promise<void>((resolve) => srv.close(() => resolve()));
     }
   });

@@ -1,15 +1,17 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { handleRpcRequest, type RpcContext, type SettlementContext } from "./rpc.js";
-import { RPC_ERRORS, type IAztecClient } from "./types.js";
+import { JsonRpcRequestSchema, RPC_ERRORS, type IAztecClient } from "./types.js";
 import type { TransactionLimits } from "./limits.js";
 import type { AuditLogger } from "./audit.js";
 import type { ReadinessObserver } from "./readiness.js";
 import {
+  AttestationRpcRequestSchema,
   attestationHttpStatus,
   handleAttestationRpc,
   type AttestationProducer,
 } from "./attestation.js";
+import { GetSettlementSchema } from "./settlement.js";
 
 const MAX_BODY_BYTES = 64 * 1024; // 64 KB
 const RATE_LIMIT_WINDOW_MS = 60_000;
@@ -640,6 +642,15 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
         } finally {
           releaseBody();
         }
+        if (!AttestationRpcRequestSchema.safeParse(parsed).success) {
+          if (!attestationInvalidRateLimiter.allow(attestationIp)) {
+            sendJson(res, 429, { error: "Too many requests" });
+            return;
+          }
+          const response = await handleAttestationRpc(parsed, opts.attestation);
+          sendJson(res, attestationHttpStatus(response), response);
+          return;
+        }
         if (!attestationRateLimiter.allow(attestationIp)) {
           sendJson(res, 429, { error: "Too many requests" });
           return;
@@ -796,18 +807,45 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           releaseBody();
         }
 
+        const rpcRequest = JsonRpcRequestSchema.safeParse(parsed);
+        if (!rpcRequest.success) {
+          if (!invalidRpcRateLimiter.allow(clientIp)) {
+            sendJson(res, 429, { error: "Too many requests" });
+            return;
+          }
+          sendJson(res, 200, {
+            jsonrpc: "2.0",
+            id: null,
+            error: { code: RPC_ERRORS.INVALID_REQUEST, message: "Invalid JSON-RPC request" },
+          });
+          return;
+        }
+        const { id, method, params } = rpcRequest.data;
+        const recoveryMethod = method === "aztec_getSettlement";
         const recoveryRequest =
-          typeof parsed === "object" &&
-          parsed !== null &&
-          "method" in parsed &&
-          parsed.method === "aztec_getSettlement";
-        const usesRecoveryCapacity = recoveryEndpoint || recoveryRequest;
-        const requestRateLimiter = usesRecoveryCapacity ? recoveryRateLimiter : rpcRateLimiter;
-        if (!requestRateLimiter.allow(clientIp)) {
-          sendJson(res, 429, { error: "Too many requests" });
+          recoveryMethod &&
+          params.length === 1 &&
+          GetSettlementSchema.safeParse(params[0]).success;
+        if (recoveryMethod && !recoveryRequest) {
+          if (!invalidRpcRateLimiter.allow(clientIp)) {
+            sendJson(res, 429, { error: "Too many requests" });
+            return;
+          }
+          sendJson(res, 200, {
+            jsonrpc: "2.0",
+            id,
+            error: {
+              code: RPC_ERRORS.INVALID_PARAMS,
+              message: "Invalid params for aztec_getSettlement",
+            },
+          });
           return;
         }
         if (recoveryEndpoint && !recoveryRequest) {
+          if (!invalidRpcRateLimiter.allow(clientIp)) {
+            sendJson(res, 429, { error: "Too many requests" });
+            return;
+          }
           sendJson(res, 400, {
             jsonrpc: "2.0",
             id: null,
@@ -815,7 +853,12 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           });
           return;
         }
-        const lease = acquireBackendLease(usesRecoveryCapacity);
+        const requestRateLimiter = recoveryRequest ? recoveryRateLimiter : rpcRateLimiter;
+        if (!requestRateLimiter.allow(clientIp)) {
+          sendJson(res, 429, { error: "Too many requests" });
+          return;
+        }
+        const lease = acquireBackendLease(recoveryRequest);
         if (lease === null) {
           sendJson(res, 503, { error: "Service busy" });
           return;
