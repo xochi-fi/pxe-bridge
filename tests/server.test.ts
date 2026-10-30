@@ -737,6 +737,7 @@ describe("public liveness isolation", () => {
 
   it("holds backend capacity for settlement work after its response", async () => {
     const key = "settlement-background-cap-key";
+    const recoveryKey = "settlement-background-recovery-key";
     const stuck = new FakeAztecClient();
     stuck.createNote = () => new Promise<never>(() => {});
     let readinessFails = false;
@@ -752,6 +753,7 @@ describe("public liveness isolation", () => {
     settlement.timeoutMs = 10;
     const srv = createApp(stuck, {
       apiKey: key,
+      recoveryApiKey: recoveryKey,
       settlement,
       readiness,
       responseTimeoutMs: 1_000,
@@ -790,13 +792,16 @@ describe("public liveness isolation", () => {
         Authorization: `Bearer ${key}`,
       });
       expect(rateLimited.status).toBe(429);
-      const recovery = await jsonPost(
-        url,
-        rpcBody("aztec_getSettlement", [
-          { version: "pxe-bridge.settlement.v1", operationId: "background-0" },
-        ]),
-        { Authorization: `Bearer ${key}` },
-      );
+      const recoveryBody = rpcBody("aztec_getSettlement", [
+        { version: "pxe-bridge.settlement.v1", operationId: "background-0" },
+      ]);
+      const legacyRecovery = await jsonPost(url, recoveryBody, {
+        Authorization: `Bearer ${key}`,
+      });
+      expect(legacyRecovery.status).toBe(429);
+      const recovery = await jsonPost(`${url}/api/recovery`, recoveryBody, {
+        Authorization: `Bearer ${recoveryKey}`,
+      });
       expect(recovery.status).toBe(200);
       expect(await recovery.json()).toMatchObject({
         result: { found: true, operationId: "background-0" },

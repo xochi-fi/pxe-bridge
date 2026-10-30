@@ -862,12 +862,12 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           });
           return;
         }
-        const requestRateLimiter = recoveryRequest ? recoveryRateLimiter : rpcRateLimiter;
+        const requestRateLimiter = recoveryEndpoint ? recoveryRateLimiter : rpcRateLimiter;
         if (!requestRateLimiter.allow(clientIp)) {
           sendJson(res, 429, { error: "Too many requests" });
           return;
         }
-        const lease = acquireBackendLease(recoveryRequest);
+        const lease = acquireBackendLease(recoveryEndpoint);
         if (lease === null) {
           sendJson(res, 503, { error: "Service busy" });
           return;

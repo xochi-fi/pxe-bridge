@@ -587,7 +587,7 @@ See `SECURITY.md` for the incident runbook.
 
 ## API Reference
 
-Methods use JSON-RPC 2.0 over HTTP POST to `/` or `/api/rpc`; use the dedicated `/api/recovery` route for `aztec_getSettlement` so reconciliation retains reserved body, rate-limit, and backend capacity. The dedicated route is disabled unless `PXE_BRIDGE_RECOVERY_API_KEY` is set and requires that credential; the legacy routes still accept reconciliation with `PXE_BRIDGE_API_KEY`. Requests require `Content-Type: application/json`.
+Methods use JSON-RPC 2.0 over HTTP POST to `/` or `/api/rpc`; use the dedicated `/api/recovery` route for `aztec_getSettlement` so reconciliation retains reserved body, rate-limit, and backend capacity. The dedicated route is disabled unless `PXE_BRIDGE_RECOVERY_API_KEY` is set and requires that credential. The legacy routes still accept reconciliation with `PXE_BRIDGE_API_KEY`, but use ordinary body, rate-limit, and backend capacity. Requests require `Content-Type: application/json`.
 
 ### `aztec_createNote`
 

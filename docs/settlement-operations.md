@@ -19,8 +19,8 @@ Deployment.
 Send `aztec_getSettlement` to `POST /api/recovery` with Bearer
 `PXE_BRIDGE_RECOVERY_API_KEY` to use the reconciliation body-intake reserve.
 The dedicated route is disabled when that distinct credential is unset.
-`/` and `/api/rpc` remain accepted with `PXE_BRIDGE_API_KEY`, but share their
-pre-classification body capacity with fund-moving and attestation traffic.
+`/` and `/api/rpc` remain accepted with `PXE_BRIDGE_API_KEY`, but use ordinary
+body-intake, rate-limit, and backend capacity alongside fund-moving traffic.
 
 Legacy `{recipient, token, amount, chainId, ...}` params are refused
 (`-32602`, `data.reason: "legacy_params_refused"`).
@@ -363,7 +363,8 @@ JSON parsing have separate 16-request ordinary/attestation and reconciliation
 ceilings. `POST /api/recovery` requires the distinct
 `PXE_BRIDGE_RECOVERY_API_KEY` before reserving body intake and accepts only
 `aztec_getSettlement`; its rate-limit and backend-work capacity are separate
-too, so an ordinary RPC credential cannot consume its reconciliation budget.
+too. Legacy-route reconciliation uses ordinary capacity, so an ordinary RPC
+credential cannot consume the dedicated reconciliation budget.
 
 The readiness projection contains the flat checker fields `ready`,
 `nodeVersion`, `l1ChainId`, `rollupVersion`, `account {address,classId}`,

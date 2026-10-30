@@ -555,6 +555,7 @@ let attestationEnvironment: AttestationEnvironmentConfig | undefined;
 try {
   attestationEnvironment = readAttestationEnvironment(process.env, [
     API_KEY,
+    RECOVERY_API_KEY,
     ADMIN_KEY,
     MAY_BROADCAST_TOKEN,
   ]);
@@ -653,6 +654,7 @@ async function main(): Promise<void> {
         secretKey,
         spendingLimitConfig.allowlistSeed,
         API_KEY,
+        RECOVERY_API_KEY,
         ADMIN_KEY,
         MAY_BROADCAST_TOKEN,
         attestationEnvironment.apiKey,
