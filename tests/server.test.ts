@@ -571,21 +571,36 @@ describe("public liveness isolation", () => {
     const headers = { Authorization: `Bearer ${key}` };
 
     try {
-      for (let i = 0; i < 20; i++) {
+      for (let i = 0; i < 15; i++) {
         const response = await jsonPost(url, rpcBody("aztec_createNote", [{}]), headers);
         expect(response.status).toBe(200);
         expect(await response.json()).toMatchObject({
           error: { code: RPC_ERRORS.INVALID_PARAMS },
         });
       }
-      for (let i = 0; i < 20; i++) {
+      for (let i = 0; i < 15; i++) {
+        const operationId = `mismatched-operation-${i}`;
+        const response = await jsonPost(
+          url,
+          rpcBody("aztec_createNote", [v1Params({ operationId })]),
+          headers,
+        );
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({
+          error: {
+            code: RPC_ERRORS.INVALID_PARAMS,
+            data: { reason: "operation_id_mismatch" },
+          },
+        });
+      }
+      for (let i = 0; i < 15; i++) {
         const response = await jsonPost(url, rpcBody("aztec_getVersion", [{}]), headers);
         expect(response.status).toBe(200);
         expect(await response.json()).toMatchObject({
           error: { code: RPC_ERRORS.INVALID_PARAMS },
         });
       }
-      for (let i = 0; i < 20; i++) {
+      for (let i = 0; i < 15; i++) {
         const response = await jsonPost(url, rpcBody("unknown_method", []), headers);
         expect(response.status).toBe(200);
         expect(await response.json()).toMatchObject({

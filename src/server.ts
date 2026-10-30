@@ -862,10 +862,32 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           });
           return;
         }
+        const createNoteParams =
+          method === "aztec_createNote" && params.length === 1
+            ? CreateNoteV1Schema.safeParse(params[0])
+            : undefined;
         const createNoteRequest =
-          method === "aztec_createNote" &&
-          params.length === 1 &&
-          CreateNoteV1Schema.safeParse(params[0]).success;
+          createNoteParams?.success === true &&
+          idempotencyKey === createNoteParams.data.operationId;
+        if (
+          createNoteParams?.success === true &&
+          idempotencyKey !== createNoteParams.data.operationId
+        ) {
+          if (!invalidRpcRateLimiter.allow(clientIp)) {
+            sendJson(res, 429, { error: "Too many requests" });
+            return;
+          }
+          sendJson(res, 200, {
+            jsonrpc: "2.0",
+            id,
+            error: {
+              code: RPC_ERRORS.INVALID_PARAMS,
+              message: "Idempotency-Key must equal operationId",
+              data: { reason: "operation_id_mismatch" },
+            },
+          });
+          return;
+        }
         const versionRequest = method === "aztec_getVersion" && params.length === 0;
         if (!recoveryRequest && !createNoteRequest && !versionRequest) {
           if (!invalidRpcRateLimiter.allow(clientIp)) {
