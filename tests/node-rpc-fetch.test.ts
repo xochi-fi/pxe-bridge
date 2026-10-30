@@ -42,11 +42,13 @@ describe("boundedNodeFetch", () => {
     const server = createServer((_req, res) => {
       res.writeHead(400, { "content-type": "application/json" });
       res.end(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          id: 1,
-          error: { code: -32000, message: "Existing nullifier\n[audit]\u001b[2J" },
-        }),
+        JSON.stringify([
+          {
+            jsonrpc: "2.0",
+            id: 1,
+            error: { code: -32000, message: "Existing nullifier\n[audit]\u001b[2J" },
+          },
+        ]),
       );
     });
     servers.push(server);

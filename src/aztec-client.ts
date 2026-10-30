@@ -60,13 +60,17 @@ type NodeRpcFetch = (
 ) => Promise<{ response: unknown; headers: Headers }>;
 
 function nodeRpcErrorMessage(decoded: unknown): string | undefined {
-  if (typeof decoded !== "object" || decoded === null || !("error" in decoded)) return undefined;
-  const error = decoded.error;
-  if (typeof error !== "object" || error === null || !("message" in error)) return undefined;
-  const message = error.message;
-  return typeof message === "string" && message.length <= 1_024
-    ? message.replace(/[^\x20-\x7e]/g, "?")
-    : undefined;
+  const responses = Array.isArray(decoded) ? decoded : [decoded];
+  for (const response of responses) {
+    if (typeof response !== "object" || response === null || !("error" in response)) continue;
+    const error = response.error;
+    if (typeof error !== "object" || error === null || !("message" in error)) continue;
+    const message = error.message;
+    if (typeof message === "string" && message.length <= 1_024) {
+      return message.replace(/[^\x20-\x7e]/g, "?");
+    }
+  }
+  return undefined;
 }
 
 /**

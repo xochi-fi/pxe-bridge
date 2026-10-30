@@ -51,6 +51,7 @@ EVM Solver --JSON-RPC--> pxe-bridge --Aztec SDK--> Aztec L2 Node
 | ----------------------- | -------- | ----------------------- | ---------------------------------------------- |
 | `PXE_BRIDGE_SECRET_KEY` | Yes      | --                      | 32-byte hex key, below the BN254 Fr modulus    |
 | `PXE_BRIDGE_API_KEY`    | No       | --                      | Bearer token for RPC auth (warns if unset)     |
+| `PXE_BRIDGE_RECOVERY_API_KEY` | No | -- | Separate bearer token for reserved `POST /api/recovery` intake; startup refuses equality with every other credential |
 | `PXE_BRIDGE_ADMIN_KEY`  | No       | --                      | Separate bearer token for `POST /admin/resume`; startup refuses equality with the RPC key |
 | `AZTEC_NODE_URL`        | No       | `http://localhost:8080` | Aztec L2 node RPC endpoint                     |
 | `PXE_BRIDGE_HOST`       | No       | `127.0.0.1`             | Bind address (localhost-only by default)       |
@@ -586,7 +587,7 @@ See `SECURITY.md` for the incident runbook.
 
 ## API Reference
 
-Methods use JSON-RPC 2.0 over HTTP POST to `/` or `/api/rpc`; use the dedicated `/api/recovery` route for `aztec_getSettlement` so reconciliation retains reserved body, rate-limit, and backend capacity. The legacy routes still accept reconciliation requests. Requests require `Content-Type: application/json`. When `PXE_BRIDGE_API_KEY` is set, include `Authorization: Bearer <key>`.
+Methods use JSON-RPC 2.0 over HTTP POST to `/` or `/api/rpc`; use the dedicated `/api/recovery` route for `aztec_getSettlement` so reconciliation retains reserved body, rate-limit, and backend capacity. The dedicated route is disabled unless `PXE_BRIDGE_RECOVERY_API_KEY` is set and requires that credential; the legacy routes still accept reconciliation with `PXE_BRIDGE_API_KEY`. Requests require `Content-Type: application/json`.
 
 ### `aztec_createNote`
 
@@ -741,7 +742,7 @@ The Docker `HEALTHCHECK` reads only `/status`'s HTTP code (`curl -sf`).
 - Set `PXE_BRIDGE_API_KEY` for production -- without it, anyone with network access can create notes
 - `Content-Type: application/json` required on POST requests (prevents browser CSRF)
 - Ordinary RPC and journal reconciliation are each rate limited to 60 requests/min
-- At most 16 ordinary/attestation bodies and 16 recovery bodies are received or parsed concurrently
+- At most 16 ordinary/attestation bodies and 16 recovery bodies are received or parsed concurrently; only the distinct `PXE_BRIDGE_RECOVERY_API_KEY` can reserve recovery intake before its body is parsed
 - Secret key zeroed from memory after wallet derivation
 - Docker image runs as non-root user
 

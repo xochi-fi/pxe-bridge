@@ -42,6 +42,12 @@ export const SETTLEMENT_DEADLINE_MS = RESPONSE_TIMEOUT_MS - 5_000;
 export interface ServerOptions {
   apiKey?: string | undefined;
   /**
+   * Separate key for `POST /api/recovery`. Its identity is what makes the
+   * route's reserved body intake safe before the JSON-RPC body can be parsed.
+   * Unset disables the dedicated endpoint; legacy RPC routes still reconcile.
+   */
+  recoveryApiKey?: string | undefined;
+  /**
    * Separate key for `POST /admin/resume`. Deliberately not `apiKey`: whoever
    * can move funds should not also be able to clear the circuit breaker that
    * stopped them. Unset disables the endpoint entirely.
@@ -732,11 +738,14 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
         const recoveryEndpoint = pathname === "/api/recovery";
         const clientIp = req.socket.remoteAddress ?? "unknown";
 
-        // A failed key is charged to the auth-failure bucket, so guessing is
-        // throttled without letting an unauthenticated caller spend the budget
-        // real traffic needs. Auth used to run with no limiter at all, which
-        // left unlimited online guessing running past a constant-time compare.
-        if (rejectedUnauthenticated(req, res, opts.apiKey, clientIp)) return;
+        // Dedicated recovery intake is selected before the body is available,
+        // so only its separate credential may reserve those receive slots.
+        if (recoveryEndpoint && !opts.recoveryApiKey) {
+          sendJson(res, 404, { error: "Not found" });
+          return;
+        }
+        const requestKey = recoveryEndpoint ? opts.recoveryApiKey : opts.apiKey;
+        if (rejectedUnauthenticated(req, res, requestKey, clientIp)) return;
 
         // Content-Type check (CSRF defense: forces browser preflight which fails without CORS)
         const contentType = req.headers["content-type"];

@@ -617,6 +617,7 @@ describe("readiness attestation producer", () => {
     const ctx = await setup([{ address: recipient, index: 137 }]);
     const server = createApp(new FakeAztecClient(), {
       apiKey: "body-rpc-key",
+      recoveryApiKey: "body-recovery-key",
       attestationApiKey: "body-attest-key",
       attestation: ctx.producer,
     });
@@ -663,7 +664,7 @@ describe("readiness attestation producer", () => {
       const recovery = await fetch(`${baseUrl}/api/recovery`, {
         method: "POST",
         headers: {
-          authorization: "Bearer body-rpc-key",
+          authorization: "Bearer body-recovery-key",
           "content-type": "application/json",
         },
         body: JSON.stringify({

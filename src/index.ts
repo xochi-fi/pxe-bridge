@@ -63,6 +63,7 @@ if (isNaN(PORT) || PORT < 0 || PORT > 65535) {
 const HOST = process.env["PXE_BRIDGE_HOST"] ?? "127.0.0.1";
 const AZTEC_NODE_URL = process.env["AZTEC_NODE_URL"] ?? "http://localhost:8080";
 const API_KEY = process.env["PXE_BRIDGE_API_KEY"];
+const RECOVERY_API_KEY = process.env["PXE_BRIDGE_RECOVERY_API_KEY"];
 
 // Production refuses to boot unauthenticated, the same way secrets.ts refuses
 // the env-var secret key. The asymmetry it replaces was hard to defend: one
@@ -284,6 +285,7 @@ const ADMIN_KEY = process.env["PXE_BRIDGE_ADMIN_KEY"];
 try {
   assertDistinctCredentials([
     ["PXE_BRIDGE_API_KEY", API_KEY],
+    ["PXE_BRIDGE_RECOVERY_API_KEY", RECOVERY_API_KEY],
     ["PXE_BRIDGE_ADMIN_KEY", ADMIN_KEY],
     ["PXE_BRIDGE_MAY_BROADCAST_TOKEN", MAY_BROADCAST_TOKEN],
     ["PXE_BRIDGE_ATTESTATION_API_KEY", process.env["PXE_BRIDGE_ATTESTATION_API_KEY"]],
@@ -695,6 +697,7 @@ async function main(): Promise<void> {
   let initialized = false;
   application = createApp(client, {
     apiKey: API_KEY,
+    recoveryApiKey: RECOVERY_API_KEY,
     adminKey: ADMIN_KEY,
     limits,
     audit,
@@ -736,6 +739,9 @@ async function main(): Promise<void> {
     `  POST /           -- JSON-RPC (aztec_createNote, aztec_getSettlement, aztec_getVersion)`,
   );
   console.log(`  POST /api/rpc    -- JSON-RPC (alias)`);
+  console.log(
+    `  POST /api/recovery -- Reconciliation reserve (${RECOVERY_API_KEY ? "enabled" : "DISABLED"})`,
+  );
   console.log(`  GET  /status     -- Minimal public liveness`);
   console.log(`  GET  /ready      -- Authenticated hard settlement readiness`);
   console.log(

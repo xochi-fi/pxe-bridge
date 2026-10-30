@@ -589,7 +589,12 @@ describe("public liveness isolation", () => {
 
   it("bounds request bodies before method classification", async () => {
     const key = "body-cap-key";
-    const srv = createApp(new FakeAztecClient(), { apiKey: key, readiness: readyObserver() });
+    const recoveryKey = "body-cap-recovery-key";
+    const srv = createApp(new FakeAztecClient(), {
+      apiKey: key,
+      recoveryApiKey: recoveryKey,
+      readiness: readyObserver(),
+    });
     await new Promise<void>((resolve) => srv.listen(0, resolve));
     const addr = srv.address();
     const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
@@ -637,7 +642,7 @@ describe("public liveness isolation", () => {
       const recovery = await jsonPost(
         `${url}/api/recovery`,
         rpcBody("aztec_getSettlement", [{}]),
-        { Authorization: `Bearer ${key}` },
+        { Authorization: `Bearer ${recoveryKey}` },
       );
       expect(recovery.status).toBe(200);
     } finally {
@@ -648,13 +653,28 @@ describe("public liveness isolation", () => {
 
   it("preserves dedicated recovery rate capacity for valid requests", async () => {
     const key = "recovery-invalid-budget-key";
-    const srv = createApp(new FakeAztecClient(), { apiKey: key });
+    const recoveryKey = "recovery-invalid-budget-reserved-key";
+    const srv = createApp(new FakeAztecClient(), {
+      apiKey: key,
+      recoveryApiKey: recoveryKey,
+    });
     await new Promise<void>((resolve) => srv.listen(0, resolve));
     const addr = srv.address();
     const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
-    const headers = { Authorization: `Bearer ${key}` };
+    const headers = { Authorization: `Bearer ${recoveryKey}` };
+
+    const ordinaryHeaders = { Authorization: `Bearer ${key}` };
 
     try {
+      const ordinaryCaller = await jsonPost(
+        `${url}/api/recovery`,
+        rpcBody("aztec_getSettlement", [
+          { version: "pxe-bridge.settlement.v1", operationId: "wrong-credential" },
+        ]),
+        ordinaryHeaders,
+      );
+      expect(ordinaryCaller.status).toBe(401);
+
       for (let i = 0; i < 30; i++) {
         const invalidMethod = await jsonPost(
           `${url}/api/recovery`,
@@ -689,6 +709,27 @@ describe("public liveness isolation", () => {
         headers,
       );
       expect(recovery.status).toBe(200);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+  it("hides dedicated recovery intake without its credential", async () => {
+    const key = "recovery-disabled-rpc-key";
+    const srv = createApp(new FakeAztecClient(), { apiKey: key });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+
+    try {
+      const response = await jsonPost(
+        `${url}/api/recovery`,
+        rpcBody("aztec_getSettlement", [
+          { version: "pxe-bridge.settlement.v1", operationId: "disabled-recovery" },
+        ]),
+        { Authorization: `Bearer ${key}` },
+      );
+      expect(response.status).toBe(404);
     } finally {
       await new Promise<void>((resolve) => srv.close(() => resolve()));
     }
@@ -798,11 +839,17 @@ describe("public liveness isolation", () => {
     }
   });
 
-  it("refuses one credential for RPC and breaker administration", () => {
+  it("refuses credentials shared across privileged routes", () => {
     const client = new FakeAztecClient();
     expect(() =>
       createApp(client, { apiKey: "shared-key", adminKey: "shared-key" })
     ).toThrow("Admin credential must differ from RPC credential");
+    expect(() =>
+      assertDistinctCredentials([
+        ["PXE_BRIDGE_API_KEY", "shared-key"],
+        ["PXE_BRIDGE_RECOVERY_API_KEY", "shared-key"],
+      ])
+    ).toThrow("PXE_BRIDGE_RECOVERY_API_KEY must differ from PXE_BRIDGE_API_KEY");
   });
 });
 
