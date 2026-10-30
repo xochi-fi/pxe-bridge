@@ -749,9 +749,16 @@ async function resumeExisting(
       }
       const refusal = await admissionRefusal(ctx, s, op.terms, deadline);
       if (refusal) {
-        return refusal.kind === "not_ready"
-          ? notReady(id, ctx, s, op, op.fingerprint, refusal)
-          : notSubmitted(id, ctx, s, op, op.fingerprint, refusal.reason, true);
+        if (refusal.kind === "not_ready") {
+          return notReady(id, ctx, s, op, op.fingerprint, refusal);
+        }
+        if (refusal.reason === "response_deadline") {
+          return notReady(id, ctx, s, op, op.fingerprint, {
+            kind: "not_ready",
+            reasons: ["readiness_observation_failed"],
+          });
+        }
+        return notSubmitted(id, ctx, s, op, op.fingerprint, refusal.reason, true);
       }
       return runAttempt(id, client, ctx, s, state, { kind: "resume", attempt }, background, deadline);
     }
