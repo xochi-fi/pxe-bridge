@@ -846,13 +846,15 @@ describe("spending limit account (e2e)", () => {
   it("stops transfers once the admin revokes the recipient", async (ctx) => {
     if (deployFailure) return ctx.skip();
 
+    const before = await balanceOf(client, tokenAddress, accountAddress);
     await expect(
       transfer({
         token: tokenAddress,
         recipient: SEED_RECIPIENT,
         amount: "1000",
       }),
-    ).rejects.toThrow("Allowlist root mismatch");
+    ).rejects.toThrow();
+    expect(await balanceOf(client, tokenAddress, accountAddress)).toBe(before);
   }, 600_000);
 
   // ADMIN AUTH. apply_limits originally had no caller check at all, so anyone

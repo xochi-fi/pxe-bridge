@@ -200,7 +200,7 @@ describe("HTTP server (e2e)", () => {
       });
       expect(read.result).toMatchObject({
         found: true,
-        observation: { state: "not_submitted", reason: "bridge_not_ready" },
+        observation: { state: "not_submitted", reason: "account_mode_not_spending_limit" },
       });
     });
 
