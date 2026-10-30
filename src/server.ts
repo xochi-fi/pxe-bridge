@@ -11,7 +11,7 @@ import {
   handleAttestationRpc,
   type AttestationProducer,
 } from "./attestation.js";
-import { GetSettlementSchema } from "./settlement.js";
+import { CreateNoteV1Schema, GetSettlementSchema } from "./settlement.js";
 
 const MAX_BODY_BYTES = 64 * 1024; // 64 KB
 const RATE_LIMIT_WINDOW_MS = 60_000;
@@ -860,6 +860,20 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
             id: null,
             error: { code: -32600, message: "Recovery endpoint requires aztec_getSettlement" },
           });
+          return;
+        }
+        const createNoteRequest =
+          method === "aztec_createNote" &&
+          params.length === 1 &&
+          CreateNoteV1Schema.safeParse(params[0]).success;
+        const versionRequest = method === "aztec_getVersion" && params.length === 0;
+        if (!recoveryRequest && !createNoteRequest && !versionRequest) {
+          if (!invalidRpcRateLimiter.allow(clientIp)) {
+            sendJson(res, 429, { error: "Too many requests" });
+            return;
+          }
+          const result = await handleRpcRequest(rpcRequest.data, client);
+          sendJson(res, 200, result);
           return;
         }
         const requestRateLimiter = recoveryEndpoint ? recoveryRateLimiter : rpcRateLimiter;

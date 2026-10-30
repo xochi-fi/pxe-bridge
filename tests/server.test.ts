@@ -562,6 +562,46 @@ describe("public liveness isolation", () => {
     }
   });
 
+  it("keeps malformed method requests off the valid RPC budget", async () => {
+    const key = "invalid-method-budget-key";
+    const srv = createApp(new FakeAztecClient(), { apiKey: key });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+    const headers = { Authorization: `Bearer ${key}` };
+
+    try {
+      for (let i = 0; i < 20; i++) {
+        const response = await jsonPost(url, rpcBody("aztec_createNote", [{}]), headers);
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({
+          error: { code: RPC_ERRORS.INVALID_PARAMS },
+        });
+      }
+      for (let i = 0; i < 20; i++) {
+        const response = await jsonPost(url, rpcBody("aztec_getVersion", [{}]), headers);
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({
+          error: { code: RPC_ERRORS.INVALID_PARAMS },
+        });
+      }
+      for (let i = 0; i < 20; i++) {
+        const response = await jsonPost(url, rpcBody("unknown_method", []), headers);
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({
+          error: { code: RPC_ERRORS.METHOD_NOT_FOUND },
+        });
+      }
+      const invalidRateLimited = await jsonPost(url, rpcBody("unknown_method", []), headers);
+      expect(invalidRateLimited.status).toBe(429);
+
+      const valid = await jsonPost(url, rpcBody("aztec_getVersion", []), headers);
+      expect(valid.status).toBe(200);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
   it("caps backend RPC work that outlives response deadlines", async () => {
     const key = "backend-cap-key";
     const stuck = new FakeAztecClient();

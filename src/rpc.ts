@@ -107,7 +107,7 @@ export async function handleRpcRequest(
     case "aztec_getSettlement":
       return handleGetSettlement(id, params, client, ctx);
     case "aztec_getVersion":
-      return handleGetVersion(id, client);
+      return handleGetVersion(id, params, client);
     default:
       return rpcError(id, RPC_ERRORS.METHOD_NOT_FOUND, `Unknown method: ${method}`);
   }
@@ -1292,8 +1292,12 @@ async function handleGetSettlement(
 
 async function handleGetVersion(
   id: number | string,
+  params: unknown[],
   client: IAztecClient,
 ): Promise<JsonRpcResponse> {
+  if (params.length !== 0) {
+    return rpcError(id, RPC_ERRORS.INVALID_PARAMS, "Invalid params for aztec_getVersion");
+  }
   try {
     const version = await client.getVersion();
     return success(id, version);
