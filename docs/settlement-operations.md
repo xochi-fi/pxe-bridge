@@ -365,7 +365,7 @@ operations must stay online.
 | `PXE_BRIDGE_JOURNAL_ADOPT_ACCOUNT` | one-shot adoption acknowledgement, `<account>@<journal id>` (D-B) |
 | `PXE_BRIDGE_SETTLEMENT_CORRIDOR` | `{corridorId, corridorRevision, manifestDigest, genesisOrNetworkDigest}`; values open for manifest rev 1; unset refuses createNote (`corridor_unconfigured`) |
 | `PXE_BRIDGE_MAY_BROADCAST_URL` / `_TOKEN` | Riddler endpoint (HTTPS, or loopback http) + service credential; set together; unset refuses createNote (`may_broadcast_unconfigured`) |
-| `PXE_BRIDGE_AUDIT_LOG` | output-only JSON lines; read only at adoption, as the legacy log |
+| `PXE_BRIDGE_AUDIT_LOG` | output-only JSON lines containing only timestamp, method and observation state; no recipient, operation, note, transaction, request-origin, token, amount or free-form reason identifiers. Read only at adoption, as the legacy log |
 
 ## Deployment
 

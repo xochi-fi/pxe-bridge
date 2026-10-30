@@ -1,3 +1,4 @@
+import { createServer, type Server } from "node:http";
 import {
   AztecClient,
   DEPLOYER_CLAIM_WITHOUT_SPENDING_LIMIT_ERROR,
@@ -7,7 +8,12 @@ import {
   sponsoredFpcSetting,
   type SponsoredFpcSetting,
 } from "./aztec-client.js";
-import { createApp, RESPONSE_TIMEOUT_MS, SETTLEMENT_DEADLINE_MS } from "./server.js";
+import {
+  createApp,
+  createInitializationApp,
+  RESPONSE_TIMEOUT_MS,
+  SETTLEMENT_DEADLINE_MS,
+} from "./server.js";
 import {
   AccountDeploymentSchema,
   AllowlistRecipientsSchema,
@@ -274,6 +280,10 @@ if (MAY_BROADCAST_URL && MAY_BROADCAST_TOKEN) {
 // Key for POST /admin/resume. Separate from the RPC key on purpose; see
 // ServerOptions.adminKey.
 const ADMIN_KEY = process.env["PXE_BRIDGE_ADMIN_KEY"];
+if (API_KEY !== undefined && ADMIN_KEY !== undefined && API_KEY === ADMIN_KEY) {
+  console.error("[pxe-bridge] PXE_BRIDGE_ADMIN_KEY must differ from PXE_BRIDGE_API_KEY");
+  process.exit(1);
+}
 if (limits && !ADMIN_KEY) {
   console.warn(
     "[pxe-bridge] WARNING: PXE_BRIDGE_ADMIN_KEY not set -- a tripped circuit " +
@@ -554,6 +564,27 @@ if (
 }
 
 async function main(): Promise<void> {
+  let application: Server = createInitializationApp(API_KEY);
+  const server = createServer((req, res) => {
+    application.emit("request", req, res);
+  });
+  server.requestTimeout = application.requestTimeout;
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error) => reject(error);
+    server.once("error", onError);
+    server.listen(PORT, HOST, () => {
+      server.off("error", onError);
+      console.log(`[pxe-bridge] Listening on ${HOST}:${PORT}`);
+      if (HOST !== "127.0.0.1" && HOST !== "localhost") {
+        console.warn(
+          "[pxe-bridge] WARNING: Binding to non-localhost address. " +
+            "Deploy behind a TLS-terminating reverse proxy (nginx, AWS ELB, etc.)",
+        );
+      }
+      resolve();
+    });
+  });
+
   const { key: secretKey, source: keySource } = await resolveSecretKey();
   console.log(`[pxe-bridge] Secret key loaded from ${keySource}`);
 
@@ -650,7 +681,7 @@ async function main(): Promise<void> {
     corridor,
   });
   let initialized = false;
-  const server = createApp(client, {
+  application = createApp(client, {
     apiKey: API_KEY,
     adminKey: ADMIN_KEY,
     limits,
@@ -673,48 +704,34 @@ async function main(): Promise<void> {
       : {}),
   });
 
-  await new Promise<void>((resolve, reject) => {
-    const onError = (error: Error) => reject(error);
-    server.once("error", onError);
-    server.listen(PORT, HOST, () => {
-      server.off("error", onError);
-      console.log(`[pxe-bridge] Listening on ${HOST}:${PORT}`);
-      if (HOST !== "127.0.0.1" && HOST !== "localhost") {
-        console.warn(
-          "[pxe-bridge] WARNING: Binding to non-localhost address. " +
-            "Deploy behind a TLS-terminating reverse proxy (nginx, AWS ELB, etc.)",
-        );
-      }
-      console.log(`[pxe-bridge] Node: ${AZTEC_NODE_URL}`);
-      console.log(`[pxe-bridge] Auth: ${API_KEY ? "enabled" : "DISABLED"}`);
-      if (limits) {
-        if (limitsConfig.maxAmount !== undefined)
-          console.log(`[pxe-bridge] Max amount: ${limitsConfig.maxAmount}`);
-        if (limitsConfig.dailyLimit !== undefined)
-          console.log(`[pxe-bridge] Daily limit: ${limitsConfig.dailyLimit}`);
-        if (limitsConfig.cooldownThreshold !== undefined)
-          console.log(
-            `[pxe-bridge] Cooldown: ${limitsConfig.cooldownDelayMs}ms above ${limitsConfig.cooldownThreshold}`,
-          );
-      }
-      console.log(`[pxe-bridge] Audit (output only): ${AUDIT_LOG_PATH ?? "stdout"}`);
-      console.log(`[pxe-bridge] Journal: ${JOURNAL_PATH ?? "NOT SET"}`);
-      console.log(`[pxe-bridge] Endpoints:`);
+  server.requestTimeout = application.requestTimeout;
+  console.log(`[pxe-bridge] Node: ${AZTEC_NODE_URL}`);
+  console.log(`[pxe-bridge] Auth: ${API_KEY ? "enabled" : "DISABLED"}`);
+  if (limits) {
+    if (limitsConfig.maxAmount !== undefined)
+      console.log(`[pxe-bridge] Max amount: ${limitsConfig.maxAmount}`);
+    if (limitsConfig.dailyLimit !== undefined)
+      console.log(`[pxe-bridge] Daily limit: ${limitsConfig.dailyLimit}`);
+    if (limitsConfig.cooldownThreshold !== undefined)
       console.log(
-        `  POST /           -- JSON-RPC (aztec_createNote, aztec_getSettlement, aztec_getVersion)`,
+        `[pxe-bridge] Cooldown: ${limitsConfig.cooldownDelayMs}ms above ${limitsConfig.cooldownThreshold}`,
       );
-      console.log(`  POST /api/rpc    -- JSON-RPC (alias)`);
-      console.log(`  GET  /status     -- Minimal public liveness`);
-      console.log(`  GET  /ready      -- Authenticated hard settlement readiness`);
-      console.log(
-        `  POST /api/attestation -- Readiness attestations (${attestation ? "enabled" : "DISABLED"})`,
-      );
-      console.log(
-        `  POST /admin/resume -- Clear the circuit breaker (${ADMIN_KEY ? "enabled" : "DISABLED"})`,
-      );
-      resolve();
-    });
-  });
+  }
+  console.log(`[pxe-bridge] Audit (output only): ${AUDIT_LOG_PATH ?? "stdout"}`);
+  console.log(`[pxe-bridge] Journal: ${JOURNAL_PATH ?? "NOT SET"}`);
+  console.log(`[pxe-bridge] Endpoints:`);
+  console.log(
+    `  POST /           -- JSON-RPC (aztec_createNote, aztec_getSettlement, aztec_getVersion)`,
+  );
+  console.log(`  POST /api/rpc    -- JSON-RPC (alias)`);
+  console.log(`  GET  /status     -- Minimal public liveness`);
+  console.log(`  GET  /ready      -- Authenticated hard settlement readiness`);
+  console.log(
+    `  POST /api/attestation -- Readiness attestations (${attestation ? "enabled" : "DISABLED"})`,
+  );
+  console.log(
+    `  POST /admin/resume -- Clear the circuit breaker (${ADMIN_KEY ? "enabled" : "DISABLED"})`,
+  );
 
   await client.connect();
   // Bound only now, because whether this is a lost journal depends on whether

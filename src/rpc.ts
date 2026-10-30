@@ -62,7 +62,6 @@ export interface RpcContext {
   readiness?: ReadinessObserver | undefined;
   /** From the `Idempotency-Key` request header, when the caller sent one. */
   idempotencyKey?: string | undefined;
-  clientIp?: string | undefined;
   /**
    * Aborted when the HTTP response deadline answers the caller (504). Closes
    * the gate synchronously, before the 504 is written, so nothing this
@@ -277,9 +276,7 @@ class OperationGate implements BroadcastGate {
     if (answer.decision !== "allow") {
       const hold: Hold =
         answer.decision === "deny" ? "may_broadcast_denied" : "may_broadcast_unknown";
-      console.warn(
-        `[rpc] Operation ${operationId} held before may-broadcast: ${answer.decision} (${answer.detail})`,
-      );
+      console.warn(`[rpc] Settlement held before may-broadcast: ${answer.decision}`);
       journal.recordHold(operationId, hold);
       throw new Held({
         state: "prepared",
@@ -455,8 +452,8 @@ async function observe(
       let node: NodeObservation;
       try {
         node = await client.observeTx(attempt.txHash);
-      } catch (cause) {
-        console.error(`[rpc] Node read for ${op.operationId} failed:`, cause);
+      } catch {
+        console.error("[rpc] Settlement node observation failed");
         return {
           state: "submitted_unknown",
           txHash: attempt.txHash,
@@ -502,8 +499,8 @@ function recordObservation(s: SettlementContext, operationId: string, observatio
     } else if (observation.state !== "request_in_flight") {
       s.journal.recordObservation(operationId, observation);
     }
-  } catch (cause) {
-    console.error(`[rpc] Could not record observation for ${operationId}:`, cause);
+  } catch {
+    console.error("[rpc] Could not durably record settlement observation");
   }
 }
 
@@ -908,7 +905,7 @@ async function preparedHoldReasons(
     readiness = await deadline.race(observer.observe());
   } catch (cause) {
     console.error("[rpc] Readiness observation for a prepared attempt failed:", cause);
-    return reasons;
+    return [...reasons, "readiness_observation_failed"];
   }
   // The request deadline is spent, so the gate would close before any mark.
   if (readiness === TIMED_OUT) return ["readiness_observation_failed"];
@@ -981,7 +978,7 @@ async function notReady(
       retryableAfterRevalidation: true,
     };
   }
-  await audit(ctx, op, fingerprint, observation);
+  await audit(ctx, observation);
   return rpcError(id, RPC_ERRORS.NOT_READY, "Bridge is not ready for new settlement admission", {
     reason: "bridge_not_ready",
     reasons: refusal.reasons,
@@ -1010,13 +1007,13 @@ async function notSubmitted(
   } catch (cause) {
     return journalFault(id, s, op.operationId, cause);
   }
-  console.warn(`[rpc] Operation ${op.operationId} not submitted: ${reason}`);
+  console.warn("[rpc] Settlement not submitted");
   const observation: Observation = {
     state: "not_submitted",
     reason,
     retryableAfterRevalidation: definitive,
   };
-  await audit(ctx, op, fingerprint, observation);
+  await audit(ctx, observation);
   return answer(id, { operationId: op.operationId, fingerprint }, observation);
 }
 
@@ -1026,7 +1023,7 @@ function journalFault(
   operationId: string,
   cause: unknown,
 ): JsonRpcResponse {
-  console.error(`[rpc] Journal fault on ${operationId}:`, cause);
+  console.error("[rpc] Settlement journal fault");
   if (cause instanceof JournalWriteError) return journalUnavailable(id, cause.health, operationId);
   if (cause instanceof JournalUnreadableError) {
     return journalUnavailable(
@@ -1079,16 +1076,14 @@ async function runAttempt(
         // Already admitted and journaled. Abandoning it here would re-prove
         // under a new hash, which Riddler refuses once it has bound this one;
         // the exact bytes stay held until the window has room again.
-        console.warn(
-          `[rpc] Holding prepared ${op.operationId}: limits: ${reservation.reason}`,
-        );
+        console.warn("[rpc] Holding prepared settlement: rolling limit unavailable");
         const observation: Observation = {
           state: "prepared",
           txHash: mode.attempt.txHash,
           expirationTimestamp: mode.attempt.expirationTimestamp,
           hold: op.hold ?? "interrupted",
         };
-        await audit(ctx, op, fingerprint, observation);
+        await audit(ctx, observation);
         return answer(id, { operationId: op.operationId, fingerprint }, observation);
       }
       return notSubmitted(id, ctx, s, op, fingerprint, `limits: ${reservation.reason}`, true);
@@ -1105,7 +1100,7 @@ async function runAttempt(
   let outcome: TransferOutcome | typeof TIMED_OUT | undefined;
   let failure: unknown;
   if (cooldownMs) {
-    console.log(`[rpc] Cooldown ${cooldownMs}ms for ${op.operationId}`);
+    console.log(`[rpc] Applying settlement cooldown (${cooldownMs}ms)`);
     await deadline.race(delay(cooldownMs));
   }
   if (deadline.expired) {
@@ -1134,17 +1129,17 @@ async function runAttempt(
     if (!gate.marked || !attempt) {
       // The client returned without passing the gate: impossible by
       // construction, and not a state that may be reported as anything known.
-      console.error(`[rpc] ${op.operationId}: broadcast reported without a may-broadcast mark`);
+      console.error("[rpc] Broadcast reported without a may-broadcast mark");
       return answer(id, op, { state: "unknown", reason: "broadcast_without_mark" });
     }
     const observation = observationFrom(attempt, outcome.observation, (s.now ?? Date.now)());
     recordObservation(s, op.operationId, observation);
-    await audit(ctx, op, fingerprint, observation);
+    await audit(ctx, observation);
     return answer(id, { operationId: op.operationId, fingerprint }, observation);
   }
 
   if (gate.marked && attempt) {
-    console.error(`[rpc] ${op.operationId} failed after may-broadcast:`, failure);
+    console.error("[rpc] Marked settlement failed after may-broadcast");
     const observation: Observation = {
       state: "submitted_unknown",
       txHash: attempt.txHash,
@@ -1156,19 +1151,19 @@ async function runAttempt(
             ? "response_deadline"
             : "post_mark_failure",
     };
-    await audit(ctx, op, fingerprint, observation);
+    await audit(ctx, observation);
     return answer(id, { operationId: op.operationId, fingerprint }, observation);
   }
 
   if (failure instanceof Held) {
-    await audit(ctx, op, fingerprint, failure.observation);
+    await audit(ctx, failure.observation);
     return answer(id, { operationId: op.operationId, fingerprint }, failure.observation);
   }
   if (failure instanceof JournalWriteError || failure instanceof JournalUnreadableError) {
     return journalFault(id, s, op.operationId, failure);
   }
 
-  console.error(`[rpc] ${op.operationId} failed before may-broadcast:`, failure);
+  console.error("[rpc] Settlement failed before may-broadcast");
   if (attempt) {
     // Prepared and journaled, never marked: provably not broadcast, and the
     // exact bytes stay available to a retry.
@@ -1183,7 +1178,7 @@ async function runAttempt(
       expirationTimestamp: attempt.expirationTimestamp,
       hold: "interrupted",
     };
-    await audit(ctx, op, fingerprint, observation);
+    await audit(ctx, observation);
     return answer(id, { operationId: op.operationId, fingerprint }, observation);
   }
   return notSubmitted(id, ctx, s, op, fingerprint, deadline.expired ? "response_deadline" : "prepare_failed", true);
@@ -1193,27 +1188,13 @@ async function runAttempt(
  * Output-only audit line. Never decides control flow: every write it
  * describes has already happened in the journal.
  */
-async function audit(
-  ctx: RpcContext,
-  op: { operationId: string; terms: SettlementTerms },
-  fingerprint: string,
-  observation: Observation,
-): Promise<void> {
+async function audit(ctx: RpcContext, observation: Observation): Promise<void> {
   if (!ctx.audit) return;
   try {
     await ctx.audit.log({
       timestamp: new Date().toISOString(),
       method: "aztec_createNote",
-      operationId: op.operationId,
-      fingerprint,
-      recipient: op.terms.recipient,
-      token: op.terms.token,
-      amount: op.terms.amount,
-      clientIp: ctx.clientIp ?? "unknown",
       observation: observation.state,
-      ...("txHash" in observation ? { txHash: observation.txHash } : {}),
-      ...("reason" in observation ? { reason: observation.reason } : {}),
-      ...("hold" in observation ? { reason: observation.hold } : {}),
     });
   } catch (cause) {
     console.error("[rpc] AUDIT WRITE FAILED (output log only):", cause);

@@ -13,14 +13,7 @@ function entry(overrides: Partial<AuditEntry> = {}): AuditEntry {
   return {
     timestamp: "2026-04-19T00:00:00.000Z",
     method: "aztec_createNote",
-    operationId: "op-1",
-    fingerprint: "0x" + "f".repeat(64),
-    recipient: "0x" + "a".repeat(64),
-    token: "0x" + "b".repeat(64),
-    amount: "1000",
-    clientIp: "127.0.0.1",
     observation: "included",
-    txHash: "0xtx",
     ...overrides,
   };
 }
@@ -43,20 +36,25 @@ describe("AuditLogger", () => {
     const logger = new AuditLogger(path);
 
     await logger.log(entry());
-    await logger.log(entry({ observation: "not_submitted", reason: "limits: over" }));
+    await logger.log(entry({ observation: "not_submitted" }));
 
     const content = await readFile(path, "utf8");
     const lines = content.trim().split("\n");
     expect(lines).toHaveLength(2);
 
     const first = JSON.parse(lines[0]!);
-    expect(first.observation).toBe("included");
-    expect(first.txHash).toBe("0xtx");
-    expect(first.operationId).toBe("op-1");
+    expect(first).toEqual({
+      timestamp: "2026-04-19T00:00:00.000Z",
+      method: "aztec_createNote",
+      observation: "included",
+    });
 
     const second = JSON.parse(lines[1]!);
-    expect(second.observation).toBe("not_submitted");
-    expect(second.reason).toBe("limits: over");
+    expect(second).toEqual({
+      timestamp: "2026-04-19T00:00:00.000Z",
+      method: "aztec_createNote",
+      observation: "not_submitted",
+    });
   });
 
   it("writes to stdout when no path given", async () => {
@@ -80,16 +78,18 @@ describe("AuditLogger", () => {
     expect(json.method).toBe("aztec_createNote");
   });
 
-  it("omits undefined optional fields", async () => {
+  it("contains no optional identifier-bearing fields", async () => {
     const path = tmpPath();
     files.push(path);
     const logger = new AuditLogger(path);
 
-    await logger.log(entry({ txHash: undefined }));
+    await logger.log(entry());
 
     const content = await readFile(path, "utf8");
-    const parsed = JSON.parse(content.trim());
-    expect("txHash" in parsed).toBe(false);
-    expect("reason" in parsed).toBe(false);
+    expect(Object.keys(JSON.parse(content.trim())).sort()).toEqual([
+      "method",
+      "observation",
+      "timestamp",
+    ]);
   });
 });

@@ -51,7 +51,7 @@ EVM Solver --JSON-RPC--> pxe-bridge --Aztec SDK--> Aztec L2 Node
 | ----------------------- | -------- | ----------------------- | ---------------------------------------------- |
 | `PXE_BRIDGE_SECRET_KEY` | Yes      | --                      | 32-byte hex key, below the BN254 Fr modulus    |
 | `PXE_BRIDGE_API_KEY`    | No       | --                      | Bearer token for RPC auth (warns if unset)     |
-| `PXE_BRIDGE_ADMIN_KEY`  | No       | --                      | Bearer token for `POST /admin/resume`          |
+| `PXE_BRIDGE_ADMIN_KEY`  | No       | --                      | Separate bearer token for `POST /admin/resume`; startup refuses equality with the RPC key |
 | `AZTEC_NODE_URL`        | No       | `http://localhost:8080` | Aztec L2 node RPC endpoint                     |
 | `PXE_BRIDGE_HOST`       | No       | `127.0.0.1`             | Bind address (localhost-only by default)       |
 | `PXE_BRIDGE_PORT`       | No       | `8547`                  | HTTP listen port (0-65535)                     |
@@ -675,9 +675,10 @@ Returns the connected Aztec node version string.
 ### Liveness and operational readiness
 
 `GET /status` is the public, unauthenticated, process-local liveness endpoint.
-The listener starts before the Aztec wallet connects; while initialization is
-incomplete, `/status` still returns `{"status":"ok"}` (HTTP 200), `/ready`
-returns 503 `initializing`, and every other route returns 503. `/status`
+The listener starts before remote secret resolution and before the Aztec wallet
+connects. While initialization is incomplete, `/status` still returns
+`{"status":"ok"}` (HTTP 200), authenticated `/ready` returns 503 `initializing`,
+and every other route returns 503. `/status`
 performs no Aztec RPC. Keep container restarts on this route: a bridge that has
 lost settlement readiness must remain up to observe and reconcile already
 marked operations.

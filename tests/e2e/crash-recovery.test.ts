@@ -186,9 +186,7 @@ describe("hard crash mid-broadcast (e2e)", () => {
       if (child.exitCode !== null) throw new Error(`bridge exited during startup:\n${log}`);
       try {
         const res = await fetch(`${url}/ready`, {
-          signal: AbortSignal.timeout(
-            Math.max(1, Math.min(10_000, deadline - Date.now())),
-          ),
+          signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
           headers: { authorization: `Bearer ${RPC_KEY}` },
         });
         const body = await res.text();

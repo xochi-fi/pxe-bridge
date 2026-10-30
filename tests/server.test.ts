@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import type { Server } from "node:http";
-import { createApp, type ServerOptions } from "../src/server.js";
+import { createApp, createInitializationApp, type ServerOptions } from "../src/server.js";
 import { TransactionLimits } from "../src/limits.js";
 import type { MayBroadcastClient } from "../src/may-broadcast.js";
 import { rpcJson } from "./helpers.js";
@@ -374,9 +374,11 @@ describe("public liveness isolation", () => {
       },
     };
     const client = new FakeAztecClient();
+    const settlement = settlementContext(openBoundJournal(), undefined, { readiness });
     const srv = createApp(client, {
       apiKey: key,
       readiness,
+      settlement,
       readinessTimeoutMs: 10,
       responseTimeoutMs: 1_000,
     });
@@ -395,6 +397,11 @@ describe("public liveness isolation", () => {
           reasons: ["readiness_observation_failed"],
         });
       }
+      const rpc = await jsonPost(url, rpcBody("aztec_createNote", [v1Params()]), {
+        Authorization: `Bearer ${key}`,
+        "Idempotency-Key": "op-1",
+      });
+      expect((await rpcJson(rpc)).error?.code).toBe(-32006);
       expect(observations).toBe(1);
     } finally {
       await new Promise<void>((resolve) => srv.close(() => resolve()));
@@ -414,6 +421,7 @@ describe("public liveness isolation", () => {
 
     try {
       expect(await (await fetch(`${url}/status`)).json()).toEqual({ status: "ok" });
+      expect((await fetch(`${url}/ready`)).status).toBe(401);
       const ready = await fetch(`${url}/ready`, {
         headers: { Authorization: `Bearer ${key}` },
       });
@@ -428,6 +436,34 @@ describe("public liveness isolation", () => {
     } finally {
       await new Promise<void>((resolve) => srv.close(() => resolve()));
     }
+  });
+
+  it("serves authenticated startup health before application assembly", async () => {
+    const key = "bootstrap-key";
+    const srv = createInitializationApp(key);
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+
+    try {
+      expect(await (await fetch(`${url}/status`)).json()).toEqual({ status: "ok" });
+      expect((await fetch(`${url}/ready`)).status).toBe(401);
+      const ready = await fetch(`${url}/ready`, {
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      expect(ready.status).toBe(503);
+      expect(await ready.json()).toEqual({ ready: false, reasons: ["initializing"] });
+      expect((await jsonPost(url, rpcBody("aztec_getVersion"))).status).toBe(503);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+  it("refuses one credential for RPC and breaker administration", () => {
+    const client = new FakeAztecClient();
+    expect(() =>
+      createApp(client, { apiKey: "shared-key", adminKey: "shared-key" })
+    ).toThrow("Admin credential must differ from RPC credential");
   });
 });
 

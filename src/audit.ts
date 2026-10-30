@@ -9,22 +9,14 @@ import { appendFile, open } from "node:fs/promises";
  * A line is written after the journal transition it describes, so a lost line
  * loses a report, never a decision.
  *
- * `observation` is the settlement observation state the operation reached
- * (see settlement.ts), so a reader sees the same vocabulary `aztec_getSettlement`
- * answers with.
+ * `observation` is the only settlement fact retained. Recipient, operation,
+ * note, transaction, request-origin, token and amount identifiers are excluded
+ * because the output can be aggregated outside the shielded trust boundary.
  */
 export interface AuditEntry {
   timestamp: string;
   method: string;
-  operationId: string;
-  fingerprint: string;
-  recipient: string;
-  token: string;
-  amount: string;
-  clientIp: string;
   observation: string;
-  txHash?: string | undefined;
-  reason?: string | undefined;
 }
 
 const AUDIT_PREFIX = "[audit] ";

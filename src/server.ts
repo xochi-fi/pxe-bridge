@@ -225,6 +225,56 @@ async function observeReadiness(
   }
 }
 
+/**
+ * Process-local surface used before remote secrets and the Aztec client have
+ * initialized. The caller swaps this handler for `createApp` without rebinding
+ * the listening socket.
+ */
+export function createInitializationApp(apiKey?: string): Server {
+  const livenessRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+  const readinessRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+  const authFailureLimiter = new RateLimiter(AUTH_FAILURE_MAX, RATE_LIMIT_WINDOW_MS);
+  const server = createServer((req, res) => {
+    const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+    const ip = req.socket.remoteAddress ?? "unknown";
+
+    if (req.method === "GET" && pathname === "/status") {
+      if (!livenessRateLimiter.allow(ip)) {
+        sendJson(res, 429, { error: "Too many requests" });
+        return;
+      }
+      sendJson(res, 200, { status: "ok" });
+      return;
+    }
+
+    if (req.method === "GET" && pathname === "/ready") {
+      if (!apiKey) {
+        sendJson(res, 503, { ready: false, reasons: ["api_key_unconfigured"] });
+        return;
+      }
+      if (!checkAuth(req, apiKey)) {
+        if (!authFailureLimiter.allow(ip)) {
+          sendJson(res, 429, { error: "Too many requests" });
+          return;
+        }
+        sendJson(res, 401, { error: "Unauthorized" });
+        return;
+      }
+      if (!readinessRateLimiter.allow(ip)) {
+        sendJson(res, 429, { error: "Too many requests" });
+        return;
+      }
+      sendJson(res, 503, { ready: false, reasons: ["initializing"] });
+      return;
+    }
+
+    sendJson(res, 503, { error: "Service initializing" });
+  });
+  server.requestTimeout = REQUEST_TIMEOUT_MS;
+  return server;
+}
+
+
 export function createApp(client: IAztecClient, opts: ServerOptions = {}): Server {
   const attestationConfigured =
     opts.attestationApiKey !== undefined || opts.attestation !== undefined;
@@ -245,28 +295,46 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
     throw new Error("Attestation credential must differ from RPC and admin credentials");
   }
   if (
+    opts.apiKey !== undefined &&
+    opts.adminKey !== undefined &&
+    opts.apiKey === opts.adminKey
+  ) {
+    throw new Error("Admin credential must differ from RPC credential");
+  }
+  if (
     opts.readiness !== undefined &&
     opts.settlement?.readiness !== undefined &&
     opts.readiness !== opts.settlement.readiness
   ) {
     throw new Error("Server and settlement must share one readiness observer");
   }
-  const readinessObserver = opts.readiness ?? opts.settlement?.readiness;
-  let readinessObservation: Promise<ReadinessProjection> | undefined;
+  const sourceReadinessObserver = opts.readiness ?? opts.settlement?.readiness;
+  type ReadinessFlight = {
+    raw: Promise<ReadinessProjection>;
+    bounded: Promise<ReadinessProjection>;
+  };
+  let readinessFlight: ReadinessFlight | undefined;
   const currentReadinessObservation = (): Promise<ReadinessProjection> => {
-    if (!readinessObserver) {
+    if (!sourceReadinessObserver) {
       return Promise.reject(new Error("readiness observer is not configured"));
     }
-    if (readinessObservation) return readinessObservation;
+    if (readinessFlight) return readinessFlight.bounded;
 
-    const observation = Promise.resolve().then(() => readinessObserver.observe());
-    readinessObservation = observation;
-    const clear = () => {
-      if (readinessObservation === observation) readinessObservation = undefined;
+    const raw = Promise.resolve().then(() => sourceReadinessObserver.observe());
+    const flight = {
+      raw,
+      bounded: observeReadiness(raw, opts.readinessTimeoutMs ?? READINESS_TIMEOUT_MS),
     };
-    void observation.then(clear, clear);
-    return observation;
+    readinessFlight = flight;
+    const clear = () => {
+      if (readinessFlight === flight) readinessFlight = undefined;
+    };
+    void raw.then(clear, clear);
+    return flight.bounded;
   };
+  const readinessObserver: ReadinessObserver | undefined = sourceReadinessObserver
+    ? { observe: currentReadinessObservation }
+    : undefined;
   const rateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const livenessRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const authFailureLimiter = new RateLimiter(AUTH_FAILURE_MAX, RATE_LIMIT_WINDOW_MS);
@@ -334,14 +402,6 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
         sendJson(res, 200, { status: "ok" });
         return;
       }
-      if (opts.initialized && !opts.initialized()) {
-        if (req.method === "GET" && pathname === "/ready") {
-          sendJson(res, 503, { ready: false, reasons: ["initializing"] });
-        } else {
-          sendJson(res, 503, { error: "Service initializing" });
-        }
-        return;
-      }
 
       // Operational readiness contains funded-account and policy detail, so it
       // is authenticated before spending the real-traffic rate-limit budget.
@@ -356,15 +416,16 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           sendJson(res, 429, { error: "Too many requests" });
           return;
         }
+        if (opts.initialized && !opts.initialized()) {
+          sendJson(res, 503, { ready: false, reasons: ["initializing"] });
+          return;
+        }
         if (!readinessObserver) {
           sendJson(res, 503, { ready: false, reasons: ["readiness_observer_unconfigured"] });
           return;
         }
         try {
-          const readiness = await observeReadiness(
-            currentReadinessObservation(),
-            opts.readinessTimeoutMs ?? READINESS_TIMEOUT_MS,
-          );
+          const readiness = await currentReadinessObservation();
           sendJson(res, readiness.ready ? 200 : 503, readiness);
         } catch (err) {
           console.error("[pxe-bridge] Readiness observation failed:", err);
@@ -372,6 +433,11 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
         }
         return;
       }
+      if (opts.initialized && !opts.initialized()) {
+        sendJson(res, 503, { error: "Service initializing" });
+        return;
+      }
+
 
       if (req.method === "POST" && pathname === "/api/attestation") {
         const attestationIp = req.socket.remoteAddress ?? "unknown";
@@ -538,7 +604,6 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           settlement: opts.settlement,
           readiness: readinessObserver,
           idempotencyKey,
-          clientIp: clientIp,
           signal: responseDeadline.signal,
         };
         const result = await handleRpcRequest(parsed, client, rpcCtx);
