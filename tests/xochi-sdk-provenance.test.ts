@@ -34,9 +34,9 @@ describe("vendored xochi-sdk PR49 artifacts", () => {
     expect(typedManifest.schemaVersion).toBe(1);
     expect(typedManifest.source).toEqual({
       repository: "https://github.com/xochi-fi/xochi-sdk",
-      commit: "a5d72ba6a9e74ecee3653ef3f84d012565bea32c",
+      commit: "50e8dc26f8d2c9dff7b0f0f3361fc03fa33cd6fb",
       commitUrl:
-        "https://github.com/xochi-fi/xochi-sdk/commit/a5d72ba6a9e74ecee3653ef3f84d012565bea32c",
+        "https://github.com/xochi-fi/xochi-sdk/commit/50e8dc26f8d2c9dff7b0f0f3361fc03fa33cd6fb",
     });
     for (const [path, expected] of Object.entries(typedManifest.artifacts)) {
       expect(sha256(path), path).toBe(expected.sha256);

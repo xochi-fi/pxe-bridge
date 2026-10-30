@@ -55,7 +55,7 @@ const fixture = FixtureSchema.parse(
   JSON.parse(
     readFileSync(
       new URL(
-        "../vendor/xochi-sdk/a5d72ba6a9e74ecee3653ef3f84d012565bea32c/shielded-recipient.json",
+        "../vendor/xochi-sdk/50e8dc26f8d2c9dff7b0f0f3361fc03fa33cd6fb/shielded-recipient.json",
         import.meta.url,
       ),
       "utf8",

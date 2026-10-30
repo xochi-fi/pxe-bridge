@@ -2,28 +2,28 @@
   "schemaVersion": 1,
   "source": {
     "repository": "https://github.com/xochi-fi/xochi-sdk",
-    "commit": "a5d72ba6a9e74ecee3653ef3f84d012565bea32c",
-    "commitUrl": "https://github.com/xochi-fi/xochi-sdk/commit/a5d72ba6a9e74ecee3653ef3f84d012565bea32c"
+    "commit": "50e8dc26f8d2c9dff7b0f0f3361fc03fa33cd6fb",
+    "commitUrl": "https://github.com/xochi-fi/xochi-sdk/commit/50e8dc26f8d2c9dff7b0f0f3361fc03fa33cd6fb"
   },
   "artifacts": {
     "xochi-signer-0.5.1.tgz": {
-      "sourceUrl": "https://github.com/xochi-fi/xochi-sdk/actions?query=commit%3Aa5d72ba6a9e74ecee3653ef3f84d012565bea32c",
-      "sha256": "64fe5b66cc534b5f5bb588e585e63a7ae02eefccf917f1724cd46a72879f8bce"
+      "sourceUrl": "https://github.com/xochi-fi/xochi-sdk/actions?query=commit%3A50e8dc26f8d2c9dff7b0f0f3361fc03fa33cd6fb",
+      "sha256": "45f7e06a6fd1768d0c5d0c54dfd49434a1b50be38f3c6619b7a056c5131b7741"
     },
-    "a5d72ba6a9e74ecee3653ef3f84d012565bea32c/shielded-recipient.json": {
-      "sourceUrl": "https://github.com/xochi-fi/xochi-sdk/blob/a5d72ba6a9e74ecee3653ef3f84d012565bea32c/packages/spec/conformance/shielded-recipient.json",
+    "50e8dc26f8d2c9dff7b0f0f3361fc03fa33cd6fb/shielded-recipient.json": {
+      "sourceUrl": "https://github.com/xochi-fi/xochi-sdk/blob/50e8dc26f8d2c9dff7b0f0f3361fc03fa33cd6fb/packages/spec/conformance/shielded-recipient.json",
       "sha256": "54ecc492b344e62cfdb14fe9906cdb03e0b9f5e967974d78880ee911aae522ad"
     },
-    "a5d72ba6a9e74ecee3653ef3f84d012565bea32c/shielded-recipient.schema.json": {
-      "sourceUrl": "https://github.com/xochi-fi/xochi-sdk/blob/a5d72ba6a9e74ecee3653ef3f84d012565bea32c/packages/spec/conformance/shielded-recipient.schema.json",
+    "50e8dc26f8d2c9dff7b0f0f3361fc03fa33cd6fb/shielded-recipient.schema.json": {
+      "sourceUrl": "https://github.com/xochi-fi/xochi-sdk/blob/50e8dc26f8d2c9dff7b0f0f3361fc03fa33cd6fb/packages/spec/conformance/shielded-recipient.schema.json",
       "sha256": "eb690d07ae3c71d3e181bea20b4a3cb0f744f21cf87116e76f24c06b0fd2afed"
     },
-    "a5d72ba6a9e74ecee3653ef3f84d012565bea32c/shielded-readiness.json": {
-      "sourceUrl": "https://github.com/xochi-fi/xochi-sdk/blob/a5d72ba6a9e74ecee3653ef3f84d012565bea32c/packages/spec/conformance/shielded-readiness.json",
+    "50e8dc26f8d2c9dff7b0f0f3361fc03fa33cd6fb/shielded-readiness.json": {
+      "sourceUrl": "https://github.com/xochi-fi/xochi-sdk/blob/50e8dc26f8d2c9dff7b0f0f3361fc03fa33cd6fb/packages/spec/conformance/shielded-readiness.json",
       "sha256": "4642210afd6bbdaf7a2ea3549ab149595549ecb3c88c9370a0b7ba678ed6e3b4"
     },
-    "a5d72ba6a9e74ecee3653ef3f84d012565bea32c/shielded-readiness.schema.json": {
-      "sourceUrl": "https://github.com/xochi-fi/xochi-sdk/blob/a5d72ba6a9e74ecee3653ef3f84d012565bea32c/packages/spec/conformance/shielded-readiness.schema.json",
+    "50e8dc26f8d2c9dff7b0f0f3361fc03fa33cd6fb/shielded-readiness.schema.json": {
+      "sourceUrl": "https://github.com/xochi-fi/xochi-sdk/blob/50e8dc26f8d2c9dff7b0f0f3361fc03fa33cd6fb/packages/spec/conformance/shielded-readiness.schema.json",
       "sha256": "adcd94fa20c7bd01d4f25c485ff972e98e2a4cbc07451217e8c1e91ee886153f"
     }
   }
