@@ -22,6 +22,7 @@ import {
   computeSiloedPrivateInitializationNullifier,
   deriveStorageSlotInMap,
 } from "@aztec-labs/stdlib/hash";
+import { jsonStringify } from "@aztec-labs/foundation/json-rpc";
 import { ACCOUNT_ADDRESS_ENV, assertAccountIdentity } from "./account-identity.js";
 import type {
   BroadcastGate,
@@ -49,6 +50,60 @@ import {
 import type { AttestationObservation } from "./attestation.js";
 
 const MAX_TOKEN_CACHE_SIZE = 100;
+export const NODE_RPC_TIMEOUT_MS = 10_000;
+
+type NodeRpcFetch = (
+  host: string,
+  body: unknown,
+  extraHeaders?: Record<string, string>,
+  noRetry?: boolean,
+) => Promise<{ response: unknown; headers: Headers }>;
+
+/**
+ * Aztec's default JSON-RPC transport has no deadline. Every client used by the
+ * bridge gets this transport so a dead HTTP peer cannot retain readiness,
+ * recovery, or version calls after their HTTP request has ended.
+ */
+export function boundedNodeFetch(timeoutMs = NODE_RPC_TIMEOUT_MS): NodeRpcFetch {
+  return async (host, body, extraHeaders = {}) => {
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(new Error("Aztec node request timed out")),
+      timeoutMs,
+    );
+    try {
+      const response = await fetch(host, {
+        method: "POST",
+        body: jsonStringify(body),
+        headers: { "content-type": "application/json", ...extraHeaders },
+        signal: controller.signal,
+      });
+      const text = await response.text();
+      let decoded: unknown;
+      try {
+        decoded = JSON.parse(text);
+      } catch {
+        throw new Error(
+          response.ok
+            ? "Aztec node returned invalid JSON"
+            : `Aztec node returned HTTP ${response.status}`,
+        );
+      }
+      if (!response.ok) {
+        throw new Error(`Aztec node returned HTTP ${response.status}`);
+      }
+      return { response: decoded, headers: response.headers };
+    } catch (cause) {
+      if (controller.signal.aborted) {
+        throw new Error("Aztec node request timed out", { cause });
+      }
+      throw cause;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+}
+
 export const TX_TIMEOUT_MS = 120_000; // 2 minutes
 
 // Multiplier applied to the worst predicted base fee. Named for the deploy
@@ -95,11 +150,14 @@ function settlementNetworkFromNodeInfo(info: NodeInfo): NodeNetwork {
  * after a test deployed an account of its own. One implementation rather than
  * two that drift, the same reason fee-juice.ts was promoted out of the helpers.
  */
-export async function headroomGasSettings(nodeUrl: string): Promise<{ maxFeesPerGas: GasFees }> {
+export async function headroomGasSettings(
+  nodeUrl: string,
+  fetchImpl: NodeRpcFetch = boundedNodeFetch(),
+): Promise<{ maxFeesPerGas: GasFees }> {
   const { createAztecNodeClient } = await import("@aztec-labs/aztec.js/node");
   const { GasFees, ManaUsageEstimate } = await import("@aztec-labs/stdlib/gas");
 
-  const node = createAztecNodeClient(nodeUrl);
+  const node = createAztecNodeClient(nodeUrl, { fetch: fetchImpl });
   const predicted = await node.getPredictedMinFees(ManaUsageEstimate.Limit);
 
   const worst = predicted.reduce(
@@ -577,6 +635,7 @@ export class AztecClient implements IAztecClient {
   /** Node client for reads and exact journaled sends; set in connect(). */
   private node: AztecNode | null = null;
   private preexisted = false;
+  private readonly nodeFetch = boundedNodeFetch();
 
   constructor(
     private readonly nodeUrl: string,
@@ -625,11 +684,12 @@ export class AztecClient implements IAztecClient {
     // handle stays live until GC.
     this.claimedDataDirectory ??= claimWalletDataDirectory(this.dataDirectory);
     this.wallet = await EmbeddedWallet.create(this.nodeUrl, {
+      nodeClientOptions: { fetch: this.nodeFetch },
       pxe: { proverEnabled: true, dataDirectory: this.claimedDataDirectory },
     });
     console.log("[pxe-bridge] EmbeddedWallet created");
     const { createAztecNodeClient } = await import("@aztec-labs/aztec.js/node");
-    this.node = createAztecNodeClient(this.nodeUrl);
+    this.node = createAztecNodeClient(this.nodeUrl, { fetch: this.nodeFetch });
     // The wallet's own sendTx proves, derives the hash, then calls
     // aztecNode.sendTx. Wrapping that one call is what lets a settlement
     // journal the exact transaction and ask before anything is broadcast,
@@ -1040,7 +1100,10 @@ export class AztecClient implements IAztecClient {
   private async feeJuiceBalance(address: AztecAddress): Promise<bigint> {
     const { createAztecNodeClient } = await import("@aztec-labs/aztec.js/node");
     const { getFeeJuiceBalance } = await import("@aztec-labs/aztec.js/utils");
-    return getFeeJuiceBalance(address, createAztecNodeClient(this.nodeUrl));
+    return getFeeJuiceBalance(
+      address,
+      createAztecNodeClient(this.nodeUrl, { fetch: this.nodeFetch }),
+    );
   }
 
   /**
@@ -1059,7 +1122,9 @@ export class AztecClient implements IAztecClient {
     if (balance === 0n) return false;
     if (!this.allowSponsoredFpc) return true;
     const { createAztecNodeClient } = await import("@aztec-labs/aztec.js/node");
-    const { txsLimits } = await createAztecNodeClient(this.nodeUrl).getNodeInfo();
+    const { txsLimits } = await createAztecNodeClient(this.nodeUrl, {
+      fetch: this.nodeFetch,
+    }).getNodeInfo();
     const { maxFeesPerGas } = await this.deployGasSettings();
     const feeLimit =
       BigInt(txsLimits.gas.daGas) * maxFeesPerGas.feePerDaGas +
@@ -1088,8 +1153,7 @@ export class AztecClient implements IAztecClient {
     const { siloNullifier } = await import("@aztec-labs/stdlib/hash");
     const { computeFeeJuiceMessageNullifier } = await import("@aztec-labs/stdlib/messaging");
     const { MerkleTreeId } = await import("@aztec-labs/stdlib/trees");
-
-    const node = createAztecNodeClient(this.nodeUrl);
+    const node = createAztecNodeClient(this.nodeUrl, { fetch: this.nodeFetch });
     const info = await node.getNodeInfo();
     const secret = Fr.fromString(claim.claimSecret);
     const messageHash = Fr.fromString(
@@ -1166,7 +1230,7 @@ export class AztecClient implements IAztecClient {
     const amount = BigInt(params.amount);
     const from = this.solverAddress;
     const token = await this.getToken(tokenAddress);
-    const gasSettings = await headroomGasSettings(this.nodeUrl);
+    const gasSettings = await headroomGasSettings(this.nodeUrl, this.nodeFetch);
 
 
     const sent = await broadcastGates.run(gate, () =>
@@ -1382,7 +1446,8 @@ export class AztecClient implements IAztecClient {
    * Independent node/network facts are retained when a later storage read
    * fails, so operators see the exact finalized reference they must diagnose.
    */
-  async observeReadinessChain(): Promise<ChainReadinessFacts> {
+  async observeReadinessChain(signal?: AbortSignal): Promise<ChainReadinessFacts> {
+    signal?.throwIfAborted();
     const observedAt = Math.floor(Date.now() / 1_000);
     const config = this.spendingLimitConfig;
     const deployment = config?.deployment;
@@ -1426,6 +1491,7 @@ export class AztecClient implements IAztecClient {
 
     let network: ChainReadinessFacts["network"] = unknown("network_identity_unknown");
     let nodeInfo: NodeInfo | null = null;
+    signal?.throwIfAborted();
     if (this.node) {
       try {
         nodeInfo = await this.node.getNodeInfo();
@@ -1445,6 +1511,7 @@ export class AztecClient implements IAztecClient {
 
     let nodeAcceptingTransactions: ChainReadinessFacts["nodeAcceptingTransactions"] =
       unknown("node_readiness_unknown");
+    signal?.throwIfAborted();
     if (this.node) {
       try {
         nodeAcceptingTransactions = known(await this.node.isReady());
@@ -1458,6 +1525,7 @@ export class AztecClient implements IAztecClient {
     }
 
     let worldState: ChainReadinessFacts["worldState"] = unknown("world_state_unknown");
+    signal?.throwIfAborted();
     if (this.node) {
       try {
         const status = await this.node.getWorldStateSyncStatus();
@@ -1474,6 +1542,7 @@ export class AztecClient implements IAztecClient {
 
     let finalized: ChainReadinessFacts["finalized"] = unknown("finalized_tip_unknown");
     let reference: { number: BlockNumber; hash: BlockHash } | null = null;
+    signal?.throwIfAborted();
     if (this.node) {
       try {
         const tip = (await this.node.getChainTips()).finalized.block;
@@ -1512,6 +1581,7 @@ export class AztecClient implements IAztecClient {
     let inventory: ChainReadinessFacts["inventory"] = unknown("inventory_unknown");
     let feeRunway: ChainReadinessFacts["feeRunway"] = unknown("fee_runway_unknown");
 
+    signal?.throwIfAborted();
     if (
       this.node &&
       reference &&
@@ -1574,6 +1644,7 @@ export class AztecClient implements IAztecClient {
       }
     }
 
+    signal?.throwIfAborted();
     if (this.node && reference && this.solverAddress && configuredToken) {
       try {
         const tokenAddress = AztecAddress.fromStringUnsafe(configuredToken);
@@ -1599,6 +1670,7 @@ export class AztecClient implements IAztecClient {
       }
     }
 
+    signal?.throwIfAborted();
     if (this.node && reference && this.solverAddress && nodeInfo) {
       try {
         const feeSlot = await deriveStorageSlotInMap(
@@ -1665,17 +1737,10 @@ export class AztecClient implements IAztecClient {
   }
 
   async getVersion(): Promise<string> {
-    if (!this.wallet) {
+    if (!this.node) {
       throw new Error("Client not connected");
     }
-
-    const info = this.wallet as unknown as Record<string, unknown>;
-    if (typeof info["getNodeInfo"] === "function") {
-      const nodeInfo = await (info["getNodeInfo"] as () => Promise<Record<string, unknown>>)();
-      return String(nodeInfo["nodeVersion"] ?? "unknown");
-    }
-
-    return "unknown";
+    return (await this.node.getNodeInfo()).nodeVersion;
   }
 
 
@@ -1686,7 +1751,10 @@ export class AztecClient implements IAztecClient {
     }
     const { createAztecNodeClient } = await import("@aztec-labs/aztec.js/node");
     const { getFeeJuiceBalance } = await import("@aztec-labs/aztec.js/utils");
-    return getFeeJuiceBalance(this.solverAddress, createAztecNodeClient(this.nodeUrl));
+    return getFeeJuiceBalance(
+      this.solverAddress,
+      createAztecNodeClient(this.nodeUrl, { fetch: this.nodeFetch }),
+    );
   }
 
   /**
@@ -1706,7 +1774,7 @@ export class AztecClient implements IAztecClient {
   }
 
   private async deployGasSettings(): Promise<{ maxFeesPerGas: GasFees }> {
-    return headroomGasSettings(this.nodeUrl);
+    return headroomGasSettings(this.nodeUrl, this.nodeFetch);
   }
 
   /**
@@ -1774,9 +1842,10 @@ export class AztecClient implements IAztecClient {
     // artifact's class: the address is caller-supplied and a registration is
     // permanent. Missing until xochi-fi/xochi#513 because every e2e wallet
     // shared one store, where the funder's deploy had registered the token for
-    // the bridge too.
     const { createAztecNodeClient } = await import("@aztec-labs/aztec.js/node");
-    const instance = await createAztecNodeClient(this.nodeUrl).getContract(address);
+    const instance = await createAztecNodeClient(this.nodeUrl, {
+      fetch: this.nodeFetch,
+    }).getContract(address);
     if (!instance) {
       throw new Error(`Token ${address.toString()} is not published on the node`);
     }

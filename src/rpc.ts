@@ -561,7 +561,7 @@ async function handleCreateNote(
   }
   const parsed = CreateNoteV1Schema.safeParse(first);
   if (!parsed.success || params.length !== 1) {
-    console.error("[rpc] Invalid createNote params:", parsed.error?.message ?? "extra params");
+    console.error("[rpc] Invalid createNote params");
     return rpcError(id, RPC_ERRORS.INVALID_PARAMS, "Invalid params for aztec_createNote");
   }
   const s = ctx.settlement;
@@ -791,7 +791,9 @@ async function resumeExisting(
     case "may_broadcast": {
       const attempt = currentAttempt(s.journal, op);
       if (!attempt) return answer(id, op, { state: "unknown", reason: "missing_transaction_identity" });
-      const observed = await deadline.race(observe(s, client, op));
+      const observationCall = observe(s, client, op);
+      background.track(observationCall);
+      const observed = await deadline.race(observationCall);
       const observation: Observation =
         observed === TIMED_OUT
           ? {
@@ -829,8 +831,8 @@ async function admissionRefusal(
   let readiness: OperationalReadiness | typeof TIMED_OUT;
   try {
     readiness = await deadline.race(observer.observe());
-  } catch (cause) {
-    console.error("[rpc] Authoritative readiness observation failed:", cause);
+  } catch {
+    console.error("[rpc] Authoritative readiness observation failed");
     return { kind: "not_ready", reasons: ["readiness_observation_failed"] };
   }
   if (readiness === TIMED_OUT) {
@@ -903,8 +905,8 @@ async function preparedHoldReasons(
   let readiness: OperationalReadiness | typeof TIMED_OUT;
   try {
     readiness = await deadline.race(observer.observe());
-  } catch (cause) {
-    console.error("[rpc] Readiness observation for a prepared attempt failed:", cause);
+  } catch {
+    console.error("[rpc] Readiness observation for a prepared attempt failed");
     return [...reasons, "readiness_observation_failed"];
   }
   // The request deadline is spent, so the gate would close before any mark.
@@ -1196,8 +1198,8 @@ async function audit(ctx: RpcContext, observation: Observation): Promise<void> {
       method: "aztec_createNote",
       observation: observation.state,
     });
-  } catch (cause) {
-    console.error("[rpc] AUDIT WRITE FAILED (output log only):", cause);
+  } catch {
+    console.error("[rpc] AUDIT WRITE FAILED (output log only)");
   }
 }
 
@@ -1290,8 +1292,8 @@ async function handleGetVersion(
   try {
     const version = await client.getVersion();
     return success(id, version);
-  } catch (cause) {
-    console.error("[rpc] aztec_getVersion failed:", cause);
+  } catch {
+    console.error("[rpc] aztec_getVersion failed");
     return rpcError(id, RPC_ERRORS.INTERNAL_ERROR, "Internal error");
   }
 }

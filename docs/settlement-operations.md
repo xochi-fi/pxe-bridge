@@ -231,15 +231,16 @@ issues one: its operation id is persisted with the sent terms before the call
 
 One deadline bounds a whole `aztec_createNote`, started when the request is
 handled (`SETTLEMENT_DEADLINE_MS`, 145 s = the 150 s HTTP response deadline
-less 5 s): admission (the node identity read), the cooldown, proving, the
-may-broadcast query and the send all spend it. When it passes the attempt's
-gate closes synchronously -- the gate is the only thing that marks -- so
-nothing the request started can be marked afterwards; a cooldown that outlasts
-it starts no proof. The HTTP response deadline (`res.setTimeout`, 150 s) is
-the backstop: it aborts the request's signal, which closes the gate, BEFORE
-the 504 is written. A caller that got a 504 therefore knows the operation is
-not marked by that request; it reads `aztec_getSettlement` and retries the
-same operation.
+less 5 s): admission, cooldown, proving, the may-broadcast query and send all
+spend it. Every Aztec JSON-RPC call has its own aborting 10 s transport
+deadline, and the HTTP server admits at most 16 concurrent JSON-RPC handlers,
+so reads that outlive a caller cannot accumulate backend work. When the
+settlement deadline passes, the attempt's gate closes synchronously -- the
+gate is the only thing that marks -- so nothing the request started can be
+marked afterwards; a cooldown that outlasts it starts no proof. The HTTP
+response deadline (`res.setTimeout`, 150 s) is the backstop: it aborts the
+request's signal, which closes the gate, BEFORE the 504 is written. A caller
+that got a 504 reads `aztec_getSettlement` and retries the same operation.
 
 ## Journal (`PXE_BRIDGE_JOURNAL`)
 

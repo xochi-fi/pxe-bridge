@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import type { Server } from "node:http";
+import { request, type Server } from "node:http";
 import { createApp, createInitializationApp, type ServerOptions } from "../src/server.js";
 import { TransactionLimits } from "../src/limits.js";
 import type { MayBroadcastClient } from "../src/may-broadcast.js";
@@ -364,13 +364,18 @@ describe("public liveness isolation", () => {
     }
   });
 
-  it("bounds a hung readiness observation to one backend call", async () => {
+  it("aborts one shared hung readiness observation and recovers", async () => {
     const key = "bounded-readiness-key";
     let observations = 0;
+    let hang = true;
+    const healthy = readyObserver();
     const readiness = {
-      observe: () => {
+      observe: (signal?: AbortSignal) => {
         observations += 1;
-        return new Promise<never>(() => {});
+        if (!hang) return healthy.observe(signal);
+        return new Promise<never>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
       },
     };
     const client = new FakeAztecClient();
@@ -387,22 +392,30 @@ describe("public liveness isolation", () => {
     const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
 
     try {
-      for (let i = 0; i < 2; i++) {
-        const response = await fetch(`${url}/ready`, {
+      const [ready, rpc] = await Promise.all([
+        fetch(`${url}/ready`, {
           headers: { Authorization: `Bearer ${key}` },
-        });
-        expect(response.status).toBe(503);
-        expect(await response.json()).toEqual({
-          ready: false,
-          reasons: ["readiness_observation_failed"],
-        });
-      }
-      const rpc = await jsonPost(url, rpcBody("aztec_createNote", [v1Params()]), {
-        Authorization: `Bearer ${key}`,
-        "Idempotency-Key": "op-1",
+        }),
+        jsonPost(url, rpcBody("aztec_createNote", [v1Params()]), {
+          Authorization: `Bearer ${key}`,
+          "Idempotency-Key": "op-1",
+        }),
+      ]);
+      expect(ready.status).toBe(503);
+      expect(await ready.json()).toEqual({
+        ready: false,
+        reasons: ["readiness_observation_failed"],
       });
       expect((await rpcJson(rpc)).error?.code).toBe(-32006);
       expect(observations).toBe(1);
+
+      hang = false;
+      const recovered = await fetch(`${url}/ready`, {
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      expect(recovered.status).toBe(200);
+      expect(await recovered.json()).toMatchObject({ ready: true });
+      expect(observations).toBe(2);
     } finally {
       await new Promise<void>((resolve) => srv.close(() => resolve()));
     }
@@ -458,6 +471,76 @@ describe("public liveness isolation", () => {
       await new Promise<void>((resolve) => srv.close(() => resolve()));
     }
   });
+  it("bounds all non-health traffic during early startup", async () => {
+    const srv = createInitializationApp("bootstrap-rate-key");
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+
+    try {
+      for (let i = 0; i < 60; i++) {
+        expect((await fetch(`${url}/not-ready`)).status).toBe(503);
+      }
+      expect((await fetch(`${url}/not-ready`)).status).toBe(429);
+      expect((await fetch(`${url}/status`)).status).toBe(200);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+  it("refuses a malformed startup request target without crashing", async () => {
+    const srv = createInitializationApp("bootstrap-target-key");
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    if (!addr || typeof addr === "string") throw new Error("server did not bind TCP");
+
+    try {
+      const status = await new Promise<number | undefined>((resolve, reject) => {
+        const req = request({
+          host: "127.0.0.1",
+          port: addr.port,
+          method: "GET",
+          path: "http://localhost:99999/",
+        });
+        req.on("response", (response) => {
+          response.resume();
+          response.on("end", () => resolve(response.statusCode));
+        });
+        req.on("error", reject);
+        req.end();
+      });
+      expect(status).toBe(400);
+      expect((await fetch(`http://127.0.0.1:${addr.port}/status`)).status).toBe(200);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+  it("caps backend RPC work that outlives response deadlines", async () => {
+    const key = "backend-cap-key";
+    const stuck = new FakeAztecClient();
+    stuck.getVersion = () => new Promise<string>(() => {});
+    const srv = createApp(stuck, {
+      apiKey: key,
+      responseTimeoutMs: 10,
+    });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+    const call = () =>
+      jsonPost(url, rpcBody("aztec_getVersion"), {
+        Authorization: `Bearer ${key}`,
+      });
+
+    try {
+      const timedOut = await Promise.all(Array.from({ length: 16 }, call));
+      expect(timedOut.every((response) => response.status === 504)).toBe(true);
+      expect((await call()).status).toBe(503);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
 
   it("refuses one credential for RPC and breaker administration", () => {
     const client = new FakeAztecClient();

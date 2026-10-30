@@ -685,12 +685,14 @@ marked operations.
 
 `GET /ready` is the authenticated operational endpoint. It requires the same
 `Authorization: Bearer <PXE_BRIDGE_API_KEY>` header as JSON-RPC and returns the
-authoritative readiness projection. A backend observation that exceeds 20
-seconds fails closed as HTTP 503 `readiness_observation_failed`. Timed-out
-callers share the same still-running observation, so probes cannot accumulate
-unbounded Aztec RPCs. HTTP 200 means new settlement admission is allowed; HTTP
-503 means it is not. Authentication failures use the separate auth-failure
-rate limiter and expose no operational state.
+authoritative readiness projection. Every Aztec JSON-RPC call has a 10-second
+aborting transport deadline; the full readiness projection has a 20-second
+deadline and fails closed as HTTP 503 `readiness_observation_failed`.
+Concurrent callers share one observation, and a timeout aborts its transport
+before a later probe can start, so probes cannot accumulate Aztec RPCs. HTTP
+200 means new settlement admission is allowed; HTTP 503 means it is not.
+Authentication failures use the separate auth-failure rate limiter and expose
+no operational state.
 
 Hard readiness requires design-A `spending_limit` mode and its durable
 deployment record; the exact derived account address and compiled class;

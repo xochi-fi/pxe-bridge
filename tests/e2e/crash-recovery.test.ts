@@ -154,6 +154,7 @@ describe("hard crash mid-broadcast (e2e)", () => {
       cwd: workDir,
       env: {
         PATH: process.env["PATH"] ?? "",
+
         AZTEC_NODE_URL: proxyUrl,
         PXE_BRIDGE_SECRET_KEY: config.secretKey,
         PXE_BRIDGE_ACCOUNT_ADDRESS: account,

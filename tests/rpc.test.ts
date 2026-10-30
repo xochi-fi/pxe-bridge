@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { writeFileSync } from "node:fs";
 import Database from "better-sqlite3";
 import { handleRpcRequest, type RpcContext, type SettlementContext } from "../src/rpc.js";
@@ -107,6 +107,23 @@ describe("aztec_createNote: the versioned payload", () => {
     const res = await createNote(client, ctx, v1Params(override));
     expect(res.error?.code).toBe(RPC_ERRORS.INVALID_PARAMS);
     expect(client.proofs).toBe(0);
+  });
+
+  it("does not log rejected shielded request fields", async () => {
+    const sentinel = "private-recipient-note-or-transaction-id";
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const res = await createNote(client, ctx, {
+        ...v1Params(),
+        accountMode: sentinel,
+        [sentinel]: sentinel,
+      });
+      expect(res.error?.code).toBe(RPC_ERRORS.INVALID_PARAMS);
+      expect(log).toHaveBeenCalledWith("[rpc] Invalid createNote params");
+      expect(JSON.stringify(log.mock.calls)).not.toContain(sentinel);
+    } finally {
+      log.mockRestore();
+    }
   });
 
   it("requires the Idempotency-Key to equal the operation id", async () => {

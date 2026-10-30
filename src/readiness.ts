@@ -133,7 +133,7 @@ export interface ChainReadinessFacts {
 }
 
 export interface ReadinessChainProbe {
-  observeReadinessChain(): Promise<ChainReadinessFacts>;
+  observeReadinessChain(signal?: AbortSignal): Promise<ChainReadinessFacts>;
 }
 
 export interface OperationalReadiness {
@@ -192,7 +192,7 @@ export interface OperationalReadiness {
 }
 
 export interface ReadinessObserver {
-  observe(): Promise<OperationalReadiness>;
+  observe(signal?: AbortSignal): Promise<OperationalReadiness>;
 }
 
 export interface ReadinessObserverOptions {
@@ -472,8 +472,8 @@ export function createReadinessObserver(
   options: ReadinessObserverOptions,
 ): ReadinessObserver {
   return {
-    async observe(): Promise<OperationalReadiness> {
-      const facts = await probe.observeReadinessChain();
+    async observe(signal?: AbortSignal): Promise<OperationalReadiness> {
+      const facts = await probe.observeReadinessChain(signal);
       return evaluateReadiness(
         facts,
         options.limits?.windowStatus() ?? null,

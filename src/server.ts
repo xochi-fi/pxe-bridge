@@ -14,6 +14,7 @@ import {
 const MAX_BODY_BYTES = 64 * 1024; // 64 KB
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = 60;
+const MAX_RPC_IN_FLIGHT = 16;
 // Bounds RECEIVING the request. Node's server.requestTimeout covers headers
 // plus body, not the response, which is why it was never the protection the
 // docs claimed it was.
@@ -165,7 +166,7 @@ function sendJson(res: ServerResponse, status: number, data: unknown): void {
 }
 
 // Long enough for a UUID or a "0x<32 bytes>-<index>" trade identifier, short
-// enough that keys cannot be used to grow the store or the audit log.
+// enough that keys cannot be used to grow durable journal state.
 const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 /** Distinct from undefined, which means the caller simply sent no key. */
 const INVALID_KEY = Symbol("invalid-idempotency-key");
@@ -213,10 +214,14 @@ type ReadinessProjection = Awaited<ReturnType<ReadinessObserver["observe"]>>;
 async function observeReadiness(
   observation: Promise<ReadinessProjection>,
   timeoutMs: number,
+  abort: () => void,
 ): Promise<ReadinessProjection> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error("readiness observation timed out")), timeoutMs);
+    timer = setTimeout(() => {
+      abort();
+      reject(new Error("readiness observation timed out"));
+    }, timeoutMs);
   });
   try {
     return await Promise.race([observation, timeout]);
@@ -233,9 +238,16 @@ async function observeReadiness(
 export function createInitializationApp(apiKey?: string): Server {
   const livenessRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const readinessRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+  const startupRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const authFailureLimiter = new RateLimiter(AUTH_FAILURE_MAX, RATE_LIMIT_WINDOW_MS);
   const server = createServer((req, res) => {
-    const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+    let pathname: string;
+    try {
+      pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+    } catch {
+      sendJson(res, 400, { error: "Invalid request target" });
+      return;
+    }
     const ip = req.socket.remoteAddress ?? "unknown";
 
     if (req.method === "GET" && pathname === "/status") {
@@ -265,6 +277,11 @@ export function createInitializationApp(apiKey?: string): Server {
         return;
       }
       sendJson(res, 503, { ready: false, reasons: ["initializing"] });
+      return;
+    }
+
+    if (!startupRateLimiter.allow("startup")) {
+      sendJson(res, 429, { error: "Too many requests" });
       return;
     }
 
@@ -320,10 +337,17 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
     }
     if (readinessFlight) return readinessFlight.bounded;
 
-    const raw = Promise.resolve().then(() => sourceReadinessObserver.observe());
+    const controller = new AbortController();
+    const raw = Promise.resolve().then(() =>
+      sourceReadinessObserver.observe(controller.signal),
+    );
     const flight = {
       raw,
-      bounded: observeReadiness(raw, opts.readinessTimeoutMs ?? READINESS_TIMEOUT_MS),
+      bounded: observeReadiness(
+        raw,
+        opts.readinessTimeoutMs ?? READINESS_TIMEOUT_MS,
+        () => controller.abort(),
+      ),
     };
     readinessFlight = flight;
     const clear = () => {
@@ -340,6 +364,8 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
   const authFailureLimiter = new RateLimiter(AUTH_FAILURE_MAX, RATE_LIMIT_WINDOW_MS);
   const attestationRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const attestationAuthFailureLimiter = new RateLimiter(AUTH_FAILURE_MAX, RATE_LIMIT_WINDOW_MS);
+  const startupRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+  let rpcInFlight = 0;
 
   /**
    * Rejects an unauthenticated caller, charging the attempt to its own bucket.
@@ -427,13 +453,17 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
         try {
           const readiness = await currentReadinessObservation();
           sendJson(res, readiness.ready ? 200 : 503, readiness);
-        } catch (err) {
-          console.error("[pxe-bridge] Readiness observation failed:", err);
+        } catch {
+          console.error("[pxe-bridge] Readiness observation failed");
           sendJson(res, 503, { ready: false, reasons: ["readiness_observation_failed"] });
         }
         return;
       }
       if (opts.initialized && !opts.initialized()) {
+        if (!startupRateLimiter.allow("startup")) {
+          sendJson(res, 429, { error: "Too many requests" });
+          return;
+        }
         sendJson(res, 503, { error: "Service initializing" });
         return;
       }
@@ -598,22 +628,31 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           return;
         }
 
-        const rpcCtx: RpcContext = {
-          limits: opts.limits,
-          audit: opts.audit,
-          settlement: opts.settlement,
-          readiness: readinessObserver,
-          idempotencyKey,
-          signal: responseDeadline.signal,
-        };
-        const result = await handleRpcRequest(parsed, client, rpcCtx);
-        sendJson(res, 200, result);
+        if (rpcInFlight >= MAX_RPC_IN_FLIGHT) {
+          sendJson(res, 503, { error: "Service busy" });
+          return;
+        }
+        rpcInFlight += 1;
+        try {
+          const rpcCtx: RpcContext = {
+            limits: opts.limits,
+            audit: opts.audit,
+            settlement: opts.settlement,
+            readiness: readinessObserver,
+            idempotencyKey,
+            signal: responseDeadline.signal,
+          };
+          const result = await handleRpcRequest(parsed, client, rpcCtx);
+          sendJson(res, 200, result);
+        } finally {
+          rpcInFlight -= 1;
+        }
         return;
       }
 
       sendJson(res, 404, { error: "Not found" });
-    } catch (err) {
-      console.error("[pxe-bridge] Unhandled error:", err);
+    } catch {
+      console.error("[pxe-bridge] Unhandled request error");
       if (!res.headersSent) {
         sendJson(res, 500, {
           jsonrpc: "2.0",
