@@ -58,6 +58,62 @@ type NodeRpcFetch = (
   extraHeaders?: Record<string, string>,
   noRetry?: boolean,
 ) => Promise<{ response: unknown; headers: Headers }>;
+const NODE_RPC_RETRY_DELAYS_MS = [1_000, 2_000, 3_000] as const;
+
+class NodeRpcNoRetryError extends Error {}
+
+async function waitForNodeRetry(delayMs: number, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  if (delayMs <= 0) return;
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function fetchNodeRpcOnce(
+  host: string,
+  body: unknown,
+  extraHeaders: Record<string, string>,
+  noRetry: boolean,
+  signal: AbortSignal,
+): Promise<{ response: unknown; headers: Headers }> {
+  const response = await fetch(host, {
+    method: "POST",
+    body: jsonStringify(body),
+    headers: { "content-type": "application/json", ...extraHeaders },
+    signal,
+  });
+  const text = await response.text();
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(text);
+  } catch {
+    throw new Error(
+      response.ok
+        ? "Aztec node returned invalid JSON"
+        : `Aztec node returned HTTP ${response.status}`,
+    );
+  }
+  const message = sanitizeNodeRpcErrors(decoded);
+  if (!response.ok) {
+    const errorMessage = message
+      ? `Aztec node returned HTTP ${response.status}: ${message}`
+      : `Aztec node returned HTTP ${response.status}`;
+    if (noRetry || (response.status >= 400 && response.status < 500)) {
+      throw new NodeRpcNoRetryError(errorMessage);
+    }
+    throw new Error(errorMessage);
+  }
+  return { response: decoded, headers: response.headers };
+}
 
 function sanitizeNodeRpcErrors(decoded: unknown): string | undefined {
   const responses = Array.isArray(decoded) ? decoded : [decoded];
@@ -86,8 +142,9 @@ function sanitizeNodeRpcErrors(decoded: unknown): string | undefined {
 export function boundedNodeFetch(
   timeoutMs = NODE_RPC_TIMEOUT_MS,
   callerSignal?: AbortSignal,
+  retryDelaysMs: readonly number[] = NODE_RPC_RETRY_DELAYS_MS,
 ): NodeRpcFetch {
-  return async (host, body, extraHeaders = {}) => {
+  return async (host, body, extraHeaders = {}, noRetry = false) => {
     const controller = new AbortController();
     const abortForCaller = (): void => controller.abort(callerSignal?.reason);
     if (callerSignal?.aborted) {
@@ -100,32 +157,26 @@ export function boundedNodeFetch(
       timeoutMs,
     );
     try {
-      const response = await fetch(host, {
-        method: "POST",
-        body: jsonStringify(body),
-        headers: { "content-type": "application/json", ...extraHeaders },
-        signal: controller.signal,
-      });
-      const text = await response.text();
-      let decoded: unknown;
-      try {
-        decoded = JSON.parse(text);
-      } catch {
-        throw new Error(
-          response.ok
-            ? "Aztec node returned invalid JSON"
-            : `Aztec node returned HTTP ${response.status}`,
-        );
+      for (let attempt = 0; ; attempt++) {
+        try {
+          return await fetchNodeRpcOnce(
+            host,
+            body,
+            extraHeaders,
+            noRetry,
+            controller.signal,
+          );
+        } catch (cause) {
+          if (callerSignal?.aborted) callerSignal.throwIfAborted();
+          if (controller.signal.aborted) {
+            throw new Error("Aztec node request timed out", { cause });
+          }
+          if (cause instanceof NodeRpcNoRetryError) throw cause;
+          const retryDelayMs = retryDelaysMs[attempt];
+          if (retryDelayMs === undefined) throw cause;
+          await waitForNodeRetry(retryDelayMs, controller.signal);
+        }
       }
-      const message = sanitizeNodeRpcErrors(decoded);
-      if (!response.ok) {
-        throw new Error(
-          message
-            ? `Aztec node returned HTTP ${response.status}: ${message}`
-            : `Aztec node returned HTTP ${response.status}`,
-        );
-      }
-      return { response: decoded, headers: response.headers };
     } catch (cause) {
       if (callerSignal?.aborted) callerSignal.throwIfAborted();
       if (controller.signal.aborted) {

@@ -66,6 +66,46 @@ describe("boundedNodeFetch", () => {
     ).rejects.toThrow("Aztec node returned HTTP 400: Existing nullifier?[audit]?[2J");
   });
 
+  it("retries transient node failures within the deadline and honors noRetry", async () => {
+    let mode: "retry" | "no-retry" = "retry";
+    let requestCount = 0;
+    const server = createServer((_req, res) => {
+      requestCount += 1;
+      if (mode === "retry" && requestCount === 3) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: "ready" }));
+        return;
+      }
+      res.writeHead(503, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          error: { code: -32000, message: "temporarily unavailable" },
+        }),
+      );
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("server did not bind TCP");
+    const url = `http://127.0.0.1:${address.port}`;
+    const request = { jsonrpc: "2.0", id: 1, method: "node_getNodeInfo" };
+    const transport = boundedNodeFetch(1_000, undefined, [0, 0, 0]);
+
+    await expect(transport(url, request)).resolves.toMatchObject({
+      response: { result: "ready" },
+    });
+    expect(requestCount).toBe(3);
+
+    mode = "no-retry";
+    requestCount = 0;
+    await expect(transport(url, request, {}, true)).rejects.toThrow(
+      "Aztec node returned HTTP 503: temporarily unavailable",
+    );
+    expect(requestCount).toBe(1);
+  });
+
   it("sanitizes successful HTTP scalar and batch JSON-RPC errors", async () => {
     let requestCount = 0;
     const server = createServer((_req, res) => {
