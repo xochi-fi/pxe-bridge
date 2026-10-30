@@ -1,0 +1,13 @@
+{
+  "name": "spike-633-recipient-schnorr-testnet-rc3",
+  "private": true,
+  "type": "module",
+  "description": "Offline class identity of SchnorrAccount under @aztec-labs 6.0.0-rc.3, for comparison with the 6.0.0 run one directory up.",
+  "dependencies": {
+    "@aztec-labs/accounts": "6.0.0-rc.3",
+    "@aztec-labs/stdlib": "6.0.0-rc.3"
+  },
+  "devDependencies": {
+    "tsx": "4.20.6"
+  }
+}
