@@ -737,15 +737,15 @@ export class RootUpdatePublisher {
       );
       if (observation.state === "known") {
         const identity = observation.value.allowlistRoot.toLowerCase();
-        const pendingCurrent = this.journal
-          .pendingRootUpdates()
-          .some((entry) => entry.root.toLowerCase() === identity);
-        if (pendingCurrent) {
-          // A crash may have left the current root's exact signed payload
-          // uncertain. Retry it and its idempotency key; never replace it with
-          // a freshly signed startup payload.
-          this.lastFinalizedRoot = identity;
-        } else if (identity !== this.lastFinalizedRoot) {
+        const pending = this.journal.pendingRootUpdates();
+        const latest = this.journal.latestRootUpdate();
+        // Only the latest durable event can represent the startup observation.
+        // Leaving the root unset here publishes fresh evidence after that exact retry drains.
+        const recoveringLatestCurrent =
+          this.lastFinalizedRoot === undefined &&
+          latest?.root.toLowerCase() === identity &&
+          pending.some((entry) => entry.id === latest.id);
+        if (!recoveringLatestCurrent && identity !== this.lastFinalizedRoot) {
           const record = await this.producer.rootUpdate(observation.value);
           if (record) {
             const digest = readinessDigest(
@@ -806,7 +806,7 @@ export class RootUpdatePublisher {
           body: JSON.stringify(RootUpdateEnvelopeSchema.parse(entry.payload)),
           signal: AbortSignal.timeout(ROOT_UPDATE_RELAY_TIMEOUT_MS),
         });
-        if (!response.ok) throw new Error(`relay returned ${response.status}`);
+        if (response.status !== 204) throw new Error(`relay returned ${response.status}`);
         this.journal.recordRootUpdateAttempt(entry.id, { delivered: true });
         this.audit?.({ method: "RootUpdate", outcome: "delivered" });
       } catch {

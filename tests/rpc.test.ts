@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import { writeFileSync } from "node:fs";
 import Database from "better-sqlite3";
 import { handleRpcRequest, type RpcContext, type SettlementContext } from "../src/rpc.js";
 import { RPC_ERRORS, SUBMITTED_UNKNOWN_MESSAGE } from "../src/types.js";
@@ -212,6 +213,71 @@ describe("aztec_createNote: the broadcast gate", () => {
     expect(client.proofs).toBe(1);
     expect(client.sends).toEqual([held]);
   });
+
+  it.each([
+    ["denied", "deny", "may_broadcast_denied"],
+    ["unknown", "unknown", "may_broadcast_unknown"],
+  ] as const)(
+    "preserves a %s prepared attempt through readiness loss and recovery",
+    async (_name, decision, hold) => {
+      gate.decision = decision;
+      await createNote(client, ctx);
+      const beforeOperation = journal.get("op-1")!;
+      const beforeAttempts = journal.attempts("op-1");
+      const beforeBytes = journal.attemptBytes("op-1", beforeOperation.currentAttempt!);
+      const beforeGeneration = journal.meta().generation;
+      expect(beforeOperation).toMatchObject({
+        fingerprint: fingerprintTerms(termsFrom(CreateNoteV1Schema.parse(v1Params()))),
+        terms: { recipient: v1Params()["recipient"] },
+        state: "prepared",
+        hold,
+        currentAttempt: 1,
+      });
+
+      s.readiness = readyObserver({
+        ready: false,
+        reasons: ["finalized_history_unavailable"],
+      });
+      const refused = await createNote(client, ctx);
+      expect(refused.error?.code).toBe(RPC_ERRORS.NOT_READY);
+      expect(refused.error?.data?.observation).toEqual({
+        state: "prepared",
+        txHash: beforeAttempts[0]!.txHash,
+        expirationTimestamp: beforeAttempts[0]!.expirationTimestamp,
+        hold,
+      });
+      expect(journal.meta().generation).toBe(beforeGeneration);
+      expect(journal.get("op-1")).toEqual(beforeOperation);
+      expect(journal.attempts("op-1")).toEqual(beforeAttempts);
+      expect(journal.attemptBytes("op-1", beforeOperation.currentAttempt!)).toEqual(beforeBytes);
+      expect(client.proofs).toBe(1);
+      expect(client.sends).toEqual([]);
+
+      const readWhileNotReady = await getSettlement(client, ctx);
+      expect(readWhileNotReady).toMatchObject({
+        fingerprint: beforeOperation.fingerprint,
+        terms: { recipient: beforeOperation.terms.recipient },
+        state: "prepared",
+        observation: { state: "prepared", txHash: beforeAttempts[0]!.txHash, hold },
+      });
+
+      s.readiness = readyObserver();
+      gate.decision = "allow";
+      const recovered = await createNote(client, ctx);
+      expect(recovered.result?.observation).toMatchObject({
+        state: "included",
+        txHash: beforeAttempts[0]!.txHash,
+      });
+      expect(client.proofs).toBe(1);
+      expect(client.sends).toEqual([beforeAttempts[0]!.txHash]);
+      expect(journal.attemptBytes("op-1", beforeOperation.currentAttempt!)).toEqual(beforeBytes);
+      expect(journal.get("op-1")).toMatchObject({
+        fingerprint: beforeOperation.fingerprint,
+        terms: { recipient: beforeOperation.terms.recipient },
+        currentAttempt: beforeOperation.currentAttempt,
+      });
+    },
+  );
 
   it("refuses a same-id request with changed terms and does no work", async () => {
     await createNote(client, ctx);
@@ -706,22 +772,22 @@ describe("aztec_getSettlement", () => {
     expect(read.observation).toMatchObject({ state: "prepared", hold: "may_broadcast_denied" });
   });
 
-  it("keeps serving reads while writes are disabled", async () => {
+  it("keeps serving settlement reads while a malformed high-water mark halts writes", async () => {
     await createNote(client, ctx);
     const path = journal.path;
     journal.close();
+    writeFileSync(`${path}.hwm`, "null");
     const reopened = SettlementJournal.open(path);
-    reopened.bindAccount("0x" + "f".repeat(64), true);
-    expect(reopened.health()).toMatchObject({ writable: false, reason: "account_mismatch" });
+    expect(reopened.health()).toMatchObject({ writable: false, reason: "rollback_detected" });
     const readOnly = { settlement: settlementContext(reopened, gate.client) };
     const write = await createNote(client, readOnly, v1Params({ operationId: "op-2" }));
     expect(write.error?.code).toBe(RPC_ERRORS.JOURNAL_UNAVAILABLE);
-    expect(write.error?.data).toMatchObject({ journal: { writable: false, reason: "account_mismatch" } });
+    expect(write.error?.data).toMatchObject({ journal: { writable: false, reason: "rollback_detected" } });
     const read = await getSettlement(client, readOnly);
     expect(read).toMatchObject({
       found: true,
       observation: { state: "included" },
-      journal: { writable: false, reason: "account_mismatch" },
+      journal: { writable: false, reason: "rollback_detected" },
     });
   });
 });

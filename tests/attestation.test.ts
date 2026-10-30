@@ -766,7 +766,7 @@ describe("attestation configuration and root outbox", () => {
           authorization: request.headers["authorization"],
           body: JSON.parse(body) as unknown,
         });
-        response.writeHead(fail ? 503 : 200).end();
+        response.writeHead(fail ? 503 : 204).end();
       });
     });
     await new Promise<void>((resolve) => relay.listen(0, "127.0.0.1", resolve));
@@ -813,17 +813,7 @@ describe("attestation configuration and root outbox", () => {
         }).signer,
       ).toBe(ctx.signer.address);
 
-      const laterRestart = new RootUpdatePublisher(
-        ctx.producer,
-        ctx.probe,
-        ctx.journal,
-        relayOptions,
-      );
-      await laterRestart.tick();
-      expect(received).toHaveLength(3);
-      expect(received[2]?.key).toBe(original?.key);
-      expect(received[2]?.body).toEqual(original?.body);
-
+      const recoveredId = ctx.journal.latestRootUpdate()?.id;
       const sameRootNextBlock = known(
         descriptor.network,
         ctx.tree.root.toString(),
@@ -831,18 +821,142 @@ describe("attestation configuration and root outbox", () => {
       if (sameRootNextBlock.state !== "known") throw new Error("unreachable");
       sameRootNextBlock.value.finalized.blockNumber = "8";
       ctx.probe.observation = sameRootNextBlock;
-      await laterRestart.tick();
+      await recovered.tick();
+      expect(received).toHaveLength(3);
+      expect(received[2]?.key).not.toBe(original?.key);
+      expect(received[2]?.body).toMatchObject({
+        record: { root: ctx.tree.root.toString(), rootBlock: "8" },
+      });
+      expect(ctx.journal.latestRootUpdate()?.id).not.toBe(recoveredId);
+
+      await recovered.tick();
       expect(received).toHaveLength(3);
 
-      ctx.probe.observation = known(
+      const changedRoot = known(
         descriptor.network,
         "0x" + "44".repeat(32),
       );
-      await laterRestart.tick();
+      if (changedRoot.state !== "known") throw new Error("unreachable");
+      changedRoot.value.finalized.blockNumber = "9";
+      ctx.probe.observation = changedRoot;
+      await recovered.tick();
       expect(received).toHaveLength(4);
       expect(received[3]?.body).toMatchObject({
-        record: { root: "0x" + "44".repeat(32) },
+        record: { root: "0x" + "44".repeat(32), rootBlock: "9" },
       });
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        relay.close((error) => (error ? reject(error) : resolve())),
+      );
+      ctx.journal.close();
+    }
+  });
+
+  it("records a returned root after a later different root despite an old pending entry", async () => {
+    const ctx = await setup([{ address: recipient, index: 137 }]);
+    const relay = createServer((request, response) => {
+      request.resume();
+      request.on("end", () => response.writeHead(503).end());
+    });
+    await new Promise<void>((resolve) => relay.listen(0, "127.0.0.1", resolve));
+    const address = relay.address();
+    if (!address || typeof address === "string") throw new Error("relay did not bind");
+    const relayOptions = {
+      url: `http://127.0.0.1:${address.port}/root`,
+      token: "relay-token",
+    };
+    const rootA = ctx.tree.root.toString();
+    const rootB = "0x" + "44".repeat(32);
+    try {
+      const publisher = new RootUpdatePublisher(
+        ctx.producer,
+        ctx.probe,
+        ctx.journal,
+        relayOptions,
+      );
+      await publisher.tick();
+
+      const observationB = known(descriptor.network, rootB);
+      if (observationB.state !== "known") throw new Error("unreachable");
+      observationB.value.finalized.blockNumber = "8";
+      ctx.probe.observation = observationB;
+      await publisher.tick();
+
+      const returnedA = known(descriptor.network, rootA);
+      if (returnedA.state !== "known") throw new Error("unreachable");
+      returnedA.value.finalized.blockNumber = "9";
+      ctx.probe.observation = returnedA;
+      const recovered = new RootUpdatePublisher(
+        ctx.producer,
+        ctx.probe,
+        ctx.journal,
+        relayOptions,
+      );
+      await recovered.tick();
+
+      const pending = ctx.journal.pendingRootUpdates();
+      expect(pending).toHaveLength(3);
+      const rootAUpdates = pending.filter((entry) => entry.root === rootA);
+      expect(rootAUpdates.map((entry) => entry.rootBlock).sort()).toEqual(["7", "9"]);
+      expect(pending).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ root: rootB, rootBlock: "8" }),
+        ]),
+      );
+      expect(ctx.journal.latestRootUpdate()?.id).toBe(
+        rootAUpdates.find((entry) => entry.rootBlock === "9")?.id,
+      );
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        relay.close((error) => (error ? reject(error) : resolve())),
+      );
+      ctx.journal.close();
+    }
+  });
+
+  it("keeps 200 and 202 relay responses pending and retries the exact envelope", async () => {
+    const ctx = await setup([{ address: recipient, index: 137 }]);
+    const statuses = [200, 202, 204];
+    const received: { key: string | undefined; body: unknown }[] = [];
+    const relay = createServer((request, response) => {
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk: string) => (body += chunk));
+      request.on("end", () => {
+        received.push({
+          key: request.headers["idempotency-key"] as string | undefined,
+          body: JSON.parse(body) as unknown,
+        });
+        response.writeHead(statuses[received.length - 1] ?? 500).end();
+      });
+    });
+    await new Promise<void>((resolve) => relay.listen(0, "127.0.0.1", resolve));
+    const address = relay.address();
+    if (!address || typeof address === "string") throw new Error("relay did not bind");
+    try {
+      const publisher = new RootUpdatePublisher(
+        ctx.producer,
+        ctx.probe,
+        ctx.journal,
+        {
+          url: `http://127.0.0.1:${address.port}/root`,
+          token: "relay-token",
+        },
+      );
+      await publisher.tick();
+      expect(ctx.journal.pendingRootUpdates()).toMatchObject([
+        { attempts: 1, lastError: "relay unavailable" },
+      ]);
+
+      await publisher.tick();
+      expect(ctx.journal.pendingRootUpdates()).toMatchObject([
+        { attempts: 2, lastError: "relay unavailable" },
+      ]);
+      expect(received[1]).toEqual(received[0]);
+
+      await publisher.tick();
+      expect(ctx.journal.pendingRootUpdates()).toEqual([]);
+      expect(received[2]).toEqual(received[0]);
     } finally {
       await new Promise<void>((resolve, reject) =>
         relay.close((error) => (error ? reject(error) : resolve())),
