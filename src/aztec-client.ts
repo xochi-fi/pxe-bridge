@@ -59,18 +59,23 @@ type NodeRpcFetch = (
   noRetry?: boolean,
 ) => Promise<{ response: unknown; headers: Headers }>;
 
-function nodeRpcErrorMessage(decoded: unknown): string | undefined {
+function sanitizeNodeRpcErrors(decoded: unknown): string | undefined {
   const responses = Array.isArray(decoded) ? decoded : [decoded];
+  let firstMessage: string | undefined;
   for (const response of responses) {
     if (typeof response !== "object" || response === null || !("error" in response)) continue;
     const error = response.error;
     if (typeof error !== "object" || error === null || !("message" in error)) continue;
     const message = error.message;
-    if (typeof message === "string" && message.length <= 1_024) {
-      return message.replace(/[^\x20-\x7e]/g, "?");
-    }
+    if (typeof message !== "string") continue;
+    const sanitized =
+      message.length <= 1_024
+        ? message.replace(/[^\x20-\x7e]/g, "?")
+        : "Aztec node error message exceeded the diagnostic limit";
+    (error as { message: unknown }).message = sanitized;
+    firstMessage ??= sanitized;
   }
-  return undefined;
+  return firstMessage;
 }
 
 /**
@@ -112,8 +117,8 @@ export function boundedNodeFetch(
             : `Aztec node returned HTTP ${response.status}`,
         );
       }
+      const message = sanitizeNodeRpcErrors(decoded);
       if (!response.ok) {
-        const message = nodeRpcErrorMessage(decoded);
         throw new Error(
           message
             ? `Aztec node returned HTTP ${response.status}: ${message}`

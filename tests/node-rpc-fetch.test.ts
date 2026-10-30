@@ -66,6 +66,39 @@ describe("boundedNodeFetch", () => {
     ).rejects.toThrow("Aztec node returned HTTP 400: Existing nullifier?[audit]?[2J");
   });
 
+  it("sanitizes successful HTTP scalar and batch JSON-RPC errors", async () => {
+    let requestCount = 0;
+    const server = createServer((_req, res) => {
+      const error = {
+        jsonrpc: "2.0",
+        id: 1,
+        error: { code: -32000, message: "Node failure\n[audit]\u001b[2J" },
+      };
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(requestCount++ === 0 ? error : [error]));
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("server did not bind TCP");
+    const url = `http://127.0.0.1:${address.port}`;
+    const transport = boundedNodeFetch(1_000);
+    const request = { jsonrpc: "2.0", id: 1, method: "node_getNodeInfo" };
+
+    await expect(transport(url, request)).resolves.toMatchObject({
+      response: {
+        error: { message: "Node failure?[audit]?[2J" },
+      },
+    });
+    await expect(transport(url, [request])).resolves.toMatchObject({
+      response: [
+        {
+          error: { message: "Node failure?[audit]?[2J" },
+        },
+      ],
+    });
+  });
+
   it("composes the caller cancellation with its transport deadline", async () => {
     const server = createServer(() => {});
     servers.push(server);
