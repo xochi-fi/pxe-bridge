@@ -498,11 +498,18 @@ are encoded positionally, so removing it would shift every argument after it.
 
 ## Build supply chain
 
-The `contract` CI job installs the Aztec toolchain by piping
-`https://install.aztec-labs.com` (formerly `install.aztec.network`, which now
-301s there) into bash. There is no published checksum to pin against, so the
-build trusts that endpoint. `aztec-up install 6.0.0` pins the toolchain version
-but not the installer that fetches it.
+The `contract` CI job downloads `aztec-up` from the pinned release's directory
+(`https://install.aztec-labs.com/6.0.0/aztec-up`; `install.aztec.network` now
+301s to `install.aztec-labs.com`) and runs `aztec-up install 6.0.0`, which
+fetches and runs that release's per-version installer. There is no published
+checksum to pin against, so the build trusts that endpoint. The npm tree comes
+from the release's own lock (`packages.tar.gz`, installed with `npm ci`), but
+the installer scripts, that lock and the Noir and Foundry binaries are fetched
+at run time, so `aztec-up install 6.0.0` pins the toolchain version but not
+what the endpoint serves for it. The job no longer runs the root installer,
+which first installs the latest release with an unlocked `npm install` and
+failed on 2026-10-30 when it resolved a tslib version published 27 seconds
+earlier.
 
 That toolchain is the contract's compile toolchain only, and it is pinned
 separately from the runtime (SDK, PXE, sandbox) because the class ID, and with
