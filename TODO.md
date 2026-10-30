@@ -146,9 +146,12 @@ Known limitations (acceptable for alpha):
   position list is terminal for allowlist management, and unlike the public
   array it replaced there is no way to read the set back. See SECURITY.md,
   "Losing the allowlist".
-- The spending-limit account cannot pay its own fees and nothing watches its
-  fee juice balance. It drains silently and refills only when an operator runs
-  `npm run top-up-fee-juice` from an L1-funded key. Tracked in Phase 3.
+- The spending-limit account cannot pay its own fees. It refills only when an
+  operator runs `npm run top-up-fee-juice` from an L1-funded key. `/ready`
+  refuses new `createNote` admission with `fee_runway_insufficient` when the
+  finalized balance cannot pay for the in-flight transfers plus those the
+  remaining daily headroom still admits, but nothing alerts on it. Tracked in
+  Phase 3.
 
 Resolved since this list was written: the fixed-epoch daily reset, which
 depended on block production rate and could wedge a stalled chain's counter, is
@@ -166,13 +169,16 @@ Bound exposure per chain by separating operational funds from reserves.
       the bulk of funds. Manual or semi-automated top-up to hot wallet when
       balance drops below threshold.
 - [ ] **Balance monitoring** -- alert when hot wallet balance drops below
-      configurable floor or spikes unexpectedly (possible drain).
-- [ ] **Fee juice balance monitoring** -- separate from the above and needed
-      sooner. The spending-limit account cannot claim fee juice for itself, so
-      running dry fails every transfer until an operator runs
-      `npm run top-up-fee-juice` from an L1-funded key. Nothing warns today.
-- [ ] **Auto-pause on low balance** -- stop accepting `createNote` when hot
-      wallet can't cover the requested amount.
+      configurable floor or spikes unexpectedly (possible drain). `/ready`
+      exposes finalized inventory and fee runway; nothing pages on them yet.
+- [ ] **Fee juice balance alerting** -- `/ready` reports
+      `fee_runway_insufficient` and stops admission, so the bridge no longer
+      sends transfers it cannot pay for. The missing part is a monitor that
+      polls `/ready` and pages before the runway runs out, since refilling
+      needs an operator on L1.
+- [x] **Auto-pause on low balance** -- `src/readiness.ts` refuses new
+      `createNote` admission with `inventory_insufficient` when finalized
+      inventory is below reserved plus remaining daily headroom (#46, #62).
 
 ## Phase 4: External Signer via AuthWitnessProvider
 
