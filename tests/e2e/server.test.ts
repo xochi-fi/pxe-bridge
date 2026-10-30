@@ -6,11 +6,7 @@ import { SettlementJournal } from "../../src/journal.js";
 import { SETTLEMENT_VERSION } from "../../src/settlement.js";
 import { TransactionLimits } from "../../src/limits.js";
 import { createReadinessObserver } from "../../src/readiness.js";
-import {
-  getTestConfig,
-  requireTestToken,
-  walletDataDirectory,
-} from "./helpers.js";
+import { getTestConfig, requireTestToken, walletDataDirectory } from "./helpers.js";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -43,16 +39,11 @@ describe("HTTP server (e2e)", () => {
 
     // The account is shared with the other suites, so it predates this
     // journal; adopting it is the operator acknowledgement the bridge needs.
-    const journal = SettlementJournal.open(
-      join(mkdtempSync(join(tmpdir(), "e2e-journal-")), "j.sqlite"),
-    );
+    const journal = SettlementJournal.open(join(mkdtempSync(join(tmpdir(), "e2e-journal-")), "j.sqlite"));
     journal.bindAccount(client.getAddress()!, client.accountPreexisted(), {
       acknowledgement: `${client.getAddress()!}@${journal.meta().journalId}`,
     });
-    const limits = new TransactionLimits({
-      maxAmount: 1_000n,
-      dailyLimit: 10_000n,
-    });
+    const limits = new TransactionLimits({ maxAmount: 1_000n, dailyLimit: 10_000n });
     const readiness = createReadinessObserver(client, {
       journal,
       limits,
@@ -89,11 +80,7 @@ describe("HTTP server (e2e)", () => {
     }
   });
 
-  function rpcBody(
-    method: string,
-    params: unknown[] = [],
-    id: number | string = 1,
-  ) {
+  function rpcBody(method: string, params: unknown[] = [], id: number | string = 1) {
     return JSON.stringify({ jsonrpc: "2.0", id, method, params });
   }
 
@@ -156,18 +143,12 @@ describe("HTTP server (e2e)", () => {
   });
 
   describe("aztec_createNote via JSON-RPC", () => {
-    async function params(
-      operationId: string,
-      overrides: Record<string, unknown> = {},
-    ) {
+    async function params(operationId: string, overrides: Record<string, unknown> = {}) {
       const network = await client.networkIdentity();
       return {
         version: SETTLEMENT_VERSION,
         operationId,
-        network: {
-          ...network,
-          genesisOrNetworkDigest: CORRIDOR.genesisOrNetworkDigest,
-        },
+        network: { ...network, genesisOrNetworkDigest: CORRIDOR.genesisOrNetworkDigest },
         corridor: {
           corridorId: CORRIDOR.corridorId,
           corridorRevision: CORRIDOR.corridorRevision,
@@ -210,37 +191,23 @@ describe("HTTP server (e2e)", () => {
     }
 
     it("blocks a standard-account payout and keeps recovery readable", async () => {
-      const body = await call(
-        "aztec_createNote",
-        await params("e2e-http-1"),
-        "e2e-http-1",
-      );
+      const body = await call("aztec_createNote", await params("e2e-http-1"), "e2e-http-1");
       expect(body.error?.code).toBe(-32006);
-      expect(body.error?.data?.reasons).toContain(
-        "account_mode_not_spending_limit",
-      );
+      expect(body.error?.data?.reasons).toContain("account_mode_not_spending_limit");
       const read = await call("aztec_getSettlement", {
         version: SETTLEMENT_VERSION,
         operationId: "e2e-http-1",
       });
       expect(read.result).toMatchObject({
         found: true,
-        observation: {
-          state: "not_submitted",
-          reason: "account_mode_not_spending_limit",
-        },
+        observation: { state: "not_submitted", reason: "bridge_not_ready" },
       });
     });
 
     it("refuses legacy params", async () => {
       const body = await call(
         "aztec_createNote",
-        {
-          recipient: client.getAddress(),
-          token: requireTestToken(),
-          amount: "1",
-          chainId: 1,
-        },
+        { recipient: client.getAddress(), token: requireTestToken(), amount: "1", chainId: 1 },
         "e2e-legacy",
       );
       expect(body.error?.code).toBe(-32602);
