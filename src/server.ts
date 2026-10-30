@@ -530,7 +530,9 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           sendJson(res, projected.ready ? 200 : 503, projected);
         } catch {
           console.error("[pxe-bridge] Readiness observation failed");
-          sendJson(res, 503, { ready: false, reasons: ["readiness_observation_failed"] });
+          const reasons = ["readiness_observation_failed"];
+          if (backendInFlight >= MAX_RPC_IN_FLIGHT) reasons.push("backend_capacity_exhausted");
+          sendJson(res, 503, { ready: false, reasons });
         }
         return;
       }
@@ -711,6 +713,10 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
         // callers that send no XIP-1 trade context.
         const idempotencyKey = readIdempotencyKey(req.headers["idempotency-key"]);
         if (idempotencyKey === INVALID_KEY) {
+          if (!invalidRpcRateLimiter.allow(clientIp)) {
+            sendJson(res, 429, { error: "Too many requests" });
+            return;
+          }
           sendJson(res, 400, {
             error: `Idempotency-Key must be 1-${MAX_IDEMPOTENCY_KEY_LENGTH} printable ASCII characters`,
           });

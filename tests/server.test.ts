@@ -590,13 +590,21 @@ describe("public liveness isolation", () => {
     const key = "settlement-background-cap-key";
     const stuck = new FakeAztecClient();
     stuck.createNote = () => new Promise<never>(() => {});
+    let readinessFails = false;
+    const healthyReadiness = readyObserver();
+    const readiness = {
+      observe: (signal?: AbortSignal) =>
+        readinessFails
+          ? Promise.reject(new Error("readiness failed"))
+          : healthyReadiness.observe(signal),
+    };
     const gate = fakeMayBroadcast("allow");
-    const settlement = settlementContext(openBoundJournal(), gate.client);
+    const settlement = settlementContext(openBoundJournal(), gate.client, { readiness });
     settlement.timeoutMs = 10;
     const srv = createApp(stuck, {
       apiKey: key,
-      readiness: settlement.readiness,
       settlement,
+      readiness,
       responseTimeoutMs: 1_000,
     });
     await new Promise<void>((resolve) => srv.listen(0, resolve));
@@ -614,13 +622,14 @@ describe("public liveness isolation", () => {
       const answered = await Promise.all(Array.from({ length: 16 }, (_, i) => call(i)));
       expect(answered.every((response) => response.status === 200)).toBe(true);
       expect((await call(16)).status).toBe(503);
+      readinessFails = true;
       const ready = await fetch(`${url}/ready`, {
         headers: { Authorization: `Bearer ${key}` },
       });
       expect(ready.status).toBe(503);
-      expect(await ready.json()).toMatchObject({
+      expect(await ready.json()).toEqual({
         ready: false,
-        reasons: expect.arrayContaining(["backend_capacity_exhausted"]),
+        reasons: ["readiness_observation_failed", "backend_capacity_exhausted"],
       });
       for (let i = 0; i < 43; i++) {
         const saturated = await jsonPost(url, rpcBody("aztec_getVersion", []), {
@@ -940,6 +949,24 @@ describe("Idempotency-Key header", () => {
         const res = await jsonPost(url, noteBody("trade-1"), { "Idempotency-Key": bad });
         expect(res.status, `should reject ${JSON.stringify(bad)}`).toBe(400);
       }
+    } finally {
+      await close();
+    }
+  });
+
+  it("rate limits malformed keys", async () => {
+    const { url, close } = await boot();
+    try {
+      for (let i = 0; i < 60; i++) {
+        const res = await jsonPost(url, noteBody("trade-1"), {
+          "Idempotency-Key": "tab\there",
+        });
+        expect(res.status).toBe(400);
+      }
+      const rateLimited = await jsonPost(url, noteBody("trade-1"), {
+        "Idempotency-Key": "tab\there",
+      });
+      expect(rateLimited.status).toBe(429);
     } finally {
       await close();
     }
