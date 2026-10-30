@@ -1,4 +1,4 @@
-import { createServer } from "node:http";
+import { createServer, type RequestListener } from "node:http";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -14,6 +14,7 @@ import {
   AttestationParamsSchema,
   AttestationProducer,
   RecipientDescriptorSchema,
+  ROOT_UPDATE_REFRESH_SECONDS,
   RootUpdateEnvelopeSchema,
   RootUpdatePublisher,
   readAttestationEnvironment,
@@ -132,7 +133,10 @@ function params(overrides: Record<string, unknown> = {}) {
   });
 }
 
-async function setup(recipients: readonly { address: string; index: number }[]) {
+async function setup(
+  recipients: readonly { address: string; index: number }[],
+  now: () => number = () => NOW,
+) {
   const tree = await AllowlistTree.build(SEED, recipients);
   const journal = openBoundJournal();
   journal.recordAllowlistSnapshot(tree.root.toString(), recipients);
@@ -151,7 +155,7 @@ async function setup(recipients: readonly { address: string; index: number }[]) 
       corridorRevision: 1,
       genesisOrNetworkDigest: descriptor.network.genesisOrNetworkDigest,
     },
-    now: () => NOW,
+    now,
   });
   return { tree, journal, signer, probe, producer };
 }
@@ -961,6 +965,136 @@ describe("attestation configuration and root outbox", () => {
       await new Promise<void>((resolve, reject) =>
         relay.close((error) => (error ? reject(error) : resolve())),
       );
+      ctx.journal.close();
+    }
+  });
+
+  async function listen(
+    handler: RequestListener,
+  ): Promise<{ url: string; close: () => Promise<void> }> {
+    const server = createServer(handler);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("relay did not bind");
+    return {
+      url: `http://127.0.0.1:${address.port}/root`,
+      close: () =>
+        new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        ),
+    };
+  }
+
+  function recordingRelay(status: () => number) {
+    const received: { key: string | undefined; body: unknown }[] = [];
+    const relay = listen((request, response) => {
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk: string) => (body += chunk));
+      request.on("end", () => {
+        received.push({
+          key: request.headers["idempotency-key"] as string | undefined,
+          body: JSON.parse(body) as unknown,
+        });
+        response.writeHead(status()).end();
+      });
+    });
+    return { received, relay };
+  }
+
+  it("re-signs an unchanged root before it ages out, under a new idempotency key", async () => {
+    let clock = NOW;
+    const ctx = await setup([{ address: recipient, index: 137 }], () => clock);
+    const { received, relay } = recordingRelay(() => 204);
+    const { url, close } = await relay;
+    try {
+      const publisher = new RootUpdatePublisher(ctx.producer, ctx.probe, ctx.journal, {
+        url,
+        token: "relay-token",
+      });
+      await publisher.tick();
+      expect(received).toHaveLength(1);
+
+      clock = NOW + ROOT_UPDATE_REFRESH_SECONDS - 1;
+      await publisher.tick();
+      expect(received).toHaveLength(1);
+
+      // Same root, same finalized block: a quiet chain still gets fresh evidence.
+      clock = NOW + ROOT_UPDATE_REFRESH_SECONDS;
+      await publisher.tick();
+      expect(received).toHaveLength(2);
+      expect(received[1]?.key).not.toBe(received[0]?.key);
+      const refreshed = RootUpdateEnvelopeSchema.parse(received[1]?.body).record;
+      expect(refreshed).toMatchObject({
+        root: ctx.tree.root.toString(),
+        rootBlock: "7",
+        attestedAt: clock,
+      });
+      expect(
+        verifyReadinessRecord("RootUpdate", refreshed, {
+          domain: policyDomain,
+          expectedSigner: ctx.signer.address,
+          expected: { root: ctx.tree.root.toString() },
+          now: NOW + 7_200,
+          maxAgeSeconds: 7_200,
+          maxFutureSkewSeconds: 300,
+          minBlock: "7",
+        }).signer,
+      ).toBe(ctx.signer.address);
+      expect(ctx.journal.pendingRootUpdates()).toEqual([]);
+    } finally {
+      await close();
+      ctx.journal.close();
+    }
+  });
+
+  it("delivers durable envelopes when the chain observation fails", async () => {
+    const ctx = await setup([{ address: recipient, index: 137 }]);
+    let status = 503;
+    const { received, relay } = recordingRelay(() => status);
+    const { url, close } = await relay;
+    try {
+      const publisher = new RootUpdatePublisher(ctx.producer, ctx.probe, ctx.journal, {
+        url,
+        token: "relay-token",
+      });
+      await publisher.tick();
+      expect(ctx.journal.pendingRootUpdates()).toHaveLength(1);
+
+      ctx.probe.observeAttestationChain = () => Promise.reject(new Error("node down"));
+      status = 204;
+      await publisher.tick();
+      expect(ctx.journal.pendingRootUpdates()).toEqual([]);
+      expect(received).toHaveLength(2);
+      expect(received[1]).toEqual(received[0]);
+    } finally {
+      await close();
+      ctx.journal.close();
+    }
+  });
+
+  it("does not count a redirected 204 as durable acceptance", async () => {
+    const ctx = await setup([{ address: recipient, index: 137 }]);
+    const { received, relay: target } = recordingRelay(() => 204);
+    const targetServer = await target;
+    const redirector = await listen((request, response) => {
+      request.resume();
+      request.on("end", () =>
+        response.writeHead(307, { location: targetServer.url }).end(),
+      );
+    });
+    try {
+      await new RootUpdatePublisher(ctx.producer, ctx.probe, ctx.journal, {
+        url: redirector.url,
+        token: "relay-token",
+      }).tick();
+      expect(received).toEqual([]);
+      expect(ctx.journal.pendingRootUpdates()).toMatchObject([
+        { attempts: 1, lastError: "relay unavailable" },
+      ]);
+    } finally {
+      await redirector.close();
+      await targetServer.close();
       ctx.journal.close();
     }
   });

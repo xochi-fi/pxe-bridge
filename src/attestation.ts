@@ -22,7 +22,7 @@ import type { AllowlistTree } from "./allowlist-tree.js";
 import type { SettlementJournal } from "./journal.js";
 import { CorridorSchema, NetworkIdentitySchema } from "./settlement.js";
 import type { ReadinessSigner } from "./attestation-secret.js";
-import { finalizedTimeReason } from "./readiness.js";
+import { FINALIZED_MAX_AGE_SECONDS, finalizedTimeReason } from "./readiness.js";
 
 
 const HEX32 = /^0x[0-9a-fA-F]{64}$/;
@@ -390,7 +390,8 @@ function refusal(reason: AttestationRefusalReason): AttestationRefusal {
 }
 
 export class AttestationProducer {
-  private readonly now: () => number;
+  /** Unix seconds; every attestedAt and age decision reads this one clock. */
+  readonly now: () => number;
   private readonly profile = AZTEC_RECIPIENT_PROFILES["aztec-6.0.0"];
 
   constructor(private readonly options: AttestationProducerOptions) {
@@ -696,13 +697,22 @@ function assertRelayUrl(raw: string): string {
   return url.toString();
 }
 
+/**
+ * A RootUpdate for an unchanged root is re-signed from a fresh finalized
+ * observation once the latest one is this old: consumers hold it to the
+ * 7,200-second readiness max age, so an unchanged root must never age out.
+ */
+export const ROOT_UPDATE_REFRESH_SECONDS = FINALIZED_MAX_AGE_SECONDS / 2;
+// Under the 30-second tick, so a stalled node read cannot hold the outbox.
+const ROOT_UPDATE_OBSERVATION_TIMEOUT_MS = 20_000;
+
 export class RootUpdatePublisher {
   private readonly relayUrl: string;
   private readonly fetchImpl: typeof fetch;
   private readonly runId = randomUUID();
   private timer: ReturnType<typeof setInterval> | undefined;
   private active = false;
-  private lastFinalizedRoot: string | undefined;
+  private emittedThisRun = false;
 
   constructor(
     private readonly producer: AttestationProducer,
@@ -731,59 +741,12 @@ export class RootUpdatePublisher {
     if (this.active) return;
     this.active = true;
     try {
-      const observation = await this.probe.observeAttestationChain(
-        undefined,
-        this.producer.domainConfig.genesisOrNetworkDigest,
-      );
-      if (observation.state === "known") {
-        const identity = observation.value.allowlistRoot.toLowerCase();
-        const pending = this.journal.pendingRootUpdates();
-        const latest = this.journal.latestRootUpdate();
-        // Only the latest durable event can represent the startup observation.
-        // Leaving the root unset here publishes fresh evidence after that exact retry drains.
-        const recoveringLatestCurrent =
-          this.lastFinalizedRoot === undefined &&
-          latest?.root.toLowerCase() === identity &&
-          pending.some((entry) => entry.id === latest.id);
-        if (!recoveringLatestCurrent && identity !== this.lastFinalizedRoot) {
-          const record = await this.producer.rootUpdate(observation.value);
-          if (record) {
-            const digest = readinessDigest(
-              "RootUpdate",
-              {
-                root: record.root as Hex,
-                rootBlock: BigInt(record.rootBlock),
-                attestedAt: record.attestedAt,
-              },
-              this.producer.domainFor(observation.value.network),
-            );
-            const payload = RootUpdateEnvelopeSchema.parse({
-              corridor_id: this.producer.domainConfig.corridorId,
-              corridor_revision: this.producer.domainConfig.corridorRevision,
-              record,
-            });
-            this.journal.enqueueRootUpdate({
-              id: `${this.runId}:${identity}:${record.rootBlock}`,
-              root: record.root,
-              rootBlock: record.rootBlock,
-              payload,
-              idempotencyKey: digest,
-            });
-            this.lastFinalizedRoot = identity;
-          } else {
-            this.audit?.({
-              method: "RootUpdate",
-              outcome: "retry",
-              reason: "signer_failed",
-            });
-          }
-        }
-      } else {
-        this.audit?.({
-          method: "RootUpdate",
-          outcome: "retry",
-          reason: observation.reason,
-        });
+      // A failure to observe or enqueue never keeps already-durable envelopes
+      // from being delivered.
+      try {
+        await this.enqueueCurrent();
+      } catch {
+        this.audit?.({ method: "RootUpdate", outcome: "retry", reason: "internal_error" });
       }
       await this.deliverPending();
     } catch {
@@ -793,8 +756,95 @@ export class RootUpdatePublisher {
     }
   }
 
+  private async enqueueCurrent(): Promise<void> {
+    // `Promise.withResolvers` is outside this project's ES lib target.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => resolve(undefined), ROOT_UPDATE_OBSERVATION_TIMEOUT_MS);
+      timer.unref();
+    });
+    let observation: AttestationObservation | undefined;
+    try {
+      observation = await Promise.race([
+        this.probe.observeAttestationChain(
+          undefined,
+          this.producer.domainConfig.genesisOrNetworkDigest,
+        ),
+        timedOut,
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (observation === undefined) {
+      this.audit?.({
+        method: "RootUpdate",
+        outcome: "retry",
+        reason: "finalized_history_unavailable",
+      });
+      return;
+    }
+    if (observation.state !== "known") {
+      this.audit?.({ method: "RootUpdate", outcome: "retry", reason: observation.reason });
+      return;
+    }
+    const identity = observation.value.allowlistRoot.toLowerCase();
+    if (!this.needsFreshRecord(identity)) return;
+    const record = await this.producer.rootUpdate(observation.value);
+    if (!record) {
+      this.audit?.({ method: "RootUpdate", outcome: "retry", reason: "signer_failed" });
+      return;
+    }
+    const digest = readinessDigest(
+      "RootUpdate",
+      {
+        root: record.root as Hex,
+        rootBlock: BigInt(record.rootBlock),
+        attestedAt: record.attestedAt,
+      },
+      this.producer.domainFor(observation.value.network),
+    );
+    const payload = RootUpdateEnvelopeSchema.parse({
+      corridor_id: this.producer.domainConfig.corridorId,
+      corridor_revision: this.producer.domainConfig.corridorRevision,
+      record,
+    });
+    this.journal.enqueueRootUpdate({
+      id: `${this.runId}:${identity}:${record.rootBlock}:${record.attestedAt}`,
+      root: record.root,
+      rootBlock: record.rootBlock,
+      payload,
+      idempotencyKey: digest,
+    });
+    this.emittedThisRun = true;
+  }
+
+  /**
+   * Whether the latest durable envelope fails to stand for the current root:
+   * another root, another corridor, old enough to need refreshing, or, once
+   * per process, already delivered (the restart push). A latest envelope for
+   * the current root that is still pending is itself the restart push.
+   */
+  private needsFreshRecord(identity: string): boolean {
+    const latest = this.journal.latestRootUpdate();
+    if (latest === undefined) return true;
+    const envelope = RootUpdateEnvelopeSchema.safeParse(latest.payload);
+    if (!envelope.success) return true;
+    const { corridor_id, corridor_revision, record } = envelope.data;
+    const domain = this.producer.domainConfig;
+    if (
+      record.root !== identity ||
+      corridor_id !== domain.corridorId.toLowerCase() ||
+      corridor_revision !== domain.corridorRevision
+    ) {
+      return true;
+    }
+    if (this.producer.now() - record.attestedAt >= ROOT_UPDATE_REFRESH_SECONDS) return true;
+    return !this.emittedThisRun && latest.deliveredAt !== null;
+  }
+
   private async deliverPending(): Promise<void> {
     for (const entry of this.journal.pendingRootUpdates()) {
+      let delivered = false;
       try {
         const response = await this.fetchImpl(this.relayUrl, {
           method: "POST",
@@ -804,17 +854,28 @@ export class RootUpdatePublisher {
             "idempotency-key": entry.idempotencyKey,
           },
           body: JSON.stringify(RootUpdateEnvelopeSchema.parse(entry.payload)),
+          // Only the configured endpoint's own 204 is durable acceptance.
+          redirect: "error",
           signal: AbortSignal.timeout(ROOT_UPDATE_RELAY_TIMEOUT_MS),
         });
-        if (response.status !== 204) throw new Error(`relay returned ${response.status}`);
-        this.journal.recordRootUpdateAttempt(entry.id, { delivered: true });
-        this.audit?.({ method: "RootUpdate", outcome: "delivered" });
+        delivered = response.status === 204;
+        await response.body?.cancel();
       } catch {
-        this.journal.recordRootUpdateAttempt(entry.id, {
-          delivered: false,
-          error: "relay unavailable",
-        });
-        this.audit?.({ method: "RootUpdate", outcome: "retry", reason: "relay_unavailable" });
+        // Undelivered; retried with the same envelope and key next tick.
+      }
+      this.audit?.(
+        delivered
+          ? { method: "RootUpdate", outcome: "delivered" }
+          : { method: "RootUpdate", outcome: "retry", reason: "relay_unavailable" },
+      );
+      try {
+        this.journal.recordRootUpdateAttempt(
+          entry.id,
+          delivered ? { delivered: true } : { delivered: false, error: "relay unavailable" },
+        );
+      } catch (cause) {
+        // An unrecorded delivery is resent under the same idempotency key.
+        console.error(`[attestation] Recording RootUpdate attempt ${entry.id} failed:`, cause);
       }
     }
   }

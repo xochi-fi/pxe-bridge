@@ -98,9 +98,11 @@ or RecipientDeployment record; uncertainty returns HTTP 503 with JSON-RPC
 error `-32010` and unsigned typed `data: {signed:false,refusal}`. The journal
 stores durable allowlist snapshots and a write-before-send RootUpdate outbox.
 The relay POST body is
-`{corridor_id,corridor_revision,record:<signed RootUpdate>}`; an undelivered
-current-root envelope retries unchanged after restart, while each later process
-still pushes the current root once. Attestation audit lines contain only
+`{corridor_id,corridor_revision,record:<signed RootUpdate>}`; only the relay's
+own `204` (no redirects) is acceptance. An undelivered current-root envelope
+retries unchanged after restart, each later process still pushes the current
+root once, and an unchanged root is re-signed once its latest record is 3,600
+seconds old, so it never ages past consumers' 7,200 seconds. Attestation audit lines contain only
 method, outcome and typed reason.
 
 Riddler/Worker consumers import the strict Zod schemas and inferred types from
