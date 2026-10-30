@@ -59,9 +59,11 @@ const RPC_KEY = "smoke-rpc-key";
 const MAX_PER_TX = 1_000_000n;
 const DAILY_LIMIT = 10_000_000n;
 const INVENTORY = 100_000_000n;
-const ALLOWLIST_SEED = "0x" + "47".repeat(32);
+// Both must be BN254 field elements: 0x47../0x48.. exceed the modulus and Fr
+// refuses them.
+const ALLOWLIST_SEED = "0x" + "17".repeat(32);
 const FEE_JUICE_AMOUNT = 1_000_000_000_000_000_000_000n;
-const RECIPIENT = "0x" + "48".repeat(32);
+const RECIPIENT = "0x" + "18".repeat(32);
 
 type KillPoint = "after_node_accepts" | "before_node_sees";
 
@@ -354,8 +356,9 @@ describe("hard crash mid-broadcast (e2e)", () => {
 
   afterAll(async () => {
     bridge?.child.kill("SIGKILL");
-    await new Promise<void>((done) => proxy?.close(() => done()));
-    await new Promise<void>((done) => gate?.close(() => done()));
+    // Unset when beforeAll failed early; close() would never call back.
+    if (proxy) await new Promise<void>((done) => proxy.close(() => done()));
+    if (gate) await new Promise<void>((done) => gate.close(() => done()));
   });
 
   /**
