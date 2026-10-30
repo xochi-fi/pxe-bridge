@@ -279,6 +279,39 @@ describe("aztec_createNote: the broadcast gate", () => {
     },
   );
 
+  it("preserves a prepared attempt when readiness observation reaches the request deadline", async () => {
+    gate.decision = "unknown";
+    await createNote(client, ctx);
+    const beforeOperation = journal.get("op-1")!;
+    const beforeAttempts = journal.attempts("op-1");
+    const beforeBytes = journal.attemptBytes("op-1", beforeOperation.currentAttempt!);
+    const beforeGeneration = journal.meta().generation;
+
+    s.readiness = { observe: () => new Promise(() => undefined) };
+    const refused = await createNote(client, { settlement: { ...s, timeoutMs: 50 } });
+    expect(refused.error?.code).toBe(RPC_ERRORS.NOT_READY);
+    expect(refused.error?.data?.observation).toEqual({
+      state: "prepared",
+      txHash: beforeAttempts[0]!.txHash,
+      expirationTimestamp: beforeAttempts[0]!.expirationTimestamp,
+      hold: "may_broadcast_unknown",
+    });
+    expect(journal.meta().generation).toBe(beforeGeneration);
+    expect(journal.get("op-1")).toEqual(beforeOperation);
+    expect(journal.attempts("op-1")).toEqual(beforeAttempts);
+    expect(journal.attemptBytes("op-1", beforeOperation.currentAttempt!)).toEqual(beforeBytes);
+
+    s.readiness = readyObserver();
+    gate.decision = "allow";
+    const recovered = await createNote(client, ctx);
+    expect(recovered.result?.observation).toMatchObject({
+      state: "included",
+      txHash: beforeAttempts[0]!.txHash,
+    });
+    expect(client.proofs).toBe(1);
+    expect(client.sends).toEqual([beforeAttempts[0]!.txHash]);
+  });
+
   it("refuses a same-id request with changed terms and does no work", async () => {
     await createNote(client, ctx);
     const res = await createNote(client, ctx, v1Params({ amount: "999" }));
