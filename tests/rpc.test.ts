@@ -218,7 +218,7 @@ describe("aztec_createNote: the broadcast gate", () => {
     ["denied", "deny", "may_broadcast_denied"],
     ["unknown", "unknown", "may_broadcast_unknown"],
   ] as const)(
-    "preserves a %s prepared attempt through readiness loss and recovery",
+    "preserves a %s prepared attempt through a per-operation hold and recovery",
     async (_name, decision, hold) => {
       gate.decision = decision;
       await createNote(client, ctx);
@@ -236,10 +236,17 @@ describe("aztec_createNote: the broadcast gate", () => {
 
       s.readiness = readyObserver({
         ready: false,
-        reasons: ["finalized_history_unavailable"],
+        reasons: ["account_paused"],
+        policy: {
+          initialized: true,
+          paused: true,
+          allowlistRoot: "0x" + "c".repeat(64),
+          configuredAllowlistRoot: "0x" + "c".repeat(64),
+        },
       });
       const refused = await createNote(client, ctx);
       expect(refused.error?.code).toBe(RPC_ERRORS.NOT_READY);
+      expect(refused.error?.data?.["reasons"]).toEqual(["account_paused"]);
       expect(refused.error?.data?.observation).toEqual({
         state: "prepared",
         txHash: beforeAttempts[0]!.txHash,
@@ -401,6 +408,26 @@ describe("aztec_createNote: the broadcast gate", () => {
     const over = await createNote(client, { settlement: s, limits }, v1Params({ operationId: "op-2" }));
     expect(over.error?.data?.observation).toMatchObject({ state: "not_submitted" });
     expect(client.sends).toHaveLength(1);
+  });
+
+  it("keeps recovering an admitted prepared attempt while new admission is closed", async () => {
+    gate.decision = "deny";
+    await createNote(client, ctx);
+    const held = journal.attempts("op-1")[0]!.txHash;
+    s.readiness = readyObserver({
+      ready: false,
+      reasons: ["fee_runway_insufficient", "finalized_tip_stale"],
+    });
+
+    const fresh = await createNote(client, ctx, v1Params({ operationId: "op-2" }));
+    expect(fresh.error?.code).toBe(RPC_ERRORS.NOT_READY);
+    expect(client.proofs).toBe(1);
+
+    gate.decision = "allow";
+    const recovered = await createNote(client, ctx);
+    expect(recovered.result?.observation).toMatchObject({ state: "included", txHash: held });
+    expect(client.proofs).toBe(1);
+    expect(client.sends).toEqual([held]);
   });
 
   it("holds a resumed prepared attempt the window cannot take, never re-proving it", async () => {

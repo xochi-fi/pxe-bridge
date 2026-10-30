@@ -787,18 +787,11 @@ async function resumeExisting(
         // prepare a new attempt under the same operation.
         return undefined;
       }
-      const refusal = await admissionRefusal(ctx, s, op.terms, deadline);
-      if (refusal) {
-        if (refusal.kind === "not_ready") {
-          return notReady(id, ctx, s, op, op.fingerprint, refusal);
-        }
-        if (refusal.reason === "response_deadline") {
-          return notReady(id, ctx, s, op, op.fingerprint, {
-            kind: "not_ready",
-            reasons: ["readiness_observation_failed"],
-          });
-        }
-        return notSubmitted(id, ctx, s, op, op.fingerprint, refusal.reason, true);
+      // Already admitted: recovery is not gated on admission readiness, only
+      // on facts that make this exact transaction unsendable or certain to fail.
+      const hold = await preparedHoldReasons(ctx, s, op.terms, deadline);
+      if (hold.length > 0) {
+        return notReady(id, ctx, s, op, op.fingerprint, { kind: "not_ready", reasons: hold });
       }
       return runAttempt(id, client, ctx, s, state, { kind: "resume", attempt }, background, deadline);
     }
@@ -904,6 +897,70 @@ async function admissionRefusal(
     return { kind: "terms", reason: "validity_bound_passed" };
   }
   return undefined;
+}
+
+/**
+ * Why an admitted, journaled, unmarked attempt is not sent now. Admission
+ * readiness -- the /ready verdict, fee runway, finalized-tip freshness,
+ * corridor admission -- closes NEW admission only and is not consulted: an
+ * attempt already admitted keeps recovering through the may-broadcast query
+ * and the exact journaled bytes. It holds only on a fact that makes this
+ * transaction unsendable or certain to fail; each leaves it prepared with the
+ * same bytes and hash, resumed by the next call. A fact that cannot be
+ * observed is not a hold: the node and the account still decide.
+ */
+async function preparedHoldReasons(
+  ctx: RpcContext,
+  s: SettlementContext,
+  terms: SettlementTerms,
+  deadline: RequestDeadline,
+): Promise<ReadinessReason[]> {
+  const reasons: ReadinessReason[] = [];
+  if (!s.journal.health().writable) reasons.push("journal_unwritable");
+  if (!s.journal.writerFenceHeld()) reasons.push("writer_fence_lost");
+  if (!s.mayBroadcast) reasons.push("may_broadcast_unconfigured");
+  if (reasons.length > 0) return reasons;
+
+  const observer = ctx.readiness ?? s.readiness;
+  if (!observer) return reasons;
+  let readiness: OperationalReadiness | typeof TIMED_OUT;
+  try {
+    readiness = await deadline.race(observer.observe());
+  } catch (cause) {
+    console.error("[rpc] Readiness observation for a prepared attempt failed:", cause);
+    return reasons;
+  }
+  // The request deadline is spent, so the gate would close before any mark.
+  if (readiness === TIMED_OUT) return ["readiness_observation_failed"];
+
+  const network = readiness.network;
+  if (
+    network.aztecChainId !== null &&
+    (network.aztecChainId !== terms.network.aztecChainId ||
+      network.protocolVersion !== terms.network.protocolVersion ||
+      network.rollupContract?.toLowerCase() !== terms.network.rollupAddress.toLowerCase() ||
+      readiness.l1ChainId !== terms.network.l1ChainId)
+  ) {
+    reasons.push("network_identity_mismatch");
+  }
+  if (readiness.policy.paused === true) reasons.push("account_paused");
+  // The attempt was proven against the configured tree; the account checks
+  // its witness against the on-chain root at inclusion.
+  if (
+    readiness.policy.allowlistRoot !== null &&
+    readiness.policy.configuredAllowlistRoot !== null &&
+    readiness.policy.allowlistRoot.toLowerCase() !==
+      readiness.policy.configuredAllowlistRoot.toLowerCase()
+  ) {
+    reasons.push("allowlist_root_mismatch");
+  }
+  if (
+    readiness.inventory.observed !== null &&
+    BigInt(readiness.inventory.observed) < BigInt(terms.amount)
+  ) {
+    reasons.push("inventory_insufficient");
+  }
+  return reasons;
 }
 
 async function notReady(
