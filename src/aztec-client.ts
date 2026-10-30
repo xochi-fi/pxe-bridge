@@ -33,6 +33,7 @@ import type {
   TransferParams,
 } from "./types.js";
 import {
+  finalizedTimeReason,
   known,
   unknown,
   type AccountStateObservation,
@@ -1242,6 +1243,14 @@ export class AztecClient implements IAztecClient {
     if (!this.node || !this.solverAddress || !this.spendingLimitContract) {
       return { state: "unknown", reason: "finalized_history_unavailable" };
     }
+    const deployment = this.spendingLimitConfig?.deployment;
+    if (
+      !deployment ||
+      deployment.address.toLowerCase() !== this.solverAddress.toString().toLowerCase()
+    ) {
+      return { state: "unknown", reason: "account_address_mismatch" };
+    }
+    let observationStage = "node_state";
     try {
       const [nodeInfo, worldState, tips] = await Promise.all([
         this.node.getNodeInfo(),
@@ -1251,15 +1260,23 @@ export class AztecClient implements IAztecClient {
       const tip = tips.finalized.block;
       const number = Number(tip.number);
       if (
-        number === 0 ||
-        BigInt(tip.hash) === 0n ||
+        !Number.isSafeInteger(number) ||
+        number <= 0 ||
+        !/^0x[0-9a-fA-F]{64}$/.test(tip.hash) ||
+        BigInt(tip.hash) === 0n
+      ) {
+        return { state: "unknown", reason: "finalized_reference_invalid" };
+      }
+      if (
         !worldState.treesAreSynched ||
+        Number(worldState.latestBlockNumber) < number ||
         Number(worldState.finalizedBlockNumber) < number ||
         Number(worldState.oldestHistoricBlockNumber) > number
       ) {
         return { state: "unknown", reason: "finalized_history_unavailable" };
       }
       const reference = { number: tip.number, hash: BlockHash.fromString(tip.hash) };
+      observationStage = "finalized_block";
       const block = await this.node.getBlockData(reference);
       if (
         !block ||
@@ -1268,11 +1285,43 @@ export class AztecClient implements IAztecClient {
       ) {
         return { state: "unknown", reason: "finalized_reference_invalid" };
       }
+      const timeReason = finalizedTimeReason(
+        block.header.globalVariables.timestamp,
+        Math.floor(Date.now() / 1_000),
+      );
+      if (timeReason !== undefined) return { state: "unknown", reason: timeReason };
+
+      observationStage = "solver_artifact";
       const artifact = await this.spendingLimitContract.getContractArtifact();
+      const initializedLayout = artifact.storageLayout["initialized"];
       const rootLayout = artifact.storageLayout["allowlist_root"];
-      if (!rootLayout) {
+      if (!initializedLayout || !rootLayout) {
         return { state: "unknown", reason: "finalized_history_unavailable" };
       }
+      const expectedClassId = (await getContractClassFromArtifact(artifact)).id
+        .toString()
+        .toLowerCase();
+      observationStage = "solver_instance";
+      const solverInstance = await this.node.getContract(this.solverAddress, reference);
+      if (!solverInstance) {
+        return { state: "unknown", reason: "account_not_initialized" };
+      }
+      if (
+        solverInstance.currentContractClassId.toString().toLowerCase() !==
+        expectedClassId
+      ) {
+        return { state: "unknown", reason: "account_class_mismatch" };
+      }
+      observationStage = "solver_initialization";
+      const initialized = await this.node.getPublicStorageAt(
+        reference,
+        this.solverAddress,
+        initializedLayout.slot,
+      );
+      if (initialized.toBigInt() !== 1n) {
+        return { state: "unknown", reason: "account_not_initialized" };
+      }
+      observationStage = "allowlist_root";
       const root = await this.node.getPublicStorageAt(
         reference,
         this.solverAddress,
@@ -1284,8 +1333,10 @@ export class AztecClient implements IAztecClient {
         | undefined;
       if (recipient !== undefined) {
         const address = AztecAddress.fromStringUnsafe(recipient);
+        observationStage = "recipient_instance";
         const instance = await this.node.getContract(address, reference);
         if (instance) {
+          observationStage = "recipient_initialization";
           const initializationNullifier = await computeSiloedPrivateInitializationNullifier(
             address,
             instance.initializationHash,
@@ -1318,7 +1369,9 @@ export class AztecClient implements IAztecClient {
         },
       };
     } catch {
-      console.error("[pxe-bridge] Attestation finalized observation failed");
+      console.error(
+        `[pxe-bridge] Attestation finalized observation failed at ${observationStage}`,
+      );
       return { state: "unknown", reason: "finalized_history_unavailable" };
     }
   }

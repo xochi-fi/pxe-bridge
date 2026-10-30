@@ -71,6 +71,7 @@ const descriptor = descriptorVector.descriptor;
 const descriptorDigest = descriptorVector.descriptorDigest.toLowerCase();
 const recipient = descriptor.aztecAddress;
 const MANIFEST = "0x" + "4d".repeat(32);
+const CORRIDOR_ID = "0x" + "63".repeat(32);
 const SEED = "0x" + "12".repeat(32);
 const NOW = 1_800_000_000;
 const SIGNER_KEY = "0x" + "31".repeat(32);
@@ -117,8 +118,14 @@ function params(overrides: Record<string, unknown> = {}) {
     descriptor,
     descriptorDigest,
     recipient,
-    bindingAuthorization: {
-      bindingDigest: bindingVector.digest,
+    network: descriptor.network,
+    corridor: {
+      corridorId: CORRIDOR_ID,
+      corridorRevision: 1,
+      manifestDigest: MANIFEST,
+    },
+    recipientAuthorization: {
+      digest: bindingVector.digest,
       signature: bindingVector.signature,
     },
     ...overrides,
@@ -140,6 +147,8 @@ async function setup(recipients: readonly { address: string; index: number }[]) 
       sourceChainId: "84532",
       environment: "staging",
       manifestDigest: MANIFEST,
+      corridorId: CORRIDOR_ID,
+      corridorRevision: 1,
       genesisOrNetworkDigest: descriptor.network.genesisOrNetworkDigest,
     },
     now: () => NOW,
@@ -154,7 +163,7 @@ const policyDomain: ReadinessDomainInputs = {
   manifestDigest: MANIFEST,
 };
 
-function expectRefusal(result: { status: string; reason?: string }, reason: string): void {
+function expectRefusal(result: unknown, reason: string): void {
   expect(result).toEqual({ status: "refused", reason });
   expect(result).not.toHaveProperty("record");
   expect(result).not.toHaveProperty("signature");
@@ -165,10 +174,9 @@ describe("readiness attestation producer", () => {
     const ctx = await setup([{ address: recipient, index: 137 }]);
     try {
       const membership = await ctx.producer.attestMembership(params());
-      expect(membership.status).toBe("signed");
-      if (membership.status !== "signed") throw new Error("membership refused");
+      if ("status" in membership) throw new Error(membership.reason);
       expect(
-        verifyReadinessRecord("Membership", membership.record, {
+        verifyReadinessRecord("Membership", membership, {
           domain: policyDomain,
           expectedSigner: ctx.signer.address,
           expected: { descriptorDigest },
@@ -180,7 +188,7 @@ describe("readiness attestation producer", () => {
       ).toBe(ctx.signer.address);
       const trustedDomain = ctx.producer.domainFor(descriptor.network);
       expect(
-        recoverReadinessSigner("Membership", membership.record, {
+        recoverReadinessSigner("Membership", membership, {
           ...trustedDomain,
           chainId: "1",
         }),
@@ -188,16 +196,15 @@ describe("readiness attestation producer", () => {
       expect(() =>
         recoverReadinessSigner(
           "RecipientDeployment",
-          membership.record as never,
+          membership as never,
           trustedDomain,
         ),
       ).toThrow();
 
       const deployment = await ctx.producer.attestRecipientDeployment(params());
-      expect(deployment.status).toBe("signed");
-      if (deployment.status !== "signed") throw new Error("deployment refused");
+      if ("status" in deployment) throw new Error(deployment.reason);
       expect(
-        verifyReadinessRecord("RecipientDeployment", deployment.record, {
+        verifyReadinessRecord("RecipientDeployment", deployment, {
           domain: policyDomain,
           expectedSigner: ctx.signer.address,
           expected: { descriptorDigest, recipient, classId: descriptor.classId },
@@ -219,23 +226,23 @@ describe("readiness attestation producer", () => {
         state: "absent",
       });
       const membership = await ctx.producer.attestMembership(params());
-      expect(membership).toMatchObject({ status: "signed", record: { member: false } });
-      if (membership.status !== "signed") throw new Error("membership refused");
+      expect(membership).toMatchObject({ member: false });
+      if ("status" in membership) throw new Error(membership.reason);
       expect(
         recoverReadinessSigner(
           "Membership",
-          membership.record,
+          membership,
           ctx.producer.domainFor(descriptor.network),
         ),
       ).toBe(ctx.signer.address);
 
       const deployment = await ctx.producer.attestRecipientDeployment(params());
-      expect(deployment).toMatchObject({ status: "signed", record: { deployed: false } });
-      if (deployment.status !== "signed") throw new Error("deployment refused");
+      expect(deployment).toMatchObject({ deployed: false });
+      if ("status" in deployment) throw new Error(deployment.reason);
       expect(
         recoverReadinessSigner(
           "RecipientDeployment",
-          deployment.record,
+          deployment,
           ctx.producer.domainFor(descriptor.network),
         ),
       ).toBe(ctx.signer.address);
@@ -247,6 +254,22 @@ describe("readiness attestation producer", () => {
   it.each([
     ["descriptor digest", { descriptorDigest: "0x" + "01".repeat(32) }, "descriptor_digest_mismatch"],
     ["recipient", { recipient: "0x" + "02".repeat(32) }, "recipient_mismatch"],
+    [
+      "request network",
+      { network: { ...descriptor.network, l1ChainId: "1" } },
+      "network_mismatch",
+    ],
+    [
+      "request corridor",
+      {
+        corridor: {
+          corridorId: CORRIDOR_ID,
+          corridorRevision: 2,
+          manifestDigest: MANIFEST,
+        },
+      },
+      "corridor_mismatch",
+    ],
     [
       "descriptor class",
       { descriptor: { ...descriptor, classId: "0x" + "05".repeat(32) } },
@@ -260,8 +283,8 @@ describe("readiness attestation producer", () => {
     [
       "binding digest",
       {
-        bindingAuthorization: {
-          bindingDigest: "0x" + "07".repeat(32),
+        recipientAuthorization: {
+          digest: "0x" + "07".repeat(32),
           signature: bindingVector.signature,
         },
       },
@@ -270,8 +293,8 @@ describe("readiness attestation producer", () => {
     [
       "binding signature",
       {
-        bindingAuthorization: {
-          bindingDigest: bindingVector.digest,
+        recipientAuthorization: {
+          digest: bindingVector.digest,
           signature: "0x" + "00".repeat(64),
         },
       },
@@ -324,7 +347,70 @@ describe("readiness attestation producer", () => {
     }
   });
 
-  it("returns a signed negative for authoritative uninitialized state", async () => {
+  it.each([
+    ["stale", String(NOW - 7_201), "finalized_tip_stale"],
+    ["future", String(NOW + 301), "finalized_tip_from_future"],
+  ])("refuses a %s finalized observation without signing", async (_name, timestamp, reason) => {
+    const ctx = await setup([{ address: recipient, index: 137 }]);
+    try {
+      const observation = known(descriptor.network, ctx.tree.root.toString());
+      if (observation.state !== "known") throw new Error("unreachable");
+      observation.value.finalized.timestamp = timestamp;
+      ctx.probe.observation = observation;
+      expectRefusal(await ctx.producer.attestMembership(params()), reason);
+      expect(await ctx.producer.rootUpdate(observation.value)).toBeNull();
+    } finally {
+      ctx.journal.close();
+    }
+  });
+
+  it.each([
+    "account_address_mismatch",
+    "account_class_mismatch",
+    "account_not_initialized",
+  ] as const)("preserves the solver %s refusal without a record", async (reason) => {
+    const ctx = await setup([{ address: recipient, index: 137 }]);
+    try {
+      ctx.probe.observation = { state: "unknown", reason };
+      expectRefusal(await ctx.producer.attestMembership(params()), reason);
+    } finally {
+      ctx.journal.close();
+    }
+  });
+
+  it("refuses signing when the durable snapshot omits another tree mapping", async () => {
+    const other = "0x0" + "9".repeat(63);
+    const recipients = [
+      { address: recipient, index: 137 },
+      { address: other, index: 942 },
+    ];
+    const tree = await AllowlistTree.build(SEED, recipients);
+    const journal = openBoundJournal();
+    journal.recordAllowlistSnapshot(tree.root.toString(), [recipients[0]!]);
+    const signer = new Secp256k1ReadinessSigner(SIGNER_KEY);
+    const producer = new AttestationProducer({
+      probe: new Probe(known(descriptor.network, tree.root.toString())),
+      journal,
+      allowlistTree: tree,
+      signer,
+      domain: {
+        sourceChainId: "84532",
+        environment: "staging",
+        manifestDigest: MANIFEST,
+        corridorId: CORRIDOR_ID,
+        corridorRevision: 1,
+        genesisOrNetworkDigest: descriptor.network.genesisOrNetworkDigest,
+      },
+      now: () => NOW,
+    });
+    try {
+      expectRefusal(await producer.attestMembership(params()), "membership_uncertain");
+    } finally {
+      journal.close();
+    }
+  });
+
+  it("returns a signed negative for authoritative uninitialized recipient state", async () => {
     const ctx = await setup([]);
     try {
       ctx.probe.observation = known(descriptor.network, ctx.tree.root.toString(), {
@@ -333,10 +419,8 @@ describe("readiness attestation producer", () => {
         initialized: false,
       });
       const deployment = await ctx.producer.attestRecipientDeployment(params());
-      expect(deployment).toMatchObject({
-        status: "signed",
-        record: { deployed: false },
-      });
+      expect(deployment).toMatchObject({ deployed: false });
+      expect(deployment).not.toHaveProperty("status");
     } finally {
       ctx.journal.close();
     }
@@ -381,7 +465,7 @@ describe("readiness attestation producer", () => {
       await producer.attestMembership(params());
       const encoded = JSON.stringify(events);
       expect(events).toEqual([
-        { method: "aztec_attestMembership", outcome: "signed" },
+        { method: "aztec_attestRecipientMembership", outcome: "signed" },
       ]);
       for (const sensitive of [
         recipient,
@@ -441,7 +525,7 @@ describe("readiness attestation producer", () => {
     if (!address || typeof address === "string") throw new Error("server did not bind");
     try {
       const response = await fetch(
-        `http://127.0.0.1:${address.port}/attest/rpc`,
+        `http://127.0.0.1:${address.port}/api/attestation`,
         { method: "POST" },
       );
       expect(response.status).toBe(404);
@@ -467,11 +551,11 @@ describe("readiness attestation producer", () => {
     const rpcBody = JSON.stringify({
       jsonrpc: "2.0",
       id: 1,
-      method: "aztec_attestMembership",
+      method: "aztec_attestRecipientMembership",
       params: params(),
     });
     try {
-      const wrong = await fetch(`${url}/attest/rpc`, {
+      const wrong = await fetch(`${url}/api/attestation`, {
         method: "POST",
         headers: {
           authorization: "Bearer rpc-key",
@@ -480,7 +564,7 @@ describe("readiness attestation producer", () => {
         body: rpcBody,
       });
       expect(wrong.status).toBe(401);
-      const adminWrong = await fetch(`${url}/attest/rpc`, {
+      const adminWrong = await fetch(`${url}/api/attestation`, {
         method: "POST",
         headers: {
           authorization: "Bearer admin-key",
@@ -490,7 +574,7 @@ describe("readiness attestation producer", () => {
       });
       expect(adminWrong.status).toBe(401);
 
-      const correct = await fetch(`${url}/attest/rpc`, {
+      const correct = await fetch(`${url}/api/attestation`, {
         method: "POST",
         headers: {
           authorization: "Bearer attest-key",
@@ -499,10 +583,67 @@ describe("readiness attestation producer", () => {
         body: rpcBody,
       });
       expect(correct.status).toBe(200);
-      expect(await correct.json()).toMatchObject({
+      expect(await correct.json()).toEqual({
         jsonrpc: "2.0",
         id: 1,
-        result: { status: "signed", primaryType: "Membership" },
+        result: {
+          descriptorDigest,
+          root: ctx.tree.root.toString(),
+          member: true,
+          rootBlock: "7",
+          attestedAt: NOW,
+          signature: expect.stringMatching(/^0x[0-9a-f]{130}$/),
+        },
+      });
+
+      const deploymentResponse = await fetch(`${url}/api/attestation`, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer attest-key",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 2,
+          method: "aztec_attestRecipientDeployment",
+          params: params(),
+        }),
+      });
+      expect(deploymentResponse.status).toBe(200);
+      expect(await deploymentResponse.json()).toEqual({
+        jsonrpc: "2.0",
+        id: 2,
+        result: {
+          descriptorDigest,
+          recipient,
+          classId: descriptor.classId,
+          deployed: true,
+          finalBlock: "7",
+          attestedAt: NOW,
+          signature: expect.stringMatching(/^0x[0-9a-f]{130}$/),
+        },
+      });
+      ctx.probe.observation = {
+        state: "unknown",
+        reason: "finalized_history_unavailable",
+      };
+      const refused = await fetch(`${url}/api/attestation`, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer attest-key",
+          "content-type": "application/json",
+        },
+        body: rpcBody,
+      });
+      expect(refused.status).toBe(503);
+      expect(await refused.json()).toEqual({
+        jsonrpc: "2.0",
+        id: 1,
+        error: {
+          code: -32010,
+          message: "Readiness attestation refused",
+          data: { signed: false, refusal: "finalized_history_unavailable" },
+        },
       });
 
       const main = await fetch(`${url}/api/rpc`, {
@@ -557,6 +698,27 @@ describe("attestation configuration and root outbox", () => {
         [],
       ),
     ).toThrow(/must not reuse/);
+    expect(() =>
+      readAttestationEnvironment(
+        { ...complete, SPENDING_LIMIT_ADMIN_KEY: SIGNER_KEY },
+        [],
+      ),
+    ).toThrow(/must not reuse/);
+    expect(() =>
+      readAttestationEnvironment(
+        { ...complete, PXE_BRIDGE_ATTESTATION_API_KEY: SIGNER_KEY },
+        [],
+      ),
+    ).toThrow(/must not reuse/);
+    expect(() =>
+      readAttestationEnvironment(
+        { ...complete, PXE_BRIDGE_ATTESTATION_RELAY_TOKEN: SIGNER_KEY },
+        [],
+      ),
+    ).toThrow(/must not reuse/);
+    expect(() => readAttestationEnvironment(complete, [SIGNER_KEY])).toThrow(
+      /must not reuse/,
+    );
     expect(() =>
       readAttestationEnvironment(
         {
@@ -625,13 +787,22 @@ describe("attestation configuration and root outbox", () => {
       expect(ctx.journal.pendingRootUpdates()).toHaveLength(1);
       const original = received[0];
       fail = false;
-      await first.tick();
+      const recovered = new RootUpdatePublisher(
+        ctx.producer,
+        ctx.probe,
+        ctx.journal,
+        relayOptions,
+      );
+      await recovered.tick();
       expect(ctx.journal.pendingRootUpdates()).toHaveLength(0);
       expect(received[1]).toEqual(original);
       expect(original?.authorization).toBe("Bearer relay-token");
-      const rootUpdate = RootUpdateEnvelopeSchema.parse(original?.body);
+      const envelope = RootUpdateEnvelopeSchema.parse(original?.body);
+      expect(envelope.corridor_id).toBe(CORRIDOR_ID);
+      expect(envelope.corridor_revision).toBe(1);
+      const rootUpdate = envelope.record;
       expect(
-        verifyReadinessRecord("RootUpdate", rootUpdate.record, {
+        verifyReadinessRecord("RootUpdate", rootUpdate, {
           domain: policyDomain,
           expectedSigner: ctx.signer.address,
           expected: { root: ctx.tree.root.toString() },
@@ -642,13 +813,13 @@ describe("attestation configuration and root outbox", () => {
         }).signer,
       ).toBe(ctx.signer.address);
 
-      const restarted = new RootUpdatePublisher(
+      const laterRestart = new RootUpdatePublisher(
         ctx.producer,
         ctx.probe,
         ctx.journal,
         relayOptions,
       );
-      await restarted.tick();
+      await laterRestart.tick();
       expect(received).toHaveLength(3);
       expect(received[2]?.key).toBe(original?.key);
       expect(received[2]?.body).toEqual(original?.body);
@@ -660,17 +831,16 @@ describe("attestation configuration and root outbox", () => {
       if (sameRootNextBlock.state !== "known") throw new Error("unreachable");
       sameRootNextBlock.value.finalized.blockNumber = "8";
       ctx.probe.observation = sameRootNextBlock;
-      await restarted.tick();
+      await laterRestart.tick();
       expect(received).toHaveLength(3);
 
       ctx.probe.observation = known(
         descriptor.network,
         "0x" + "44".repeat(32),
       );
-      await restarted.tick();
+      await laterRestart.tick();
       expect(received).toHaveLength(4);
       expect(received[3]?.body).toMatchObject({
-        primaryType: "RootUpdate",
         record: { root: "0x" + "44".repeat(32) },
       });
     } finally {

@@ -540,11 +540,15 @@ try {
 }
 if (
   attestationEnvironment &&
-  (!API_KEY || !JOURNAL_PATH || !spendingLimitConfig || !corridor)
+  (!API_KEY ||
+    !JOURNAL_PATH ||
+    !spendingLimitConfig?.deployment ||
+    !corridor)
 ) {
   console.error(
     "[pxe-bridge] Attestation requires PXE_BRIDGE_API_KEY, PXE_BRIDGE_JOURNAL, " +
-      "the spending-limit account, and PXE_BRIDGE_SETTLEMENT_CORRIDOR",
+      "PXE_BRIDGE_ACCOUNT_DEPLOYMENT, the spending-limit account, and " +
+      "PXE_BRIDGE_SETTLEMENT_CORRIDOR",
   );
   process.exit(1);
 }
@@ -598,10 +602,19 @@ async function main(): Promise<void> {
   let rootUpdatePublisher: RootUpdatePublisher | undefined;
   let attestationTree: AllowlistTree | undefined;
   if (attestationEnvironment && journal && spendingLimitConfig && corridor) {
-    const resolved = await resolveAttestationSecret(process.env, [
-      secretKey,
-      spendingLimitConfig.allowlistSeed,
-    ]);
+    const resolved = await resolveAttestationSecret(
+      process.env,
+      [
+        secretKey,
+        spendingLimitConfig.allowlistSeed,
+        API_KEY,
+        ADMIN_KEY,
+        MAY_BROADCAST_TOKEN,
+        attestationEnvironment.apiKey,
+        attestationEnvironment.relay.token,
+        process.env["SPENDING_LIMIT_ADMIN_KEY"],
+      ].filter((value): value is string => value !== undefined),
+    );
     console.log(`[pxe-bridge] Attestation key loaded from ${resolved.source}`);
     attestationTree = await AllowlistTree.build(
       spendingLimitConfig.allowlistSeed,
@@ -615,6 +628,8 @@ async function main(): Promise<void> {
       domain: {
         sourceChainId: attestationEnvironment.domain.sourceChainId,
         environment: attestationEnvironment.domain.environment,
+        corridorId: corridor.corridorId,
+        corridorRevision: corridor.corridorRevision,
         manifestDigest: corridor.manifestDigest,
         genesisOrNetworkDigest: corridor.genesisOrNetworkDigest,
       },
@@ -731,7 +746,7 @@ async function main(): Promise<void> {
     console.log(`  GET  /status     -- Minimal public liveness`);
     console.log(`  GET  /ready      -- Authenticated hard settlement readiness`);
     console.log(
-      `  POST /attest/rpc -- Readiness attestations (${attestation ? "enabled" : "DISABLED"})`,
+      `  POST /api/attestation -- Readiness attestations (${attestation ? "enabled" : "DISABLED"})`,
     );
     console.log(
       `  POST /admin/resume -- Clear the circuit breaker (${ADMIN_KEY ? "enabled" : "DISABLED"})`,

@@ -172,6 +172,22 @@ describe("AllowlistTree", () => {
     expect(tree.witnessFor(A.toUpperCase().replace("0X", "0x"))).toBeDefined();
   });
 
+  it("compares the complete address/index mapping without exposing it", () => {
+    expect(
+      tree.matchesRecipients([
+        { address: B, index: 942 },
+        { address: A.toUpperCase().replace("0X", "0x"), index: 137 },
+      ]),
+    ).toBe(true);
+    expect(tree.matchesRecipients([{ address: A, index: 137 }])).toBe(false);
+    expect(
+      tree.matchesRecipients([
+        { address: A, index: 138 },
+        { address: B, index: 942 },
+      ]),
+    ).toBe(false);
+  });
+
   /**
    * THE SET STAYS SECRET. Changing the seed changes every salt and therefore
    * every leaf, so the same recipients at the same positions produce a

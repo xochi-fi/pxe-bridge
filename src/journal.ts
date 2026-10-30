@@ -938,6 +938,23 @@ export class SettlementJournal {
   }
 
   /**
+   * Transactions that may still consume one transfer fee. Terminal rows no
+   * longer need runway; every `may_broadcast` row does, regardless of whether
+   * its in-memory limit reservation survived.
+   */
+  mayBroadcastOperationCount(): number {
+    const row = this.read((db) =>
+      db
+        .prepare("SELECT count(*) AS count FROM operations WHERE state = 'may_broadcast'")
+        .get(),
+    ) as { count: number };
+    if (!Number.isSafeInteger(row.count) || row.count < 0) {
+      throw new JournalUnreadableError("invalid may-broadcast operation count");
+    }
+    return row.count;
+  }
+
+  /**
    * Rebuilds the rolling window: feeds the spends since `sinceMs` to `restore`
    * (`TransactionLimits.restore`) and returns how many it took. Any failure --
    * an unreadable table, a malformed amount, a restore that throws -- disables

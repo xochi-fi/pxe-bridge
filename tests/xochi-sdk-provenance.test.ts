@@ -28,6 +28,7 @@ function sha256(path: string): string {
   return createHash("sha256").update(readFileSync(resolve(root, path))).digest("hex");
 }
 
+
 describe("vendored xochi-sdk PR49 artifacts", () => {
   it("matches the pinned commit and hashes", () => {
     expect(typedManifest.schemaVersion).toBe(1);

@@ -7,12 +7,14 @@ import {
   type ChainReadinessFacts,
   type ReadinessReason,
 } from "../src/readiness.js";
+import { CreateNoteV1Schema, fingerprintTerms, termsFrom } from "../src/settlement.js";
 import {
   ACCOUNT,
   CORRIDOR,
   NETWORK,
   TOKEN,
   openBoundJournal,
+  v1Params,
 } from "./settlement-fixtures.js";
 
 const NOW = Date.parse("2026-10-29T12:00:00Z");
@@ -197,6 +199,35 @@ describe("authoritative readiness predicate", () => {
     expect(result.inventory.required).toBe("10000");
     expect(result.ready).toBe(false);
     expect(result.reasons).toContain("fee_runway_insufficient");
+  });
+
+  it("keeps fee runway for every durable may-broadcast operation", () => {
+    const journal = openBoundJournal();
+    const limits = new TransactionLimits({ maxAmount: 1_000n, dailyLimit: 10_000n });
+    const terms = termsFrom(CreateNoteV1Schema.parse(v1Params()));
+    const fingerprint = fingerprintTerms(terms);
+    journal.claim("marked", fingerprint, terms);
+    const attempt = journal.recordPrepared("marked", {
+      txHash: "0x" + "1".repeat(64),
+      txBytes: Buffer.from("marked"),
+      expirationTimestamp: 1_900_000_000n,
+    });
+    journal.markMayBroadcast("marked", attempt, terms.amount);
+    limits.recordSpend(1_000n);
+    const facts = healthyFacts();
+    facts.feeRunway = known({ observed: 999n, perTransferFeeLimit: 100n });
+    try {
+      const result = evaluateReadiness(
+        facts,
+        limits.windowStatus(),
+        { journal, mayBroadcastConfigured: true, corridor: CORRIDOR },
+        NOW,
+      );
+      expect(result.feeRunway.required).toBe("1000");
+      expect(result.reasons).toContain("fee_runway_insufficient");
+    } finally {
+      journal.close();
+    }
   });
 
   it("detects a released exclusive writer fence independently of durable health", () => {
