@@ -731,7 +731,7 @@ async function main(): Promise<void> {
       console.log(`[pxe-bridge] Daily limit: ${limitsConfig.dailyLimit}`);
     if (limitsConfig.cooldownThreshold !== undefined)
       console.log(
-        `[pxe-bridge] Cooldown: ${limitsConfig.cooldownDelayMs}ms above ${limitsConfig.cooldownThreshold}`,
+        `[pxe-bridge] Cooldown: ${limitsConfig.cooldownDelayMs}ms at or above ${limitsConfig.cooldownThreshold}`,
       );
   }
   console.log(`[pxe-bridge] Audit (output only): ${AUDIT_LOG_PATH ?? "stdout"}`);
