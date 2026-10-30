@@ -1087,15 +1087,27 @@ export class SettlementJournal {
     });
   }
 
-  latestRootUpdate(): { id: string; root: string } | undefined {
-    return this.read((db) =>
+  latestRootUpdate():
+    | { id: string; root: string; payload: unknown; deliveredAt: number | null }
+    | undefined {
+    const row = this.read((db) =>
       db
         .prepare(
-          `SELECT id, root FROM root_update_outbox
+          `SELECT id, root, payload_json, delivered_at FROM root_update_outbox
            ORDER BY rowid DESC LIMIT 1`,
         )
         .get(),
-    ) as { id: string; root: string } | undefined;
+    ) as
+      | { id: string; root: string; payload_json: string; delivered_at: number | null }
+      | undefined;
+    return row === undefined
+      ? undefined
+      : {
+          id: row.id,
+          root: row.root,
+          payload: JSON.parse(row.payload_json) as unknown,
+          deliveredAt: row.delivered_at,
+        };
   }
 
   pendingRootUpdates(): RootUpdateOutboxEntry[] {

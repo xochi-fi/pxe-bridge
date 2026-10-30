@@ -521,10 +521,17 @@ RootUpdate relay bearer token.
 The SQLite journal schema stores the local allowlist snapshot identity and
 exact RootUpdate relay envelope. The payload is durable before HTTP send,
 retains one idempotency key across uncertain delivery, and retries after
-restart. If an undelivered payload already names the current root, a restart
-retries that exact envelope and key before creating anything new. A delivered
-record does not suppress the one current-root push required after a later
-restart. The relay HTTP body is
+restart. Every tick delivers the pending envelopes, in order, even when the
+chain observation (bounded to 20 seconds) or the enqueue fails, and an attempt
+that cannot be recorded is resent under the same key. Only the configured
+URL's own `204` is durable acceptance; redirects are refused. A new signed
+record, from a fresh finalized observation and with a new idempotency key, is
+enqueued when the finalized root differs from the latest envelope's, when the
+corridor changed, when the latest record's `attestedAt` is 3,600 seconds old
+(half the consumers' 7,200-second maximum age, so an unchanged root never
+lapses), and once per process after restart. If the latest envelope already
+names the current root and is undelivered, that exact envelope and key is the
+restart push. The relay HTTP body is
 `{corridor_id,corridor_revision,record:<signed RootUpdate>}` and is configured
 separately by `PXE_BRIDGE_ATTESTATION_RELAY_URL` / `_TOKEN`; only HTTPS or
 loopback HTTP is accepted. Attestation audit output contains only method,
