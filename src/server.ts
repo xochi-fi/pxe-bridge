@@ -24,6 +24,10 @@ const REQUEST_TIMEOUT_MS = 30_000;
 // is not waiting on anything the bridge is going to deliver.
 export const RESPONSE_TIMEOUT_MS = 150_000;
 
+// A readiness probe is diagnostic, not a settlement. Return a typed 503 before
+// the general response deadline if an authenticated backend observation hangs.
+const READINESS_TIMEOUT_MS = 20_000;
+
 // The one deadline of a createNote, started when the request is handled and
 // spent by admission, cooldown, proving, the may-broadcast query and the
 // send. Under the response deadline by a margin, so the structured answer
@@ -53,6 +57,8 @@ export interface ServerOptions {
   readiness?: ReadinessObserver | undefined;
   /** The HTTP response deadline; RESPONSE_TIMEOUT_MS unless a test shortens it. */
   responseTimeoutMs?: number | undefined;
+  /** Readiness observation deadline; READINESS_TIMEOUT_MS unless a test shortens it. */
+  readinessTimeoutMs?: number | undefined;
 }
 
 
@@ -200,6 +206,21 @@ function checkAuth(req: IncomingMessage, apiKey: string): boolean {
   return match && actual.length === expected.length;
 }
 
+async function observeReadiness(
+  observer: ReadinessObserver,
+  timeoutMs: number,
+): Promise<Awaited<ReturnType<ReadinessObserver["observe"]>>> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("readiness observation timed out")), timeoutMs);
+  });
+  try {
+    return await Promise.race([observer.observe(), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export function createApp(client: IAztecClient, opts: ServerOptions = {}): Server {
   const attestationConfigured =
     opts.attestationApiKey !== undefined || opts.attestation !== undefined;
@@ -228,6 +249,7 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
   }
   const readinessObserver = opts.readiness ?? opts.settlement?.readiness;
   const rateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+  const livenessRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const authFailureLimiter = new RateLimiter(AUTH_FAILURE_MAX, RATE_LIMIT_WINDOW_MS);
   const attestationRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const attestationAuthFailureLimiter = new RateLimiter(AUTH_FAILURE_MAX, RATE_LIMIT_WINDOW_MS);
@@ -281,21 +303,16 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
     try {
       const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
 
-      // Public liveness is deliberately minimal: no account, policy, balance,
-      // journal, network, or readiness detail is exposed without the RPC key.
+      // Public liveness is deliberately process-local. It exposes no funded
+      // account detail and performs no Aztec RPC that an unauthenticated caller
+      // could use to contend with readiness or payout admission.
       if (req.method === "GET" && pathname === "/status") {
         const statusIp = req.socket.remoteAddress ?? "unknown";
-        if (!rateLimiter.allow(statusIp)) {
+        if (!livenessRateLimiter.allow(statusIp)) {
           sendJson(res, 429, { error: "Too many requests" });
           return;
         }
-        try {
-          await client.getVersion();
-          sendJson(res, 200, { status: "ok" });
-        } catch (err) {
-          console.error("[pxe-bridge] Liveness check failed:", err);
-          sendJson(res, 503, { status: "starting" });
-        }
+        sendJson(res, 200, { status: "ok" });
         return;
       }
 
@@ -317,7 +334,10 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           return;
         }
         try {
-          const readiness = await readinessObserver.observe();
+          const readiness = await observeReadiness(
+            readinessObserver,
+            opts.readinessTimeoutMs ?? READINESS_TIMEOUT_MS,
+          );
           sendJson(res, readiness.ready ? 200 : 503, readiness);
         } catch (err) {
           console.error("[pxe-bridge] Readiness observation failed:", err);

@@ -782,7 +782,7 @@ export class SettlementJournal {
     }));
   }
 
-  /** The exact bytes of an attempt: what a re-broadcast sends, never rebuilt. */
+  /** Exact attempt bytes, used only to resume an unmarked prepared attempt. */
   attemptBytes(operationId: string, attempt: number): Buffer {
     const row = this.read((db) =>
       db

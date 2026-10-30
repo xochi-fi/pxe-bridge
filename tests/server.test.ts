@@ -61,19 +61,18 @@ function jsonPost(url: string, body: string, extraHeaders: Record<string, string
 
 describe("HTTP server", () => {
   describe("GET /status", () => {
-    it("returns ok with version", async () => {
+    it("returns process-local liveness", async () => {
       const res = await fetch(`${baseUrl}/status`);
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body).toEqual({ status: "ok" });
     });
 
-    it("returns 503 when client errors", async () => {
+    it("does not inherit Aztec RPC failures", async () => {
       client.versionError = new Error("not ready");
       const res = await fetch(`${baseUrl}/status`);
-      expect(res.status).toBe(503);
-      const body = await res.json();
-      expect(body).toEqual({ status: "starting" });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ status: "ok" });
       client.versionError = null;
     });
 
@@ -334,6 +333,63 @@ describe("HTTP server with auth", () => {
   it("allows /status without auth", async () => {
     const res = await fetch(`${authBaseUrl}/status`);
     expect(res.status).toBe(200);
+  });
+});
+
+describe("public liveness isolation", () => {
+  it("does not consume authenticated capacity or call the Aztec client", async () => {
+    const key = "liveness-isolation-key";
+    const readiness = readyObserver();
+    const client = new FakeAztecClient();
+    client.versionError = new Error("public liveness must not call getVersion");
+    const settlement = settlementContext(openBoundJournal(), undefined, { readiness });
+    const srv = createApp(client, { apiKey: key, settlement, readiness });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+
+    try {
+      for (let i = 0; i < 60; i++) {
+        expect((await fetch(`${url}/status`)).status).toBe(200);
+      }
+      expect((await fetch(`${url}/status`)).status).toBe(429);
+
+      const ready = await fetch(`${url}/ready`, {
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      expect(ready.status).toBe(200);
+      expect(await ready.json()).toMatchObject({ ready: true });
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+  it("returns a typed 503 when the authenticated readiness probe hangs", async () => {
+    const key = "bounded-readiness-key";
+    const readiness = { observe: () => new Promise<never>(() => {}) };
+    const client = new FakeAztecClient();
+    const srv = createApp(client, {
+      apiKey: key,
+      readiness,
+      readinessTimeoutMs: 10,
+      responseTimeoutMs: 1_000,
+    });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+
+    try {
+      const response = await fetch(`${url}/ready`, {
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({
+        ready: false,
+        reasons: ["readiness_observation_failed"],
+      });
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
   });
 });
 

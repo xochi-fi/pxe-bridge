@@ -518,7 +518,7 @@ describe("ambiguity after the mark is submitted_unknown, never a retryable error
     expect(client.credits()).toBe(1);
   });
 
-  it("re-broadcasts the journaled bytes when the process died between mark and send", async () => {
+  it("never replays when the process died between mark and send", async () => {
     client.behaviour = "die_after_mark";
     const first = await createNote(client, ctx);
     expect(first.error?.code).toBe(RPC_ERRORS.SUBMITTED_UNKNOWN);
@@ -530,18 +530,24 @@ describe("ambiguity after the mark is submitted_unknown, never a retryable error
     });
     expect((await getSettlement(client, ctx)).observation).toMatchObject({
       state: "submitted_unknown",
+      txHash: marked,
       reason: "node_reports_dropped_or_unknown",
     });
     client.behaviour = "land";
     const retry = await createNote(client, ctx);
-    expect(retry.result?.observation).toMatchObject({ state: "included", txHash: marked });
+    expect(retry.error?.code).toBe(RPC_ERRORS.SUBMITTED_UNKNOWN);
+    expect(retry.error?.data?.observation).toMatchObject({
+      state: "submitted_unknown",
+      txHash: marked,
+      reason: "node_reports_dropped_or_unknown",
+    });
+    expect(client.sends).toHaveLength(0);
     expect(client.proofs).toBe(1);
-    expect(client.credits()).toBe(1);
-    // Permission was granted once, with the mark; a re-broadcast does not re-ask.
+    expect(client.credits()).toBe(0);
     expect(gate.calls).toEqual(["op-1"]);
   });
 
-  it("never re-broadcasts a marked attempt past validUntil, and never calls it unsubmitted", async () => {
+  it("keeps a marked attempt ambiguous past validUntil without replay", async () => {
     client.behaviour = "die_after_mark";
     await createNote(client, ctx);
     const marked = journal.attempts("op-1")[0]!.txHash;
@@ -561,7 +567,7 @@ describe("ambiguity after the mark is submitted_unknown, never a retryable error
     expect((await getSettlement(client, late)).observation.state).toBe("submitted_unknown");
   });
 
-  it("keeps exact-byte recovery available when readiness loses journal writes", async () => {
+  it("keeps marked observation available when journal writes are lost", async () => {
     const path = tempJournalPath();
     const first = openBoundJournal(path);
     client.behaviour = "die_after_mark";
@@ -576,8 +582,12 @@ describe("ambiguity after the mark is submitted_unknown, never a retryable error
     expect(reopened.health()).toMatchObject({ writable: false, reason: "journal_inconsistent" });
     client.behaviour = "land";
     const retry = await createNote(client, { settlement: settlementContext(reopened, gate.client) });
-    expect(retry.result?.observation.state).toBe("included");
-    expect(client.sends).toHaveLength(1);
+    expect(retry.error?.code).toBe(RPC_ERRORS.SUBMITTED_UNKNOWN);
+    expect(retry.error?.data?.observation).toMatchObject({
+      state: "submitted_unknown",
+      reason: "node_reports_dropped_or_unknown",
+    });
+    expect(client.sends).toHaveLength(0);
     expect(client.proofs).toBe(1);
   });
 
@@ -703,47 +713,6 @@ describe("the gate is the last word on both bounds", () => {
     expect(journal.spendsSince(0)).toHaveLength(1);
   });
 
-  it.each([
-    ["validUntil", "validity_bound_passed", () => (VALID_UNTIL + 1) * 1000],
-    ["the protocol expiration", "expiration_passed", () => (nowSec() + 200) * 1000],
-  ] as const)("does not re-broadcast when %s passes between the gate and the send", async (
-    _bound,
-    reason,
-    toMs,
-  ) => {
-    client.expiration = BigInt(nowSec() + 100);
-    client.behaviour = "die_after_mark";
-    await createNote(client, { settlement: timed });
-    client.behaviour = "land";
-    client.afterGate = () => {
-      clock = toMs();
-    };
-    const retry = await createNote(client, { settlement: timed });
-    expect(retry.error?.data?.observation).toMatchObject({ state: "submitted_unknown", reason });
-    expect(client.sends).toHaveLength(0);
-  });
-
-  it.each([
-    ["validUntil", "validity_bound_passed", () => (VALID_UNTIL + 1) * 1000],
-    ["the protocol expiration", "expiration_passed", () => (nowSec() + 200) * 1000],
-  ] as const)(
-    "never re-broadcasts a marked attempt when %s passes while its bytes are reconstructed",
-    async (_bound, reason, toMs) => {
-      client.expiration = BigInt(nowSec() + 100);
-      client.behaviour = "die_after_mark";
-      await createNote(client, { settlement: timed });
-      const marked = journal.attempts("op-1")[0]!.txHash;
-      client.behaviour = "land";
-      client.beforeGate = () => {
-        clock = toMs();
-      };
-      const retry = await createNote(client, { settlement: timed });
-      expect(retry.error?.code).toBe(RPC_ERRORS.SUBMITTED_UNKNOWN);
-      expect(retry.error?.data?.observation).toMatchObject({ state: "submitted_unknown", txHash: marked, reason });
-      expect(client.sends).toHaveLength(0);
-      expect(journal.get("op-1")?.state).toBe("may_broadcast");
-    },
-  );
 
   it.each([
     ["validUntil", "validity_bound_passed", false, () => (VALID_UNTIL + 1) * 1000],

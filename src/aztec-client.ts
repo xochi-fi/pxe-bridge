@@ -574,7 +574,7 @@ export class AztecClient implements IAztecClient {
   private readonly expectedAccountAddress: string | undefined;
   /** Set once this client holds its directory; a retried connect() reuses it. */
   private claimedDataDirectory: string | null = null;
-  /** Node client for reads and exact re-broadcasts; set in connect(). */
+  /** Node client for reads and exact journaled sends; set in connect(). */
   private node: AztecNode | null = null;
   private preexisted = false;
 

@@ -201,12 +201,10 @@ interface DriveState {
 
 /**
  * `fresh` proves a new attempt; `resume` re-asks for a journaled, unmarked
- * attempt; `rebroadcast` resends a marked attempt's exact bytes.
+ * attempt. A marked attempt is observation-only: absence from one node is
+ * never proof that the transaction did not reach another node or a prior fork.
  */
-type GateMode =
-  | { kind: "fresh" }
-  | { kind: "resume"; attempt: Attempt }
-  | { kind: "rebroadcast"; attempt: Attempt };
+type GateMode = { kind: "fresh" } | { kind: "resume"; attempt: Attempt };
 
 /**
  * The per-attempt broadcast gate: journal the exact transaction, ask Riddler,
@@ -235,7 +233,6 @@ class OperationGate implements BroadcastGate {
     private readonly onMark: () => void,
   ) {
     if (mode.kind !== "fresh") this.attempt = mode.attempt;
-    if (mode.kind === "rebroadcast") this.marked = true;
   }
 
   close(): void {
@@ -251,10 +248,8 @@ class OperationGate implements BroadcastGate {
       if (tx.txHash.toLowerCase() !== this.mode.attempt.txHash) {
         throw new Error("journaled bytes no longer produce the journaled hash");
       }
-      // Permission was recorded with the mark; an exact re-broadcast of a
-      // marked attempt does not ask again. Its bounds are checked in
-      // beforeSend, after the bytes were reconstructed.
-      if (this.mode.kind === "rebroadcast") return;
+      // An unmarked prepared attempt re-asks Riddler for the same hash before
+      // its exact bytes can be sent.
     } else {
       const attempt = journal.recordPrepared(operationId, tx);
       this.attempt = {
@@ -809,22 +804,7 @@ async function resumeExisting(
               reason: "response_deadline",
             }
           : observed;
-      // A re-broadcast needs every bound still open: the protocol's expiry AND
-      // the operation's own `validUntil`. Past `validUntil` the marked attempt
-      // is never resent -- the deal it was admitted for is over -- and it is
-      // never "not submitted" either: it was marked and may be on chain, so
-      // the answer stays submitted_unknown until a node observation settles it.
-      const unseen =
-        observation.state === "submitted_unknown" &&
-        observation.reason === "node_reports_dropped_or_unknown" &&
-        BigInt(nowSeconds(s)) < BigInt(attempt.expirationTimestamp) &&
-        nowSeconds(s) < op.terms.validUntil;
-      if (!unseen) return answer(id, op, observation);
-      // Marked, and the node does not know it: the process may have died
-      // between the mark and the send. Re-broadcast the journaled bytes --
-      // never a rebuilt transaction -- which can land at most once.
-      console.warn(`[rpc] Re-broadcasting journaled attempt ${attempt.attempt} of ${op.operationId}`);
-      return runAttempt(id, client, ctx, s, state, { kind: "rebroadcast", attempt }, background, deadline);
+      return answer(id, op, observation);
     }
   }
 }
@@ -1092,7 +1072,7 @@ async function runAttempt(
 
   let reservationId: number | undefined;
   let cooldownMs: number | undefined;
-  if (ctx.limits && mode.kind !== "rebroadcast") {
+  if (ctx.limits) {
     const reservation = ctx.limits.reserve(amount);
     if (!reservation.allowed) {
       if (mode.kind === "resume") {

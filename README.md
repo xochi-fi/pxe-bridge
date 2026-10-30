@@ -674,16 +674,16 @@ Returns the connected Aztec node version string.
 
 ### Liveness and operational readiness
 
-`GET /status` is the public, unauthenticated liveness endpoint. It exposes only
-`{"status":"ok"}` while the node answers (HTTP 200), or
-`{"status":"starting"}` while it does not (HTTP 503). Keep container restarts
-on this route: a bridge that has lost settlement readiness must remain up for
-reconciliation and exact-byte rebroadcast of already marked operations.
+`GET /status` is the public, unauthenticated, process-local liveness endpoint.
+It exposes only `{"status":"ok"}` (HTTP 200) and performs no Aztec RPC. Keep
+container restarts on this route: a bridge that has lost settlement readiness
+must remain up to observe and reconcile already marked operations.
 
 `GET /ready` is the authenticated operational endpoint. It requires the same
-`Authorization: Bearer <PXE_BRIDGE_API_KEY>` header as JSON-RPC and returns
-HTTP 200 only when the single admission predicate says a new settlement may
-start; otherwise it returns HTTP 503 with stable reasons. Authentication
+`Authorization: Bearer <PXE_BRIDGE_API_KEY>` header as JSON-RPC and returns the
+authoritative readiness projection. A backend observation that exceeds 20
+seconds fails closed as HTTP 503 `readiness_observation_failed`. HTTP 200 means
+new settlement admission is allowed; HTTP 503 means it is not. Authentication
 failures use the separate auth-failure rate limiter and expose no operational
 state.
 
@@ -717,9 +717,10 @@ new work and returns JSON-RPC `-32006` with
 `data.reason: "bridge_not_ready"`, stable `data.reasons`, and the established
 typed `data.observation` (`not_submitted`, with the primary readiness reason).
 Readiness loss does not erase or redirect journaled operations:
-`aztec_getSettlement`, marked-operation reconciliation and exact-byte
-rebroadcast remain available, and an already admitted `prepared` operation
-keeps resuming its exact journaled bytes, held only on per-operation facts
+`aztec_getSettlement` and marked-operation observation remain available, but a
+marked operation is never replayed when one node reports it absent. An already
+admitted `prepared` operation keeps resuming its exact journaled bytes, held
+only on per-operation facts
 (journal or fence lost, network mismatch, account paused, on-chain root not
 the configured one, inventory below its amount, rolling window full; see
 docs/settlement-operations.md). A new operation cannot pass admission while

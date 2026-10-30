@@ -98,7 +98,7 @@ corridor.
 | `prepared` | no (journaled, unmarked) | `txHash, expirationTimestamp, hold: may_broadcast_unknown \| may_broadcast_denied \| interrupted` | hold; retry the same operation later; never refund |
 | `not_submitted` | no | `reason, retryableAfterRevalidation` | `true`: retry the same operation; `false` (e.g. `validity_bound_passed`): revalidate/requote |
 | `request_in_flight` | maybe | -- | wait, then read |
-| `submitted_unknown` | maybe | `txHash, expirationTimestamp, reason` (`post_mark_failure`, `response_deadline`, `node_reports_dropped_or_unknown`, `node_read_failed`, `validity_bound_passed`, `expiration_passed`) | hold; reconcile. A retry of the same operation re-broadcasts the journaled bytes (same hash, lands at most once) only while BOTH the protocol `expirationTimestamp` and the operation's `validUntil` are in the future -- checked last by the gate, after the bytes are reconstructed and immediately before the send; past either it answers `submitted_unknown` (reason naming the bound) without sending, and never `not_submitted` |
+| `submitted_unknown` | maybe | `txHash, expirationTimestamp, reason` (`post_mark_failure`, `response_deadline`, `node_reports_dropped_or_unknown`, `node_read_failed`, `validity_bound_passed`, `expiration_passed`) | hold and reconcile; never replay it. Absence from one node is not proof that the transaction never reached another node or an earlier fork |
 | `pending` | yes | `txHash, expirationTimestamp` | wait |
 | `included` | yes | `txHash, expirationTimestamp, executionResult: success, blockHash, blockNumber, receiptStatus (proposed\|checkpointed\|proven), observedAt, effects {state, noteHashes, nullifiers}` | non-terminal; wait for `finalized` |
 | `finalized` | yes | as `included`, `receiptStatus: finalized` (durably recorded) | delivery evidence (never "completed" alone) |
@@ -134,9 +134,8 @@ requote under a NEW operation id; a retry of the old id answers the same
 2. After the mark -- an fsync that can itself cross a second -- a separate
    SYNCHRONOUS final step (`BroadcastGate.beforeSend`) rechecks both bounds,
    and the client calls the node's `sendTx` in the same synchronous run, with
-   no `await` between the check and the call. A re-broadcast of a marked
-   attempt takes the same step after its bytes are reconstructed. A marked
-   attempt refused here is never sent and answers `submitted_unknown` (reason
+   no `await` between the check and the call. A marked attempt refused here is
+   never sent and answers `submitted_unknown` (reason
    `validity_bound_passed` / `expiration_passed`), never `not_submitted`: it
    was marked.
 
@@ -170,8 +169,8 @@ environment-scoped service credential Riddler holds as
   in every `NODE_ENV`, production included; no credentials in the URL. The
   bearer token and the allow/deny answer cross this link, so a plaintext hop
   would let an on-path party ask on the bridge's behalf or forge an `allow`.
-- The mark and the rolling-spend row commit in one transaction. A
-  re-broadcast of a marked attempt does not ask again.
+- The mark and the rolling-spend row commit in one transaction. Once marked,
+  the attempt becomes observation-only and is never sent again.
 
 ### Riddler's decision table
 
@@ -283,8 +282,8 @@ adoption"), `legacy_audit_unresolved`, `account_mismatch`,
 `missing_transaction_identity`, `journal_inconsistent`,
 `spend_window_unreadable`, `unknown_schema_version`, `write_failed`. With
 writes disabled, new and unmarked `createNote` attempts are refused `-32004`.
-An existing marked operation remains observable and may rebroadcast its exact
-journaled bytes; terminal operations and `aztec_getSettlement` remain readable.
+An existing marked operation remains observation-only; terminal operations and
+`aztec_getSettlement` remain readable.
 None clears itself: restore the exact journal, or reconcile and start a new one
 through the adoption procedure.
 
@@ -345,8 +344,8 @@ is the only record of what the legacy bridge may have sent.
 
 | Endpoint | Auth | Answers |
 | --- | --- | --- |
-| `GET /status` | none, rate-limited | Public minimal **liveness** only: 200 `{"status":"ok"}` whenever the node answers; otherwise 503 `{"status":"starting"}`. |
-| `GET /ready` | Bearer `PXE_BRIDGE_API_KEY`, then the normal rate limiter | Operational projection from the authoritative admission predicate: 200 iff `ready: true`, otherwise 503 with stable reasons. Failed authentication is charged to the separate auth-failure limiter and exposes no state. |
+| `GET /status` | none, separately rate-limited | Public minimal **process liveness** only: 200 `{"status":"ok"}` with no Aztec RPC. |
+| `GET /ready` | Bearer `PXE_BRIDGE_API_KEY`, then the normal rate limiter | Operational projection from the authoritative admission predicate: 200 iff `ready: true`, otherwise 503 with stable reasons. A backend observation exceeding 20 seconds returns 503 `readiness_observation_failed`. Failed authentication is charged to the separate auth-failure limiter and exposes no state. |
 
 The readiness projection contains the flat checker fields `ready`,
 `nodeVersion`, `l1ChainId`, `rollupVersion`, `account {address,classId}`,
@@ -402,10 +401,11 @@ per environment, shared by blue/green colours) and
 **Readiness.** Gate deploys and new settlement traffic on authenticated
 `GET /ready` (200 = ready; Bearer `PXE_BRIDGE_API_KEY`). Its projection is the
 same typed predicate `aztec_createNote` invokes before proving or broadcasting
-new work. `GET /status` remains public minimal liveness only. Keep the
-container healthcheck on `/status`: a journal with writes disabled or another
-readiness fault must not restart the service, because `aztec_getSettlement`,
-marked-operation observation and exact-byte rebroadcast remain available.
+new work. `GET /status` remains public process-local liveness only and performs
+no Aztec RPC. Keep the container healthcheck on `/status`: a journal with
+writes disabled or another readiness fault must not restart the service,
+because `aztec_getSettlement` and marked-operation observation remain
+available.
 
 The predicate admits only design-A spending-limit deployments with a durable
 deployment record. It checks the configured/derived address and compiled class,
@@ -427,7 +427,7 @@ multiplied by predicted maximum fees per gas. The projection exposes observed
 and required fee juice, observed finalized token inventory and required
 admissible volume, and the exact finalized reference.
 Readiness loss blocks only new admission. An already may-broadcast-marked
-operation keeps its normal lookup, observation and exact-byte rebroadcast path.
+operation keeps its normal lookup and observation path but is never replayed.
 An already admitted `prepared` operation keeps recovering too: the
 may-broadcast query and the send of its exact journaled bytes are not gated on
 the `/ready` verdict, fee runway, finalized-tip freshness or corridor

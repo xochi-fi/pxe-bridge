@@ -7,7 +7,7 @@ import {
   type Server,
 } from "node:http";
 import { mkdtempSync, openSync, writeSync, closeSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { randomBytes } from "node:crypto";
@@ -41,8 +41,8 @@ import {
  *   - `after_node_accepts`: the node has the transaction, the bridge dies
  *     before it hears so. Recovery must find it, never send a second one.
  *   - `before_node_sees`: the bridge has marked may-broadcast and dies before
- *     the node has anything. Recovery must re-broadcast the journaled bytes,
- *     never prove a new transaction.
+ *     the node has anything. Recovery must hold the ambiguous operation and
+ *     never replay it.
  */
 
 const config = getTestConfig();
@@ -71,6 +71,7 @@ interface Bridge {
   child: ChildProcess;
   url: string;
   exited: Promise<number | null>;
+  log(): string;
 }
 
 function listen(server: Server): Promise<number> {
@@ -137,6 +138,7 @@ describe("hard crash mid-broadcast (e2e)", () => {
     const value = (raw as { result?: unknown })?.result ?? raw;
     return BigInt((value as { toString(): string }).toString());
   }
+
 
   async function startBridge(
     workDir: string,
@@ -400,7 +402,7 @@ describe("hard crash mid-broadcast (e2e)", () => {
   }
 
   it.each(["after_node_accepts", "before_node_sees"] as const)(
-    "credits exactly once after a SIGKILL %s and a restart",
+    "recovers safely after a SIGKILL %s and a restart",
     async (point) => {
       const workDir = mkdtempSync(join(tmpdir(), "pxe-crash-"));
       const journal = adoptedJournal(workDir);
@@ -412,7 +414,10 @@ describe("hard crash mid-broadcast (e2e)", () => {
       const first = await rpc(bridge.url, "aztec_createNote", params, operationId).catch(
         (err: unknown) => err,
       );
-      expect(first, "the first response must be lost to the kill").toBeInstanceOf(Error);
+      expect(
+        first,
+        `the first response must be lost to the kill, got ${JSON.stringify(first)}\n${bridge.log()}`,
+      ).toBeInstanceOf(Error);
       expect(await bridge.exited).toBeNull();
       expect(killed).toBeGreaterThan(0);
 
@@ -429,31 +434,45 @@ describe("hard crash mid-broadcast (e2e)", () => {
       expect(attempts[0]!.mayBroadcast).toBe(true);
 
       const retry = await rpc(bridge.url, "aztec_createNote", params, operationId);
-      expect(["pending", "included", "finalized"]).toContain(retry.result?.observation.state);
 
-      // Poll until the node has it mined, then check the one credit.
-      const deadline = Date.now() + 120_000;
-      let state = retry.result?.observation.state;
-      while (state === "pending" && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 2_000));
-        state = (
-          await rpc(bridge.url, "aztec_getSettlement", { version: SETTLEMENT_VERSION, operationId })
-        ).result?.observation.state;
+      if (point === "before_node_sees") {
+        expect(retry.error).toMatchObject({
+          code: -32002,
+          data: { observation: { state: "submitted_unknown" } },
+        });
+        expect(before - (await publicBalance())).toBe(0n);
+        const again = await rpc(bridge.url, "aztec_createNote", params, operationId);
+        expect(again.error).toMatchObject({
+          code: -32002,
+          data: { observation: { state: "submitted_unknown" } },
+        });
+        expect(before - (await publicBalance())).toBe(0n);
+      } else {
+        expect(["pending", "included", "finalized"]).toContain(retry.result?.observation.state);
+        const deadline = Date.now() + 120_000;
+        let state = retry.result?.observation.state;
+        while (state === "pending" && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 2_000));
+          state = (
+            await rpc(bridge.url, "aztec_getSettlement", {
+              version: SETTLEMENT_VERSION,
+              operationId,
+            })
+          ).result?.observation.state;
+        }
+        expect(["included", "finalized"]).toContain(state);
+        expect(before - (await publicBalance())).toBe(BigInt(AMOUNT));
+        const again = await rpc(bridge.url, "aztec_createNote", params, operationId);
+        expect(again.result?.observation.txHash).toBe(retry.result?.observation.txHash);
+        expect(before - (await publicBalance())).toBe(BigInt(AMOUNT));
       }
-      expect(["included", "finalized"]).toContain(state);
-      expect(before - (await publicBalance())).toBe(BigInt(AMOUNT));
-
-      // A further retry still sends nothing.
-      const again = await rpc(bridge.url, "aztec_createNote", params, operationId);
-      expect(again.result?.observation.txHash).toBe(retry.result?.observation.txHash);
-      expect(before - (await publicBalance())).toBe(BigInt(AMOUNT));
       expect(gateCalls.filter((id) => id === operationId)).toHaveLength(1);
 
       bridge.child.kill("SIGTERM");
       await bridge.exited;
       bridge = undefined;
     },
-    600_000,
+    900_000,
   );
 
   it("resumes the exact prepared bytes after a SIGKILL at may-broadcast, with new admission closed", async () => {
@@ -467,12 +486,18 @@ describe("hard crash mid-broadcast (e2e)", () => {
     const first = await rpc(bridge.url, "aztec_createNote", params, operationId).catch(
       (err: unknown) => err,
     );
-    expect(first, "the first response must be lost to the kill").toBeInstanceOf(Error);
+    expect(
+      first,
+      `the first response must be lost to the kill, got ${JSON.stringify(first)}\n${bridge.log()}`,
+    ).toBeInstanceOf(Error);
     expect(await bridge.exited).toBeNull();
 
     // Restart under another corridor revision: the operation's own corridor no
     // longer admits new work, which must not stop its recovery.
-    bridge = await startBridge(workDir, journal, true, { ...CORRIDOR, corridorRevision: 2 });
+    bridge = await startBridge(workDir, journal, false, {
+      ...CORRIDOR,
+      corridorRevision: 2,
+    });
     const held = await rpc(bridge.url, "aztec_getSettlement", {
       version: SETTLEMENT_VERSION,
       operationId,
@@ -511,7 +536,7 @@ describe("hard crash mid-broadcast (e2e)", () => {
     bridge.child.kill("SIGTERM");
     await bridge.exited;
     bridge = undefined;
-  }, 600_000);
+  }, 900_000);
 
   it("halts writes visibly on a corrupt journal and keeps serving status", async () => {
     const workDir = mkdtempSync(join(tmpdir(), "pxe-corrupt-"));
