@@ -58,7 +58,7 @@ import { fingerprintTerms, type Observation, type SettlementTerms } from "./sett
  * (`JournalPermissionError`) otherwise.
  */
 
-export const JOURNAL_SCHEMA_VERSION = 1;
+export const JOURNAL_SCHEMA_VERSION = 2;
 
 export type WriteDisabledReason =
   | "corrupt"
@@ -116,6 +116,25 @@ export type ClaimResult =
   | { kind: "conflict"; operation: StoredOperation };
 
 /** Another live process holds the journal's writer lock. */
+export interface AllowlistSnapshot {
+  root: string;
+  recipients: readonly { address: string; index: number }[];
+  createdAt: number;
+}
+
+export interface RootUpdateOutboxEntry {
+  id: string;
+  root: string;
+  rootBlock: string;
+  payload: unknown;
+  idempotencyKey: string;
+  attempts: number;
+  deliveredAt: number | null;
+  lastError: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export class JournalLockedError extends Error {
   constructor(path: string, cause: unknown) {
     super(
@@ -190,11 +209,6 @@ interface AttemptRow {
   may_broadcast_at: number | null;
 }
 
-interface HighWaterMark {
-  journalId: string;
-  generation: number;
-}
-
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS operations (
@@ -225,6 +239,25 @@ CREATE TABLE IF NOT EXISTS spends (
   amount TEXT NOT NULL,
   at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS allowlist_snapshots (
+  root TEXT PRIMARY KEY,
+  recipients_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS root_update_outbox (
+  id TEXT PRIMARY KEY,
+  root TEXT NOT NULL,
+  root_block TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  delivered_at INTEGER,
+  last_error TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS root_update_pending
+  ON root_update_outbox(delivered_at, created_at);
 `;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -323,6 +356,13 @@ export class SettlementJournal {
     if (!this.healthState.writable) return;
     this.checkHighWaterMark();
     if (!this.healthState.writable) return;
+    try {
+      this.migrateSchema(db);
+    } catch (cause) {
+      this.classifyOpenError(cause);
+      return;
+    }
+    if (!this.healthState.writable) return;
     this.checkInvariants();
   }
 
@@ -353,14 +393,60 @@ export class SettlementJournal {
     this.writeHighWaterMark();
   }
 
+  private migrateSchema(db: Database.Database): void {
+    const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as
+      | { value: string }
+      | undefined;
+    const version = Number(row?.value);
+    if (version === JOURNAL_SCHEMA_VERSION) return;
+    if (version !== 1) {
+      this.disable(
+        "unknown_schema_version",
+        `journal schema ${row?.value ?? "(missing)"} is not supported`,
+      );
+      return;
+    }
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE allowlist_snapshots (
+          root TEXT PRIMARY KEY,
+          recipients_json TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+        CREATE TABLE root_update_outbox (
+          id TEXT PRIMARY KEY,
+          root TEXT NOT NULL,
+          root_block TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          idempotency_key TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          delivered_at INTEGER,
+          last_error TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX root_update_pending
+          ON root_update_outbox(delivered_at, created_at);
+      `);
+      db.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'").run(
+        String(JOURNAL_SCHEMA_VERSION),
+      );
+      db.prepare("UPDATE meta SET value = ? WHERE key = 'generation'").run(
+        String(this.generation + 1),
+      );
+    }).immediate();
+    this.generation += 1;
+    this.writeHighWaterMark();
+  }
+
   private loadMeta(db: Database.Database): void {
     const rows = db.prepare("SELECT key, value FROM meta").all() as { key: string; value: string }[];
     const meta = new Map(rows.map((r) => [r.key, r.value]));
     const version = Number(meta.get("schema_version"));
-    if (version !== JOURNAL_SCHEMA_VERSION) {
+    if (!Number.isSafeInteger(version) || version < 1 || version > JOURNAL_SCHEMA_VERSION) {
       this.disable(
         "unknown_schema_version",
-        `journal schema ${meta.get("schema_version")} is not ${JOURNAL_SCHEMA_VERSION}`,
+        `journal schema ${meta.get("schema_version")} is not supported`,
       );
     }
     this.journalId = meta.get("journal_id") ?? "";
@@ -380,9 +466,9 @@ export class SettlementJournal {
    */
   private checkHighWaterMark(): void {
     if (this.fresh) return;
-    let mark: HighWaterMark;
+    let parsed: unknown;
     try {
-      mark = JSON.parse(readFileSync(this.hwmPath, "utf8")) as HighWaterMark;
+      parsed = JSON.parse(readFileSync(this.hwmPath, "utf8")) as unknown;
     } catch (cause) {
       const missing = (cause as NodeJS.ErrnoException).code === "ENOENT";
       this.disable(
@@ -393,15 +479,42 @@ export class SettlementJournal {
       );
       return;
     }
-    if (mark.journalId !== this.journalId) {
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed) ||
+      Object.keys(parsed).length !== 2 ||
+      !Object.hasOwn(parsed, "journalId") ||
+      !Object.hasOwn(parsed, "generation")
+    ) {
       this.disable(
         "rollback_detected",
-        `journal id ${this.journalId} is not the high-water mark's ${mark.journalId}`,
+        `high-water mark ${this.hwmPath} is not an exact journalId/generation object`,
       );
-    } else if (this.generation < mark.generation) {
+      return;
+    }
+    const mark = parsed as Record<string, unknown>;
+    if (
+      typeof mark["journalId"] !== "string" ||
+      typeof mark["generation"] !== "number" ||
+      !Number.isSafeInteger(mark["generation"]) ||
+      mark["generation"] < 0
+    ) {
       this.disable(
         "rollback_detected",
-        `journal generation ${this.generation} is below the high-water mark ${mark.generation}`,
+        `high-water mark ${this.hwmPath} has an invalid journal id or generation`,
+      );
+      return;
+    }
+    if (mark["journalId"] !== this.journalId) {
+      this.disable(
+        "rollback_detected",
+        `journal id ${this.journalId} is not the high-water mark's ${mark["journalId"]}`,
+      );
+    } else if (this.generation < mark["generation"]) {
+      this.disable(
+        "rollback_detected",
+        `journal generation ${this.generation} is below the high-water mark ${mark["generation"]}`,
       );
     }
   }
@@ -634,6 +747,16 @@ export class SettlementJournal {
     return this.healthState;
   }
 
+  /**
+   * Whether this process still owns the SQLite connection that acquired the
+   * exclusive writer lock. Journal health alone is insufficient: `close()`
+   * intentionally leaves the durable health diagnosis unchanged so recovery
+   * metadata remains inspectable, but closing releases the writer fence.
+   */
+  writerFenceHeld(): boolean {
+    return this.db !== null;
+  }
+
   get(operationId: string): StoredOperation | undefined {
     const row = this.read((db) =>
       db.prepare("SELECT * FROM operations WHERE operation_id = ?").get(operationId),
@@ -659,7 +782,7 @@ export class SettlementJournal {
     }));
   }
 
-  /** The exact bytes of an attempt: what a re-broadcast sends, never rebuilt. */
+  /** Exact attempt bytes, used only to resume an unmarked prepared attempt. */
   attemptBytes(operationId: string, attempt: number): Buffer {
     const row = this.read((db) =>
       db
@@ -837,6 +960,23 @@ export class SettlementJournal {
   }
 
   /**
+   * Transactions that may still consume one transfer fee. Terminal rows no
+   * longer need runway; every `may_broadcast` row does, regardless of whether
+   * its in-memory limit reservation survived.
+   */
+  mayBroadcastOperationCount(): number {
+    const row = this.read((db) =>
+      db
+        .prepare("SELECT count(*) AS count FROM operations WHERE state = 'may_broadcast'")
+        .get(),
+    ) as { count: number };
+    if (!Number.isSafeInteger(row.count) || row.count < 0) {
+      throw new JournalUnreadableError("invalid may-broadcast operation count");
+    }
+    return row.count;
+  }
+
+  /**
    * Rebuilds the rolling window: feeds the spends since `sinceMs` to `restore`
    * (`TransactionLimits.restore`) and returns how many it took. Any failure --
    * an unreadable table, a malformed amount, a restore that throws -- disables
@@ -856,6 +996,175 @@ export class SettlementJournal {
       );
       return undefined;
     }
+  }
+
+  recordAllowlistSnapshot(
+    root: string,
+    recipients: readonly { address: string; index: number }[],
+  ): void {
+    const canonical = recipients
+      .map(({ address, index }) => ({ address: address.toLowerCase(), index }))
+      .sort((a, b) => a.index - b.index);
+    const encoded = JSON.stringify(canonical);
+    this.write("record allowlist snapshot", (db) => {
+      const existing = db
+        .prepare("SELECT recipients_json FROM allowlist_snapshots WHERE root = ?")
+        .get(root.toLowerCase()) as { recipients_json: string } | undefined;
+      if (existing) {
+        if (existing.recipients_json !== encoded) {
+          throw new StateError(`allowlist root ${root} is already bound to another snapshot`);
+        }
+        return false;
+      }
+      db.prepare(
+        "INSERT INTO allowlist_snapshots (root, recipients_json, created_at) VALUES (?, ?, ?)",
+      ).run(root.toLowerCase(), encoded, this.now());
+    });
+  }
+
+  allowlistSnapshot(root: string): AllowlistSnapshot | undefined {
+    const row = this.read((db) =>
+      db
+        .prepare(
+          "SELECT root, recipients_json, created_at FROM allowlist_snapshots WHERE root = ?",
+        )
+        .get(root.toLowerCase()),
+    ) as { root: string; recipients_json: string; created_at: number } | undefined;
+    if (!row) return undefined;
+    const recipients = JSON.parse(row.recipients_json) as {
+      address: string;
+      index: number;
+    }[];
+    return { root: row.root, recipients, createdAt: row.created_at };
+  }
+
+  enqueueRootUpdate(entry: {
+    id: string;
+    root: string;
+    rootBlock: string;
+    payload: unknown;
+    idempotencyKey: string;
+  }): void {
+    const payload = JSON.stringify(entry.payload);
+    this.write("enqueue root update", (db) => {
+      const existing = db
+        .prepare(
+          "SELECT root, root_block, payload_json, idempotency_key FROM root_update_outbox WHERE id = ?",
+        )
+        .get(entry.id) as
+        | {
+            root: string;
+            root_block: string;
+            payload_json: string;
+            idempotency_key: string;
+          }
+        | undefined;
+      if (existing) {
+        if (
+          existing.root !== entry.root.toLowerCase() ||
+          existing.root_block !== entry.rootBlock ||
+          existing.payload_json !== payload ||
+          existing.idempotency_key !== entry.idempotencyKey
+        ) {
+          throw new StateError(`root update ${entry.id} is already bound to another payload`);
+        }
+        return false;
+      }
+      const at = this.now();
+      db.prepare(
+        `INSERT INTO root_update_outbox
+           (id, root, root_block, payload_json, idempotency_key, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        entry.id,
+        entry.root.toLowerCase(),
+        entry.rootBlock,
+        payload,
+        entry.idempotencyKey,
+        at,
+        at,
+      );
+    });
+  }
+
+  latestRootUpdate():
+    | { id: string; root: string; payload: unknown; deliveredAt: number | null }
+    | undefined {
+    const row = this.read((db) =>
+      db
+        .prepare(
+          `SELECT id, root, payload_json, delivered_at FROM root_update_outbox
+           ORDER BY rowid DESC LIMIT 1`,
+        )
+        .get(),
+    ) as
+      | { id: string; root: string; payload_json: string; delivered_at: number | null }
+      | undefined;
+    return row === undefined
+      ? undefined
+      : {
+          id: row.id,
+          root: row.root,
+          payload: JSON.parse(row.payload_json) as unknown,
+          deliveredAt: row.delivered_at,
+        };
+  }
+
+  pendingRootUpdates(): RootUpdateOutboxEntry[] {
+    const rows = this.read((db) =>
+      db
+        .prepare(
+          `SELECT id, root, root_block, payload_json, idempotency_key, attempts,
+                  delivered_at, last_error, created_at, updated_at
+           FROM root_update_outbox WHERE delivered_at IS NULL ORDER BY created_at, id`,
+        )
+        .all(),
+    ) as {
+      id: string;
+      root: string;
+      root_block: string;
+      payload_json: string;
+      idempotency_key: string;
+      attempts: number;
+      delivered_at: number | null;
+      last_error: string | null;
+      created_at: number;
+      updated_at: number;
+    }[];
+    return rows.map((row) => ({
+      id: row.id,
+      root: row.root,
+      rootBlock: row.root_block,
+      payload: JSON.parse(row.payload_json) as unknown,
+      idempotencyKey: row.idempotency_key,
+      attempts: row.attempts,
+      deliveredAt: row.delivered_at,
+      lastError: row.last_error,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  recordRootUpdateAttempt(id: string, result: { delivered: true } | { delivered: false; error: string }): void {
+    this.write("record root update attempt", (db) => {
+      const at = this.now();
+      const updated = result.delivered
+        ? db
+            .prepare(
+              `UPDATE root_update_outbox
+               SET attempts = attempts + 1, delivered_at = ?, last_error = NULL, updated_at = ?
+               WHERE id = ? AND delivered_at IS NULL`,
+            )
+            .run(at, at, id)
+        : db
+            .prepare(
+              `UPDATE root_update_outbox
+               SET attempts = attempts + 1, last_error = ?, updated_at = ?
+               WHERE id = ? AND delivered_at IS NULL`,
+            )
+            .run(result.error, at, id);
+      return updated.changes === 0 ? false : undefined;
+    });
   }
 
   /** Operations a restart must reconcile: anything not provably settled. */

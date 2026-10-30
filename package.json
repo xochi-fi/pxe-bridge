@@ -18,10 +18,18 @@
     "./types": {
       "types": "./dist/types.d.ts",
       "import": "./dist/types.js"
+    },
+    "./attestation": {
+      "types": "./dist/attestation.d.ts",
+      "import": "./dist/attestation.js"
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "vendor/xochi-sdk/xochi-signer-0.5.1.tgz"
+  ],
+  "bundleDependencies": [
+    "@xochi/signer"
   ],
   "scripts": {
     "build": "tsc",
@@ -32,7 +40,8 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "vitest run --config vitest.config.e2e.ts",
-    "test:e2e:up": "docker compose up -d --wait anvil aztec-sandbox && npm run test:e2e; ec=$?; docker compose down; exit $ec",
+    "test:e2e:crash": "E2E_SUITE=crash vitest run --config vitest.config.e2e.ts",
+    "test:e2e:up": "docker compose up -d --wait anvil aztec-sandbox && npm run test:e2e; ec=$?; docker compose down; [ $ec -eq 0 ] || exit $ec; docker compose up -d --wait anvil aztec-sandbox && npm run test:e2e:crash; ec=$?; docker compose down; exit $ec",
     "bridge-fee-juice": "tsx scripts/bridge-fee-juice.ts",
     "top-up-fee-juice": "tsx scripts/top-up-fee-juice.ts",
     "update-allowlist": "tsx scripts/update-allowlist.ts",
@@ -45,6 +54,7 @@
     "@aztec-labs/aztec.js": "6.0.0",
     "@aztec-labs/noir-contracts.js": "6.0.0",
     "@aztec-labs/wallets": "6.0.0",
+    "@xochi/signer": "file:vendor/xochi-sdk/xochi-signer-0.5.1.tgz",
     "better-sqlite3": "^12.11.1",
     "viem": "2.57.1",
     "zod": "^3.23.0"
@@ -58,6 +68,6 @@
     "vitest": "^4.1.4"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   }
 }

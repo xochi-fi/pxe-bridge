@@ -1,13 +1,42 @@
 import { describe, it, expect, beforeAll } from "vitest";
+import { z } from "zod";
 import { AztecClient, deriveAccountKeys } from "../../src/aztec-client.js";
 import {
   SpendingLimitAccountContract,
   type SpendingLimitConfig,
 } from "../../src/spending-limit-account.js";
 import { AllowlistTree } from "../../src/allowlist-tree.js";
+import {
+  AttestationParamsSchema,
+  AttestationProducer,
+  AttestationRpcResponseSchema,
+  MembershipResultSchema,
+  RecipientDeploymentResultSchema,
+  RecipientDescriptorSchema,
+  RootUpdateEnvelopeSchema,
+  RootUpdatePublisher,
+} from "../../src/attestation.js";
+import { Secp256k1ReadinessSigner } from "../../src/attestation-secret.js";
+import {
+  hashRecipientDescriptor,
+  recoverReadinessSigner,
+  verifyReadinessRecord,
+  type ReadinessDomainInputs,
+  type RecipientDescriptor,
+} from "@xochi/signer";
 import type { AccountDeployment } from "../../src/types.js";
 import { SCHNORR_CLASS_ID_6_0_0, assertAccountIdentity } from "../../src/account-identity.js";
+import { SettlementJournal } from "../../src/journal.js";
+import { TransactionLimits } from "../../src/limits.js";
+import { createReadinessObserver } from "../../src/readiness.js";
+import { createApp } from "../../src/server.js";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
+  advanceFinalizedTip,
+  finalizedTimestampMs,
   getTestConfig,
   deployTestToken,
   feeWithHeadroom,
@@ -85,6 +114,55 @@ const UNLISTED_RECIPIENT = "0x" + "22".repeat(32);
 // first touch of a position visibly an addition.
 const ALLOWLIST_SEED = "0x" + "07".repeat(32);
 const SEED_RECIPIENT_INDEX = 137;
+const READINESS_CORRIDOR = {
+  corridorId: "0x" + "c2".repeat(32),
+  corridorRevision: 1,
+  manifestDigest: "0x" + "d2".repeat(32),
+  genesisOrNetworkDigest: "0x" + "e2".repeat(32),
+};
+const ATTESTATION_RECIPIENT_INDEX = 421;
+const ATTESTATION_SIGNER_KEY = "0x" + "31".repeat(32);
+const RecipientFixtureSchema = z.object({
+  descriptor: z.object({
+    vectors: z.array(
+      z.object({
+        name: z.string(),
+        descriptor: RecipientDescriptorSchema,
+      }),
+    ),
+  }),
+  recipientMessage: z.object({
+    bindingMessages: z.array(
+      z.object({
+        name: z.string(),
+        digest: z.string(),
+        signature: z.string(),
+      }),
+    ),
+  }),
+});
+const recipientFixture = RecipientFixtureSchema.parse(
+  JSON.parse(
+    readFileSync(
+      new URL(
+        "../../vendor/xochi-sdk/50e8dc26f8d2c9dff7b0f0f3361fc03fa33cd6fb/shielded-recipient.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  ),
+);
+const attestationDescriptorVector = recipientFixture.descriptor.vectors.find(
+  ({ name }) => name === "aztec-6.0.0-stock",
+)!;
+const attestationBindingVector = recipientFixture.recipientMessage.bindingMessages.find(
+  ({ name }) => name === "aztec-6.0.0-stock binding",
+)!;
+const ATTESTATION_RECIPIENT = attestationDescriptorVector.descriptor.aztecAddress;
+const DEPLOYED_RECIPIENTS = [
+  { address: SEED_RECIPIENT, index: SEED_RECIPIENT_INDEX },
+  { address: ATTESTATION_RECIPIENT, index: ATTESTATION_RECIPIENT_INDEX },
+] as const;
 
 
 describe("spending limit account (e2e)", () => {
@@ -121,7 +199,7 @@ describe("spending limit account (e2e)", () => {
       admin: adminAddress,
       token: tokenAddress,
       allowlistSeed: ALLOWLIST_SEED,
-      allowlistRecipients: [{ address: SEED_RECIPIENT, index: SEED_RECIPIENT_INDEX }],
+      allowlistRecipients: DEPLOYED_RECIPIENTS,
     };
 
     client = new AztecClient(
@@ -151,6 +229,10 @@ describe("spending limit account (e2e)", () => {
         FEE_JUICE_AMOUNT,
         () => mintOne(funderWallet, tokenAddress, adminAddress),
       );
+      await advanceFinalizedTip(
+        config.nodeUrl,
+        () => mintOne(funderWallet, tokenAddress, adminAddress),
+      );
     } catch (err) {
       deployFailure = err;
     }
@@ -164,6 +246,311 @@ describe("spending limit account (e2e)", () => {
     }
     expect(accountAddress).toMatch(/^0x[0-9a-f]{64}$/i);
   });
+
+  it("observes the funded deployment as ready from one finalized reference", async (ctx) => {
+    if (deployFailure) return ctx.skip();
+
+    const observed = new AztecClient(
+      config.nodeUrl,
+      config.secretKey,
+      undefined,
+      {
+        maxAmountPerTx: MAX_PER_TX,
+        dailyLimit: DAILY_LIMIT,
+        admin: adminAddress,
+        token: tokenAddress,
+        allowlistSeed: ALLOWLIST_SEED,
+        allowlistRecipients: DEPLOYED_RECIPIENTS,
+        deployment: await deployedRecord(),
+      },
+      undefined,
+      walletDataDirectory("limit-readiness"),
+    );
+    await observed.connect();
+    const trustedNow = await finalizedTimestampMs(config.nodeUrl);
+
+    const journal = SettlementJournal.open(
+      join(mkdtempSync(join(tmpdir(), "limit-readiness-journal-")), "settlement.sqlite"),
+    );
+    journal.bindAccount(accountAddress, observed.accountPreexisted(), {
+      acknowledgement: `${accountAddress}@${journal.meta().journalId}`,
+    });
+    const observer = createReadinessObserver(observed, {
+      journal,
+      limits: new TransactionLimits({
+        maxAmount: MAX_PER_TX,
+        dailyLimit: DAILY_LIMIT,
+      }),
+      mayBroadcastConfigured: true,
+      corridor: READINESS_CORRIDOR,
+      now: () => trustedNow,
+    });
+    try {
+      const readiness = await observer.observe();
+
+      expect(readiness.reasons, JSON.stringify(readiness, null, 2)).toEqual([]);
+      expect(readiness.ready).toBe(true);
+      expect(readiness.finalized).toMatchObject({
+        blockNumber: expect.stringMatching(/^[1-9]\d*$/),
+        blockHash: expect.stringMatching(/^0x[0-9a-f]{64}$/i),
+        maxAgeSeconds: 7_200,
+      });
+      expect(readiness.inventory.observed).toBe(MINT_AMOUNT.toString());
+      expect(BigInt(readiness.feeRunway.observed!)).toBeGreaterThanOrEqual(
+        BigInt(readiness.feeRunway.required!),
+      );
+
+      journal.close();
+      const withoutFence = await observer.observe();
+      expect(withoutFence.ready).toBe(false);
+      expect(withoutFence.reasons).toContain("writer_fence_lost");
+    } finally {
+      journal.close();
+    }
+  }, 600_000);
+
+  it("attests membership, deployment and RootUpdate from finalized reads", async (ctx) => {
+    if (deployFailure) return ctx.skip();
+    const tree = await AllowlistTree.build(ALLOWLIST_SEED, DEPLOYED_RECIPIENTS);
+    const journal = SettlementJournal.open(
+      join(mkdtempSync(join(tmpdir(), "limit-attestation-journal-")), "settlement.sqlite"),
+    );
+    journal.bindAccount(accountAddress, true, {
+      acknowledgement: `${accountAddress}@${journal.meta().journalId}`,
+    });
+    journal.recordAllowlistSnapshot(tree.root.toString(), DEPLOYED_RECIPIENTS);
+    const attestationClient = new AztecClient(
+      config.nodeUrl,
+      config.secretKey,
+      undefined,
+      {
+        maxAmountPerTx: MAX_PER_TX,
+        dailyLimit: DAILY_LIMIT,
+        admin: adminAddress,
+        token: tokenAddress,
+        allowlistSeed: ALLOWLIST_SEED,
+        allowlistRecipients: DEPLOYED_RECIPIENTS,
+        deployment: await deployedRecord(),
+      },
+      undefined,
+      walletDataDirectory("limit-attestation-account"),
+    );
+    await attestationClient.connect();
+
+    let observed = await attestationClient.observeAttestationChain(
+      undefined,
+      READINESS_CORRIDOR.genesisOrNetworkDigest,
+    );
+    const clockDeadline = Date.now() + 15 * 60_000;
+    while (observed.state === "unknown" && observed.reason === "finalized_tip_from_future") {
+      if (Date.now() >= clockDeadline) {
+        throw new Error("local finalized tip did not return inside the 300-second skew policy");
+      }
+      // An external Anvil clock cannot be advanced with Vitest fake timers.
+      // Wait on the policy condition; never weaken the policy.
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      observed = await attestationClient.observeAttestationChain(
+        undefined,
+        READINESS_CORRIDOR.genesisOrNetworkDigest,
+      );
+    }
+    if (observed.state !== "known") {
+      throw new Error(`attestation observation refused: ${observed.reason}`);
+    }
+    expect(observed.state).toBe("known");
+    const descriptor = RecipientDescriptorSchema.parse({
+      ...attestationDescriptorVector.descriptor,
+      network: observed.value.network,
+    });
+    const digest = hashRecipientDescriptor(descriptor as RecipientDescriptor);
+    const signer = new Secp256k1ReadinessSigner(ATTESTATION_SIGNER_KEY);
+    const producer = new AttestationProducer({
+      probe: attestationClient,
+      journal,
+      allowlistTree: tree,
+      signer,
+      domain: {
+        sourceChainId: "84532",
+        environment: "staging",
+        corridorId: READINESS_CORRIDOR.corridorId,
+        corridorRevision: READINESS_CORRIDOR.corridorRevision,
+        manifestDigest: READINESS_CORRIDOR.manifestDigest,
+        genesisOrNetworkDigest: READINESS_CORRIDOR.genesisOrNetworkDigest,
+      },
+    });
+    const request = AttestationParamsSchema.parse({
+      descriptor,
+      descriptorDigest: digest,
+      recipient: descriptor.aztecAddress,
+      network: observed.value.network,
+      corridor: {
+        corridorId: READINESS_CORRIDOR.corridorId,
+        corridorRevision: READINESS_CORRIDOR.corridorRevision,
+        manifestDigest: READINESS_CORRIDOR.manifestDigest,
+      },
+      recipientAuthorization: {
+        digest: attestationBindingVector.digest,
+        signature: attestationBindingVector.signature,
+      },
+    });
+    const readinessPolicyDomain: ReadinessDomainInputs = {
+      sourceChainId: "84532",
+      environment: "staging",
+      network: observed.value.network,
+      manifestDigest: READINESS_CORRIDOR.manifestDigest,
+    };
+
+    const route = createApp(attestationClient, {
+      apiKey: "e2e-rpc-token",
+      attestationApiKey: "e2e-attestation-token",
+      attestation: producer,
+    });
+    await new Promise<void>((resolve) => route.listen(0, "127.0.0.1", resolve));
+    const routeAddress = route.address();
+    if (!routeAddress || typeof routeAddress === "string") {
+      throw new Error("attestation route did not bind");
+    }
+    const invoke = async (method: string): Promise<unknown> => {
+      const response = await fetch(
+        `http://127.0.0.1:${routeAddress.port}/api/attestation`,
+        {
+          method: "POST",
+          headers: {
+            authorization: "Bearer e2e-attestation-token",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ jsonrpc: "2.0", id: method, method, params: request }),
+        },
+      );
+      expect(response.status).toBe(200);
+      const envelope = AttestationRpcResponseSchema.parse(await response.json());
+      if ("error" in envelope) throw new Error(envelope.error.message);
+      return envelope.result;
+    };
+    try {
+      const membership = MembershipResultSchema.parse(
+        await invoke("aztec_attestRecipientMembership"),
+      );
+      if ("status" in membership) throw new Error(membership.reason);
+      expect(
+        verifyReadinessRecord("Membership", membership, {
+          domain: readinessPolicyDomain,
+          expectedSigner: signer.address,
+          expected: { descriptorDigest: digest, root: tree.root.toString() },
+          now: membership.attestedAt,
+          maxAgeSeconds: 7_200,
+          maxFutureSkewSeconds: 300,
+          minBlock: observed.value.finalized.blockNumber,
+        }).signer,
+      ).toBe(signer.address);
+
+      const deployment = RecipientDeploymentResultSchema.parse(
+        await invoke("aztec_attestRecipientDeployment"),
+      );
+      expect(deployment).toMatchObject({ deployed: false });
+      if ("status" in deployment) throw new Error(deployment.reason);
+      expect(
+        recoverReadinessSigner(
+          "RecipientDeployment",
+          deployment,
+          producer.domainFor(observed.value.network),
+        ),
+      ).toBe(signer.address);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        route.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+
+    let rootPayload: unknown;
+    const relay = createServer((request_, response) => {
+      let body = "";
+      request_.setEncoding("utf8");
+      request_.on("data", (chunk: string) => (body += chunk));
+      request_.on("end", () => {
+        rootPayload = JSON.parse(body) as unknown;
+        response.writeHead(200).end();
+      });
+    });
+    await new Promise<void>((resolve) => relay.listen(0, "127.0.0.1", resolve));
+    const relayAddress = relay.address();
+    if (!relayAddress || typeof relayAddress === "string") {
+      throw new Error("attestation relay did not bind");
+    }
+    try {
+      await new RootUpdatePublisher(producer, attestationClient, journal, {
+        url: `http://127.0.0.1:${relayAddress.port}/root`,
+        token: "e2e-root-token",
+      }).tick();
+      const envelope = RootUpdateEnvelopeSchema.parse(rootPayload);
+      expect(envelope.corridor_id).toBe(READINESS_CORRIDOR.corridorId);
+      expect(envelope.corridor_revision).toBe(READINESS_CORRIDOR.corridorRevision);
+      const payload = envelope.record;
+      expect(
+        verifyReadinessRecord("RootUpdate", payload, {
+          domain: readinessPolicyDomain,
+          expectedSigner: signer.address,
+          expected: { root: tree.root.toString() },
+          now: payload.attestedAt,
+          maxAgeSeconds: 7_200,
+          maxFutureSkewSeconds: 300,
+          minBlock: observed.value.finalized.blockNumber,
+        }).signer,
+      ).toBe(signer.address);
+      expect(payload.rootBlock).toBe(observed.value.finalized.blockNumber);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        relay.close((error) => (error ? reject(error) : resolve())),
+      );
+      journal.close();
+    }
+  }, 600_000);
+
+  it("fails readiness on finalized allowlist-root drift", async (ctx) => {
+    if (deployFailure) return ctx.skip();
+
+    const drifted = new AztecClient(
+      config.nodeUrl,
+      config.secretKey,
+      undefined,
+      {
+        maxAmountPerTx: MAX_PER_TX,
+        dailyLimit: DAILY_LIMIT,
+        admin: adminAddress,
+        token: tokenAddress,
+        allowlistSeed: ALLOWLIST_SEED,
+        allowlistRecipients: [{ address: UNLISTED_RECIPIENT, index: 511 }],
+        deployment: await deployedRecord(),
+      },
+      undefined,
+      walletDataDirectory("limit-readiness-root-drift"),
+    );
+    await drifted.connect();
+    const trustedNow = await finalizedTimestampMs(config.nodeUrl);
+    const journal = SettlementJournal.open(
+      join(mkdtempSync(join(tmpdir(), "limit-root-drift-journal-")), "settlement.sqlite"),
+    );
+    journal.bindAccount(accountAddress, drifted.accountPreexisted(), {
+      acknowledgement: `${accountAddress}@${journal.meta().journalId}`,
+    });
+    try {
+      const readiness = await createReadinessObserver(drifted, {
+        journal,
+        limits: new TransactionLimits({
+          maxAmount: MAX_PER_TX,
+          dailyLimit: DAILY_LIMIT,
+        }),
+        mayBroadcastConfigured: true,
+        corridor: READINESS_CORRIDOR,
+        now: () => trustedNow,
+      }).observe();
+      expect(readiness.ready).toBe(false);
+      expect(readiness.reasons).toContain("allowlist_root_mismatch");
+      expect(readiness.finalized.blockNumber).toMatch(/^[1-9]\d*$/);
+    } finally {
+      journal.close();
+    }
+  }, 600_000);
 
   // The restart the allowlist runbook prescribes. The address used to derive
   // from live configuration, so this client, with a different set and
@@ -219,9 +606,7 @@ describe("spending limit account (e2e)", () => {
 
   /** The record an operator would have persisted from the deployment above. */
   async function deployedRecord(): Promise<AccountDeployment> {
-    const tree = await AllowlistTree.build(ALLOWLIST_SEED, [
-      { address: SEED_RECIPIENT, index: SEED_RECIPIENT_INDEX },
-    ]);
+    const tree = await AllowlistTree.build(ALLOWLIST_SEED, DEPLOYED_RECIPIENTS);
     return {
       address: accountAddress,
       maxAmountPerTx: MAX_PER_TX.toString(),
@@ -450,8 +835,10 @@ describe("spending limit account (e2e)", () => {
   // send, so a removal simply disappeared from the hint and is_allowlisted
   // rejected the recipient in private. There is no set on chain to re-read any
   // more, so the bridge instead compares the root it can build against the root
-  // the account stores, and an admin change it has not been told about shows up
-  // as drift rather than as an unlisted recipient.
+  // the account stores. Hard readiness (#46) makes that comparison against the
+  // FINALIZED root, so a revocation inside the finality lag reaches the send,
+  // and the account's own public check refuses it in the wallet's public
+  // simulation, before anything is broadcast.
   //
   // That is the honest failure. The bridge cannot know whether the recipient
   // was revoked, whether someone else was added, or whether its configuration
@@ -467,7 +854,7 @@ describe("spending limit account (e2e)", () => {
         recipient: SEED_RECIPIENT,
         amount: "1000",
       }),
-    ).rejects.toThrow("Allowlist root mismatch");
+    ).rejects.toThrow("Allowlist changed since this transaction was proven");
   }, 600_000);
 
   // ADMIN AUTH. apply_limits originally had no caller check at all, so anyone

@@ -74,15 +74,14 @@ describe("limits integration through server", () => {
     expect(body.result?.observation.state).toBe("included");
   });
 
-  it("writes output-only audit lines for both", async () => {
+  it("writes identifier-free output-only audit lines for both", async () => {
     const lines = (await readFile(auditPath, "utf8")).trim().split("\n").map((l) => JSON.parse(l));
-    expect(lines.find((l) => l.operationId === "over")).toMatchObject({
-      observation: "not_submitted",
-      amount: "10001",
-    });
-    expect(lines.find((l) => l.operationId === "within")).toMatchObject({
-      observation: "included",
-      amount: "5000",
-    });
+    expect(lines.map((line) => line.observation)).toEqual(["not_submitted", "included"]);
+    for (const line of lines) {
+      expect(Object.keys(line).every((key) =>
+        ["timestamp", "method", "observation"].includes(key)
+      )).toBe(true);
+    }
+    expect(JSON.stringify(lines)).not.toMatch(/over|within|10001|5000/);
   });
 });

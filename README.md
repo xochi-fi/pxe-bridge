@@ -51,17 +51,23 @@ EVM Solver --JSON-RPC--> pxe-bridge --Aztec SDK--> Aztec L2 Node
 | ----------------------- | -------- | ----------------------- | ---------------------------------------------- |
 | `PXE_BRIDGE_SECRET_KEY` | Yes      | --                      | 32-byte hex key, below the BN254 Fr modulus    |
 | `PXE_BRIDGE_API_KEY`    | No       | --                      | Bearer token for RPC auth (warns if unset)     |
-| `PXE_BRIDGE_ADMIN_KEY`  | No       | --                      | Bearer token for `POST /admin/resume`          |
+| `PXE_BRIDGE_RECOVERY_API_KEY` | No | -- | Separate bearer token for reserved `POST /api/recovery` intake; startup refuses equality with every other credential |
+| `PXE_BRIDGE_ADMIN_KEY`  | No       | --                      | Separate bearer token for `POST /admin/resume`; startup refuses equality with the RPC key |
 | `AZTEC_NODE_URL`        | No       | `http://localhost:8080` | Aztec L2 node RPC endpoint                     |
 | `PXE_BRIDGE_HOST`       | No       | `127.0.0.1`             | Bind address (localhost-only by default)       |
 | `PXE_BRIDGE_PORT`       | No       | `8547`                  | HTTP listen port (0-65535)                     |
 | `PXE_BRIDGE_ACCOUNT_ADDRESS` | Prod | --                   | The bridge account's recorded address; startup refuses any other |
 | `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY` | Prod, first deploy only | -- | `1` lets production start without a recorded address |
-| `PXE_BRIDGE_MIN_FEE_JUICE` | No    | --                      | Fee juice floor; below it `/status` reports `degraded` and a warning is logged |
+| `PXE_BRIDGE_ACCOUNT_DEPLOYMENT` | Operational settlement and attestations | -- | Durable spending-limit deployment record; startup refuses attestations and hard readiness refuses new settlements without it |
+| `PXE_BRIDGE_ATTESTATION_API_KEY` | With attestations | -- | Dedicated Bearer token for `POST /api/attestation`; must differ from RPC/admin/outbound tokens |
+| `PXE_BRIDGE_ATTESTATION_SECRET_ARN` | Prod attestations | -- | AWS Secrets Manager secp256k1 key used only for readiness records; resolved material must differ from all custody and bearer secrets |
+| `PXE_BRIDGE_ATTESTATION_SECRET_KEY` | Dev attestations | -- | Dev-only nonzero secp256k1 scalar with the same separation rule; refused in production |
+| `PXE_BRIDGE_ATTESTATION_SOURCE_CHAIN_ID` / `PXE_BRIDGE_ATTESTATION_ENVIRONMENT` | With attestations | -- | Trusted readiness EIP-712 domain inputs |
+| `PXE_BRIDGE_ATTESTATION_RELAY_URL` / `PXE_BRIDGE_ATTESTATION_RELAY_TOKEN` | With attestations | -- | RootUpdate relay (HTTPS or loopback HTTP) and separate outbound credential |
 
-The secret key is a BN254 scalar, not an arbitrary 32 bytes. About 81% of
-random 32-byte values are at or above the field modulus and are rejected at
-startup, so generate one by retrying until it is in range:
+The bridge spending secret key is a BN254 scalar, not an arbitrary 32 bytes.
+About 81% of random 32-byte values are at or above the field modulus and are
+rejected at startup, so generate one by retrying until it is in range:
 
 ```bash
 node -e 'const {randomBytes} = require("crypto");
@@ -69,6 +75,40 @@ const MODULUS = BigInt("0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f5
 let k; do { k = randomBytes(32).toString("hex"); } while (BigInt("0x" + k) >= MODULUS);
 console.log("0x" + k);'
 ```
+
+### Readiness attestations
+
+Attestations are optional and hidden (`404`) unless every attestation variable
+above is configured together with the main RPC key, journal, settlement
+corridor, spending-limit account and durable account deployment record.
+`POST /api/attestation` accepts only `aztec_attestRecipientMembership` and
+`aztec_attestRecipientDeployment`. Its strict params are `{descriptor,
+descriptorDigest, recipient, network, corridor,
+recipientAuthorization:{digest,signature}}`; source-wallet/chain/binding
+fields, block selectors, witnesses, salts, indexes and unknown fields are
+refused. Network and corridor are compared with trusted local state; they
+cannot select the signing domain or finalized observation.
+
+The bridge validates the pinned `aztec-6.0.0` descriptor, derived recipient,
+recorded solver identity/class/initialization, synchronized retained finalized
+history and recipient Schnorr authorization before reading the finalized root
+or recipient deployment. The exact finalized number/hash is nonzero and its
+timestamp uses the shared 7,200-second age and 300-second future-skew policy.
+A successful JSON-RPC `result` is the exact signed `@xochi/signer` Membership
+or RecipientDeployment record; uncertainty returns HTTP 503 with JSON-RPC
+error `-32010` and unsigned typed `data: {signed:false,refusal}`. The journal
+stores durable allowlist snapshots and a write-before-send RootUpdate outbox.
+The relay POST body is
+`{corridor_id,corridor_revision,record:<signed RootUpdate>}`; only the relay's
+own `204` (no redirects) is acceptance. An undelivered current-root envelope
+retries unchanged after restart, each later process still pushes the current
+root once, and an unchanged root is re-signed once its latest record is 3,600
+seconds old, so it never ages past consumers' 7,200 seconds. Attestation audit lines contain only
+method, outcome and typed reason.
+
+Riddler/Worker consumers import the strict Zod schemas and inferred types from
+`@xochi-fi/pxe-bridge/attestation`; readiness policy is maximum age 7,200
+seconds and future skew 300 seconds.
 
 ### Recording the account address
 
@@ -547,7 +587,7 @@ See `SECURITY.md` for the incident runbook.
 
 ## API Reference
 
-All methods use JSON-RPC 2.0 over HTTP POST to `/` or `/api/rpc`. Requests require `Content-Type: application/json`. When `PXE_BRIDGE_API_KEY` is set, include `Authorization: Bearer <key>`.
+Methods use JSON-RPC 2.0 over HTTP POST to `/` or `/api/rpc`; use the dedicated `/api/recovery` route for `aztec_getSettlement` so reconciliation retains reserved body, rate-limit, and backend capacity. The dedicated route is disabled unless `PXE_BRIDGE_RECOVERY_API_KEY` is set and requires that credential. The legacy routes still accept reconciliation with `PXE_BRIDGE_API_KEY`, but use ordinary body, rate-limit, and backend capacity. Requests require `Content-Type: application/json`.
 
 ### `aztec_createNote`
 
@@ -633,43 +673,66 @@ Requests without the header behave exactly as before: every one executes.
 
 Returns the connected Aztec node version string.
 
-### Health Check
+### Liveness and operational readiness
 
-Two unauthenticated, rate-limited endpoints share one body:
+`GET /status` is the public, unauthenticated, process-local liveness endpoint.
+The listener starts before remote secret resolution and before the Aztec wallet
+connects. While initialization is incomplete, `/status` still returns
+`{"status":"ok"}` (HTTP 200), authenticated `/ready` returns 503 `initializing`,
+and every other route returns 503. `/status`
+performs no Aztec RPC. Keep container restarts on this route: a bridge that has
+lost settlement readiness must remain up to observe and reconcile already
+marked operations.
 
-- `GET /status` is **liveness**: 200 whenever the node answers, 503
-  `{ status: "starting", ready: false }` until it does. Keep container
-  restarts on it: a bridge with journal writes disabled must stay up to serve
-  `aztec_getSettlement`.
-- `GET /ready` is **readiness**: 200 only when every settlement prerequisite
-  holds -- the journal configured and writable, the may-broadcast endpoint
-  and the corridor configured -- and 503 otherwise. Gate traffic and deploys
-  on it.
+`GET /ready` is the authenticated operational endpoint. It requires the same
+`Authorization: Bearer <PXE_BRIDGE_API_KEY>` header as JSON-RPC and returns the
+authoritative readiness projection. Every Aztec JSON-RPC call has a 10-second
+aborting transport deadline; the full readiness projection has a 20-second
+deadline and fails closed as HTTP 503 `readiness_observation_failed`.
+Concurrent callers share one observation, and a timeout aborts its transport
+before a later probe can start, so probes cannot accumulate Aztec RPCs. HTTP
+200 means new settlement admission is allowed; HTTP 503 means it is not.
+Authentication failures use the separate auth-failure rate limiter and expose
+no operational state.
 
-The body is `{ status, ready, notReady?, version, feeJuice: { balance, low? },
-journal: { writable, reason? }, settlement: { mayBroadcast, corridor } }`.
-`notReady` lists every unmet prerequisite (`journal_unconfigured`,
-`journal_<reason>`, `may_broadcast_unconfigured`, `corridor_unconfigured`).
-`status` is `ok` only when ready and fee juice is not low, otherwise
-`degraded`. `balance` is the solver account's fee juice as a decimal string,
-cached for 30s so the unauthenticated endpoints do not query the node per
-request, and `null` if the last read failed (never `low` then). With
-`PXE_BRIDGE_MIN_FEE_JUICE` set, `feeJuice.low` is added while the balance is
-below it; low fee juice degrades the bridge without making it unready, since
-restarting it does not add fee juice. Top up with `npm run top-up-fee-juice`
-before it runs out, since every transfer fails once it does.
+Hard readiness requires design-A `spending_limit` mode and its durable
+deployment record; the exact derived account address and compiled class;
+initialized, unpaused account state; exact token, allowlist root and live
+limits; sufficient finalized token inventory and rolling-window headroom;
+sufficient fee juice; a healthy writable journal with its exclusive writer
+fence; complete network identity; node transaction readiness; and synchronized
+world-state history. All contract, storage, inventory and fee observations use
+one exact, nonzero `finalized` block number and hash. There is no
+`proven`/`latest` fallback. That finalized block's timestamp must be no more
+than 7,200 seconds old or 300 seconds ahead of local time; a missing or
+unreadable value is not ready.
 
-```jsonc
-// /status 200, /ready 200
-{ "status": "ok", "ready": true, "version": "6.0.0", "feeJuice": { "balance": "999000000000000000" },
-  "journal": { "writable": true }, "settlement": { "mayBroadcast": "configured", "corridor": "configured" } }
-// /status 200, /ready 503: no corridor configured
-{ "status": "degraded", "ready": false, "notReady": ["corridor_unconfigured"], "version": "6.0.0",
-  "feeJuice": { "balance": "10" }, "journal": { "writable": true },
-  "settlement": { "mayBroadcast": "configured", "corridor": "unconfigured" } }
-// both 503, not connected yet
-{ "status": "starting", "ready": false }
+The fee runway shown by `/ready` reports both observed and required fee juice.
+Required fee juice is:
+
 ```
+(pre-mark in-flight reservations + durable may-broadcast operations
+  + ceil(rolling-window headroom / live per-tx cap))
+  * (transaction gas limits * predicted maximum fees per gas)
+```
+
+Inventory likewise reports observed finalized balance and the volume still
+admissible, including reservations. A static minimum-balance setting is not a
+substitute for this operation-count-based policy.
+
+`aztec_createNote` invokes this same observer before proving or broadcasting
+new work and returns JSON-RPC `-32006` with
+`data.reason: "bridge_not_ready"`, stable `data.reasons`, and the established
+typed `data.observation` (`not_submitted`, with the primary readiness reason).
+Readiness loss does not erase or redirect journaled operations:
+`aztec_getSettlement` and marked-operation observation remain available, but a
+marked operation is never replayed when one node reports it absent. An already
+admitted `prepared` operation keeps resuming its exact journaled bytes, held
+only on per-operation facts
+(journal or fence lost, network mismatch, account paused, on-chain root not
+the configured one, inventory below its amount, rolling window full; see
+docs/settlement-operations.md). A new operation cannot pass admission while
+the bridge is unready.
 
 The Docker `HEALTHCHECK` reads only `/status`'s HTTP code (`curl -sf`).
 
@@ -678,7 +741,8 @@ The Docker `HEALTHCHECK` reads only `/status`'s HTTP code (`curl -sf`).
 - Binds to `127.0.0.1` by default -- set `PXE_BRIDGE_HOST=0.0.0.0` only behind a reverse proxy
 - Set `PXE_BRIDGE_API_KEY` for production -- without it, anyone with network access can create notes
 - `Content-Type: application/json` required on POST requests (prevents browser CSRF)
-- Rate limited to 60 RPC requests/min
+- Ordinary RPC and journal reconciliation are each rate limited to 60 requests/min
+- At most 16 ordinary/attestation bodies and 16 recovery bodies are received or parsed concurrently; only the distinct `PXE_BRIDGE_RECOVERY_API_KEY` can reserve recovery intake before its body is parsed
 - Secret key zeroed from memory after wallet derivation
 - Docker image runs as non-root user
 

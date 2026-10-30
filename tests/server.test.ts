@@ -1,15 +1,21 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import type { Server } from "node:http";
-import { createApp, type ServerOptions } from "../src/server.js";
+import { request, type Server } from "node:http";
+import {
+  assertDistinctCredentials,
+  createApp,
+  createInitializationApp,
+  type ServerOptions,
+} from "../src/server.js";
 import { TransactionLimits } from "../src/limits.js";
-import { SettlementJournal } from "../src/journal.js";
 import type { MayBroadcastClient } from "../src/may-broadcast.js";
+import { RPC_ERRORS } from "../src/types.js";
 import { rpcJson } from "./helpers.js";
 import {
   FakeAztecClient as SettlementFakeClient,
   openBoundJournal,
+  fakeMayBroadcast,
+  readyObserver,
   settlementContext,
-  tempJournalPath,
   v1Params,
 } from "./settlement-fixtures.js";
 
@@ -23,15 +29,6 @@ class FakeAztecClient extends SettlementFakeClient {
   override async getVersion(): Promise<string> {
     if (this.versionError) throw this.versionError;
     return this.versionResult;
-  }
-
-  feeJuiceBalance = 1000n;
-  feeJuiceError: Error | null = null;
-  feeJuiceReads = 0;
-  override async getFeeJuiceBalance(): Promise<bigint> {
-    this.feeJuiceReads++;
-    if (this.feeJuiceError) throw this.feeJuiceError;
-    return this.feeJuiceBalance;
   }
 }
 
@@ -69,28 +66,52 @@ function jsonPost(url: string, body: string, extraHeaders: Record<string, string
   });
 }
 
+function rawStatus(port: number, path: string): Promise<number | undefined> {
+  return new Promise((resolve, reject) => {
+    const req = request({ host: "127.0.0.1", port, method: "GET", path });
+    req.on("response", (response) => {
+      response.resume();
+      response.on("end", () => resolve(response.statusCode));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+describe("bearer credential isolation", () => {
+  it("requires every configured bearer credential to be distinct", () => {
+    expect(() =>
+      assertDistinctCredentials([
+        ["PXE_BRIDGE_API_KEY", "shared"],
+        ["PXE_BRIDGE_MAY_BROADCAST_TOKEN", "shared"],
+      ])
+    ).toThrow(
+      "PXE_BRIDGE_MAY_BROADCAST_TOKEN must differ from PXE_BRIDGE_API_KEY",
+    );
+    expect(() =>
+      assertDistinctCredentials([
+        ["PXE_BRIDGE_API_KEY", "rpc"],
+        ["PXE_BRIDGE_ADMIN_KEY", "admin"],
+        ["PXE_BRIDGE_MAY_BROADCAST_TOKEN", "outbound"],
+      ])
+    ).not.toThrow();
+  });
+});
+
 describe("HTTP server", () => {
   describe("GET /status", () => {
-    it("returns ok with version", async () => {
+    it("returns process-local liveness", async () => {
       const res = await fetch(`${baseUrl}/status`);
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body).toEqual({
-        status: "ok",
-        ready: true,
-        version: "4.1.3",
-        feeJuice: { balance: "1000" },
-        journal: { writable: true },
-        settlement: { mayBroadcast: "configured", corridor: "configured" },
-      });
+      expect(body).toEqual({ status: "ok" });
     });
 
-    it("returns 503 when client errors", async () => {
+    it("does not inherit Aztec RPC failures", async () => {
       client.versionError = new Error("not ready");
       const res = await fetch(`${baseUrl}/status`);
-      expect(res.status).toBe(503);
-      const body = await res.json();
-      expect(body).toEqual({ status: "starting", ready: false });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ status: "ok" });
       client.versionError = null;
     });
 
@@ -101,18 +122,13 @@ describe("HTTP server", () => {
   });
 
   describe("GET /ready", () => {
-    it("answers 200 only when every settlement prerequisite holds", async () => {
-      const res = await fetch(`${baseUrl}/ready`);
-      expect(res.status).toBe(200);
-      expect(await res.json()).toMatchObject({ status: "ok", ready: true });
-    });
-
-    it("answers 503 while the node is not answering", async () => {
-      client.versionError = new Error("not ready");
+    it("never exposes operational detail without a configured API key", async () => {
       const res = await fetch(`${baseUrl}/ready`);
       expect(res.status).toBe(503);
-      expect(await res.json()).toEqual({ status: "starting", ready: false });
-      client.versionError = null;
+      expect(await res.json()).toEqual({
+        ready: false,
+        reasons: ["api_key_unconfigured"],
+      });
     });
   });
 
@@ -298,7 +314,12 @@ describe("HTTP server with auth", () => {
 
   beforeAll(async () => {
     authClient = new FakeAztecClient();
-    authServer = createApp(authClient, { apiKey: TEST_API_KEY });
+    const settlement = settlementContext(openBoundJournal());
+    authServer = createApp(authClient, {
+      apiKey: TEST_API_KEY,
+      settlement,
+      readiness: settlement.readiness,
+    });
     await new Promise<void>((resolve) => {
       authServer.listen(0, () => {
         const addr = authServer.address();
@@ -335,9 +356,581 @@ describe("HTTP server with auth", () => {
     expect(body.result).toBe("4.1.3");
   });
 
+  it("authenticates /ready and serves the authoritative projection", async () => {
+    expect((await fetch(`${authBaseUrl}/ready`)).status).toBe(401);
+    const res = await fetch(`${authBaseUrl}/ready`, {
+      headers: { Authorization: `Bearer ${TEST_API_KEY}` },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      ready: true,
+      nodeVersion: "6.0.0",
+      account: { address: expect.any(String), classId: expect.any(String) },
+    });
+  });
+
   it("allows /status without auth", async () => {
     const res = await fetch(`${authBaseUrl}/status`);
     expect(res.status).toBe(200);
+  });
+});
+
+describe("public liveness isolation", () => {
+  it("does not consume authenticated capacity or call the Aztec client", async () => {
+    const key = "liveness-isolation-key";
+    const readiness = readyObserver();
+    const client = new FakeAztecClient();
+    client.versionError = new Error("public liveness must not call getVersion");
+    const settlement = settlementContext(openBoundJournal(), undefined, { readiness });
+    const srv = createApp(client, { apiKey: key, settlement, readiness });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+
+    try {
+      for (let i = 0; i < 60; i++) {
+        expect((await fetch(`${url}/status`)).status).toBe(200);
+      }
+      expect((await fetch(`${url}/status`)).status).toBe(429);
+
+      const ready = await fetch(`${url}/ready`, {
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      expect(ready.status).toBe(200);
+      expect(await ready.json()).toMatchObject({ ready: true });
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+  it("aborts one shared hung readiness observation and recovers", async () => {
+    const key = "bounded-readiness-key";
+    let observations = 0;
+    let hang = true;
+    const healthy = readyObserver();
+    const readiness = {
+      observe: (signal?: AbortSignal) => {
+        observations += 1;
+        if (!hang) return healthy.observe(signal);
+        return new Promise<never>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      },
+    };
+    const client = new FakeAztecClient();
+    const settlement = settlementContext(openBoundJournal(), undefined, { readiness });
+    const srv = createApp(client, {
+      apiKey: key,
+      readiness,
+      settlement,
+      readinessTimeoutMs: 10,
+      responseTimeoutMs: 1_000,
+    });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+
+    try {
+      const [ready, rpc] = await Promise.all([
+        fetch(`${url}/ready`, {
+          headers: { Authorization: `Bearer ${key}` },
+        }),
+        jsonPost(url, rpcBody("aztec_createNote", [v1Params()]), {
+          Authorization: `Bearer ${key}`,
+          "Idempotency-Key": "op-1",
+        }),
+      ]);
+      expect(ready.status).toBe(503);
+      expect(await ready.json()).toEqual({
+        ready: false,
+        reasons: ["readiness_observation_failed"],
+      });
+      expect((await rpcJson(rpc)).error?.code).toBe(-32006);
+      expect(observations).toBe(1);
+
+      hang = false;
+      const recovered = await fetch(`${url}/ready`, {
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      expect(recovered.status).toBe(200);
+      expect(await recovered.json()).toMatchObject({ ready: true });
+      expect(observations).toBe(2);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+  it("serves only process liveness while initialization is incomplete", async () => {
+    const key = "initializing-key";
+    const client = new FakeAztecClient();
+    const srv = createApp(client, {
+      apiKey: key,
+      initialized: () => false,
+    });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+
+    try {
+      expect(await (await fetch(`${url}/status`)).json()).toEqual({ status: "ok" });
+      expect((await fetch(`${url}/ready`)).status).toBe(401);
+      const ready = await fetch(`${url}/ready`, {
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      expect(ready.status).toBe(503);
+      expect(await ready.json()).toEqual({ ready: false, reasons: ["initializing"] });
+
+      const rpc = await jsonPost(url, rpcBody("aztec_getVersion"), {
+        Authorization: `Bearer ${key}`,
+      });
+      expect(rpc.status).toBe(503);
+      expect(await rpc.json()).toEqual({ error: "Service initializing" });
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+  it("serves authenticated startup health before application assembly", async () => {
+    const key = "bootstrap-key";
+    const srv = createInitializationApp(key);
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+
+    try {
+      expect(await (await fetch(`${url}/status`)).json()).toEqual({ status: "ok" });
+      expect((await fetch(`${url}/ready`)).status).toBe(401);
+      const ready = await fetch(`${url}/ready`, {
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      expect(ready.status).toBe(503);
+      expect(await ready.json()).toEqual({ ready: false, reasons: ["initializing"] });
+      expect((await jsonPost(url, rpcBody("aztec_getVersion"))).status).toBe(503);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+  it("bounds all non-health traffic during early startup", async () => {
+    const srv = createInitializationApp("bootstrap-rate-key");
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+
+    try {
+      for (let i = 0; i < 60; i++) {
+        expect((await fetch(`${url}/not-ready`)).status).toBe(503);
+      }
+      expect((await fetch(`${url}/not-ready`)).status).toBe(429);
+      expect((await fetch(`${url}/status`)).status).toBe(200);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+  it("refuses a malformed startup request target without crashing", async () => {
+    const srv = createInitializationApp("bootstrap-target-key");
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    if (!addr || typeof addr === "string") throw new Error("server did not bind TCP");
+
+    try {
+      for (let i = 0; i < 60; i++) {
+        expect(await rawStatus(addr.port, "http://localhost:99999/")).toBe(400);
+      }
+      expect(await rawStatus(addr.port, "http://localhost:99999/")).toBe(429);
+      expect((await fetch(`http://127.0.0.1:${addr.port}/status`)).status).toBe(200);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+
+  it("rate-limits malformed targets after application assembly", async () => {
+    const srv = createApp(new FakeAztecClient());
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    if (!addr || typeof addr === "string") throw new Error("server did not bind TCP");
+
+    try {
+      for (let i = 0; i < 60; i++) {
+        expect(await rawStatus(addr.port, "http://localhost:99999/")).toBe(400);
+      }
+      expect(await rawStatus(addr.port, "http://localhost:99999/")).toBe(429);
+      expect((await fetch(`http://127.0.0.1:${addr.port}/status`)).status).toBe(200);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+  it("keeps malformed method requests off the valid RPC budget", async () => {
+    const key = "invalid-method-budget-key";
+    const srv = createApp(new FakeAztecClient(), { apiKey: key });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+    const headers = { Authorization: `Bearer ${key}` };
+
+    try {
+      for (let i = 0; i < 15; i++) {
+        const response = await jsonPost(url, rpcBody("aztec_createNote", [{}]), headers);
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({
+          error: { code: RPC_ERRORS.INVALID_PARAMS },
+        });
+      }
+      for (let i = 0; i < 15; i++) {
+        const operationId = `mismatched-operation-${i}`;
+        const response = await jsonPost(
+          url,
+          rpcBody("aztec_createNote", [v1Params({ operationId })]),
+          headers,
+        );
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({
+          error: {
+            code: RPC_ERRORS.INVALID_PARAMS,
+            data: { reason: "operation_id_mismatch" },
+          },
+        });
+      }
+      for (let i = 0; i < 15; i++) {
+        const response = await jsonPost(url, rpcBody("aztec_getVersion", [{}]), headers);
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({
+          error: { code: RPC_ERRORS.INVALID_PARAMS },
+        });
+      }
+      for (let i = 0; i < 15; i++) {
+        const response = await jsonPost(url, rpcBody("unknown_method", []), headers);
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({
+          error: { code: RPC_ERRORS.METHOD_NOT_FOUND },
+        });
+      }
+      const invalidRateLimited = await jsonPost(url, rpcBody("unknown_method", []), headers);
+      expect(invalidRateLimited.status).toBe(429);
+
+      const valid = await jsonPost(url, rpcBody("aztec_getVersion", []), headers);
+      expect(valid.status).toBe(200);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+  it("caps backend RPC work that outlives response deadlines", async () => {
+    const key = "backend-cap-key";
+    const stuck = new FakeAztecClient();
+    stuck.getVersion = () => new Promise<string>(() => {});
+    const srv = createApp(stuck, {
+      apiKey: key,
+      responseTimeoutMs: 10,
+    });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+    const call = () =>
+      jsonPost(url, rpcBody("aztec_getVersion"), {
+        Authorization: `Bearer ${key}`,
+      });
+
+    try {
+      const timedOut = await Promise.all(Array.from({ length: 16 }, call));
+      expect(timedOut.every((response) => response.status === 504)).toBe(true);
+      expect((await call()).status).toBe(503);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+  it("bounds request bodies before method classification", async () => {
+    const key = "body-cap-key";
+    const recoveryKey = "body-cap-recovery-key";
+    const srv = createApp(new FakeAztecClient(), {
+      apiKey: key,
+      recoveryApiKey: recoveryKey,
+      readiness: readyObserver(),
+    });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+    const held: ReturnType<typeof request>[] = [];
+
+    try {
+      for (let i = 0; i < 16; i++) {
+        const req = request(url, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${key}`,
+            "Content-Type": "application/json",
+          },
+        });
+        held.push(req);
+        await new Promise<void>((resolve, reject) => {
+          req.once("error", reject);
+          req.once("socket", (socket) => {
+            const sendPartialBody = (): void => {
+              req.flushHeaders();
+              req.write(Buffer.alloc(64 * 1024 + 1, "x"));
+              resolve();
+            };
+            if (socket.connecting) socket.once("connect", sendPartialBody);
+            else sendPartialBody();
+          });
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+
+      const ready = await fetch(`${url}/ready`, {
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      expect(ready.status).toBe(503);
+      expect(await ready.json()).toMatchObject({
+        ready: false,
+        reasons: expect.arrayContaining(["backend_capacity_exhausted"]),
+      });
+
+      const overflow = await jsonPost(url, rpcBody("aztec_getVersion", []), {
+        Authorization: `Bearer ${key}`,
+      });
+      expect(overflow.status).toBe(503);
+
+      const recovery = await jsonPost(
+        `${url}/api/recovery`,
+        rpcBody("aztec_getSettlement", [{}]),
+        { Authorization: `Bearer ${recoveryKey}` },
+      );
+      expect(recovery.status).toBe(200);
+    } finally {
+      for (const req of held) req.destroy();
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+  it("preserves dedicated recovery rate capacity for valid requests", async () => {
+    const key = "recovery-invalid-budget-key";
+    const recoveryKey = "recovery-invalid-budget-reserved-key";
+    const srv = createApp(new FakeAztecClient(), {
+      apiKey: key,
+      recoveryApiKey: recoveryKey,
+    });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+    const headers = { Authorization: `Bearer ${recoveryKey}` };
+
+    const ordinaryHeaders = { Authorization: `Bearer ${key}` };
+
+    try {
+      const ordinaryCaller = await jsonPost(
+        `${url}/api/recovery`,
+        rpcBody("aztec_getSettlement", [
+          { version: "pxe-bridge.settlement.v1", operationId: "wrong-credential" },
+        ]),
+        ordinaryHeaders,
+      );
+      expect(ordinaryCaller.status).toBe(401);
+
+      for (let i = 0; i < 30; i++) {
+        const invalidMethod = await jsonPost(
+          `${url}/api/recovery`,
+          rpcBody("aztec_getVersion", []),
+          headers,
+        );
+        expect(invalidMethod.status).toBe(400);
+      }
+      for (let i = 0; i < 30; i++) {
+        const invalidParams = await jsonPost(
+          `${url}/api/recovery`,
+          rpcBody("aztec_getSettlement", [{}]),
+          headers,
+        );
+        expect(invalidParams.status).toBe(200);
+        expect(await invalidParams.json()).toMatchObject({
+          error: { code: RPC_ERRORS.INVALID_PARAMS },
+        });
+      }
+      const invalidRateLimited = await jsonPost(
+        `${url}/api/recovery`,
+        rpcBody("aztec_getVersion", []),
+        headers,
+      );
+      expect(invalidRateLimited.status).toBe(429);
+
+      const recovery = await jsonPost(
+        `${url}/api/recovery`,
+        rpcBody("aztec_getSettlement", [
+          { version: "pxe-bridge.settlement.v1", operationId: "recover-valid" },
+        ]),
+        headers,
+      );
+      expect(recovery.status).toBe(200);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+  it("hides dedicated recovery intake without its credential", async () => {
+    const key = "recovery-disabled-rpc-key";
+    const srv = createApp(new FakeAztecClient(), { apiKey: key });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+
+    try {
+      const response = await jsonPost(
+        `${url}/api/recovery`,
+        rpcBody("aztec_getSettlement", [
+          { version: "pxe-bridge.settlement.v1", operationId: "disabled-recovery" },
+        ]),
+        { Authorization: `Bearer ${key}` },
+      );
+      expect(response.status).toBe(404);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+  it("holds backend capacity for settlement work after its response", async () => {
+    const key = "settlement-background-cap-key";
+    const recoveryKey = "settlement-background-recovery-key";
+    const stuck = new FakeAztecClient();
+    stuck.createNote = () => new Promise<never>(() => {});
+    let readinessFails = false;
+    const healthyReadiness = readyObserver();
+    const readiness = {
+      observe: (signal?: AbortSignal) =>
+        readinessFails
+          ? Promise.reject(new Error("readiness failed"))
+          : healthyReadiness.observe(signal),
+    };
+    const gate = fakeMayBroadcast("allow");
+    const settlement = settlementContext(openBoundJournal(), gate.client, { readiness });
+    settlement.timeoutMs = 10;
+    const srv = createApp(stuck, {
+      apiKey: key,
+      recoveryApiKey: recoveryKey,
+      settlement,
+      readiness,
+      responseTimeoutMs: 1_000,
+    });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+    const call = (index: number) => {
+      const operationId = `background-${index}`;
+      return jsonPost(url, rpcBody("aztec_createNote", [v1Params({ operationId })]), {
+        Authorization: `Bearer ${key}`,
+        "Idempotency-Key": operationId,
+      });
+    };
+
+    try {
+      const answered = await Promise.all(Array.from({ length: 16 }, (_, i) => call(i)));
+      expect(answered.every((response) => response.status === 200)).toBe(true);
+      expect((await call(16)).status).toBe(503);
+      readinessFails = true;
+      const ready = await fetch(`${url}/ready`, {
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      expect(ready.status).toBe(503);
+      expect(await ready.json()).toEqual({
+        ready: false,
+        reasons: ["readiness_observation_failed", "backend_capacity_exhausted"],
+      });
+      for (let i = 0; i < 43; i++) {
+        const saturated = await jsonPost(url, rpcBody("aztec_getVersion", []), {
+          Authorization: `Bearer ${key}`,
+        });
+        expect(saturated.status).toBe(503);
+      }
+      const rateLimited = await jsonPost(url, rpcBody("aztec_getVersion", []), {
+        Authorization: `Bearer ${key}`,
+      });
+      expect(rateLimited.status).toBe(429);
+      const recoveryBody = rpcBody("aztec_getSettlement", [
+        { version: "pxe-bridge.settlement.v1", operationId: "background-0" },
+      ]);
+      const legacyRecovery = await jsonPost(url, recoveryBody, {
+        Authorization: `Bearer ${key}`,
+      });
+      expect(legacyRecovery.status).toBe(429);
+      const recovery = await jsonPost(`${url}/api/recovery`, recoveryBody, {
+        Authorization: `Bearer ${recoveryKey}`,
+      });
+      expect(recovery.status).toBe(200);
+      expect(await recovery.json()).toMatchObject({
+        result: { found: true, operationId: "background-0" },
+      });
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+
+  it("reserves rate-limit capacity for administrative recovery", async () => {
+    const rpcKey = "admin-budget-rpc-key";
+    const adminKey = "admin-budget-recovery-key";
+    const srv = createApp(new FakeAztecClient(), {
+      apiKey: rpcKey,
+      adminKey,
+      limits: new TransactionLimits({ dailyLimit: 5_000n }),
+    });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+
+    try {
+      for (let i = 0; i < 60; i++) {
+        await fetch(`${url}/ready`, {
+          headers: { Authorization: `Bearer ${rpcKey}` },
+        });
+      }
+      const recovered = await fetch(`${url}/admin/resume`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${adminKey}`,
+          "Content-Type": "application/json",
+        },
+        body: "{}",
+      });
+      expect(recovered.status).toBe(200);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+  it("refuses credentials shared across privileged routes", () => {
+    const client = new FakeAztecClient();
+    expect(() =>
+      createApp(client, { apiKey: "shared-key", adminKey: "shared-key" })
+    ).toThrow("Admin credential must differ from RPC credential");
+    expect(() =>
+      createApp(client, {
+        apiKey: "shared-key",
+        recoveryApiKey: "shared-key",
+      })
+    ).toThrow("Recovery credential must differ from RPC, admin, and attestation credentials");
+    expect(() =>
+      createApp(client, {
+        apiKey: "rpc-key",
+        recoveryApiKey: "shared-key",
+        adminKey: "shared-key",
+      })
+    ).toThrow("Recovery credential must differ from RPC, admin, and attestation credentials");
+    expect(() =>
+      createApp(client, {
+        apiKey: "rpc-key",
+        recoveryApiKey: "shared-key",
+        attestationApiKey: "shared-key",
+        attestation: {} as never,
+      })
+    ).toThrow("Recovery credential must differ from RPC, admin, and attestation credentials");
+    expect(() =>
+      assertDistinctCredentials([
+        ["PXE_BRIDGE_API_KEY", "shared-key"],
+        ["PXE_BRIDGE_RECOVERY_API_KEY", "shared-key"],
+      ])
+    ).toThrow("PXE_BRIDGE_RECOVERY_API_KEY must differ from PXE_BRIDGE_API_KEY");
   });
 });
 
@@ -397,165 +990,102 @@ describe("auth failures are throttled separately from real traffic", () => {
   });
 });
 
-describe("GET /status fee juice", () => {
-  async function boot(opts: ServerOptions): Promise<{
-    url: string;
-    client: FakeAztecClient;
-    close: () => Promise<void>;
+describe("GET /ready: authoritative routing", () => {
+  const key = "readiness-route-key";
+
+  async function probe(readiness = readyObserver()): Promise<{
+    live: { status: number; body: unknown };
+    ready: { status: number; body: unknown };
   }> {
-    const c = new FakeAztecClient();
-    const srv = createApp(c, { settlement: settlementContext(openBoundJournal()), ...opts });
-    await new Promise<void>((resolve) => srv.listen(0, resolve));
-    const addr = srv.address();
-    const port = addr && typeof addr === "object" ? addr.port : 0;
-    return {
-      url: `http://127.0.0.1:${port}`,
-      client: c,
-      close: () => new Promise<void>((resolve) => srv.close(() => resolve())),
-    };
-  }
-
-  const status = async (url: string) => (await fetch(`${url}/status`)).json();
-
-  it("reports degraded below the minimum and ok at it", async () => {
-    const { url, client: c, close } = await boot({ minFeeJuice: 1000n, feeJuiceCacheMs: 0 });
-    try {
-      c.feeJuiceBalance = 999n;
-      expect(await status(url)).toEqual({
-        status: "degraded",
-        // Low fee juice degrades the bridge without making it unready.
-        ready: true,
-        version: "4.1.3",
-        feeJuice: { balance: "999", low: true },
-        journal: { writable: true },
-        settlement: { mayBroadcast: "configured", corridor: "configured" },
-      });
-
-      c.feeJuiceBalance = 1000n;
-      expect(await status(url)).toMatchObject({ status: "ok", feeJuice: { low: false } });
-    } finally {
-      await close();
-    }
-  });
-
-  it("serves a cached reading instead of asking the node per request", async () => {
-    const { url, client: c, close } = await boot({ minFeeJuice: 1000n, feeJuiceCacheMs: 60_000 });
-    try {
-      await status(url);
-      c.feeJuiceBalance = 1n;
-      const body = await status(url);
-
-      expect(c.feeJuiceReads).toBe(1);
-      expect(body).toMatchObject({ status: "ok", feeJuice: { balance: "1000" } });
-    } finally {
-      await close();
-    }
-  });
-
-  it("stays up with a null balance when the read fails", async () => {
-    const { url, client: c, close } = await boot({ minFeeJuice: 1000n, feeJuiceCacheMs: 0 });
-    try {
-      c.feeJuiceError = new Error("node down");
-      const res = await fetch(`${url}/status`);
-
-      expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({
-        status: "ok",
-        ready: true,
-        version: "4.1.3",
-        feeJuice: { balance: null },
-        journal: { writable: true },
-        settlement: { mayBroadcast: "configured", corridor: "configured" },
-      });
-    } finally {
-      await close();
-    }
-  });
-});
-
-describe("GET /status journal", () => {
-  it("reports a journal with writes disabled as degraded, naming only the reason", async () => {
-    const journal = openBoundJournal();
-    const path = journal.path;
-    journal.close();
-    const readOnly = SettlementJournal.open(path);
-    readOnly.bindAccount("0x" + "9".repeat(64), true);
-    const srv = createApp(new FakeAztecClient(), { settlement: settlementContext(readOnly) });
-    await new Promise<void>((resolve) => srv.listen(0, resolve));
-    const addr = srv.address();
-    const port = addr && typeof addr === "object" ? addr.port : 0;
-    try {
-      const body = await (await fetch(`http://127.0.0.1:${port}/status`)).json();
-      expect(body).toMatchObject({
-        status: "degraded",
-        journal: { writable: false, reason: "account_mismatch" },
-      });
-      expect(JSON.stringify(body)).not.toContain("9999");
-    } finally {
-      await new Promise<void>((resolve) => srv.close(() => resolve()));
-    }
-  });
-
-  it("reports a bridge with no journal as degraded", async () => {
-    const srv = createApp(new FakeAztecClient());
-    await new Promise<void>((resolve) => srv.listen(0, resolve));
-    const addr = srv.address();
-    const port = addr && typeof addr === "object" ? addr.port : 0;
-    try {
-      const body = await (await fetch(`http://127.0.0.1:${port}/status`)).json();
-      expect(body).toMatchObject({
-        status: "degraded",
-        journal: { writable: false, reason: "journal_unconfigured" },
-      });
-    } finally {
-      await new Promise<void>((resolve) => srv.close(() => resolve()));
-    }
-  });
-});
-
-describe("GET /ready: every settlement prerequisite", () => {
-  async function probe(opts: ServerOptions): Promise<{ live: number; ready: number; body: unknown }> {
-    const srv = createApp(new FakeAztecClient(), opts);
+    const settlement = settlementContext(openBoundJournal(), undefined, { readiness });
+    const srv = createApp(new FakeAztecClient(), {
+      apiKey: key,
+      settlement,
+      readiness,
+    });
     await new Promise<void>((resolve) => srv.listen(0, resolve));
     const addr = srv.address();
     const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
     try {
-      const live = (await fetch(`${url}/status`)).status;
-      const res = await fetch(`${url}/ready`);
-      return { live, ready: res.status, body: await res.json() };
+      const liveResponse = await fetch(`${url}/status`);
+      const readyResponse = await fetch(`${url}/ready`, {
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      return {
+        live: { status: liveResponse.status, body: await liveResponse.json() },
+        ready: { status: readyResponse.status, body: await readyResponse.json() },
+      };
     } finally {
       await new Promise<void>((resolve) => srv.close(() => resolve()));
     }
   }
 
-  it.each([
-    [
-      "no may-broadcast endpoint",
-      () => ({ settlement: settlementContext(openBoundJournal(), undefined, { mayBroadcast: undefined }) }),
-      ["may_broadcast_unconfigured"],
-    ],
-    [
-      "no corridor",
-      () => ({ settlement: settlementContext(openBoundJournal(), undefined, { corridor: undefined }) }),
-      ["corridor_unconfigured"],
-    ],
-    [
-      "no journal",
-      () => ({}),
-      ["journal_unconfigured", "may_broadcast_unconfigured", "corridor_unconfigured"],
-    ],
-    [
-      "an unbound journal",
-      () => ({ settlement: settlementContext(SettlementJournal.open(tempJournalPath())) }),
-      ["journal_account_unbound"],
-    ],
-  ] as const)("is not ready with %s: /status stays 200 but says degraded", async (_name, opts, notReady) => {
-    const { live, ready, body } = await probe(opts());
-    expect(live).toBe(200);
-    expect(ready).toBe(503);
-    expect(body).toMatchObject({ status: "degraded", ready: false, notReady });
+  it("keeps public liveness minimal when operational readiness is lost", async () => {
+    const result = await probe(
+      readyObserver({
+        ready: false,
+        reasons: ["account_paused"],
+        policy: {
+          initialized: true,
+          paused: true,
+          allowlistRoot: "0x" + "c".repeat(64),
+          configuredAllowlistRoot: "0x" + "c".repeat(64),
+        },
+      }),
+    );
+    expect(result.live).toEqual({ status: 200, body: { status: "ok" } });
+    expect(result.ready.status).toBe(503);
+    expect(result.ready.body).toMatchObject({
+      ready: false,
+      reasons: ["account_paused"],
+    });
+  });
+
+  it("returns 200 iff the shared observer says ready", async () => {
+    const result = await probe();
+    expect(result.ready.status).toBe(200);
+    expect(result.ready.body).toMatchObject({ ready: true });
+  });
+
+  it("makes /ready and new admission return the same not-ready reasons", async () => {
+    const readiness = readyObserver({
+      ready: false,
+      reasons: ["inventory_insufficient", "fee_runway_insufficient"],
+    });
+    const settlement = settlementContext(openBoundJournal(), undefined, { readiness });
+    const client = new FakeAztecClient();
+    const srv = createApp(client, { apiKey: key, settlement, readiness });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+    try {
+      const readyResponse = await fetch(`${url}/ready`, {
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      const rpcResponse = await jsonPost(url, rpcBody("aztec_createNote", [v1Params()]), {
+        Authorization: `Bearer ${key}`,
+        "Idempotency-Key": "op-1",
+      });
+      const rpc = await rpcJson(rpcResponse);
+
+      expect((await readyResponse.json()) as object).toMatchObject({
+        ready: false,
+        reasons: ["inventory_insufficient", "fee_runway_insufficient"],
+      });
+      expect(rpc.error).toMatchObject({
+        code: -32006,
+        data: {
+          reason: "bridge_not_ready",
+          reasons: ["inventory_insufficient", "fee_runway_insufficient"],
+        },
+      });
+      expect(client.proofs).toBe(0);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
   });
 });
+
 
 describe("HTTP response deadline", () => {
   it("closes the gate before the 504, so an answer arriving later cannot mark", async () => {
@@ -655,6 +1185,24 @@ describe("Idempotency-Key header", () => {
         const res = await jsonPost(url, noteBody("trade-1"), { "Idempotency-Key": bad });
         expect(res.status, `should reject ${JSON.stringify(bad)}`).toBe(400);
       }
+    } finally {
+      await close();
+    }
+  });
+
+  it("rate limits malformed keys", async () => {
+    const { url, close } = await boot();
+    try {
+      for (let i = 0; i < 60; i++) {
+        const res = await jsonPost(url, noteBody("trade-1"), {
+          "Idempotency-Key": "tab\there",
+        });
+        expect(res.status).toBe(400);
+      }
+      const rateLimited = await jsonPost(url, noteBody("trade-1"), {
+        "Idempotency-Key": "tab\there",
+      });
+      expect(rateLimited.status).toBe(429);
     } finally {
       await close();
     }

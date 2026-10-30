@@ -33,6 +33,7 @@ import {
 import type { MayBroadcastClient } from "./may-broadcast.js";
 import type { TransactionLimits } from "./limits.js";
 import type { AuditLogger } from "./audit.js";
+import type { OperationalReadiness, ReadinessObserver, ReadinessReason } from "./readiness.js";
 
 export interface SettlementContext {
   journal: SettlementJournal;
@@ -48,6 +49,8 @@ export interface SettlementContext {
    * gate closes. Default TX deadline.
    */
   timeoutMs: number;
+  /** Same instance exposed by authenticated GET /ready. */
+  readiness?: ReadinessObserver | undefined;
   now?: () => number;
 }
 
@@ -55,15 +58,18 @@ export interface RpcContext {
   limits?: TransactionLimits | undefined;
   audit?: AuditLogger | undefined;
   settlement?: SettlementContext | undefined;
+  /** The same authoritative observer served by authenticated GET /ready. */
+  readiness?: ReadinessObserver | undefined;
   /** From the `Idempotency-Key` request header, when the caller sent one. */
   idempotencyKey?: string | undefined;
-  clientIp?: string | undefined;
   /**
    * Aborted when the HTTP response deadline answers the caller (504). Closes
    * the gate synchronously, before the 504 is written, so nothing this
    * request started can be marked may-broadcast after the caller gave up.
    */
   signal?: AbortSignal | undefined;
+  /** Keeps the server's global backend-work lease until `call` actually settles. */
+  trackBackground?: ((call: Promise<unknown>) => void) | undefined;
 }
 
 function success(id: number | string | null, result: unknown): JsonRpcResponse {
@@ -101,7 +107,7 @@ export async function handleRpcRequest(
     case "aztec_getSettlement":
       return handleGetSettlement(id, params, client, ctx);
     case "aztec_getVersion":
-      return handleGetVersion(id, client);
+      return handleGetVersion(id, params, client);
     default:
       return rpcError(id, RPC_ERRORS.METHOD_NOT_FOUND, `Unknown method: ${method}`);
   }
@@ -196,12 +202,10 @@ interface DriveState {
 
 /**
  * `fresh` proves a new attempt; `resume` re-asks for a journaled, unmarked
- * attempt; `rebroadcast` resends a marked attempt's exact bytes.
+ * attempt. A marked attempt is observation-only: absence from one node is
+ * never proof that the transaction did not reach another node or a prior fork.
  */
-type GateMode =
-  | { kind: "fresh" }
-  | { kind: "resume"; attempt: Attempt }
-  | { kind: "rebroadcast"; attempt: Attempt };
+type GateMode = { kind: "fresh" } | { kind: "resume"; attempt: Attempt };
 
 /**
  * The per-attempt broadcast gate: journal the exact transaction, ask Riddler,
@@ -230,7 +234,6 @@ class OperationGate implements BroadcastGate {
     private readonly onMark: () => void,
   ) {
     if (mode.kind !== "fresh") this.attempt = mode.attempt;
-    if (mode.kind === "rebroadcast") this.marked = true;
   }
 
   close(): void {
@@ -246,10 +249,8 @@ class OperationGate implements BroadcastGate {
       if (tx.txHash.toLowerCase() !== this.mode.attempt.txHash) {
         throw new Error("journaled bytes no longer produce the journaled hash");
       }
-      // Permission was recorded with the mark; an exact re-broadcast of a
-      // marked attempt does not ask again. Its bounds are checked in
-      // beforeSend, after the bytes were reconstructed.
-      if (this.mode.kind === "rebroadcast") return;
+      // An unmarked prepared attempt re-asks Riddler for the same hash before
+      // its exact bytes can be sent.
     } else {
       const attempt = journal.recordPrepared(operationId, tx);
       this.attempt = {
@@ -277,9 +278,7 @@ class OperationGate implements BroadcastGate {
     if (answer.decision !== "allow") {
       const hold: Hold =
         answer.decision === "deny" ? "may_broadcast_denied" : "may_broadcast_unknown";
-      console.warn(
-        `[rpc] Operation ${operationId} held before may-broadcast: ${answer.decision} (${answer.detail})`,
-      );
+      console.warn(`[rpc] Settlement held before may-broadcast: ${answer.decision}`);
       journal.recordHold(operationId, hold);
       throw new Held({
         state: "prepared",
@@ -382,6 +381,31 @@ function observationFrom(attempt: Attempt, node: NodeObservation, now: number): 
   }
 }
 
+type MinedObservation = Extract<Observation, { observedAt: number }>;
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i += 1) {
+    if (left[i] !== right[i]) return false;
+  }
+  return true;
+}
+
+function sameCanonicalOutcome(left: MinedObservation, right: MinedObservation): boolean {
+  return (
+    left.state === right.state &&
+    left.txHash === right.txHash &&
+    left.expirationTimestamp === right.expirationTimestamp &&
+    left.executionResult === right.executionResult &&
+    left.blockHash === right.blockHash &&
+    left.blockNumber === right.blockNumber &&
+    left.receiptStatus === right.receiptStatus &&
+    left.effects.state === right.effects.state &&
+    sameStrings(left.effects.noteHashes, right.effects.noteHashes) &&
+    sameStrings(left.effects.nullifiers, right.effects.nullifiers)
+  );
+}
+
 function currentAttempt(journal: SettlementJournal, op: StoredOperation): Attempt | undefined {
   if (op.currentAttempt === null) return undefined;
   return journal.attempts(op.operationId).find((a) => a.attempt === op.currentAttempt);
@@ -430,8 +454,8 @@ async function observe(
       let node: NodeObservation;
       try {
         node = await client.observeTx(attempt.txHash);
-      } catch (cause) {
-        console.error(`[rpc] Node read for ${op.operationId} failed:`, cause);
+      } catch {
+        console.error("[rpc] Settlement node observation failed");
         return {
           state: "submitted_unknown",
           txHash: attempt.txHash,
@@ -439,10 +463,25 @@ async function observe(
           reason: "node_read_failed",
         };
       }
-      const observation = observationFrom(attempt, node, (s.now ?? Date.now)());
-      // Reads record only a finalized outcome, so polling does not churn the
-      // journal; the live observation is always re-read.
-      if (observation.state === "finalized" || observation.state === "reverted") {
+      let observation = observationFrom(attempt, node, (s.now ?? Date.now)());
+      let unchanged = false;
+      if (
+        "observedAt" in observation &&
+        op.observation != null &&
+        "observedAt" in op.observation &&
+        sameCanonicalOutcome(op.observation, observation)
+      ) {
+        observation = { ...observation, observedAt: op.observation.observedAt };
+        unchanged = true;
+      }
+      // Reads record a finalized outcome, and a mined outcome the journal does
+      // not hold yet, so an unchanged outcome keeps its first observedAt across
+      // polls and restarts without a write per poll.
+      if (
+        observation.state === "finalized" ||
+        observation.state === "reverted" ||
+        ("observedAt" in observation && !unchanged)
+      ) {
         recordObservation(s, op.operationId, observation);
       }
       return observation;
@@ -462,8 +501,8 @@ function recordObservation(s: SettlementContext, operationId: string, observatio
     } else if (observation.state !== "request_in_flight") {
       s.journal.recordObservation(operationId, observation);
     }
-  } catch (cause) {
-    console.error(`[rpc] Could not record observation for ${operationId}:`, cause);
+  } catch {
+    console.error("[rpc] Could not durably record settlement observation");
   }
 }
 
@@ -524,7 +563,7 @@ async function handleCreateNote(
   }
   const parsed = CreateNoteV1Schema.safeParse(first);
   if (!parsed.success || params.length !== 1) {
-    console.error("[rpc] Invalid createNote params:", parsed.error?.message ?? "extra params");
+    console.error("[rpc] Invalid createNote params");
     return rpcError(id, RPC_ERRORS.INVALID_PARAMS, "Invalid params for aztec_createNote");
   }
   const s = ctx.settlement;
@@ -564,7 +603,44 @@ async function createNoteWithin(
   const fingerprint = fingerprintTerms(terms);
 
   const health = s.journal.health();
-  if (!health.writable) return journalUnavailable(id, health, operationId);
+  if (!health.writable) {
+    let existing: StoredOperation | undefined;
+    try {
+      existing = s.journal.get(operationId);
+    } catch (cause) {
+      return journalFault(id, s, operationId, cause);
+    }
+    if (!existing) return journalUnavailable(id, health, operationId);
+    if (existing.fingerprint !== fingerprint) {
+      return conflict(id, operationId, fingerprint, existing.fingerprint);
+    }
+    if (
+      existing.state !== "may_broadcast" &&
+      existing.state !== "finalized" &&
+      existing.state !== "reverted"
+    ) {
+      return journalUnavailable(id, health, operationId);
+    }
+    if (s.inFlight.has(operationId)) {
+      return answer(id, existing, { state: "request_in_flight" });
+    }
+    s.inFlight.add(operationId);
+    const background = new BackgroundCalls(ctx.trackBackground);
+    try {
+      const resumed = await resumeExisting(
+        id,
+        client,
+        ctx,
+        s,
+        existing,
+        background,
+        deadline,
+      );
+      return resumed ?? journalUnavailable(id, health, operationId);
+    } finally {
+      background.whenIdle(() => s.inFlight.delete(operationId));
+    }
+  }
 
   // Synchronous from the check to the add: two concurrent duplicates cannot
   // both get past here.
@@ -585,7 +661,7 @@ async function createNoteWithin(
   // The claim is released only once the request has answered AND every client
   // call it started has settled: a call that outlived its deadline is still
   // proving, and a retry must see "in flight" until it stops.
-  const background = new BackgroundCalls();
+  const background = new BackgroundCalls(ctx.trackBackground);
   try {
     return await driveOperation(id, client, ctx, s, operationId, fingerprint, terms, background, deadline);
   } finally {
@@ -598,7 +674,10 @@ class BackgroundCalls {
   private pending = 0;
   private onIdle: (() => void) | undefined;
 
+  constructor(private readonly trackForRequest?: (call: Promise<unknown>) => void) {}
+
   track(call: Promise<unknown>): void {
+    this.trackForRequest?.(call);
     this.pending += 1;
     const settled = (): void => {
       this.pending -= 1;
@@ -654,8 +733,12 @@ async function driveOperation(
     return journalFault(id, s, operationId, cause);
   }
 
-  const refusal = await admissionRefusal(client, s, terms, deadline);
-  if (refusal) return notSubmitted(id, ctx, s, op, fingerprint, refusal, true);
+  const refusal = await admissionRefusal(ctx, s, terms, deadline);
+  if (refusal) {
+    return refusal.kind === "not_ready"
+      ? notReady(id, ctx, s, op, fingerprint, refusal)
+      : notSubmitted(id, ctx, s, op, fingerprint, refusal.reason, true);
+  }
 
   return runAttempt(id, client, ctx, s, { op, fingerprint, terms }, { kind: "fresh" }, background, deadline);
 }
@@ -701,15 +784,21 @@ async function resumeExisting(
         // prepare a new attempt under the same operation.
         return undefined;
       }
-      const refusal = await admissionRefusal(client, s, op.terms, deadline);
-      if (refusal) return notSubmitted(id, ctx, s, op, op.fingerprint, refusal, true);
+      // Already admitted: recovery is not gated on admission readiness, only
+      // on facts that make this exact transaction unsendable or certain to fail.
+      const hold = await preparedHoldReasons(ctx, s, op.terms, deadline);
+      if (hold.length > 0) {
+        return notReady(id, ctx, s, op, op.fingerprint, { kind: "not_ready", reasons: hold });
+      }
       return runAttempt(id, client, ctx, s, state, { kind: "resume", attempt }, background, deadline);
     }
 
     case "may_broadcast": {
       const attempt = currentAttempt(s.journal, op);
       if (!attempt) return answer(id, op, { state: "unknown", reason: "missing_transaction_identity" });
-      const observed = await deadline.race(observe(s, client, op));
+      const observationCall = observe(s, client, op);
+      background.track(observationCall);
+      const observed = await deadline.race(observationCall);
       const observation: Observation =
         observed === TIMED_OUT
           ? {
@@ -719,67 +808,195 @@ async function resumeExisting(
               reason: "response_deadline",
             }
           : observed;
-      // A re-broadcast needs every bound still open: the protocol's expiry AND
-      // the operation's own `validUntil`. Past `validUntil` the marked attempt
-      // is never resent -- the deal it was admitted for is over -- and it is
-      // never "not submitted" either: it was marked and may be on chain, so
-      // the answer stays submitted_unknown until a node observation settles it.
-      const unseen =
-        observation.state === "submitted_unknown" &&
-        observation.reason === "node_reports_dropped_or_unknown" &&
-        BigInt(nowSeconds(s)) < BigInt(attempt.expirationTimestamp) &&
-        nowSeconds(s) < op.terms.validUntil;
-      if (!unseen) return answer(id, op, observation);
-      // Marked, and the node does not know it: the process may have died
-      // between the mark and the send. Re-broadcast the journaled bytes --
-      // never a rebuilt transaction -- which can land at most once.
-      console.warn(`[rpc] Re-broadcasting journaled attempt ${attempt.attempt} of ${op.operationId}`);
-      return runAttempt(id, client, ctx, s, state, { kind: "rebroadcast", attempt }, background, deadline);
+      return answer(id, op, observation);
     }
   }
 }
 
-/** Every check a fresh or resumed attempt must pass before preparing. */
+type AdmissionRefusal =
+  | { kind: "terms"; reason: string }
+  | {
+      kind: "not_ready";
+      reasons: ReadinessReason[];
+      readiness?: OperationalReadiness;
+    };
+
+/** Every check a fresh or unmarked resumed attempt must pass before preparing. */
 async function admissionRefusal(
-  client: IAztecClient,
+  ctx: RpcContext,
   s: SettlementContext,
   terms: SettlementTerms,
   deadline: RequestDeadline,
-): Promise<string | undefined> {
-  if (!s.mayBroadcast) return "may_broadcast_unconfigured";
+): Promise<AdmissionRefusal | undefined> {
+  const observer = ctx.readiness ?? s.readiness;
+  if (!observer) {
+    return { kind: "not_ready", reasons: ["readiness_observation_failed"] };
+  }
+
+  let readiness: OperationalReadiness | typeof TIMED_OUT;
+  try {
+    readiness = await deadline.race(observer.observe());
+  } catch {
+    console.error("[rpc] Authoritative readiness observation failed");
+    return { kind: "not_ready", reasons: ["readiness_observation_failed"] };
+  }
+  if (readiness === TIMED_OUT) {
+    return { kind: "terms", reason: "response_deadline" };
+  }
+  if (!readiness.ready) {
+    return { kind: "not_ready", reasons: readiness.reasons, readiness };
+  }
+
   const corridor = s.corridor;
-  if (!corridor) return "corridor_unconfigured";
+  if (!s.mayBroadcast || !corridor) {
+    // A ready projection and missing local prerequisites cannot coexist. Fail
+    // closed rather than introducing a second definition of readiness.
+    return { kind: "not_ready", reasons: ["readiness_observation_failed"] };
+  }
   if (
     terms.corridor.corridorId !== corridor.corridorId.toLowerCase() ||
     terms.corridor.corridorRevision !== corridor.corridorRevision ||
     terms.corridor.manifestDigest !== corridor.manifestDigest.toLowerCase()
   ) {
-    return "corridor_mismatch";
+    return { kind: "terms", reason: "corridor_mismatch" };
   }
   if (terms.network.genesisOrNetworkDigest !== corridor.genesisOrNetworkDigest.toLowerCase()) {
-    return "network_mismatch";
+    return { kind: "terms", reason: "network_mismatch" };
   }
-  if (terms.accountMode !== client.accountMode()) return "account_mode_mismatch";
-  const pinned = client.pinnedToken();
-  if (pinned !== undefined && pinned.toLowerCase() !== terms.token) return "token_mismatch";
-  let network;
-  try {
-    network = await deadline.race(client.networkIdentity());
-  } catch (cause) {
-    console.error("[rpc] Network identity read failed:", cause);
-    return "network_unreadable";
+  if (terms.accountMode !== readiness.accountMode) {
+    return { kind: "terms", reason: "account_mode_mismatch" };
   }
-  if (network === TIMED_OUT) return "response_deadline";
+  if (readiness.token === null || readiness.token.toLowerCase() !== terms.token) {
+    return { kind: "terms", reason: "token_mismatch" };
+  }
   if (
-    network.aztecChainId !== terms.network.aztecChainId ||
-    network.protocolVersion !== terms.network.protocolVersion ||
-    network.rollupAddress !== terms.network.rollupAddress ||
-    network.l1ChainId !== terms.network.l1ChainId
+    readiness.network.aztecChainId !== terms.network.aztecChainId ||
+    readiness.network.protocolVersion !== terms.network.protocolVersion ||
+    readiness.network.rollupContract !== terms.network.rollupAddress ||
+    readiness.l1ChainId !== terms.network.l1ChainId
   ) {
-    return "network_mismatch";
+    return { kind: "terms", reason: "network_mismatch" };
   }
-  if (nowSeconds(s) >= terms.validUntil) return "validity_bound_passed";
+  if (nowSeconds(s) >= terms.validUntil) {
+    return { kind: "terms", reason: "validity_bound_passed" };
+  }
   return undefined;
+}
+
+/**
+ * Why an admitted, journaled, unmarked attempt is not sent now. Admission
+ * readiness -- the /ready verdict, fee runway, finalized-tip freshness,
+ * corridor admission -- closes NEW admission only and is not consulted: an
+ * attempt already admitted keeps recovering through the may-broadcast query
+ * and the exact journaled bytes. It holds only on a fact that makes this
+ * transaction unsendable or certain to fail; each leaves it prepared with the
+ * same bytes and hash, resumed by the next call. A fact that cannot be
+ * observed is not a hold: the node and the account still decide.
+ */
+async function preparedHoldReasons(
+  ctx: RpcContext,
+  s: SettlementContext,
+  terms: SettlementTerms,
+  deadline: RequestDeadline,
+): Promise<ReadinessReason[]> {
+  const reasons: ReadinessReason[] = [];
+  if (!s.journal.health().writable) reasons.push("journal_unwritable");
+  if (!s.journal.writerFenceHeld()) reasons.push("writer_fence_lost");
+  if (!s.mayBroadcast) reasons.push("may_broadcast_unconfigured");
+  if (reasons.length > 0) return reasons;
+
+  const observer = ctx.readiness ?? s.readiness;
+  if (!observer) return reasons;
+  let readiness: OperationalReadiness | typeof TIMED_OUT;
+  try {
+    readiness = await deadline.race(observer.observe());
+  } catch {
+    console.error("[rpc] Readiness observation for a prepared attempt failed");
+    return reasons;
+  }
+  // The request deadline is spent, so the gate would close before any mark.
+  if (readiness === TIMED_OUT) return ["readiness_observation_failed"];
+
+  const network = readiness.network;
+  if (
+    network.aztecChainId !== null &&
+    (network.aztecChainId !== terms.network.aztecChainId ||
+      network.protocolVersion !== terms.network.protocolVersion ||
+      network.rollupContract?.toLowerCase() !== terms.network.rollupAddress.toLowerCase() ||
+      readiness.l1ChainId !== terms.network.l1ChainId)
+  ) {
+    reasons.push("network_identity_mismatch");
+  }
+  if (readiness.policy.paused === true) reasons.push("account_paused");
+  // The attempt was proven against the configured tree; the account checks
+  // its witness against the on-chain root at inclusion.
+  if (
+    readiness.policy.allowlistRoot !== null &&
+    readiness.policy.configuredAllowlistRoot !== null &&
+    readiness.policy.allowlistRoot.toLowerCase() !==
+      readiness.policy.configuredAllowlistRoot.toLowerCase()
+  ) {
+    reasons.push("allowlist_root_mismatch");
+  }
+  if (
+    readiness.inventory.observed !== null &&
+    BigInt(readiness.inventory.observed) < BigInt(terms.amount)
+  ) {
+    reasons.push("inventory_insufficient");
+  }
+  return reasons;
+}
+
+async function notReady(
+  id: number | string,
+  ctx: RpcContext,
+  s: SettlementContext,
+  op: StoredOperation,
+  fingerprint: string,
+  refusal: Extract<AdmissionRefusal, { kind: "not_ready" }>,
+): Promise<JsonRpcResponse> {
+  const primaryReason = refusal.reasons[0] ?? "readiness_observation_failed";
+  let observation: Observation;
+  if (op.state === "prepared") {
+    const attempt = currentAttempt(s.journal, op);
+    if (!attempt) {
+      return journalFault(
+        id,
+        s,
+        op.operationId,
+        new JournalUnreadableError(`current attempt of prepared operation ${op.operationId} missing`),
+      );
+    }
+    observation = {
+      state: "prepared",
+      txHash: attempt.txHash,
+      expirationTimestamp: attempt.expirationTimestamp,
+      hold: op.hold ?? "interrupted",
+    };
+  } else {
+    try {
+      s.journal.recordNotSubmitted(op.operationId, primaryReason, true);
+    } catch (cause) {
+      return journalFault(id, s, op.operationId, cause);
+    }
+    observation = {
+      state: "not_submitted",
+      reason: primaryReason,
+      retryableAfterRevalidation: true,
+    };
+  }
+  await audit(ctx, observation);
+  return rpcError(id, RPC_ERRORS.NOT_READY, "Bridge is not ready for new settlement admission", {
+    reason: "bridge_not_ready",
+    reasons: refusal.reasons,
+    observation,
+    ...(refusal.readiness
+      ? {
+          finalized: refusal.readiness.finalized,
+          observedAt: refusal.readiness.observedAt,
+        }
+      : {}),
+  });
 }
 
 async function notSubmitted(
@@ -797,13 +1014,13 @@ async function notSubmitted(
   } catch (cause) {
     return journalFault(id, s, op.operationId, cause);
   }
-  console.warn(`[rpc] Operation ${op.operationId} not submitted: ${reason}`);
+  console.warn("[rpc] Settlement not submitted");
   const observation: Observation = {
     state: "not_submitted",
     reason,
     retryableAfterRevalidation: definitive,
   };
-  await audit(ctx, op, fingerprint, observation);
+  await audit(ctx, observation);
   return answer(id, { operationId: op.operationId, fingerprint }, observation);
 }
 
@@ -813,7 +1030,7 @@ function journalFault(
   operationId: string,
   cause: unknown,
 ): JsonRpcResponse {
-  console.error(`[rpc] Journal fault on ${operationId}:`, cause);
+  console.error("[rpc] Settlement journal fault");
   if (cause instanceof JournalWriteError) return journalUnavailable(id, cause.health, operationId);
   if (cause instanceof JournalUnreadableError) {
     return journalUnavailable(
@@ -859,9 +1076,23 @@ async function runAttempt(
 
   let reservationId: number | undefined;
   let cooldownMs: number | undefined;
-  if (ctx.limits && mode.kind !== "rebroadcast") {
+  if (ctx.limits) {
     const reservation = ctx.limits.reserve(amount);
     if (!reservation.allowed) {
+      if (mode.kind === "resume") {
+        // Already admitted and journaled. Abandoning it here would re-prove
+        // under a new hash, which Riddler refuses once it has bound this one;
+        // the exact bytes stay held until the window has room again.
+        console.warn("[rpc] Holding prepared settlement: rolling limit unavailable");
+        const observation: Observation = {
+          state: "prepared",
+          txHash: mode.attempt.txHash,
+          expirationTimestamp: mode.attempt.expirationTimestamp,
+          hold: op.hold ?? "interrupted",
+        };
+        await audit(ctx, observation);
+        return answer(id, { operationId: op.operationId, fingerprint }, observation);
+      }
       return notSubmitted(id, ctx, s, op, fingerprint, `limits: ${reservation.reason}`, true);
     }
     reservationId = reservation.reservationId;
@@ -876,7 +1107,7 @@ async function runAttempt(
   let outcome: TransferOutcome | typeof TIMED_OUT | undefined;
   let failure: unknown;
   if (cooldownMs) {
-    console.log(`[rpc] Cooldown ${cooldownMs}ms for ${op.operationId}`);
+    console.log(`[rpc] Applying settlement cooldown (${cooldownMs}ms)`);
     await deadline.race(delay(cooldownMs));
   }
   if (deadline.expired) {
@@ -905,17 +1136,17 @@ async function runAttempt(
     if (!gate.marked || !attempt) {
       // The client returned without passing the gate: impossible by
       // construction, and not a state that may be reported as anything known.
-      console.error(`[rpc] ${op.operationId}: broadcast reported without a may-broadcast mark`);
+      console.error("[rpc] Broadcast reported without a may-broadcast mark");
       return answer(id, op, { state: "unknown", reason: "broadcast_without_mark" });
     }
     const observation = observationFrom(attempt, outcome.observation, (s.now ?? Date.now)());
     recordObservation(s, op.operationId, observation);
-    await audit(ctx, op, fingerprint, observation);
+    await audit(ctx, observation);
     return answer(id, { operationId: op.operationId, fingerprint }, observation);
   }
 
   if (gate.marked && attempt) {
-    console.error(`[rpc] ${op.operationId} failed after may-broadcast:`, failure);
+    console.error("[rpc] Marked settlement failed after may-broadcast");
     const observation: Observation = {
       state: "submitted_unknown",
       txHash: attempt.txHash,
@@ -927,19 +1158,19 @@ async function runAttempt(
             ? "response_deadline"
             : "post_mark_failure",
     };
-    await audit(ctx, op, fingerprint, observation);
+    await audit(ctx, observation);
     return answer(id, { operationId: op.operationId, fingerprint }, observation);
   }
 
   if (failure instanceof Held) {
-    await audit(ctx, op, fingerprint, failure.observation);
+    await audit(ctx, failure.observation);
     return answer(id, { operationId: op.operationId, fingerprint }, failure.observation);
   }
   if (failure instanceof JournalWriteError || failure instanceof JournalUnreadableError) {
     return journalFault(id, s, op.operationId, failure);
   }
 
-  console.error(`[rpc] ${op.operationId} failed before may-broadcast:`, failure);
+  console.error("[rpc] Settlement failed before may-broadcast");
   if (attempt) {
     // Prepared and journaled, never marked: provably not broadcast, and the
     // exact bytes stay available to a retry.
@@ -954,7 +1185,7 @@ async function runAttempt(
       expirationTimestamp: attempt.expirationTimestamp,
       hold: "interrupted",
     };
-    await audit(ctx, op, fingerprint, observation);
+    await audit(ctx, observation);
     return answer(id, { operationId: op.operationId, fingerprint }, observation);
   }
   return notSubmitted(id, ctx, s, op, fingerprint, deadline.expired ? "response_deadline" : "prepare_failed", true);
@@ -964,30 +1195,16 @@ async function runAttempt(
  * Output-only audit line. Never decides control flow: every write it
  * describes has already happened in the journal.
  */
-async function audit(
-  ctx: RpcContext,
-  op: { operationId: string; terms: SettlementTerms },
-  fingerprint: string,
-  observation: Observation,
-): Promise<void> {
+async function audit(ctx: RpcContext, observation: Observation): Promise<void> {
   if (!ctx.audit) return;
   try {
     await ctx.audit.log({
       timestamp: new Date().toISOString(),
       method: "aztec_createNote",
-      operationId: op.operationId,
-      fingerprint,
-      recipient: op.terms.recipient,
-      token: op.terms.token,
-      amount: op.terms.amount,
-      clientIp: ctx.clientIp ?? "unknown",
       observation: observation.state,
-      ...("txHash" in observation ? { txHash: observation.txHash } : {}),
-      ...("reason" in observation ? { reason: observation.reason } : {}),
-      ...("hold" in observation ? { reason: observation.hold } : {}),
     });
-  } catch (cause) {
-    console.error("[rpc] AUDIT WRITE FAILED (output log only):", cause);
+  } catch {
+    console.error("[rpc] AUDIT WRITE FAILED (output log only)");
   }
 }
 
@@ -1045,6 +1262,13 @@ async function handleGetSettlement(
     if (driving && observation.state === "submitted_unknown") {
       observation = { state: "request_in_flight" };
     }
+    // The observation may have just committed a terminal outcome (or lost
+    // that commit to a concurrent one): answer from the durable row.
+    op = s.journal.get(operationId) ?? op;
+    attempts = s.journal.attempts(operationId);
+    if ((op.state === "finalized" || op.state === "reverted") && op.observation) {
+      observation = op.observation;
+    }
   } catch (cause) {
     return journalFault(id, s, operationId, cause);
   }
@@ -1068,13 +1292,17 @@ async function handleGetSettlement(
 
 async function handleGetVersion(
   id: number | string,
+  params: unknown[],
   client: IAztecClient,
 ): Promise<JsonRpcResponse> {
+  if (params.length !== 0) {
+    return rpcError(id, RPC_ERRORS.INVALID_PARAMS, "Invalid params for aztec_getVersion");
+  }
   try {
     const version = await client.getVersion();
     return success(id, version);
-  } catch (cause) {
-    console.error("[rpc] aztec_getVersion failed:", cause);
+  } catch {
+    console.error("[rpc] aztec_getVersion failed");
     return rpcError(id, RPC_ERRORS.INTERNAL_ERROR, "Internal error");
   }
 }

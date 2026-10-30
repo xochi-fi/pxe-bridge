@@ -24,7 +24,7 @@ describe("fingerprintTerms", () => {
     ["recipient", { recipient: "0x0" + "9".repeat(63) }],
     ["token", { token: "0x0" + "8".repeat(63) }],
     ["descriptor digest", { recipientDescriptorDigest: "0x" + "9".repeat(64) }],
-    ["account mode", { accountMode: "spending_limit" }],
+    ["account mode", { accountMode: "standard" }],
     ["validity bound", { validUntil: 2_000_000_001 }],
     [
       "corridor revision",

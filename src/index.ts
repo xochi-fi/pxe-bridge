@@ -1,3 +1,4 @@
+import { createServer, type Server } from "node:http";
 import {
   AztecClient,
   DEPLOYER_CLAIM_WITHOUT_SPENDING_LIMIT_ERROR,
@@ -7,7 +8,13 @@ import {
   sponsoredFpcSetting,
   type SponsoredFpcSetting,
 } from "./aztec-client.js";
-import { createApp, RESPONSE_TIMEOUT_MS, SETTLEMENT_DEADLINE_MS } from "./server.js";
+import {
+  assertDistinctCredentials,
+  createApp,
+  createInitializationApp,
+  RESPONSE_TIMEOUT_MS,
+  SETTLEMENT_DEADLINE_MS,
+} from "./server.js";
 import {
   AccountDeploymentSchema,
   AllowlistRecipientsSchema,
@@ -28,7 +35,17 @@ import { legacyAuditRefusal } from "./legacy-audit.js";
 import { httpMayBroadcastClient, type MayBroadcastClient } from "./may-broadcast.js";
 import { CorridorConfigSchema, type CorridorConfig } from "./settlement.js";
 import { resolveSecretKey } from "./secrets.js";
+import { createReadinessObserver } from "./readiness.js";
 import type { SpendingLimitConfig } from "./spending-limit-account.js";
+import { AllowlistTree } from "./allowlist-tree.js";
+import {
+  AttestationProducer,
+  RootUpdatePublisher,
+  attestationAudit,
+  readAttestationEnvironment,
+  type AttestationEnvironmentConfig,
+} from "./attestation.js";
+import { resolveAttestationSecret } from "./attestation-secret.js";
 
 // Must match WINDOW_MS in limits.ts: it bounds the same rolling window.
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -46,6 +63,7 @@ if (isNaN(PORT) || PORT < 0 || PORT > 65535) {
 const HOST = process.env["PXE_BRIDGE_HOST"] ?? "127.0.0.1";
 const AZTEC_NODE_URL = process.env["AZTEC_NODE_URL"] ?? "http://localhost:8080";
 const API_KEY = process.env["PXE_BRIDGE_API_KEY"];
+const RECOVERY_API_KEY = process.env["PXE_BRIDGE_RECOVERY_API_KEY"];
 
 // Production refuses to boot unauthenticated, the same way secrets.ts refuses
 // the env-var secret key. The asymmetry it replaces was hard to defend: one
@@ -153,13 +171,6 @@ if (DAILY_LIMIT_RAW) {
   limitsConfig.dailyLimit = parsePositiveBigInt("PXE_BRIDGE_DAILY_LIMIT", DAILY_LIMIT_RAW);
 }
 
-// Unlike the limits above, a floor on the bridge's own fee juice. The
-// spending-limit account cannot refill itself, so running dry means every
-// transfer fails; this surfaces it on /status before that happens.
-const MIN_FEE_JUICE_RAW = process.env["PXE_BRIDGE_MIN_FEE_JUICE"];
-const minFeeJuice = MIN_FEE_JUICE_RAW
-  ? parsePositiveBigInt("PXE_BRIDGE_MIN_FEE_JUICE", MIN_FEE_JUICE_RAW)
-  : undefined;
 
 const COOLDOWN_THRESHOLD_RAW = process.env["PXE_BRIDGE_COOLDOWN_THRESHOLD"];
 const COOLDOWN_DELAY_RAW = process.env["PXE_BRIDGE_COOLDOWN_DELAY_MS"];
@@ -271,6 +282,22 @@ if (MAY_BROADCAST_URL && MAY_BROADCAST_TOKEN) {
 // Key for POST /admin/resume. Separate from the RPC key on purpose; see
 // ServerOptions.adminKey.
 const ADMIN_KEY = process.env["PXE_BRIDGE_ADMIN_KEY"];
+try {
+  assertDistinctCredentials([
+    ["PXE_BRIDGE_API_KEY", API_KEY],
+    ["PXE_BRIDGE_RECOVERY_API_KEY", RECOVERY_API_KEY],
+    ["PXE_BRIDGE_ADMIN_KEY", ADMIN_KEY],
+    ["PXE_BRIDGE_MAY_BROADCAST_TOKEN", MAY_BROADCAST_TOKEN],
+    ["PXE_BRIDGE_ATTESTATION_API_KEY", process.env["PXE_BRIDGE_ATTESTATION_API_KEY"]],
+    [
+      "PXE_BRIDGE_ATTESTATION_RELAY_TOKEN",
+      process.env["PXE_BRIDGE_ATTESTATION_RELAY_TOKEN"],
+    ],
+  ]);
+} catch (err) {
+  console.error(`[pxe-bridge] ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+}
 if (limits && !ADMIN_KEY) {
   console.warn(
     "[pxe-bridge] WARNING: PXE_BRIDGE_ADMIN_KEY not set -- a tripped circuit " +
@@ -524,7 +551,55 @@ if (deployerFeeJuiceClaim && !spendingLimitConfig) {
   process.exit(1);
 }
 
+let attestationEnvironment: AttestationEnvironmentConfig | undefined;
+try {
+  attestationEnvironment = readAttestationEnvironment(process.env, [
+    API_KEY,
+    RECOVERY_API_KEY,
+    ADMIN_KEY,
+    MAY_BROADCAST_TOKEN,
+  ]);
+} catch (err) {
+  console.error(`[pxe-bridge] ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+}
+if (
+  attestationEnvironment &&
+  (!API_KEY ||
+    !JOURNAL_PATH ||
+    !spendingLimitConfig?.deployment ||
+    !corridor)
+) {
+  console.error(
+    "[pxe-bridge] Attestation requires PXE_BRIDGE_API_KEY, PXE_BRIDGE_JOURNAL, " +
+      "PXE_BRIDGE_ACCOUNT_DEPLOYMENT, the spending-limit account, and " +
+      "PXE_BRIDGE_SETTLEMENT_CORRIDOR",
+  );
+  process.exit(1);
+}
+
 async function main(): Promise<void> {
+  let application: Server = createInitializationApp(API_KEY);
+  const server = createServer((req, res) => {
+    application.emit("request", req, res);
+  });
+  server.requestTimeout = application.requestTimeout;
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error) => reject(error);
+    server.once("error", onError);
+    server.listen(PORT, HOST, () => {
+      server.off("error", onError);
+      console.log(`[pxe-bridge] Listening on ${HOST}:${PORT}`);
+      if (HOST !== "127.0.0.1" && HOST !== "localhost") {
+        console.warn(
+          "[pxe-bridge] WARNING: Binding to non-localhost address. " +
+            "Deploy behind a TLS-terminating reverse proxy (nginx, AWS ELB, etc.)",
+        );
+      }
+      resolve();
+    });
+  });
+
   const { key: secretKey, source: keySource } = await resolveSecretKey();
   console.log(`[pxe-bridge] Secret key loaded from ${keySource}`);
 
@@ -569,11 +644,69 @@ async function main(): Promise<void> {
         : {}),
     },
   );
-  const server = createApp(client, {
+  let attestation: AttestationProducer | undefined;
+  let rootUpdatePublisher: RootUpdatePublisher | undefined;
+  let attestationTree: AllowlistTree | undefined;
+  if (attestationEnvironment && journal && spendingLimitConfig && corridor) {
+    const resolved = await resolveAttestationSecret(
+      process.env,
+      [
+        secretKey,
+        spendingLimitConfig.allowlistSeed,
+        API_KEY,
+        RECOVERY_API_KEY,
+        ADMIN_KEY,
+        MAY_BROADCAST_TOKEN,
+        attestationEnvironment.apiKey,
+        attestationEnvironment.relay.token,
+        process.env["SPENDING_LIMIT_ADMIN_KEY"],
+      ].filter((value): value is string => value !== undefined),
+    );
+    console.log(`[pxe-bridge] Attestation key loaded from ${resolved.source}`);
+    attestationTree = await AllowlistTree.build(
+      spendingLimitConfig.allowlistSeed,
+      spendingLimitConfig.allowlistRecipients,
+    );
+    attestation = new AttestationProducer({
+      probe: client,
+      journal,
+      allowlistTree: attestationTree,
+      signer: resolved.signer,
+      domain: {
+        sourceChainId: attestationEnvironment.domain.sourceChainId,
+        environment: attestationEnvironment.domain.environment,
+        corridorId: corridor.corridorId,
+        corridorRevision: corridor.corridorRevision,
+        manifestDigest: corridor.manifestDigest,
+        genesisOrNetworkDigest: corridor.genesisOrNetworkDigest,
+      },
+      audit: attestationAudit,
+    });
+    rootUpdatePublisher = new RootUpdatePublisher(
+      attestation,
+      client,
+      journal,
+      attestationEnvironment.relay,
+      attestationAudit,
+    );
+  }
+  const readiness = createReadinessObserver(client, {
+    journal,
+    limits,
+    mayBroadcastConfigured: mayBroadcast !== undefined,
+    corridor,
+  });
+  let initialized = false;
+  application = createApp(client, {
     apiKey: API_KEY,
+    recoveryApiKey: RECOVERY_API_KEY,
     adminKey: ADMIN_KEY,
     limits,
     audit,
+    readiness,
+    initialized: () => initialized,
+    attestationApiKey: attestationEnvironment?.apiKey,
+    attestation,
     ...(journal
       ? {
           settlement: {
@@ -582,11 +715,43 @@ async function main(): Promise<void> {
             corridor,
             inFlight: new Set<string>(),
             timeoutMs: SETTLEMENT_DEADLINE_MS,
+            readiness,
           },
         }
       : {}),
-    minFeeJuice,
   });
+
+  server.requestTimeout = application.requestTimeout;
+  console.log(`[pxe-bridge] Node: ${AZTEC_NODE_URL}`);
+  console.log(`[pxe-bridge] Auth: ${API_KEY ? "enabled" : "DISABLED"}`);
+  if (limits) {
+    if (limitsConfig.maxAmount !== undefined)
+      console.log(`[pxe-bridge] Max amount: ${limitsConfig.maxAmount}`);
+    if (limitsConfig.dailyLimit !== undefined)
+      console.log(`[pxe-bridge] Daily limit: ${limitsConfig.dailyLimit}`);
+    if (limitsConfig.cooldownThreshold !== undefined)
+      console.log(
+        `[pxe-bridge] Cooldown: ${limitsConfig.cooldownDelayMs}ms above ${limitsConfig.cooldownThreshold}`,
+      );
+  }
+  console.log(`[pxe-bridge] Audit (output only): ${AUDIT_LOG_PATH ?? "stdout"}`);
+  console.log(`[pxe-bridge] Journal: ${JOURNAL_PATH ?? "NOT SET"}`);
+  console.log(`[pxe-bridge] Endpoints:`);
+  console.log(
+    `  POST /           -- JSON-RPC (aztec_createNote, aztec_getSettlement, aztec_getVersion)`,
+  );
+  console.log(`  POST /api/rpc    -- JSON-RPC (alias)`);
+  console.log(
+    `  POST /api/recovery -- Reconciliation reserve (${RECOVERY_API_KEY ? "enabled" : "DISABLED"})`,
+  );
+  console.log(`  GET  /status     -- Minimal public liveness`);
+  console.log(`  GET  /ready      -- Authenticated hard settlement readiness`);
+  console.log(
+    `  POST /api/attestation -- Readiness attestations (${attestation ? "enabled" : "DISABLED"})`,
+  );
+  console.log(
+    `  POST /admin/resume -- Clear the circuit breaker (${ADMIN_KEY ? "enabled" : "DISABLED"})`,
+  );
 
   await client.connect();
   // Bound only now, because whether this is a lost journal depends on whether
@@ -600,6 +765,12 @@ async function main(): Promise<void> {
         ? () => legacyAuditRefusal(AUDIT_LOG_PATH, Date.now())
         : undefined,
     });
+    if (attestationTree && spendingLimitConfig && journal.health().writable) {
+      journal.recordAllowlistSnapshot(
+        attestationTree.root.toString(),
+        spendingLimitConfig.allowlistRecipients,
+      );
+    }
     const health = journal.health();
     console.log(
       health.writable
@@ -613,6 +784,8 @@ async function main(): Promise<void> {
       console.warn("[pxe-bridge] WARNING: PXE_BRIDGE_SETTLEMENT_CORRIDOR not set; createNote refused");
     }
   }
+  rootUpdatePublisher?.start();
+  initialized = true;
 
   // Printed on every unrecorded start, not just the first, so a missed first
   // print is not the end of it.
@@ -626,41 +799,9 @@ async function main(): Promise<void> {
     );
   }
 
-  server.listen(PORT, HOST, () => {
-    console.log(`[pxe-bridge] Listening on ${HOST}:${PORT}`);
-    if (HOST !== "127.0.0.1" && HOST !== "localhost") {
-      console.warn(
-        "[pxe-bridge] WARNING: Binding to non-localhost address. " +
-          "Deploy behind a TLS-terminating reverse proxy (nginx, AWS ELB, etc.)",
-      );
-    }
-    console.log(`[pxe-bridge] Node: ${AZTEC_NODE_URL}`);
-    console.log(`[pxe-bridge] Auth: ${API_KEY ? "enabled" : "DISABLED"}`);
-    if (limits) {
-      if (limitsConfig.maxAmount !== undefined)
-        console.log(`[pxe-bridge] Max amount: ${limitsConfig.maxAmount}`);
-      if (limitsConfig.dailyLimit !== undefined)
-        console.log(`[pxe-bridge] Daily limit: ${limitsConfig.dailyLimit}`);
-      if (limitsConfig.cooldownThreshold !== undefined)
-        console.log(
-          `[pxe-bridge] Cooldown: ${limitsConfig.cooldownDelayMs}ms above ${limitsConfig.cooldownThreshold}`,
-        );
-    }
-    console.log(`[pxe-bridge] Audit (output only): ${AUDIT_LOG_PATH ?? "stdout"}`);
-    console.log(`[pxe-bridge] Journal: ${JOURNAL_PATH ?? "NOT SET"}`);
-    console.log(`[pxe-bridge] Endpoints:`);
-    console.log(
-      `  POST /           -- JSON-RPC (aztec_createNote, aztec_getSettlement, aztec_getVersion)`,
-    );
-    console.log(`  POST /api/rpc    -- JSON-RPC (alias)`);
-    console.log(`  GET  /status     -- Liveness (200 while the node answers; body lists prerequisites)`);
-    console.log(`  GET  /ready      -- Readiness (200 only when every settlement prerequisite holds)`);
-    console.log(
-      `  POST /admin/resume -- Clear the circuit breaker (${ADMIN_KEY ? "enabled" : "DISABLED"})`,
-    );
-  });
 
   function shutdown(): void {
+    rootUpdatePublisher?.stop();
     console.log("[pxe-bridge] Shutting down...");
     const timer = setTimeout(() => process.exit(1), 5000);
     server.close(() => {

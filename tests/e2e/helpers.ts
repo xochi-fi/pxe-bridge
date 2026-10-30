@@ -19,6 +19,7 @@ import { L1TokenManager } from "@aztec-labs/aztec.js/ethereum";
 import { createLogger } from "@aztec-labs/aztec.js/log";
 import { createAztecNodeClient } from "@aztec-labs/aztec.js/node";
 import { createExtendedL1Client } from "@aztec-labs/ethereum/client";
+import { BlockHash } from "@aztec-labs/stdlib/block";
 
 export interface E2EConfig {
   nodeUrl: string;
@@ -236,6 +237,68 @@ export const L1_RPC = process.env["L1_RPC_URL"] ?? "http://localhost:8545";
 // one instead of sleeping. Twelve is plenty for a healthy node and keeps a
 // broken one failing in minutes rather than in the beforeAll timeout.
 const SANDBOX_WAIT_ATTEMPTS = 12;
+
+/**
+ * Drives real L2 transactions until every block already proposed at entry is
+ * visible through the sandbox's finalized tip. Each callback transaction
+ * advances Anvil and gives the sequencer/archiver a completed request
+ * boundary; no wall-clock sleep or proven/latest substitution is involved.
+ */
+export async function advanceFinalizedTip(
+  nodeUrl: string,
+  onBlockNeeded: () => Promise<void>,
+  attempts = SANDBOX_WAIT_ATTEMPTS,
+): Promise<void> {
+  const node = createAztecNodeClient(nodeUrl);
+  let [tips, worldState] = await Promise.all([
+    node.getChainTips(),
+    node.getWorldStateSyncStatus(),
+  ]);
+  const minimumBlock = Number(tips.proposed.number);
+  if (minimumBlock === 0) {
+    throw new Error("cannot advance finalized L2 history before the sandbox has proposed a block");
+  }
+  for (let attempt = 0; attempt <= attempts; attempt++) {
+    if (
+      Number(tips.finalized.block.number) >= minimumBlock &&
+      Number(worldState.finalizedBlockNumber) >= minimumBlock &&
+      worldState.treesAreSynched
+    ) {
+      return;
+    }
+    if (attempt === attempts) break;
+    await onBlockNeeded();
+    [tips, worldState] = await Promise.all([
+      node.getChainTips(),
+      node.getWorldStateSyncStatus(),
+    ]);
+  }
+  throw new Error(
+    `finalized L2 tip did not reach ${minimumBlock} after ${attempts} driven blocks: ` +
+      `proposed=${tips.proposed.number}, proven=${tips.proven.block.number}, ` +
+      `finalized=${tips.finalized.block.number}, ` +
+      `worldFinalized=${worldState.finalizedBlockNumber}, treesSynced=${worldState.treesAreSynched}`,
+  );
+}
+
+/**
+ * The sandbox advances its L1 clock by one Aztec slot for each driven block,
+ * which can outrun host wall time during a proof-heavy test. Chain integration
+ * tests anchor their injected trusted clock to the exact finalized block;
+ * readiness unit tests separately enforce the 300-second production skew cap.
+ */
+export async function finalizedTimestampMs(nodeUrl: string): Promise<number> {
+  const node = createAztecNodeClient(nodeUrl);
+  const tip = (await node.getChainTips()).finalized.block;
+  const block = await node.getBlockData({
+    number: tip.number,
+    hash: BlockHash.fromString(tip.hash),
+  });
+  if (!block) {
+    throw new Error(`finalized block ${tip.number}/${tip.hash} is unavailable`);
+  }
+  return Number(block.header.globalVariables.timestamp) * 1_000;
+}
 
 /**
  * Gives `recipient` a fee juice balance, bridging from L1 and then claiming on
