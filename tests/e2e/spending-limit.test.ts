@@ -835,8 +835,10 @@ describe("spending limit account (e2e)", () => {
   // send, so a removal simply disappeared from the hint and is_allowlisted
   // rejected the recipient in private. There is no set on chain to re-read any
   // more, so the bridge instead compares the root it can build against the root
-  // the account stores, and an admin change it has not been told about shows up
-  // as drift rather than as an unlisted recipient.
+  // the account stores. Hard readiness (#46) makes that comparison against the
+  // FINALIZED root, so a revocation inside the finality lag reaches the send,
+  // and the account's own public check refuses it in the wallet's public
+  // simulation, before anything is broadcast.
   //
   // That is the honest failure. The bridge cannot know whether the recipient
   // was revoked, whether someone else was added, or whether its configuration
@@ -852,7 +854,7 @@ describe("spending limit account (e2e)", () => {
         recipient: SEED_RECIPIENT,
         amount: "1000",
       }),
-    ).rejects.toThrow("Allowlist root mismatch");
+    ).rejects.toThrow("Allowlist changed since this transaction was proven");
   }, 600_000);
 
   // ADMIN AUTH. apply_limits originally had no caller check at all, so anyone
