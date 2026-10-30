@@ -198,9 +198,10 @@ describe("HTTP server (e2e)", () => {
         version: SETTLEMENT_VERSION,
         operationId: "e2e-http-1",
       });
+      // The journal records the primary readiness reason (settlement-operations.md, -32006).
       expect(read.result).toMatchObject({
         found: true,
-        observation: { state: "not_submitted", reason: "bridge_not_ready" },
+        observation: { state: "not_submitted", reason: "account_mode_not_spending_limit" },
       });
     });
 
