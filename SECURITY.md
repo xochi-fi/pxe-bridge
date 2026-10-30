@@ -366,15 +366,43 @@ one) is rejected at startup. Production runbook:
 The contract enforces its limits against public state, and a public function's
 arguments are part of the transaction. Every transfer therefore publishes:
 
-- **The amount.** `declared_amount` is an argument to `check_spending_public`.
+- **The amount.** `declared_amount` is an argument to `check_spending_public`,
+  `amount` is an argument to the token's public finalize call, and the
+  completed note's value is emitted in a public log.
+- **The sender.** `from` is an argument to the token's public finalize call.
 - **The token.** Pinned at construction and visible as the call target.
 - **The allowlist root**, and the fact that a transfer proved membership against
   it. Not the recipient, and not the set.
 
 This is inherent to checking a value against public storage and is not
 remediated for the amount. Enforcing that privately would mean nullifier-based
-counters and a different contract. Callers who need the amount private cannot
-use the spending-limit account.
+counters and a different contract. Switching accounts does not help: no mode of
+this bridge is amount-private. At Aztec 6.0.0 the token's `transfer_to_private`
+enqueues the public `_finalize_transfer_to_private_unsafe(from, amount,
+partial_note)`, which calls `_finalize_transfer_to_private`, regardless of
+account
+([`token_contract/src/main.nr:324-335, 402-425`](https://github.com/aztec-labs-eng/aztec-node/blob/v6.0.0/noir-projects/noir-contracts/contracts/app/token_contract/src/main.nr#L324-L425)).
+Completing the partial note emits `[storage_slot, value]` in a public log
+([`uint_note.nr:211-212`](https://github.com/aztec-labs-eng/aztec-node/blob/v6.0.0/noir-projects/aztec-nr/uint-note/src/uint_note.nr#L211-L212)).
+So the amount and the sender are on the transcript under a plain Schnorr
+account too. Only a private-to-private `transfer` from private inventory, which
+this bridge does not implement, keeps the amount off it.
+
+The recipient's address is placed in no public call in either mode, but that is
+not recipient privacy. Whether the recipient stays off the transcript depends on
+how the note is delivered. The partial note is sent to the recipient with
+`MessageDelivery::onchain_unconstrained()`
+([`uint_note.nr:123-129`](https://github.com/aztec-labs-eng/aztec-node/blob/v6.0.0/noir-projects/aztec-nr/uint-note/src/uint_note.nr#L123-L129)),
+and when no handshake is registered for the sender/recipient pair, PXE asks the
+wallet's `resolveTaggingSecretStrategy` hook for a tagging strategy. Without a
+hook it uses `non-interactive-handshake`, which "reveals the recipient onchain"
+([`resolve_tagging_secret_strategy.ts:9-17, 42-43`](https://github.com/aztec-labs-eng/aztec-node/blob/v6.0.0/yarn-project/pxe/src/hooks/resolve_tagging_secret_strategy.ts#L9-L43)).
+This bridge's `EmbeddedWallet` is created with no hooks
+([`src/aztec-client.ts`](src/aztec-client.ts)), so the first transfer to each
+recipient reveals it, and recipient privacy is **not** delivered today. The
+`interactive-handshake` strategy reveals nothing about the recipient onchain but
+needs the recipient to answer the handshake registry's request. The allowlist
+design below keeps the recipient out of the bridge's own public calls only.
 
 The recipient is a different story since NM-1019 [Medium]. The array design
 published a candidate set of up to eight addresses per transfer, and the set was
@@ -424,9 +452,10 @@ has permanent-brick modes -- `permitted_token` has no setter, and a zero admin
 is unrecoverable -- and this is one more.
 
 The seed is a secret, but a weaker one than the signing key: holding it lets
-someone test a candidate address against a leaf, which costs recipient privacy
-and not custody. It is warned about rather than refused when read from the
-environment in production.
+someone test a candidate address against a leaf, which costs allowlist
+membership privacy (recipient privacy is not delivered today; see
+[What is public](#what-is-public)), not custody. It is warned about rather than
+refused when read from the environment in production.
 
 The bridge checks its copy against the chain before every send, via
 `get_allowlist_root`, and refuses to send on a mismatch. That check is what makes
