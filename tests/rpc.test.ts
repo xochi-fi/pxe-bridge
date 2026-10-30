@@ -403,6 +403,28 @@ describe("aztec_createNote: the broadcast gate", () => {
     expect(client.sends).toHaveLength(1);
   });
 
+  it("holds a resumed prepared attempt the window cannot take, never re-proving it", async () => {
+    const limits = new TransactionLimits({ maxAmount: 5000n, dailyLimit: 1500n });
+    gate.decision = "deny";
+    await createNote(client, { settlement: s, limits });
+    const held = journal.attempts("op-1")[0]!.txHash;
+    gate.decision = "allow";
+    await createNote(client, { settlement: s, limits }, v1Params({ operationId: "op-2" }));
+    expect(limits.windowStatus().committed).toBe(1000n);
+
+    const denied = await createNote(client, { settlement: s, limits });
+    expect(denied.error?.code).toBe(RPC_ERRORS.NOT_SUBMITTED);
+    expect(denied.error?.data?.observation).toMatchObject({ state: "prepared", txHash: held });
+    expect(journal.get("op-1")?.state).toBe("prepared");
+    expect(journal.attempts("op-1")).toHaveLength(1);
+    expect(client.proofs).toBe(2);
+
+    const nextWindow = new TransactionLimits({ maxAmount: 5000n, dailyLimit: 1500n });
+    const recovered = await createNote(client, { settlement: s, limits: nextWindow });
+    expect(recovered.result?.observation).toMatchObject({ state: "included", txHash: held });
+    expect(client.proofs).toBe(2);
+  });
+
   it("reports a mined revert as `reverted`, not as a failure", async () => {
     client.revert = true;
     const res = await createNote(client, ctx);
@@ -428,6 +450,27 @@ describe("ambiguity after the mark is submitted_unknown, never a retryable error
     const res = await createNote(client, { settlement: { ...s, timeoutMs: 50 } });
     expect(res.error?.code).toBe(RPC_ERRORS.SUBMITTED_UNKNOWN);
     expect(res.error?.data?.observation).toMatchObject({ reason: "response_deadline" });
+  });
+
+  it("keeps the first observedAt across polls and answers lookups from the committed row", async () => {
+    client.behaviour = "lose_response";
+    await createNote(client, ctx);
+    let clock = 1_000_000;
+    const timed = { settlement: { ...s, now: () => clock } };
+
+    const first = await getSettlement(client, timed);
+    expect(first.observation).toMatchObject({ state: "included", observedAt: 1_000 });
+    clock = 2_000_000;
+    expect(journal.get("op-1")?.observation).toMatchObject({ observedAt: 1_000 });
+    expect((await getSettlement(client, timed)).observation).toMatchObject({
+      state: "included",
+      observedAt: 1_000,
+    });
+
+    client.finalizeAll();
+    const settled = await getSettlement(client, timed);
+    expect(settled.state).toBe("finalized");
+    expect(settled.observation).toMatchObject({ state: "finalized" });
   });
 
   it("recovers a lost response through aztec_getSettlement, and a retry does not send again", async () => {
