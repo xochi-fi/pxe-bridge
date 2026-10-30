@@ -60,6 +60,7 @@ export type ReadinessReason =
   | "corridor_unconfigured"
   | "network_identity_unknown"
   | "network_identity_incomplete"
+  | "network_identity_mismatch"
   | "node_readiness_unknown"
   | "node_not_ready"
   | "world_state_unknown"

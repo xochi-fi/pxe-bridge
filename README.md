@@ -716,8 +716,12 @@ new work and returns JSON-RPC `-32006` with
 typed `data.observation` (`not_submitted`, with the primary readiness reason).
 Readiness loss does not erase or redirect journaled operations:
 `aztec_getSettlement`, marked-operation reconciliation and exact-byte
-rebroadcast remain available. An unmarked operation cannot newly pass
-admission while the bridge is unready.
+rebroadcast remain available, and an already admitted `prepared` operation
+keeps resuming its exact journaled bytes, held only on per-operation facts
+(journal or fence lost, network mismatch, account paused, on-chain root not
+the configured one, inventory below its amount, rolling window full; see
+docs/settlement-operations.md). A new operation cannot pass admission while
+the bridge is unready.
 
 The Docker `HEALTHCHECK` reads only `/status`'s HTTP code (`curl -sf`).
 

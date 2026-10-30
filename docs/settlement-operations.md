@@ -426,8 +426,27 @@ becomes terminal. The per-transfer limit is the SDK transaction gas limits
 multiplied by predicted maximum fees per gas. The projection exposes observed
 and required fee juice, observed finalized token inventory and required
 admissible volume, and the exact finalized reference.
-Readiness loss blocks only unmarked admission: an already may-broadcast-marked
+Readiness loss blocks only new admission. An already may-broadcast-marked
 operation keeps its normal lookup, observation and exact-byte rebroadcast path.
+An already admitted `prepared` operation keeps recovering too: the
+may-broadcast query and the send of its exact journaled bytes are not gated on
+the `/ready` verdict, fee runway, finalized-tip freshness or corridor
+admission. It is held, still `prepared` with the same bytes and hash and
+resumed by the next call, only while one of these per-operation facts holds:
+
+| Hold (`data.reasons`) | Source |
+| --- | --- |
+| `journal_unwritable`, `writer_fence_lost` | local journal |
+| `may_broadcast_unconfigured` | local configuration |
+| `network_identity_mismatch` | node identity vs the operation's `network` |
+| `account_paused` | finalized `paused` read by the readiness probe |
+| `allowlist_root_mismatch` | finalized on-chain root vs the configured tree the attempt was proven against |
+| `inventory_insufficient` | finalized public token balance below the operation's amount |
+| in-memory rolling window full | `TransactionLimits.reserve`; answered `prepared`, never re-proved |
+
+A fact the probe could not read is not a hold: the node and the account
+decide. Past `validUntil` the operation is `not_submitted`; past the attempt's
+protocol expiry a new attempt is prepared, as before.
 
 ## Recipient readiness attestations
 
