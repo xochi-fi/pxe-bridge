@@ -387,6 +387,31 @@ function observationFrom(attempt: Attempt, node: NodeObservation, now: number): 
   }
 }
 
+type MinedObservation = Extract<Observation, { observedAt: number }>;
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i += 1) {
+    if (left[i] !== right[i]) return false;
+  }
+  return true;
+}
+
+function sameCanonicalOutcome(left: MinedObservation, right: MinedObservation): boolean {
+  return (
+    left.state === right.state &&
+    left.txHash === right.txHash &&
+    left.expirationTimestamp === right.expirationTimestamp &&
+    left.executionResult === right.executionResult &&
+    left.blockHash === right.blockHash &&
+    left.blockNumber === right.blockNumber &&
+    left.receiptStatus === right.receiptStatus &&
+    left.effects.state === right.effects.state &&
+    sameStrings(left.effects.noteHashes, right.effects.noteHashes) &&
+    sameStrings(left.effects.nullifiers, right.effects.nullifiers)
+  );
+}
+
 function currentAttempt(journal: SettlementJournal, op: StoredOperation): Attempt | undefined {
   if (op.currentAttempt === null) return undefined;
   return journal.attempts(op.operationId).find((a) => a.attempt === op.currentAttempt);
@@ -444,9 +469,17 @@ async function observe(
           reason: "node_read_failed",
         };
       }
-      const observation = observationFrom(attempt, node, (s.now ?? Date.now)());
+      let observation = observationFrom(attempt, node, (s.now ?? Date.now)());
+      if (
+        "observedAt" in observation &&
+        op.observation != null &&
+        "observedAt" in op.observation &&
+        sameCanonicalOutcome(op.observation, observation)
+      ) {
+        observation = { ...observation, observedAt: op.observation.observedAt };
+      }
       // Reads record only a finalized outcome, so polling does not churn the
-      // journal; the live observation is always re-read.
+      // journal; a changed canonical outcome is still returned immediately.
       if (observation.state === "finalized" || observation.state === "reverted") {
         recordObservation(s, op.operationId, observation);
       }
