@@ -4,10 +4,13 @@ JSON-RPC bridge from EVM intent solvers to Aztec shielded settlement via embedde
 
 > **Network.** This release targets the **Aztec 6.0.0 public testnet** (L1
 > chain id 11155111, rollup version 679261766) through the `@aztec-labs/*`
-> 6.0.0 SDK. It does **not** serve Aztec mainnet, which runs 5.2.0: a 6.0.0
-> client against a 5.2.0 node is unsupported, and every account address this
-> release derives differs from its 5.2.0 counterpart. Run it only against a
-> 6.0.0 node.
+> 6.0.0 SDK. Aztec mainnet has also run 6.0.0 since its v6 upgrade on
+> 26 October 2026
+> ([announcement](https://announce.aztec.network/a/2026-10-upgrade-the-v6-upgrade-executed-on));
+> this README documents the testnet configuration only. A 6.0.0 client
+> against a 5.x node is unsupported, and every account address this release
+> derives differs from its 5.2.0 counterpart. Run it only against a 6.0.0
+> node.
 
 ## What is PXE?
 
@@ -27,13 +30,21 @@ EVM intent solvers speak JSON-RPC and have no concept of private execution, PXEs
 
 pxe-bridge embeds a PXE wallet and wraps it in a JSON-RPC interface that solvers already understand. When a solver says "create a shielded note for this token," the bridge handles private execution, proof generation, and note encryption transparently. The solver gets back a transaction hash.
 
-> **What "shielded" covers.** The note and its recipient are private. With the
-> on-chain spending-limit account enabled, the transfer **amount is public**.
-> Enforcing caps against public contract state requires putting the amount in a
-> public call's arguments. The recipient is not: membership in the allowlist is
-> proven in private against a Merkle root, and the public call sees only that
-> root. See [SECURITY.md](SECURITY.md#what-is-public). A plain Schnorr account,
-> the default, publishes neither.
+> **What "shielded" covers.** The note's owner and randomness are private.
+> The transfer **amount and sender are public in both account modes**: the
+> bridge calls the token's `transfer_to_private`, which enqueues the public
+> `_finalize_transfer_to_private_unsafe(from, amount, partial_note)`, and the
+> completed note publishes its amount in a public log. With the on-chain
+> spending-limit account enabled, the transfer also publishes `declared_amount`
+> and the allowlist root through `check_spending_public`. The recipient's
+> address is in no public call in either mode, but recipient privacy is **not**
+> delivered today: the bridge installs no `resolveTaggingSecretStrategy` hook,
+> so PXE's default strategy establishes a non-interactive handshake for each
+> recipient it has no landed handshake with, publishing a tag any holder of the
+> recipient's address can match. Only a private-to-private
+> `transfer` from private inventory, which this bridge does not implement,
+> keeps the amount off the transcript. Sources (Aztec 6.0.0) in
+> [SECURITY.md](SECURITY.md#what-is-public).
 
 ```
 EVM Solver --JSON-RPC--> pxe-bridge --Aztec SDK--> Aztec L2 Node

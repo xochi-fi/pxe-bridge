@@ -388,8 +388,9 @@ if (SPENDING_LIMIT_ADMIN) {
     process.exit(1);
   }
   // Warned rather than refused. Unlike the signing key this cannot move funds:
-  // leaking it costs recipient privacy, not custody. It is still a secret, and
-  // it belongs in the same store the signing key comes from.
+  // leaking it costs membership privacy for allowlisted recipients the bridge
+  // has not yet paid, and which position each occupies, not custody. It is
+  // still a secret, and it belongs in the same store the signing key comes from.
   if (process.env["NODE_ENV"] === "production") {
     console.warn(
       "[pxe-bridge] PXE_BRIDGE_ALLOWLIST_SEED is being read from the environment in " +
