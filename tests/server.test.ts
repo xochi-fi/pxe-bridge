@@ -614,11 +614,62 @@ describe("public liveness isolation", () => {
       const answered = await Promise.all(Array.from({ length: 16 }, (_, i) => call(i)));
       expect(answered.every((response) => response.status === 200)).toBe(true);
       expect((await call(16)).status).toBe(503);
+      const ready = await fetch(`${url}/ready`, {
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      expect(ready.status).toBe(503);
+      expect(await ready.json()).toMatchObject({
+        ready: false,
+        reasons: expect.arrayContaining(["backend_capacity_exhausted"]),
+      });
+      const recovery = await jsonPost(
+        url,
+        rpcBody("aztec_getSettlement", [
+          { version: "pxe-bridge.settlement.v1", operationId: "background-0" },
+        ]),
+        { Authorization: `Bearer ${key}` },
+      );
+      expect(recovery.status).toBe(200);
+      expect(await recovery.json()).toMatchObject({
+        result: { found: true, operationId: "background-0" },
+      });
     } finally {
       await new Promise<void>((resolve) => srv.close(() => resolve()));
     }
   });
 
+
+  it("reserves rate-limit capacity for administrative recovery", async () => {
+    const rpcKey = "admin-budget-rpc-key";
+    const adminKey = "admin-budget-recovery-key";
+    const srv = createApp(new FakeAztecClient(), {
+      apiKey: rpcKey,
+      adminKey,
+      limits: new TransactionLimits({ dailyLimit: 5_000n }),
+    });
+    await new Promise<void>((resolve) => srv.listen(0, resolve));
+    const addr = srv.address();
+    const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
+
+    try {
+      for (let i = 0; i < 60; i++) {
+        await fetch(`${url}/ready`, {
+          headers: { Authorization: `Bearer ${rpcKey}` },
+        });
+      }
+      const recovered = await fetch(`${url}/admin/resume`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${adminKey}`,
+          "Content-Type": "application/json",
+        },
+        body: "{}",
+      });
+      expect(recovered.status).toBe(200);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
 
   it("refuses one credential for RPC and breaker administration", () => {
     const client = new FakeAztecClient();

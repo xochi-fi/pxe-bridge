@@ -71,7 +71,8 @@ export type ReadinessReason =
   | "finalized_tip_mismatch"
   | "finalized_tip_from_future"
   | "finalized_tip_stale"
-  | "readiness_observation_failed";
+  | "readiness_observation_failed"
+  | "backend_capacity_exhausted";
 
 export type ReadinessFact<T> =
   | { state: "known"; value: T }

@@ -335,6 +335,25 @@ describe("aztec_createNote: the broadcast gate", () => {
     expect(client.proofs).toBe(1);
     expect(client.sends).toEqual([beforeAttempts[0]!.txHash]);
   });
+  it("resumes a prepared attempt when readiness observation fails", async () => {
+    gate.decision = "unknown";
+    await createNote(client, ctx);
+    const prepared = journal.attempts("op-1")[0]!;
+
+    s.readiness = {
+      observe: () => Promise.reject(new Error("readiness transport unavailable")),
+    };
+    gate.decision = "allow";
+    const recovered = await createNote(client, ctx);
+
+    expect(recovered.result?.observation).toMatchObject({
+      state: "included",
+      txHash: prepared.txHash,
+    });
+    expect(client.proofs).toBe(1);
+    expect(client.sends).toEqual([prepared.txHash]);
+  });
+
 
   it("refuses a same-id request with changed terms and does no work", async () => {
     await createNote(client, ctx);

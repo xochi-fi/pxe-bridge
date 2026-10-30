@@ -912,7 +912,7 @@ async function preparedHoldReasons(
     readiness = await deadline.race(observer.observe());
   } catch {
     console.error("[rpc] Readiness observation for a prepared attempt failed");
-    return [...reasons, "readiness_observation_failed"];
+    return reasons;
   }
   // The request deadline is spent, so the gate would close before any mark.
   if (readiness === TIMED_OUT) return ["readiness_observation_failed"];

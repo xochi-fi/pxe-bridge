@@ -379,26 +379,31 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
     ? { observe: currentReadinessObservation }
     : undefined;
   const rateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+  const adminRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const livenessRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const authFailureLimiter = new RateLimiter(AUTH_FAILURE_MAX, RATE_LIMIT_WINDOW_MS);
   const attestationRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const attestationAuthFailureLimiter = new RateLimiter(AUTH_FAILURE_MAX, RATE_LIMIT_WINDOW_MS);
   const startupRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const malformedTargetRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
-  let rpcInFlight = 0;
-  const acquireBackendLease = (): {
+  let backendInFlight = 0;
+  let recoveryInFlight = 0;
+  const acquireBackendLease = (recovery = false): {
     trackBackground: (call: Promise<unknown>) => void;
     finish: () => void;
   } | null => {
-    if (rpcInFlight >= MAX_RPC_IN_FLIGHT) return null;
-    rpcInFlight += 1;
+    const active = recovery ? recoveryInFlight : backendInFlight;
+    if (active >= MAX_RPC_IN_FLIGHT) return null;
+    if (recovery) recoveryInFlight += 1;
+    else backendInFlight += 1;
     let backgroundPending = 0;
     let handlerFinished = false;
     let capacityReleased = false;
     const releaseCapacity = (): void => {
       if (capacityReleased || !handlerFinished || backgroundPending !== 0) return;
       capacityReleased = true;
-      rpcInFlight -= 1;
+      if (recovery) recoveryInFlight -= 1;
+      else backendInFlight -= 1;
     };
     return {
       trackBackground(call): void {
@@ -511,7 +516,15 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
         }
         try {
           const readiness = await currentReadinessObservation();
-          sendJson(res, readiness.ready ? 200 : 503, readiness);
+          const projected =
+            backendInFlight >= MAX_RPC_IN_FLIGHT
+              ? {
+                  ...readiness,
+                  ready: false,
+                  reasons: [...readiness.reasons, "backend_capacity_exhausted" as const],
+                }
+              : readiness;
+          sendJson(res, projected.ready ? 200 : 503, projected);
         } catch {
           console.error("[pxe-bridge] Readiness observation failed");
           sendJson(res, 503, { ready: false, reasons: ["readiness_observation_failed"] });
@@ -594,12 +607,10 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           sendJson(res, 404, { error: "Not found" });
           return;
         }
-        // Charged to the auth-failure bucket for the same reason as the RPC
-        // branch, and it matters more here: this endpoint shares one limiter
-        // with the RPC path, so hammering it used to spend the budget every
-        // transfer depends on.
+        // Administrative recovery keeps reserved capacity: a lower-privilege
+        // RPC caller cannot consume its limiter through ordinary traffic.
         if (rejectedUnauthenticated(req, res, opts.adminKey, adminIp)) return;
-        if (!rateLimiter.allow(adminIp)) {
+        if (!adminRateLimiter.allow(adminIp)) {
           sendJson(res, 429, { error: "Too many requests" });
           return;
         }
@@ -696,7 +707,12 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           return;
         }
 
-        const lease = acquireBackendLease();
+        const recoveryRequest =
+          typeof parsed === "object" &&
+          parsed !== null &&
+          "method" in parsed &&
+          parsed.method === "aztec_getSettlement";
+        const lease = acquireBackendLease(recoveryRequest);
         if (lease === null) {
           sendJson(res, 503, { error: "Service busy" });
           return;

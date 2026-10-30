@@ -234,7 +234,9 @@ handled (`SETTLEMENT_DEADLINE_MS`, 145 s = the 150 s HTTP response deadline
 less 5 s): admission, cooldown, proving, the may-broadcast query and send all
 spend it. Every Aztec JSON-RPC call has its own aborting 10 s transport
 deadline, and the HTTP server admits at most 16 concurrent JSON-RPC backend
-leases. A lease stays held until tracked proving or send work actually settles,
+leases. A separate bounded pool keeps journal-only `aztec_getSettlement`
+reconciliation available while fund-moving or attestation work is saturated.
+A backend lease stays held until tracked proving or send work actually settles,
 so work that outlives its caller cannot accumulate without bound. When the
 settlement deadline passes, the attempt's gate closes synchronously -- the
 gate is the only thing that marks -- so nothing the request started can be
@@ -348,6 +350,10 @@ is the only record of what the legacy bridge may have sent.
 | --- | --- | --- |
 | `GET /status` | none, separately rate-limited | Public minimal **process liveness** only: 200 `{"status":"ok"}` with no Aztec RPC. The listener serves it while the wallet is still connecting. |
 | `GET /ready` | Bearer `PXE_BRIDGE_API_KEY`, then the normal rate limiter | Operational projection from the authoritative admission predicate: 200 iff `ready: true`, otherwise 503 with stable reasons. During startup it returns 503 `initializing`. A backend observation exceeding 20 seconds returns 503 `readiness_observation_failed`; later probes share that still-running observation rather than starting more Aztec RPCs. Failed authentication is charged to the separate auth-failure limiter and exposes no state. |
+
+Backend saturation adds `backend_capacity_exhausted` and returns 503 for new
+admission. Journal-only `aztec_getSettlement` uses its separate bounded pool
+and remains available for reconciliation.
 
 The readiness projection contains the flat checker fields `ready`,
 `nodeVersion`, `l1ChainId`, `rollupVersion`, `account {address,classId}`,
