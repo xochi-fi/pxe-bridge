@@ -145,7 +145,7 @@ const recipientFixture = RecipientFixtureSchema.parse(
   JSON.parse(
     readFileSync(
       new URL(
-        "../../vendor/xochi-sdk/6626f545eade7e6a4226cb7be69f6196fd98f105/shielded-recipient.json",
+        "../../vendor/xochi-sdk/8e419cda8acbcb1178490ae6b8636d50cbd18e5c/shielded-recipient.json",
         import.meta.url,
       ),
       "utf8",

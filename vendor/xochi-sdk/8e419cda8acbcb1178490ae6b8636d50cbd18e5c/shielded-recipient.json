@@ -1812,7 +1812,8 @@
     "rules": [
       "bindingDigest = the RecipientBinding EIP-712 digest both parties signed",
       "BackupPersistenceAck.backupCommitment = keccak256(randomized encrypted backup bytes); backupFormatId = keccak256(UTF8(\"xochi.shielded.backup-format.v1\")) = 0xe37c67f007c5a5bbebbc6c5b9aefd99f252b2cc121e3fc9a269801940f605348; neither value contains plaintext",
-      "nonce / challengeExpiry: a server-issued single-use challenge and its signing window, as for RecipientBinding (for PaymentReceiptAck, the receipt challenge)",
+      "BackupPersistenceAck and SenderRegistrationAck are enrollment acknowledgements: nonce / challengeExpiry equal the named RecipientBinding challenge members exactly; no second enrollment challenge is issued",
+      "PaymentReceiptAck nonce / challengeExpiry are a separate server-issued single-use receipt challenge and signing window",
       "SenderRegistrationAck.registeredSenders: nonempty, strictly ascending (bytewise), each a nonzero in-field Aztec address",
       "PaymentReceiptAck.amount: the exact credited BaseUnits, 0 < amount <= 2^128 - 1; blockNumber: decimal string on the wire"
     ],
@@ -1837,25 +1838,25 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "backupCommitment": "0x89d38145c86cef1776f2ce78a7a34412ac6a8891a2de5a886c11a4fbd4c875ab",
           "backupFormatId": "0xe37c67f007c5a5bbebbc6c5b9aefd99f252b2cc121e3fc9a269801940f605348",
           "purpose": "xochi.shielded.backup-persistence-ack.v1"
         },
-        "structHash": "0x67f3c849a53537cb6a7a9f16af9c31144f717805d164767b7d93350726f72ebf",
-        "digest": "0x1116ee0dc9cca8e93723c9d7ea73dee65b44a8a42c7e74cb09ab2cbeafaed207",
+        "structHash": "0xdb523fc4057eba01c2553e8c5b3a1b43c6a1d5232d10733b6eaad7e8557b3a08",
+        "digest": "0xbd9a7a3b57e671843f29e45e3a680e7def1feaf7f8d7e4c450c15cf5decee462",
         "wrapper": {
-          "u": "0x52e3d22fe2ae39b09fec3136ef033a50152a7ebb89545be7c41cf642c98a46314f6a5c10e9a80efdc054d0e51f1d78cd94237457a867f430ecf643e421966181",
-          "u48": "0x52e3d22fe2ae39b09fec3136ef033a50152a7ebb89545be7c41cf642c98a46314f6a5c10e9a80efdc054d0e51f1d78cd",
-          "messageField": "0x1ed7c7bd0ae0f6764a2fefccdab1e8cb1141912aa4f5088fbaa06cdb9565779b",
-          "provisionalPlainModR": "0x1116ee0dc9cca8e93723c9d7ea73dee65b44a8a42c7e74cb09ab2cbeafaed207"
+          "u": "0xd067bbaac3f36343754e78e7e5b56e2d2921cbc8c4ff38515f9d6efeb06ef0ae90948a33b8718fa3f6ea10cea857cac14d0a390121f412eed2e71ee83ea5d8f5",
+          "u48": "0xd067bbaac3f36343754e78e7e5b56e2d2921cbc8c4ff38515f9d6efeb06ef0ae90948a33b8718fa3f6ea10cea857cac1",
+          "messageField": "0x235eb8e15ae9229ac47e945162606cd245775f2a00c9f88980e7abc671936029",
+          "provisionalPlainModR": "0x2c6d8ee2b45191071639133ab5e405667684321e8bab9310851b7c3a0ecee45f"
         },
         "publicKey": {
           "x": "0x2a7cb3bc90801273e8b55228ad62489d0ee8c72bdf0fcfafa82d3461bcb05ecf",
           "y": "0x1a2d126b720b34667a7286aabdb35dea906223aca72dbeb4e2c6690565be732b"
         },
-        "signature": "0x203656e1cc9a8599316c5d0262851257a67a4f3bf4e7ba6ea14052fdfebe1e2316fe3c79e963444e88360aa320efc35e37b7e32cee0d8e454c6d9210726cb106"
+        "signature": "0x26b8bc6366b24614524fa012ac7c2157eb68c5c3a8c36f0d79f3614ad97337f02a8576a8b06a03da65d18c1c7f8d2705336d36d756406451e1ffe85c6c271639"
       },
       {
         "name": "SenderRegistrationAck (binding X)",
@@ -1877,8 +1878,8 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "registeredSenders": [
             "0x0000000000000000000000000000000000000000000000000000000000000005",
             "0x1717171717171717171717171717171717171717171717171717171717171717",
@@ -1886,19 +1887,19 @@
           ],
           "purpose": "xochi.shielded.sender-registration-ack.v1"
         },
-        "structHash": "0xb9e1f84e8f733fa5ff34a1704cab5753dc0342c8877f80385877255b51e8ce2b",
-        "digest": "0xfa194c5cef9612a3c252db2beb61acedd34abf7c4161c2cdce3a196a068f505e",
+        "structHash": "0xa73adf1417151b9e67d87dc3cd600926650ba175046eda1bc970fbe8bfe0e2b4",
+        "digest": "0x45819fb710ce5a09ae40d2d002321c508cb0a27b4ad8ffbe28a7ada5d19859b2",
         "wrapper": {
-          "u": "0x2f645003c8998052cf5730af0f7ce9ce41c57e96fffaf9999dd1c0440bd987f5e87e2e04b27a3c09c335f7d0269e39ef6c809ca06d4e58653c34d9b75102cf5d",
-          "u48": "0x2f645003c8998052cf5730af0f7ce9ce41c57e96fffaf9999dd1c0440bd987f5e87e2e04b27a3c09c335f7d0269e39ef",
-          "messageField": "0x2f94fa56b2e29dd5395ad4a859a1cd873b8f6f2dd2440ea11a7f2978480f5d8e",
-          "provisionalPlainModR": "0x0823c41e899df1d328c17e9b63daf31c0a473611e0c28ff77ad04d86568f5059"
+          "u": "0xded4eabc248b042b223683de865951d229fdf15e940209698beafae642323b08bf0f25c297e42f52e067249dfd93e8bbf794bfd758936fea61472a94ffdf6ab3",
+          "u48": "0xded4eabc248b042b223683de865951d229fdf15e940209698beafae642323b08bf0f25c297e42f52e067249dfd93e8bb",
+          "messageField": "0x013a2cec073ad6846a6abc3f2f9aaf9fae5502326fa89c0a261371f61d1db0df",
+          "provisionalPlainModR": "0x151d51442f9cb9dff5f08d1980b0c3f3647cba32d11f8f2ce4c5b811e19859b1"
         },
         "publicKey": {
           "x": "0x2a7cb3bc90801273e8b55228ad62489d0ee8c72bdf0fcfafa82d3461bcb05ecf",
           "y": "0x1a2d126b720b34667a7286aabdb35dea906223aca72dbeb4e2c6690565be732b"
         },
-        "signature": "0x074de56fbb9dbbd9ac8c7e37681f0aec00b75b9800219d890ec373466fdc8fda2a7b4f8f6b970dea6f0e7078b6c517d5e8f47747a15520b1bc2c320b940e0126"
+        "signature": "0x22eae756dbee26d07f99918a60db78de92a76db51c5a52e809147f1b40909a6430269feed92272ef4f4054ffdf2d19e957fabc63fc9f90fc9a3a1dcd9b313485"
       },
       {
         "name": "PaymentReceiptAck (binding X)",
@@ -1966,14 +1967,14 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "backupCommitment": "0x89d38145c86cef1776f2ce78a7a34412ac6a8891a2de5a886c11a4fbd4c875ab",
           "backupFormatId": "0xe37c67f007c5a5bbebbc6c5b9aefd99f252b2cc121e3fc9a269801940f605348",
           "purpose": "xochi.shielded.backup-persistence-ack.v1"
         },
-        "digest": "0x1116ee0dc9cca8e93723c9d7ea73dee65b44a8a42c7e74cb09ab2cbeafaed207",
-        "messageField": "0x1ed7c7bd0ae0f6764a2fefccdab1e8cb1141912aa4f5088fbaa06cdb9565779b",
+        "digest": "0xbd9a7a3b57e671843f29e45e3a680e7def1feaf7f8d7e4c450c15cf5decee462",
+        "messageField": "0x235eb8e15ae9229ac47e945162606cd245775f2a00c9f88980e7abc671936029",
         "publicKey": {
           "x": "0x2a7cb3bc90801273e8b55228ad62489d0ee8c72bdf0fcfafa82d3461bcb05ecf",
           "y": "0x1a2d126b720b34667a7286aabdb35dea906223aca72dbeb4e2c6690565be732b"
@@ -1994,8 +1995,8 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "registeredSenders": [
             "0x0000000000000000000000000000000000000000000000000000000000000005",
             "0x1717171717171717171717171717171717171717171717171717171717171717",
@@ -2003,8 +2004,8 @@
           ],
           "purpose": "xochi.shielded.sender-registration-ack.v1"
         },
-        "digest": "0xfa194c5cef9612a3c252db2beb61acedd34abf7c4161c2cdce3a196a068f505e",
-        "messageField": "0x2f94fa56b2e29dd5395ad4a859a1cd873b8f6f2dd2440ea11a7f2978480f5d8e",
+        "digest": "0x45819fb710ce5a09ae40d2d002321c508cb0a27b4ad8ffbe28a7ada5d19859b2",
+        "messageField": "0x013a2cec073ad6846a6abc3f2f9aaf9fae5502326fa89c0a261371f61d1db0df",
         "publicKey": {
           "x": "0x2a7cb3bc90801273e8b55228ad62489d0ee8c72bdf0fcfafa82d3461bcb05ecf",
           "y": "0x1a2d126b720b34667a7286aabdb35dea906223aca72dbeb4e2c6690565be732b"
@@ -2080,7 +2081,7 @@
           "x": "0x2a7cb3bc90801273e8b55228ad62489d0ee8c72bdf0fcfafa82d3461bcb05ecf",
           "y": "0x1a2d126b720b34667a7286aabdb35dea906223aca72dbeb4e2c6690565be732b"
         },
-        "signature": "0x203656e1cc9a8599316c5d0262851257a67a4f3bf4e7ba6ea14052fdfebe1e2316fe3c79e963444e88360aa320efc35e37b7e32cee0d8e454c6d9210726cb106",
+        "signature": "0x26b8bc6366b24614524fa012ac7c2157eb68c5c3a8c36f0d79f3614ad97337f02a8576a8b06a03da65d18c1c7f8d2705336d36d756406451e1ffe85c6c271639",
         "valid": false
       },
       {
@@ -2096,8 +2097,8 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "registeredSenders": [
             "0x0000000000000000000000000000000000000000000000000000000000000005",
             "0x1717171717171717171717171717171717171717171717171717171717171717",
@@ -2105,13 +2106,13 @@
           ],
           "purpose": "xochi.shielded.sender-registration-ack.v1"
         },
-        "digest": "0xfa194c5cef9612a3c252db2beb61acedd34abf7c4161c2cdce3a196a068f505e",
-        "messageField": "0x2f94fa56b2e29dd5395ad4a859a1cd873b8f6f2dd2440ea11a7f2978480f5d8e",
+        "digest": "0x45819fb710ce5a09ae40d2d002321c508cb0a27b4ad8ffbe28a7ada5d19859b2",
+        "messageField": "0x013a2cec073ad6846a6abc3f2f9aaf9fae5502326fa89c0a261371f61d1db0df",
         "publicKey": {
           "x": "0x2a7cb3bc90801273e8b55228ad62489d0ee8c72bdf0fcfafa82d3461bcb05ecf",
           "y": "0x1a2d126b720b34667a7286aabdb35dea906223aca72dbeb4e2c6690565be732b"
         },
-        "signature": "0x203656e1cc9a8599316c5d0262851257a67a4f3bf4e7ba6ea14052fdfebe1e2316fe3c79e963444e88360aa320efc35e37b7e32cee0d8e454c6d9210726cb106",
+        "signature": "0x26b8bc6366b24614524fa012ac7c2157eb68c5c3a8c36f0d79f3614ad97337f02a8576a8b06a03da65d18c1c7f8d2705336d36d756406451e1ffe85c6c271639",
         "valid": false
       },
       {
@@ -2150,7 +2151,7 @@
           "x": "0x2a7cb3bc90801273e8b55228ad62489d0ee8c72bdf0fcfafa82d3461bcb05ecf",
           "y": "0x1a2d126b720b34667a7286aabdb35dea906223aca72dbeb4e2c6690565be732b"
         },
-        "signature": "0x203656e1cc9a8599316c5d0262851257a67a4f3bf4e7ba6ea14052fdfebe1e2316fe3c79e963444e88360aa320efc35e37b7e32cee0d8e454c6d9210726cb106",
+        "signature": "0x26b8bc6366b24614524fa012ac7c2157eb68c5c3a8c36f0d79f3614ad97337f02a8576a8b06a03da65d18c1c7f8d2705336d36d756406451e1ffe85c6c271639",
         "valid": false
       },
       {
@@ -2182,7 +2183,7 @@
           "x": "0x2a7cb3bc90801273e8b55228ad62489d0ee8c72bdf0fcfafa82d3461bcb05ecf",
           "y": "0x1a2d126b720b34667a7286aabdb35dea906223aca72dbeb4e2c6690565be732b"
         },
-        "signature": "0x074de56fbb9dbbd9ac8c7e37681f0aec00b75b9800219d890ec373466fdc8fda2a7b4f8f6b970dea6f0e7078b6c517d5e8f47747a15520b1bc2c320b940e0126",
+        "signature": "0x22eae756dbee26d07f99918a60db78de92a76db51c5a52e809147f1b40909a6430269feed92272ef4f4054ffdf2d19e957fabc63fc9f90fc9a3a1dcd9b313485",
         "valid": false
       },
       {
@@ -2198,19 +2199,19 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "backupCommitment": "0x89d38145c86cef1776f2ce78a7a34412ac6a8891a2de5a886c11a4fbd4c875ab",
           "backupFormatId": "0xe37c67f007c5a5bbebbc6c5b9aefd99f252b2cc121e3fc9a269801940f605348",
           "purpose": "xochi.shielded.backup-persistence-ack.v1"
         },
-        "digest": "0x1116ee0dc9cca8e93723c9d7ea73dee65b44a8a42c7e74cb09ab2cbeafaed207",
-        "messageField": "0x1ed7c7bd0ae0f6764a2fefccdab1e8cb1141912aa4f5088fbaa06cdb9565779b",
+        "digest": "0xbd9a7a3b57e671843f29e45e3a680e7def1feaf7f8d7e4c450c15cf5decee462",
+        "messageField": "0x235eb8e15ae9229ac47e945162606cd245775f2a00c9f88980e7abc671936029",
         "publicKey": {
           "x": "0x2a7cb3bc90801273e8b55228ad62489d0ee8c72bdf0fcfafa82d3461bcb05ecf",
           "y": "0x1a2d126b720b34667a7286aabdb35dea906223aca72dbeb4e2c6690565be732b"
         },
-        "signature": "0x074de56fbb9dbbd9ac8c7e37681f0aec00b75b9800219d890ec373466fdc8fda2a7b4f8f6b970dea6f0e7078b6c517d5e8f47747a15520b1bc2c320b940e0126",
+        "signature": "0x22eae756dbee26d07f99918a60db78de92a76db51c5a52e809147f1b40909a6430269feed92272ef4f4054ffdf2d19e957fabc63fc9f90fc9a3a1dcd9b313485",
         "valid": false
       },
       {
@@ -2249,7 +2250,7 @@
           "x": "0x2a7cb3bc90801273e8b55228ad62489d0ee8c72bdf0fcfafa82d3461bcb05ecf",
           "y": "0x1a2d126b720b34667a7286aabdb35dea906223aca72dbeb4e2c6690565be732b"
         },
-        "signature": "0x074de56fbb9dbbd9ac8c7e37681f0aec00b75b9800219d890ec373466fdc8fda2a7b4f8f6b970dea6f0e7078b6c517d5e8f47747a15520b1bc2c320b940e0126",
+        "signature": "0x22eae756dbee26d07f99918a60db78de92a76db51c5a52e809147f1b40909a6430269feed92272ef4f4054ffdf2d19e957fabc63fc9f90fc9a3a1dcd9b313485",
         "valid": false
       },
       {
@@ -2297,14 +2298,14 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "backupCommitment": "0x89d38145c86cef1776f2ce78a7a34412ac6a8891a2de5a886c11a4fbd4c875ab",
           "backupFormatId": "0xe37c67f007c5a5bbebbc6c5b9aefd99f252b2cc121e3fc9a269801940f605348",
           "purpose": "xochi.shielded.backup-persistence-ack.v1"
         },
-        "digest": "0x1116ee0dc9cca8e93723c9d7ea73dee65b44a8a42c7e74cb09ab2cbeafaed207",
-        "messageField": "0x1ed7c7bd0ae0f6764a2fefccdab1e8cb1141912aa4f5088fbaa06cdb9565779b",
+        "digest": "0xbd9a7a3b57e671843f29e45e3a680e7def1feaf7f8d7e4c450c15cf5decee462",
+        "messageField": "0x235eb8e15ae9229ac47e945162606cd245775f2a00c9f88980e7abc671936029",
         "publicKey": {
           "x": "0x2a7cb3bc90801273e8b55228ad62489d0ee8c72bdf0fcfafa82d3461bcb05ecf",
           "y": "0x1a2d126b720b34667a7286aabdb35dea906223aca72dbeb4e2c6690565be732b"
@@ -2325,8 +2326,8 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "registeredSenders": [
             "0x0000000000000000000000000000000000000000000000000000000000000005",
             "0x1717171717171717171717171717171717171717171717171717171717171717",
@@ -2334,8 +2335,8 @@
           ],
           "purpose": "xochi.shielded.sender-registration-ack.v1"
         },
-        "digest": "0xfa194c5cef9612a3c252db2beb61acedd34abf7c4161c2cdce3a196a068f505e",
-        "messageField": "0x2f94fa56b2e29dd5395ad4a859a1cd873b8f6f2dd2440ea11a7f2978480f5d8e",
+        "digest": "0x45819fb710ce5a09ae40d2d002321c508cb0a27b4ad8ffbe28a7ada5d19859b2",
+        "messageField": "0x013a2cec073ad6846a6abc3f2f9aaf9fae5502326fa89c0a261371f61d1db0df",
         "publicKey": {
           "x": "0x2a7cb3bc90801273e8b55228ad62489d0ee8c72bdf0fcfafa82d3461bcb05ecf",
           "y": "0x1a2d126b720b34667a7286aabdb35dea906223aca72dbeb4e2c6690565be732b"
@@ -2357,19 +2358,19 @@
         "message": {
           "bindingDigest": "0x82d8becf934e7f95053dcc62034613e1e365640eed8f2e1556892c25090b2614",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+          "challengeExpiry": "1900000000",
           "backupCommitment": "0x89d38145c86cef1776f2ce78a7a34412ac6a8891a2de5a886c11a4fbd4c875ab",
           "backupFormatId": "0xe37c67f007c5a5bbebbc6c5b9aefd99f252b2cc121e3fc9a269801940f605348",
           "purpose": "xochi.shielded.backup-persistence-ack.v1"
         },
-        "digest": "0x698bdfdbdf6f0072456daab88c5ce24b1c2502be881a1fc9b7afe6dd5ddb0085",
-        "messageField": "0x09518c5fde9c22ee71d9db8646f2aecb2f875d0eabf3c79c60cff71e40acb7e4",
+        "digest": "0x8b16c68fbb6ee973559762d3201db78d7db87aaa816e4a8285a73af913466706",
+        "messageField": "0x0d25d973291c8b6d9959a40e2ad7015e30ee8ab6c215bc1877e8ccc9d4a2f38d",
         "publicKey": {
           "x": "0x2a7cb3bc90801273e8b55228ad62489d0ee8c72bdf0fcfafa82d3461bcb05ecf",
           "y": "0x1a2d126b720b34667a7286aabdb35dea906223aca72dbeb4e2c6690565be732b"
         },
-        "signature": "0x203656e1cc9a8599316c5d0262851257a67a4f3bf4e7ba6ea14052fdfebe1e2316fe3c79e963444e88360aa320efc35e37b7e32cee0d8e454c6d9210726cb106",
+        "signature": "0x26b8bc6366b24614524fa012ac7c2157eb68c5c3a8c36f0d79f3614ad97337f02a8576a8b06a03da65d18c1c7f8d2705336d36d756406451e1ffe85c6c271639",
         "valid": false
       },
       {
@@ -2384,19 +2385,19 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "backupCommitment": "0x89d38145c86cef1776f2ce78a7a34412ac6a8891a2de5a886c11a4fbd4c875ab",
           "backupFormatId": "0xe37c67f007c5a5bbebbc6c5b9aefd99f252b2cc121e3fc9a269801940f605348",
           "purpose": "xochi.shielded.backup-persistence-ack.v1"
         },
-        "digest": "0x2a4b7d8971aac5b51d7177bf3a3d898a146a93c89fe13a70f432e1481a312eb3",
-        "messageField": "0x30141c3ccbc1c3d925a83359b0e44089ebe1d0c15902c8e93542737d78a680b4",
+        "digest": "0x525a62e167d20b60e06c16b7ae683482b54e6d9422e769ba653b894c60f4ba3d",
+        "messageField": "0x2e73dd2ae7865fc970baa7ff9a6f541c50c027b57d375699d6b35f50a4788c3a",
         "publicKey": {
           "x": "0x2a7cb3bc90801273e8b55228ad62489d0ee8c72bdf0fcfafa82d3461bcb05ecf",
           "y": "0x1a2d126b720b34667a7286aabdb35dea906223aca72dbeb4e2c6690565be732b"
         },
-        "signature": "0x203656e1cc9a8599316c5d0262851257a67a4f3bf4e7ba6ea14052fdfebe1e2316fe3c79e963444e88360aa320efc35e37b7e32cee0d8e454c6d9210726cb106",
+        "signature": "0x26b8bc6366b24614524fa012ac7c2157eb68c5c3a8c36f0d79f3614ad97337f02a8576a8b06a03da65d18c1c7f8d2705336d36d756406451e1ffe85c6c271639",
         "valid": false
       },
       {
@@ -2411,8 +2412,8 @@
         "message": {
           "bindingDigest": "0x82d8becf934e7f95053dcc62034613e1e365640eed8f2e1556892c25090b2614",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+          "challengeExpiry": "1900000000",
           "registeredSenders": [
             "0x0000000000000000000000000000000000000000000000000000000000000005",
             "0x1717171717171717171717171717171717171717171717171717171717171717",
@@ -2420,13 +2421,13 @@
           ],
           "purpose": "xochi.shielded.sender-registration-ack.v1"
         },
-        "digest": "0xba33db1250b981d21ecca22f197e68b839855ec5f4fce226dae492a02560a405",
-        "messageField": "0x0e7a8f1133378d5b52390df94b90095bc3b0e0a4d39251f1ba328e50c5d929f8",
+        "digest": "0x3b243371b768e52fbc5ba4ca8459bfbd33c93ce175fbbc981f04d8eba1ca1405",
+        "messageField": "0x2030d4aa320baa612969593294fd391518a831d86fa5e556cf401b31bd287c2a",
         "publicKey": {
           "x": "0x2a7cb3bc90801273e8b55228ad62489d0ee8c72bdf0fcfafa82d3461bcb05ecf",
           "y": "0x1a2d126b720b34667a7286aabdb35dea906223aca72dbeb4e2c6690565be732b"
         },
-        "signature": "0x074de56fbb9dbbd9ac8c7e37681f0aec00b75b9800219d890ec373466fdc8fda2a7b4f8f6b970dea6f0e7078b6c517d5e8f47747a15520b1bc2c320b940e0126",
+        "signature": "0x22eae756dbee26d07f99918a60db78de92a76db51c5a52e809147f1b40909a6430269feed92272ef4f4054ffdf2d19e957fabc63fc9f90fc9a3a1dcd9b313485",
         "valid": false
       },
       {
@@ -2441,8 +2442,8 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "registeredSenders": [
             "0x0000000000000000000000000000000000000000000000000000000000000005",
             "0x1717171717171717171717171717171717171717171717171717171717171717",
@@ -2450,13 +2451,13 @@
           ],
           "purpose": "xochi.shielded.sender-registration-ack.v1"
         },
-        "digest": "0xfce271846cc66a57b823aeae123963bba125d7d8287de512558a0015b30be288",
-        "messageField": "0x148662cc4d1d64eed16e86ed82563d8a5b9754f3676f2f007ede5600f1103acc",
+        "digest": "0x135d812764edb44eaa39bcf28b3479be1625ab02b0cee5606e3a90a07f78981d",
+        "messageField": "0x22422ad8ec8cc72f8bafd099ad2d0dad319b5fdd3ce95c1107f287d0a4ee5d20",
         "publicKey": {
           "x": "0x2a7cb3bc90801273e8b55228ad62489d0ee8c72bdf0fcfafa82d3461bcb05ecf",
           "y": "0x1a2d126b720b34667a7286aabdb35dea906223aca72dbeb4e2c6690565be732b"
         },
-        "signature": "0x074de56fbb9dbbd9ac8c7e37681f0aec00b75b9800219d890ec373466fdc8fda2a7b4f8f6b970dea6f0e7078b6c517d5e8f47747a15520b1bc2c320b940e0126",
+        "signature": "0x22eae756dbee26d07f99918a60db78de92a76db51c5a52e809147f1b40909a6430269feed92272ef4f4054ffdf2d19e957fabc63fc9f90fc9a3a1dcd9b313485",
         "valid": false
       },
       {
@@ -2543,8 +2544,8 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "backupCommitment": "0x89d38145c86cef1776f2ce78a7a34412ac6a8891a2de5a886c11a4fbd4c875ab",
           "backupFormatId": "0xe37c67f007c5a5bbebbc6c5b9aefd99f252b2cc121e3fc9a269801940f605348",
           "purpose": "xochi.shielded.sender-registration-ack.v1"
@@ -2560,8 +2561,8 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "backupCommitment": "0x89d38145c86cef1776f2ce78a7a34412ac6a8891a2de5a886c11a4fbd4c875ab",
           "backupFormatId": "0xe37c67f007c5a5bbebbc6c5b9aefd99f252b2cc121e3fc9a269801940f605348",
           "purpose": "xochi.shielded.recipient-binding.v1"
@@ -2577,8 +2578,8 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x0000000000000000000000000000000000000000000000000000000000000000",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "backupCommitment": "0x89d38145c86cef1776f2ce78a7a34412ac6a8891a2de5a886c11a4fbd4c875ab",
           "backupFormatId": "0xe37c67f007c5a5bbebbc6c5b9aefd99f252b2cc121e3fc9a269801940f605348",
           "purpose": "xochi.shielded.backup-persistence-ack.v1"
@@ -2594,7 +2595,7 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
           "challengeExpiry": "18446744073709551616",
           "backupCommitment": "0x89d38145c86cef1776f2ce78a7a34412ac6a8891a2de5a886c11a4fbd4c875ab",
           "backupFormatId": "0xe37c67f007c5a5bbebbc6c5b9aefd99f252b2cc121e3fc9a269801940f605348",
@@ -2611,8 +2612,8 @@
         "message": {
           "bindingDigest": "0x0000000000000000000000000000000000000000000000000000000000000000",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "backupCommitment": "0x89d38145c86cef1776f2ce78a7a34412ac6a8891a2de5a886c11a4fbd4c875ab",
           "backupFormatId": "0xe37c67f007c5a5bbebbc6c5b9aefd99f252b2cc121e3fc9a269801940f605348",
           "purpose": "xochi.shielded.backup-persistence-ack.v1"
@@ -2629,7 +2630,7 @@
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
           "nonce": "0x0000000000000000000000000000000000000000000000000000000000000000",
-          "challengeExpiry": "1900000300",
+          "challengeExpiry": "1900000000",
           "backupCommitment": "0x89d38145c86cef1776f2ce78a7a34412ac6a8891a2de5a886c11a4fbd4c875ab",
           "backupFormatId": "0xe37c67f007c5a5bbebbc6c5b9aefd99f252b2cc121e3fc9a269801940f605348",
           "purpose": "xochi.shielded.backup-persistence-ack.v1"
@@ -2645,8 +2646,8 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "registeredSenders": [
             "0x0000000000000000000000000000000000000000000000000000000000000005",
             "0x1717171717171717171717171717171717171717171717171717171717171717",
@@ -2665,8 +2666,8 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "registeredSenders": [
             "0x0000000000000000000000000000000000000000000000000000000000000005",
             "0x1717171717171717171717171717171717171717171717171717171717171717",
@@ -2685,8 +2686,8 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x0000000000000000000000000000000000000000000000000000000000000000",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "registeredSenders": [
             "0x0000000000000000000000000000000000000000000000000000000000000005",
             "0x1717171717171717171717171717171717171717171717171717171717171717",
@@ -2705,7 +2706,7 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
           "challengeExpiry": "18446744073709551616",
           "registeredSenders": [
             "0x0000000000000000000000000000000000000000000000000000000000000005",
@@ -2725,8 +2726,8 @@
         "message": {
           "bindingDigest": "0x0000000000000000000000000000000000000000000000000000000000000000",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "registeredSenders": [
             "0x0000000000000000000000000000000000000000000000000000000000000005",
             "0x1717171717171717171717171717171717171717171717171717171717171717",
@@ -2746,7 +2747,7 @@
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
           "nonce": "0x0000000000000000000000000000000000000000000000000000000000000000",
-          "challengeExpiry": "1900000300",
+          "challengeExpiry": "1900000000",
           "registeredSenders": [
             "0x0000000000000000000000000000000000000000000000000000000000000005",
             "0x1717171717171717171717171717171717171717171717171717171717171717",
@@ -2933,8 +2934,8 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "registeredSenders": [
             "0x2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c",
             "0x1717171717171717171717171717171717171717171717171717171717171717",
@@ -2953,8 +2954,8 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "registeredSenders": [
             "0x0000000000000000000000000000000000000000000000000000000000000005",
             "0x0000000000000000000000000000000000000000000000000000000000000005",
@@ -2974,8 +2975,8 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "registeredSenders": [],
           "purpose": "xochi.shielded.sender-registration-ack.v1"
         },
@@ -2990,8 +2991,8 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "registeredSenders": [
             "0x0000000000000000000000000000000000000000000000000000000000000000",
             "0x0000000000000000000000000000000000000000000000000000000000000005",
@@ -3235,8 +3236,8 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "backupCommitment": "0x0000000000000000000000000000000000000000000000000000000000000000",
           "backupFormatId": "0xe37c67f007c5a5bbebbc6c5b9aefd99f252b2cc121e3fc9a269801940f605348",
           "purpose": "xochi.shielded.backup-persistence-ack.v1"
@@ -3252,8 +3253,8 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "backupCommitment": "0x89d38145c86cef1776f2ce78a7a34412ac6a8891a2de5a886c11a4fbd4c875ab",
           "backupFormatId": "0x0000000000000000000000000000000000000000000000000000000000000000",
           "purpose": "xochi.shielded.backup-persistence-ack.v1"
@@ -3269,8 +3270,8 @@
         "message": {
           "bindingDigest": "0x730dec73ce68b684420e21c48d5387f5f6fa861a2602cd1310c0e53ba5eb64a2",
           "aztecRecipient": "0x2abc53b778dd33eb5a7d1d752d937764fa162893f536c24c236520e507319ff9",
-          "nonce": "0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
-          "challengeExpiry": "1900000300",
+          "nonce": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "challengeExpiry": "1900000000",
           "backupCommitment": "0x89d38145c86cef1776f2ce78a7a34412ac6a8891a2de5a886c11a4fbd4c875ab",
           "backupFormatId": "0x769fc63222fd0ddbced17ae0109e8bda0e4a02aed15f0ef9f5f3090363bd764a",
           "purpose": "xochi.shielded.backup-persistence-ack.v1"
