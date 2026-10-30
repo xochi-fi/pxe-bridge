@@ -200,8 +200,11 @@ constructor's enqueued initializer has not been mined yet.
 Combined with the rest of this change set:
 
 - Recipient allowlist: enforced, but `check_spending_public` receives neither
-  the recipient nor the set. Membership is proven in private against a Merkle
-  root, and public asserts only that the proven root equals the stored one. That
+  the recipient nor the set. (The transaction is not recipient-blind: a
+  transfer to a recipient the bridge has no landed handshake with publishes a
+  recipient-keyed handshake tag; see "What is public".) Membership is proven in
+  private against a Merkle root, and public asserts only that the proven root
+  equals the stored one. That
   equality is evaluated at inclusion time, which is what lets a revocation
   invalidate an already-proven transfer. A zero recipient is rejected at both
   the circuit (`Recipient must not be zero`) and the RPC validation layer
@@ -372,7 +375,9 @@ arguments are part of the transaction. Every transfer therefore publishes:
 - **The sender.** `from` is an argument to the token's public finalize call.
 - **The token.** Pinned at construction and visible as the call target.
 - **The allowlist root**, and the fact that a transfer proved membership against
-  it. Not the recipient, and not the set.
+  it. The contract's public calls carry neither the recipient nor the set.
+- **A recipient-keyed handshake tag**, on the first transfer to each recipient
+  and any proven before that one lands, in either account mode. See below.
 
 This is inherent to checking a value against public storage and is not
 remediated for the amount. Enforcing that privately would mean nullifier-based
@@ -393,13 +398,27 @@ not recipient privacy. Whether the recipient stays off the transcript depends on
 how the note is delivered. The partial note is sent to the recipient with
 `MessageDelivery::onchain_unconstrained()`
 ([`uint_note.nr:123-129`](https://github.com/aztec-labs-eng/aztec-node/blob/v6.0.0/noir-projects/aztec-nr/uint-note/src/uint_note.nr#L123-L129)),
-and when no handshake is registered for the sender/recipient pair, PXE asks the
-wallet's `resolveTaggingSecretStrategy` hook for a tagging strategy. Without a
-hook it uses `non-interactive-handshake`, which "reveals the recipient onchain"
+and when the sender's PXE finds no handshake note for the pair, aztec-nr asks
+the wallet's `resolveTaggingSecretStrategy` hook for a tagging strategy
+([`tag.nr:37-56`](https://github.com/aztec-labs-eng/aztec-node/blob/v6.0.0/noir-projects/aztec-nr/aztec/src/messages/delivery/tag.nr#L37-L56)).
+Without a hook PXE uses `non-interactive-handshake`, which "reveals the
+recipient onchain"
 ([`resolve_tagging_secret_strategy.ts:9-17, 42-43`](https://github.com/aztec-labs-eng/aztec-node/blob/v6.0.0/yarn-project/pxe/src/hooks/resolve_tagging_secret_strategy.ts#L9-L43)).
 This bridge's `EmbeddedWallet` is created with no hooks
-([`src/aztec-client.ts`](src/aztec-client.ts)), so the first transfer to each
-recipient reveals it, and recipient privacy is **not** delivered today. The
+([`src/aztec-client.ts`](src/aztec-client.ts)), so every transfer proven while
+the bridge account has no landed handshake with the recipient (the first to
+each recipient, plus any proven before that one lands, since the lookup reads
+committed state only:
+[`handshake.nr:115-124`](https://github.com/aztec-labs-eng/aztec-node/blob/v6.0.0/noir-projects/aztec-nr/aztec/src/messages/delivery/handshake.nr#L115-L124))
+calls the HandshakeRegistry's `non_interactive_handshake`, which publishes a
+log tagged by a fixed hash of the recipient's address
+([`handshake_registry_contract/src/main.nr:75-94`](https://github.com/aztec-labs-eng/aztec-node/blob/v6.0.0/noir-projects/noir-contracts/contracts/standard/handshake_registry_contract/src/main.nr#L75-L94)).
+The address is not in clear, but anyone holding a candidate address can confirm
+that the bridge account, named as `from` in the same transaction, paid it, and
+the number of distinct tags counts the recipients paid. The tag is visible once
+the transaction is broadcast, whether or not it lands. Later transfers reuse
+the handshake and are not linkable to the recipient. Recipient privacy is
+**not** delivered today. The
 `interactive-handshake` strategy reveals nothing about the recipient onchain but
 needs the recipient to answer the handshake registry's request. The allowlist
 design below keeps the recipient out of the bridge's own public calls only.
@@ -432,8 +451,10 @@ without the seed; see "An attacker holding the admin key". Tracked in #32.
 
 Anonymity is still bounded by how many recipients are actually allowlisted. A
 tree removes the mechanism's ceiling; it does not supply recipients. Run with
-three and the set is three, though under this design the count is no longer
-public.
+three and the set is three. The tree keeps the number allowlisted off chain,
+but not the number paid: each paid recipient has a distinct handshake tag on
+chain (see above), so how many recipients the bridge has paid is public, and
+each one is confirmable by anyone holding its address.
 
 ## Losing the allowlist
 
@@ -452,10 +473,11 @@ has permanent-brick modes -- `permitted_token` has no setter, and a zero admin
 is unrecoverable -- and this is one more.
 
 The seed is a secret, but a weaker one than the signing key: holding it lets
-someone test a candidate address against a leaf, which costs allowlist
-membership privacy (recipient privacy is not delivered today; see
-[What is public](#what-is-public)), not custody. It is warned about rather than
-refused when read from the environment in production.
+someone test a candidate address against a leaf, which costs membership
+privacy for allowlisted recipients the bridge has not yet paid, and which
+position each occupies, not custody. Paid recipients are confirmable from their
+handshake tags without it; see [What is public](#what-is-public). It is warned
+about rather than refused when read from the environment in production.
 
 The bridge checks its copy against the chain before every send, via
 `get_allowlist_root`, and refuses to send on a mismatch. That check is what makes

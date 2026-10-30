@@ -4,10 +4,13 @@ JSON-RPC bridge from EVM intent solvers to Aztec shielded settlement via embedde
 
 > **Network.** This release targets the **Aztec 6.0.0 public testnet** (L1
 > chain id 11155111, rollup version 679261766) through the `@aztec-labs/*`
-> 6.0.0 SDK. It does **not** serve Aztec mainnet, which runs 5.2.0: a 6.0.0
-> client against a 5.2.0 node is unsupported, and every account address this
-> release derives differs from its 5.2.0 counterpart. Run it only against a
-> 6.0.0 node.
+> 6.0.0 SDK. Aztec mainnet has also run 6.0.0 since its v6 upgrade on
+> 26 October 2026
+> ([announcement](https://announce.aztec.network/a/2026-10-upgrade-the-v6-upgrade-executed-on));
+> this README documents the testnet configuration only. A 6.0.0 client
+> against a 5.x node is unsupported, and every account address this release
+> derives differs from its 5.2.0 counterpart. Run it only against a 6.0.0
+> node.
 
 ## What is PXE?
 
@@ -36,8 +39,9 @@ pxe-bridge embeds a PXE wallet and wraps it in a JSON-RPC interface that solvers
 > and the allowlist root through `check_spending_public`. The recipient's
 > address is in no public call in either mode, but recipient privacy is **not**
 > delivered today: the bridge installs no `resolveTaggingSecretStrategy` hook,
-> and PXE's default strategy establishes a non-interactive handshake for each
-> new recipient, which reveals the recipient onchain. Only a private-to-private
+> so PXE's default strategy establishes a non-interactive handshake for each
+> recipient it has no landed handshake with, publishing a tag any holder of the
+> recipient's address can match. Only a private-to-private
 > `transfer` from private inventory, which this bridge does not implement,
 > keeps the amount off the transcript. Sources (Aztec 6.0.0) in
 > [SECURITY.md](SECURITY.md#what-is-public).
