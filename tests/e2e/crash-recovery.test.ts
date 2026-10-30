@@ -111,6 +111,9 @@ describe("hard crash mid-broadcast (e2e)", () => {
   let gateUrl: string;
   const gateCalls: string[] = [];
   let killPoint: KillPoint | undefined;
+  // Kill the bridge while its may-broadcast query is in flight: prepared and
+  // journaled, never marked.
+  let killOnGate = false;
   let bridge: Bridge | undefined;
   let killed = 0;
 
@@ -137,6 +140,7 @@ describe("hard crash mid-broadcast (e2e)", () => {
     workDir: string,
     journal: string,
     requireReadiness = true,
+    corridor: typeof CORRIDOR = CORRIDOR,
   ): Promise<Bridge> {
     // A port the OS just handed out, released for the bridge to bind.
     const probe = createServer();
@@ -159,7 +163,7 @@ describe("hard crash mid-broadcast (e2e)", () => {
         PXE_BRIDGE_API_KEY: RPC_KEY,
         PXE_BRIDGE_PORT: String(port),
         PXE_BRIDGE_JOURNAL: journal,
-        PXE_BRIDGE_SETTLEMENT_CORRIDOR: JSON.stringify(CORRIDOR),
+        PXE_BRIDGE_SETTLEMENT_CORRIDOR: JSON.stringify(corridor),
         PXE_BRIDGE_MAY_BROADCAST_URL: gateUrl,
         PXE_BRIDGE_MAY_BROADCAST_TOKEN: SERVICE_TOKEN,
         PXE_BRIDGE_AUDIT_LOG: join(workDir, "audit.jsonl"),
@@ -291,6 +295,13 @@ describe("hard crash mid-broadcast (e2e)", () => {
       const body = JSON.parse((await readBody(req)).toString("utf8")) as { operationId: string };
       const ok = req.headers["authorization"] === `Bearer ${SERVICE_TOKEN}`;
       gateCalls.push(body.operationId);
+      if (killOnGate) {
+        killOnGate = false;
+        killed += 1;
+        bridge?.child.kill("SIGKILL");
+        res.destroy();
+        return;
+      }
       res.writeHead(ok ? 200 : 401, { "content-type": "application/json" });
       res.end(
         JSON.stringify({ version: MAY_BROADCAST_VERSION, operationId: body.operationId, decision: "allow" }),
@@ -417,6 +428,63 @@ describe("hard crash mid-broadcast (e2e)", () => {
     },
     600_000,
   );
+
+  it("resumes the exact prepared bytes after a SIGKILL at may-broadcast, with new admission closed", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pxe-crash-gate-"));
+    const journal = adoptedJournal(workDir);
+    const operationId = `crash-gate-${randomBytes(4).toString("hex")}`;
+    const params = await terms(operationId);
+    const before = await publicBalance();
+    bridge = await startBridge(workDir, journal);
+    killOnGate = true;
+    const first = await rpc(bridge.url, "aztec_createNote", params, operationId).catch(
+      (err: unknown) => err,
+    );
+    expect(first, "the first response must be lost to the kill").toBeInstanceOf(Error);
+    expect(await bridge.exited).toBeNull();
+
+    // Restart under another corridor revision: the operation's own corridor no
+    // longer admits new work, which must not stop its recovery.
+    bridge = await startBridge(workDir, journal, true, { ...CORRIDOR, corridorRevision: 2 });
+    const held = await rpc(bridge.url, "aztec_getSettlement", {
+      version: SETTLEMENT_VERSION,
+      operationId,
+    });
+    expect(held.result).toMatchObject({ found: true, state: "prepared" });
+    const preparedAttempts = held.result!["attempts"] as { txHash: string; mayBroadcast: boolean }[];
+    expect(preparedAttempts).toHaveLength(1);
+    expect(preparedAttempts[0]!.mayBroadcast).toBe(false);
+
+    const freshId = `crash-gate-fresh-${randomBytes(4).toString("hex")}`;
+    const fresh = await rpc(bridge.url, "aztec_createNote", await terms(freshId), freshId);
+    expect(fresh.error?.data?.observation).toMatchObject({
+      state: "not_submitted",
+      reason: "corridor_mismatch",
+    });
+
+    const retry = await rpc(bridge.url, "aztec_createNote", params, operationId);
+    expect(retry.result?.observation.txHash).toBe(preparedAttempts[0]!.txHash);
+    const deadline = Date.now() + 120_000;
+    let state = retry.result?.observation.state;
+    while (state === "pending" && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 2_000));
+      state = (
+        await rpc(bridge.url, "aztec_getSettlement", { version: SETTLEMENT_VERSION, operationId })
+      ).result?.observation.state;
+    }
+    expect(["included", "finalized"]).toContain(state);
+    expect(before - (await publicBalance())).toBe(BigInt(AMOUNT));
+    const settled = await rpc(bridge.url, "aztec_getSettlement", {
+      version: SETTLEMENT_VERSION,
+      operationId,
+    });
+    expect(settled.result!["attempts"]).toHaveLength(1);
+    expect(gateCalls.filter((id) => id === operationId)).toHaveLength(2);
+
+    bridge.child.kill("SIGTERM");
+    await bridge.exited;
+    bridge = undefined;
+  }, 600_000);
 
   it("halts writes visibly on a corrupt journal and keeps serving status", async () => {
     const workDir = mkdtempSync(join(tmpdir(), "pxe-corrupt-"));
