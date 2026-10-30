@@ -183,7 +183,7 @@ describe("readiness attestation producer", () => {
         verifyReadinessRecord("Membership", membership, {
           domain: policyDomain,
           expectedSigner: ctx.signer.address,
-          expected: { descriptorDigest },
+          expected: { descriptorDigest, root: ctx.tree.root.toString() },
           now: NOW,
           maxAgeSeconds: 7_200,
           maxFutureSkewSeconds: 300,

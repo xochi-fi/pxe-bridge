@@ -436,7 +436,7 @@ describe("spending limit account (e2e)", () => {
         verifyReadinessRecord("Membership", membership, {
           domain: readinessPolicyDomain,
           expectedSigner: signer.address,
-          expected: { descriptorDigest: digest },
+          expected: { descriptorDigest: digest, root: tree.root.toString() },
           now: membership.attestedAt,
           maxAgeSeconds: 7_200,
           maxFutureSkewSeconds: 300,
