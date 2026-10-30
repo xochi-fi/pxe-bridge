@@ -360,6 +360,16 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
     throw new Error("Admin credential must differ from RPC credential");
   }
   if (
+    opts.recoveryApiKey !== undefined &&
+    (opts.recoveryApiKey === opts.apiKey ||
+      opts.recoveryApiKey === opts.adminKey ||
+      opts.recoveryApiKey === opts.attestationApiKey)
+  ) {
+    throw new Error(
+      "Recovery credential must differ from RPC, admin, and attestation credentials",
+    );
+  }
+  if (
     opts.readiness !== undefined &&
     opts.settlement?.readiness !== undefined &&
     opts.readiness !== opts.settlement.readiness

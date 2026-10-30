@@ -905,6 +905,27 @@ describe("public liveness isolation", () => {
       createApp(client, { apiKey: "shared-key", adminKey: "shared-key" })
     ).toThrow("Admin credential must differ from RPC credential");
     expect(() =>
+      createApp(client, {
+        apiKey: "shared-key",
+        recoveryApiKey: "shared-key",
+      })
+    ).toThrow("Recovery credential must differ from RPC, admin, and attestation credentials");
+    expect(() =>
+      createApp(client, {
+        apiKey: "rpc-key",
+        recoveryApiKey: "shared-key",
+        adminKey: "shared-key",
+      })
+    ).toThrow("Recovery credential must differ from RPC, admin, and attestation credentials");
+    expect(() =>
+      createApp(client, {
+        apiKey: "rpc-key",
+        recoveryApiKey: "shared-key",
+        attestationApiKey: "shared-key",
+        attestation: {} as never,
+      })
+    ).toThrow("Recovery credential must differ from RPC, admin, and attestation credentials");
+    expect(() =>
       assertDistinctCredentials([
         ["PXE_BRIDGE_API_KEY", "shared-key"],
         ["PXE_BRIDGE_RECOVERY_API_KEY", "shared-key"],
