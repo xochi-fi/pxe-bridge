@@ -865,7 +865,7 @@ export class AztecClient implements IAztecClient {
       const gasSettings = await this.deployGasSettings();
       const paymentMethod = deployer
         ? await this.limitAccountPaymentMethod(address, deployer.address, deployer.claim)
-        : await this.buildFeePaymentMethod(address, this.feeJuiceClaim);
+        : await this.buildFeePaymentMethod("Account", address, this.feeJuiceClaim);
 
       const deployMethod = await accountManager.getDeployMethod();
       try {
@@ -1138,7 +1138,7 @@ export class AztecClient implements IAztecClient {
     // its own balance.
     const paymentMethod = fromBalance
       ? undefined
-      : await this.buildFeePaymentMethod(deployerAddress, claim);
+      : await this.buildFeePaymentMethod("Deployer", deployerAddress, claim);
     try {
       await (await manager.getDeployMethod()).send({
         from: NO_FROM,
@@ -1283,9 +1283,9 @@ export class AztecClient implements IAztecClient {
   ): Promise<FeePaymentMethod | undefined> {
     switch (limitAccountFeePath(claim)) {
       case "sponsored":
-        return this.buildFeePaymentMethod(accountAddress, undefined);
+        return this.buildFeePaymentMethod("Account", accountAddress, undefined);
       case "claim":
-        return this.buildFeePaymentMethod(deployer, this.deployerFeeJuiceClaim);
+        return this.buildFeePaymentMethod("Deployer", deployer, this.deployerFeeJuiceClaim);
       case "preexisting":
         console.log(
           `[pxe-bridge] Paying deployment of ${accountAddress.toString()} from the deployer's fee juice balance`,
@@ -1881,8 +1881,13 @@ export class AztecClient implements IAztecClient {
    * FEE_JUICE_CLAIM for the plain Schnorr solver, the deployer claim for the
    * deployer. Handing one to the other fails the message lookup with "No L1 to
    * L2 message found for message hash".
+   *
+   * `role` labels `accountAddress` in the SponsoredFPC refusal. For a
+   * spending-limit account the refusal fires first for the deployer, whose
+   * address is where `bridge-fee-juice --deployer` must send the claim.
    */
   private async buildFeePaymentMethod(
+    role: "Account" | "Deployer",
     accountAddress: AztecAddress,
     claim: FeeJuiceClaim | undefined,
   ): Promise<FeePaymentMethod> {
@@ -1904,7 +1909,7 @@ export class AztecClient implements IAztecClient {
     // spending-limit deployment stops before sending anything.
     if (!this.allowSponsoredFpc) {
       throw new Error(
-        `Account ${accountAddress.toString()} is not deployed. ${SPONSORED_FPC_REFUSED_ERROR}`,
+        `${role} ${accountAddress.toString()} is not deployed. ${SPONSORED_FPC_REFUSED_ERROR}`,
       );
     }
     console.warn(

@@ -17,7 +17,8 @@ No infra changes. Caps the blast radius of a compromised key or rogue caller.
       application logs. Write to stdout with a parseable prefix or a dedicated
       log file (`PXE_BRIDGE_AUDIT_LOG`).
 - [x] **Cooldown for large transfers** -- configurable delay (e.g. 30s) for
-      amounts above a threshold, giving monitoring a window to alert/intervene.
+      amounts at or above a threshold, giving monitoring a window to
+      alert/intervene.
 
 ## Phase 1: Key Management (infra)
 
@@ -146,12 +147,13 @@ Known limitations (acceptable for alpha):
   position list is terminal for allowlist management, and unlike the public
   array it replaced there is no way to read the set back. See SECURITY.md,
   "Losing the allowlist".
-- The spending-limit account cannot pay its own fees. It refills only when an
+- The spending-limit account cannot acquire fee juice itself: it pays only from
+  its existing balance (`PREEXISTING_FEE_JUICE`), which refills only when an
   operator runs `npm run top-up-fee-juice` from an L1-funded key. `/ready`
   refuses new `createNote` admission with `fee_runway_insufficient` when the
-  finalized balance cannot pay for the in-flight transfers plus those the
-  remaining daily headroom still admits, but nothing alerts on it. Tracked in
-  Phase 3.
+  finalized balance cannot pay for the in-flight transfers plus at least
+  ceil(app-level rolling-window headroom / per-tx cap) more transfers, but
+  nothing alerts on it. Tracked in Phase 3.
 
 Resolved since this list was written: the fixed-epoch daily reset, which
 depended on block production rate and could wedge a stalled chain's counter, is
@@ -172,13 +174,19 @@ Bound exposure per chain by separating operational funds from reserves.
       configurable floor or spikes unexpectedly (possible drain). `/ready`
       exposes finalized inventory and fee runway; nothing pages on them yet.
 - [ ] **Fee juice balance alerting** -- `/ready` reports
-      `fee_runway_insufficient` and stops admission, so the bridge no longer
-      sends transfers it cannot pay for. The missing part is a monitor that
-      polls `/ready` and pages before the runway runs out, since refilling
-      needs an operator on L1.
-- [x] **Auto-pause on low balance** -- `src/readiness.ts` refuses new
-      `createNote` admission with `inventory_insufficient` when finalized
-      inventory is below reserved plus remaining daily headroom (#46, #62).
+      `fee_runway_insufficient` and stops new admission. A resumed `prepared`
+      operation bypasses that check, so the bridge can still send a transfer
+      it cannot pay for (#67). The missing part is a monitor that polls
+      `/ready` and pages before the runway runs out, since refilling needs an
+      operator on L1.
+- [x] **Auto-pause on low balance** -- spending-limit mode only (plain Schnorr
+      mode is never ready and refuses every `createNote`). Not a pause:
+      `src/readiness.ts` refuses each new `createNote` admission with
+      `inventory_insufficient` while finalized inventory is below reserved plus
+      the full remaining app-level rolling-window headroom, so the hot wallet
+      must hold both (#46, #62). Known gap: amounts of marked, not yet
+      finalized transfers are not subtracted, so readiness can admit a
+      transfer the chain reverts (#67).
 
 ## Phase 4: External Signer via AuthWitnessProvider
 

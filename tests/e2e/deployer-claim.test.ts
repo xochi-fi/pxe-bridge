@@ -283,11 +283,21 @@ describe("spending limit account deployed from a funded deployer (e2e)", () => {
       const { AztecAddress } = await import("@aztec-labs/aztec.js/addresses");
       const node = createAztecNodeClient(config.nodeUrl);
 
+      // Registered with the funder's wallet only to learn its address; the
+      // client opens its own store and nothing is deployed.
+      const { address: deployer } = await registerDeployer(
+        funderWallet as EmbeddedWallet,
+        REFUSED_PATH_KEY,
+      );
       const client = new AztecClient(config.nodeUrl, REFUSED_PATH_KEY, undefined, limits, undefined, {
         ...walletDataDirectory("deployer-refused"),
         allowSponsoredFpc: false,
       });
-      await expect(client.connect()).rejects.toThrow(SPONSORED_FPC_REFUSED_ERROR);
+      // The deployer is deployed first, so the refusal names it, the address
+      // `bridge-fee-juice --deployer` has to be pointed at.
+      await expect(client.connect()).rejects.toThrow(
+        `Deployer ${deployer.toString()} is not deployed. ${SPONSORED_FPC_REFUSED_ERROR}`,
+      );
 
       const account = AztecAddress.fromStringUnsafe(
         await limitAccountAddress(funderWallet, REFUSED_PATH_KEY, limits),
