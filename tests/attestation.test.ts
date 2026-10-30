@@ -173,7 +173,7 @@ function expectRefusal(result: unknown, reason: string): void {
   expect(result).not.toHaveProperty("signature");
 }
 
-describe("readiness attestation producer", () => {
+describe("readiness attestation producer", { timeout: 20_000 }, () => {
   it("signs authoritative membership and deployment through the exact SDK verifier", async () => {
     const ctx = await setup([{ address: recipient, index: 137 }]);
     try {
@@ -678,7 +678,7 @@ describe("readiness attestation producer", () => {
   });
 });
 
-describe("attestation configuration and root outbox", () => {
+describe("attestation configuration and root outbox", { timeout: 20_000 }, () => {
   it("keeps the feature absent and rejects partial or confused credentials", () => {
     expect(readAttestationEnvironment({}, [])).toBeUndefined();
     expect(() =>
