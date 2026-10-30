@@ -45,7 +45,7 @@ describe("boundedNodeFetch", () => {
         JSON.stringify({
           jsonrpc: "2.0",
           id: 1,
-          error: { code: -32000, message: "Existing nullifier" },
+          error: { code: -32000, message: "Existing nullifier\n[audit]\u001b[2J" },
         }),
       );
     });
@@ -61,7 +61,7 @@ describe("boundedNodeFetch", () => {
         id: 1,
         method: "node_sendTx",
       }),
-    ).rejects.toThrow("Aztec node returned HTTP 400: Existing nullifier");
+    ).rejects.toThrow("Aztec node returned HTTP 400: Existing nullifier?[audit]?[2J");
   });
 
   it("composes the caller cancellation with its transport deadline", async () => {

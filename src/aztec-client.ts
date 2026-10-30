@@ -64,7 +64,9 @@ function nodeRpcErrorMessage(decoded: unknown): string | undefined {
   const error = decoded.error;
   if (typeof error !== "object" || error === null || !("message" in error)) return undefined;
   const message = error.message;
-  return typeof message === "string" && message.length <= 1_024 ? message : undefined;
+  return typeof message === "string" && message.length <= 1_024
+    ? message.replace(/[^\x20-\x7e]/g, "?")
+    : undefined;
 }
 
 /**
