@@ -314,138 +314,6 @@ describe("spending limit account (e2e)", () => {
     }
   }, 600_000);
 
-  // The predicate /ready serves is the one createNote admission runs. Both
-  // faults are real finalized storage -- the admin's pause, an account with
-  // no fee juice -- driven through an actual createNote.
-  it("refuses admission on a finalized pause and a real fee-juice shortfall", async (ctx) => {
-    if (deployFailure) return ctx.skip();
-
-    const admit = async (
-      observed: AztecClient,
-      deployment: AccountDeployment,
-      operationId: string,
-    ): Promise<{ readiness: OperationalReadiness; reasons: unknown; code: unknown }> => {
-      const trustedNow = await finalizedTimestampMs(config.nodeUrl);
-      const journal = SettlementJournal.open(
-        join(mkdtempSync(join(tmpdir(), `${operationId}-journal-`)), "settlement.sqlite"),
-      );
-      journal.bindAccount(deployment.address, observed.accountPreexisted(), {
-        acknowledgement: `${deployment.address}@${journal.meta().journalId}`,
-      });
-      const limits = new TransactionLimits({ maxAmount: MAX_PER_TX, dailyLimit: DAILY_LIMIT });
-      const readiness = createReadinessObserver(observed, {
-        journal,
-        limits,
-        mayBroadcastConfigured: true,
-        corridor: READINESS_CORRIDOR,
-        now: () => trustedNow,
-      });
-      try {
-        const projection = await readiness.observe();
-        const response = (await handleRpcRequest(
-          rpcBody("aztec_createNote", [v1Params({ operationId })]),
-          observed,
-          {
-            settlement: {
-              journal,
-              mayBroadcast: fakeMayBroadcast("allow").client,
-              corridor: READINESS_CORRIDOR,
-              inFlight: new Set(),
-              timeoutMs: 120_000,
-              readiness,
-            },
-            limits,
-            idempotencyKey: operationId,
-          },
-        )) as { error?: { code: number; data?: { reasons?: unknown } } };
-        return {
-          readiness: projection,
-          reasons: response.error?.data?.reasons,
-          code: response.error?.code,
-        };
-      } finally {
-        journal.close();
-      }
-    };
-    const nextBlock = () => mintOne(funderWallet, tokenAddress, adminAddress);
-
-    const record = await deployedRecord();
-    const observed = new AztecClient(
-      config.nodeUrl,
-      config.secretKey,
-      undefined,
-      {
-        maxAmountPerTx: MAX_PER_TX,
-        dailyLimit: DAILY_LIMIT,
-        admin: adminAddress,
-        token: tokenAddress,
-        allowlistSeed: ALLOWLIST_SEED,
-        allowlistRecipients: DEPLOYED_RECIPIENTS,
-        deployment: record,
-      },
-      undefined,
-      walletDataDirectory("limit-readiness-paused"),
-    );
-    await observed.connect();
-
-    expect(
-      await callAccount(client, accountAddress, funderWallet, adminAddress, "pause", []),
-    ).toBe("success");
-    try {
-      await advanceFinalizedTip(config.nodeUrl, nextBlock);
-      const paused = await admit(observed, record, "readiness-paused");
-      expect(paused.readiness.reasons, JSON.stringify(paused.readiness, null, 2)).toEqual([
-        "account_paused",
-      ]);
-      expect(paused.code).toBe(RPC_ERRORS.NOT_READY);
-      expect(paused.reasons).toEqual(["account_paused"]);
-    } finally {
-      expect(
-        await callAccount(client, accountAddress, funderWallet, adminAddress, "unpause", []),
-      ).toBe("success");
-      await advanceFinalizedTip(config.nodeUrl, nextBlock);
-    }
-
-    const unfundedConfig: SpendingLimitConfig = {
-      maxAmountPerTx: MAX_PER_TX,
-      dailyLimit: DAILY_LIMIT,
-      admin: adminAddress,
-      token: tokenAddress,
-      allowlistSeed: ALLOWLIST_SEED,
-      allowlistRecipients: DEPLOYED_RECIPIENTS,
-    };
-    const deployer = new AztecClient(
-      config.nodeUrl,
-      UNFUNDED_KEY,
-      undefined,
-      unfundedConfig,
-      undefined,
-      walletDataDirectory("limit-unfunded"),
-    );
-    await deployer.connect();
-    const unfundedRecord: AccountDeployment = { ...record, address: deployer.getAddress()! };
-    await mintTo(funderWallet, tokenAddress, unfundedRecord.address, MINT_AMOUNT, adminAddress);
-    await advanceFinalizedTip(config.nodeUrl, nextBlock);
-    const unfunded = new AztecClient(
-      config.nodeUrl,
-      UNFUNDED_KEY,
-      undefined,
-      { ...unfundedConfig, deployment: unfundedRecord },
-      undefined,
-      walletDataDirectory("limit-unfunded-readiness"),
-    );
-    await unfunded.connect();
-
-    const short = await admit(unfunded, unfundedRecord, "readiness-fee");
-    expect(short.readiness.reasons, JSON.stringify(short.readiness, null, 2)).toEqual([
-      "fee_runway_insufficient",
-    ]);
-    expect(short.readiness.feeRunway.observed).toBe("0");
-    expect(short.readiness.inventory.observed).toBe(MINT_AMOUNT.toString());
-    expect(short.code).toBe(RPC_ERRORS.NOT_READY);
-    expect(short.reasons).toEqual(["fee_runway_insufficient"]);
-  }, 900_000);
-
   it("attests membership, deployment and RootUpdate from finalized reads", async (ctx) => {
     if (deployFailure) return ctx.skip();
     const tree = await AllowlistTree.build(ALLOWLIST_SEED, DEPLOYED_RECIPIENTS);
@@ -642,6 +510,141 @@ describe("spending limit account (e2e)", () => {
       journal.close();
     }
   }, 600_000);
+
+  // The predicate /ready serves is the one createNote admission runs. Both
+  // faults are real finalized storage -- the admin's pause, an account with
+  // no fee juice -- driven through an actual createNote. After the attestation
+  // test on purpose: the pause, unpause, second deployment and the blocks that
+  // finalize them push the automined sandbox clock ahead, and that test waits
+  // for the finalized tip to come back within the 300-second skew policy.
+  it("refuses admission on a finalized pause and a real fee-juice shortfall", async (ctx) => {
+    if (deployFailure) return ctx.skip();
+
+    const admit = async (
+      observed: AztecClient,
+      deployment: AccountDeployment,
+      operationId: string,
+    ): Promise<{ readiness: OperationalReadiness; reasons: unknown; code: unknown }> => {
+      const trustedNow = await finalizedTimestampMs(config.nodeUrl);
+      const journal = SettlementJournal.open(
+        join(mkdtempSync(join(tmpdir(), `${operationId}-journal-`)), "settlement.sqlite"),
+      );
+      journal.bindAccount(deployment.address, observed.accountPreexisted(), {
+        acknowledgement: `${deployment.address}@${journal.meta().journalId}`,
+      });
+      const limits = new TransactionLimits({ maxAmount: MAX_PER_TX, dailyLimit: DAILY_LIMIT });
+      const readiness = createReadinessObserver(observed, {
+        journal,
+        limits,
+        mayBroadcastConfigured: true,
+        corridor: READINESS_CORRIDOR,
+        now: () => trustedNow,
+      });
+      try {
+        const projection = await readiness.observe();
+        const response = (await handleRpcRequest(
+          rpcBody("aztec_createNote", [v1Params({ operationId })]),
+          observed,
+          {
+            settlement: {
+              journal,
+              mayBroadcast: fakeMayBroadcast("allow").client,
+              corridor: READINESS_CORRIDOR,
+              inFlight: new Set(),
+              timeoutMs: 120_000,
+              readiness,
+            },
+            limits,
+            idempotencyKey: operationId,
+          },
+        )) as { error?: { code: number; data?: { reasons?: unknown } } };
+        return {
+          readiness: projection,
+          reasons: response.error?.data?.reasons,
+          code: response.error?.code,
+        };
+      } finally {
+        journal.close();
+      }
+    };
+    const nextBlock = () => mintOne(funderWallet, tokenAddress, adminAddress);
+
+    const record = await deployedRecord();
+    const observed = new AztecClient(
+      config.nodeUrl,
+      config.secretKey,
+      undefined,
+      {
+        maxAmountPerTx: MAX_PER_TX,
+        dailyLimit: DAILY_LIMIT,
+        admin: adminAddress,
+        token: tokenAddress,
+        allowlistSeed: ALLOWLIST_SEED,
+        allowlistRecipients: DEPLOYED_RECIPIENTS,
+        deployment: record,
+      },
+      undefined,
+      walletDataDirectory("limit-readiness-paused"),
+    );
+    await observed.connect();
+
+    expect(
+      await callAccount(client, accountAddress, funderWallet, adminAddress, "pause", []),
+    ).toBe("success");
+    try {
+      await advanceFinalizedTip(config.nodeUrl, nextBlock);
+      const paused = await admit(observed, record, "readiness-paused");
+      expect(paused.readiness.reasons, JSON.stringify(paused.readiness, null, 2)).toEqual([
+        "account_paused",
+      ]);
+      expect(paused.code).toBe(RPC_ERRORS.NOT_READY);
+      expect(paused.reasons).toEqual(["account_paused"]);
+    } finally {
+      expect(
+        await callAccount(client, accountAddress, funderWallet, adminAddress, "unpause", []),
+      ).toBe("success");
+      await advanceFinalizedTip(config.nodeUrl, nextBlock);
+    }
+
+    const unfundedConfig: SpendingLimitConfig = {
+      maxAmountPerTx: MAX_PER_TX,
+      dailyLimit: DAILY_LIMIT,
+      admin: adminAddress,
+      token: tokenAddress,
+      allowlistSeed: ALLOWLIST_SEED,
+      allowlistRecipients: DEPLOYED_RECIPIENTS,
+    };
+    const deployer = new AztecClient(
+      config.nodeUrl,
+      UNFUNDED_KEY,
+      undefined,
+      unfundedConfig,
+      undefined,
+      walletDataDirectory("limit-unfunded"),
+    );
+    await deployer.connect();
+    const unfundedRecord: AccountDeployment = { ...record, address: deployer.getAddress()! };
+    await mintTo(funderWallet, tokenAddress, unfundedRecord.address, MINT_AMOUNT, adminAddress);
+    await advanceFinalizedTip(config.nodeUrl, nextBlock);
+    const unfunded = new AztecClient(
+      config.nodeUrl,
+      UNFUNDED_KEY,
+      undefined,
+      { ...unfundedConfig, deployment: unfundedRecord },
+      undefined,
+      walletDataDirectory("limit-unfunded-readiness"),
+    );
+    await unfunded.connect();
+
+    const short = await admit(unfunded, unfundedRecord, "readiness-fee");
+    expect(short.readiness.reasons, JSON.stringify(short.readiness, null, 2)).toEqual([
+      "fee_runway_insufficient",
+    ]);
+    expect(short.readiness.feeRunway.observed).toBe("0");
+    expect(short.readiness.inventory.observed).toBe(MINT_AMOUNT.toString());
+    expect(short.code).toBe(RPC_ERRORS.NOT_READY);
+    expect(short.reasons).toEqual(["fee_runway_insufficient"]);
+  }, 900_000);
 
   it("fails readiness on finalized allowlist-root drift", async (ctx) => {
     if (deployFailure) return ctx.skip();
