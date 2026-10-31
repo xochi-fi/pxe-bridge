@@ -429,27 +429,58 @@ available.
 The predicate admits only design-A spending-limit deployments with a durable
 deployment record. It checks the configured/derived address and compiled class,
 initialization and pause state, permitted token, local/on-chain allowlist root
-and limits, finalized token inventory, rolling-window headroom, fee runway,
-journal write health and exclusive fence, complete network identity, node
-transaction readiness, and synchronized retained world-state history. One
-exact nonzero `finalized` block number/hash is captured and supplied to every
-contract and storage observation; `proven` and `latest` are never fallbacks.
-The finalized block timestamp must be at most 7,200 seconds old and no more
-than 300 seconds ahead of local time. Unknowns and read failures are explicit
-not-ready reasons.
+and limits, the contract's own spend window, finalized token inventory,
+rolling-window headroom, fee runway, journal write health and exclusive fence,
+complete network identity, node transaction readiness, and synchronized
+retained world-state history. One exact nonzero `finalized` block number/hash
+is captured and supplied to every contract and storage observation; `proven`
+and `latest` are never fallbacks. The finalized block timestamp must be at
+most 7,200 seconds old and no more than 300 seconds ahead of local time.
+Unknowns and read failures are explicit not-ready reasons.
 
-Required fee juice is `(pre-mark in-flight reservations + durable
-may-broadcast operations + ceil(admissible rolling-window headroom / live
-max-per-tx)) * per-transfer fee limit`; a marked operation counts until it
-becomes terminal. The per-transfer limit is the SDK transaction gas limits
-multiplied by predicted maximum fees per gas. The projection exposes observed
-and required fee juice, observed finalized token inventory and required
-admissible volume, and the exact finalized reference.
+**Marked exposure.** A `may_broadcast` operation may still take its principal
+and one fee from the finalized state until the finalized block's timestamp
+passes its attempt's protocol expiration (the node admits a transaction only
+into a block whose timestamp is at most that expiration). Past it the
+transaction either landed at or before the finalized block, which then already
+shows its spend and fee, or it never will. So every marked operation counts
+against inventory, the contract window and fee juice until then, with or
+without a caller asking about it, and stops counting at most one protocol
+transaction lifetime after it was prepared. Its journal row is unchanged:
+nothing resolves it short of an authoritative observation.
+
+**Admissible headroom** is the smaller of the bridge's own 24h window
+(`rollingWindow.localHeadroom`) and the contract's
+(`rollingWindow.onChainHeadroom`). The contract keeps 25 hourly buckets and
+clears aged ones lazily on the next transfer, so its lookback is 24 to 25
+hours, against the bridge's exact 24. The probe reads `spend_buckets` and
+`spend_bucket` at the finalized reference and replays `advance_window` to the
+finalized timestamp (`onChainSpent`); on-chain headroom is the daily limit
+less that, marked exposure and in-flight reservations. Zero is
+`spend_window_exhausted`; an unreadable window `spend_window_unknown`; a
+stored bucket after the finalized one, where every transfer would revert,
+`spend_window_inconsistent`.
+
+Required inventory is `reservations + admissible headroom + marked principal`.
+Required fee juice is `(pre-mark in-flight reservations + marked operations +
+ceil(admissible headroom / live max-per-tx)) * per-transfer fee limit`. The
+per-transfer limit is the SDK transaction gas limits multiplied by predicted
+maximum fees per gas. The projection exposes observed and required fee juice
+and inventory, marked exposure, both headrooms, and the exact finalized
+reference.
+
+Concurrent admissions share one chain observation (the server single-flights
+it). Capacity is therefore evaluated twice: in the projection, then again in
+`runAttempt` against the live window and journal, synchronously with the
+reservation. The second evaluation also refuses an amount above on-chain
+headroom (`spend_window_insufficient`), so no two requests can each be judged
+against headroom, inventory or fee juice that the other has already reserved.
+
 Readiness loss blocks only new admission. An already may-broadcast-marked
 operation keeps its normal lookup and observation path but is never replayed.
 An already admitted `prepared` operation keeps recovering too: the
 may-broadcast query and the send of its exact journaled bytes are not gated on
-the `/ready` verdict, fee runway, finalized-tip freshness or corridor
+the `/ready` verdict, the full fee runway, finalized-tip freshness or corridor
 admission. It is held, still `prepared` with the same bytes and hash and
 resumed by the next call, only while one of these per-operation facts holds:
 
@@ -460,8 +491,19 @@ resumed by the next call, only while one of these per-operation facts holds:
 | `network_identity_mismatch` | node identity vs the operation's `network` |
 | `account_paused` | finalized `paused` read by the readiness probe |
 | `allowlist_root_mismatch` | finalized on-chain root vs the configured tree the attempt was proven against |
-| `inventory_insufficient` | finalized public token balance below the operation's amount |
+| `operation_inventory_insufficient` | finalized public token balance below the operation's amount plus marked principal and other reservations |
+| `operation_fee_runway_insufficient` | finalized fee juice below one per-transfer fee limit for this operation, each marked operation and each other reservation |
+| `operation_spend_window_insufficient` | the contract's window at the finalized timestamp cannot take the operation's amount on top of marked principal and other reservations |
 | in-memory rolling window full | `TransactionLimits.reserve`; answered `prepared`, never re-proved |
+
+The `operation_*` reasons are the prepared path's own; admission's
+`inventory_insufficient` and `fee_runway_insufficient` mean the bridge cannot
+honour its whole admissible headroom. An underfunded fee payer is refused by
+the node, not charged: Aztec 6.0.0 `GasTxValidator` rejects a transaction
+whose fee payer's Fee Juice is below its fee limit both at `sendTx` and again
+at block building, where it is dropped rather than included. Sending anyway
+would still mark the operation and leave it counted as marked exposure until
+its expiry, so the fee hold keeps it `prepared` instead.
 
 A fact the probe could not read is not a hold: the node and the account
 decide. Past `validUntil` the operation is `not_submitted`; past the attempt's
