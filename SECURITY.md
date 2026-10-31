@@ -647,8 +647,8 @@ is unchanged. aztec 6.0.0 / noir
 | artifact hash | `0x23175c2477ef7185293e060b672df9bb97be41037400af95a7e3114e3e36b197` |
 | private functions root | `0x01d57d9fd9ad35dceaa51b65ce8345b4535c8488233a2c9fec23e04dde34a76f` |
 | public bytecode commitment | `0x274f0b212e6dedb4ef9e46a8bea713a6900fc145ff72388c781b4894adb62340` |
-| artifact digest (`ARTIFACT_SHA256`, `scripts/artifact-digest.js`) | `38ca99d673e5cf4c81fae00f942dd51a33ff3a78b9983ce0d7b7f42ef1d135f8` |
-| raw file sha256 (arm64 build at `/tmp/pxe-bridge-6`, path-dependent) | `6cc1287c1338d7bf393cfa7b77cc4c64912bcc6a2b71ebaa2d9f2bd7f5784c1a` |
+| artifact digest (`ARTIFACT_SHA256`, `scripts/artifact-digest.js`) | `773ddd56dc189bc72282263aab1bfd6f40863cc847ad40b5b37d5c937b319ce1` |
+| raw file sha256 (x86 CI build, run 41159399538, path-dependent) | `0db1ed1f3fc70aa9769b171cfd34cdefa474d3195023a875195aeadb6971a648` |
 
 The public bytecode commitment is the pre-#44 value: #44 changed only the
 private entrypoint, so only the private functions root, and with it the class
@@ -657,6 +657,14 @@ id, moved. The pre-#44 6.0.0 build pinned class id
 `7ecfad1190cd2bbdd40e6e020d982ccbcaca119ba2c17e4444bc7e2faae922f7`. A
 spending-limit account deployed against that class derives elsewhere under this
 one, and a bridge with `PXE_BRIDGE_ACCOUNT_ADDRESS` recorded refuses to start.
+
+`main.nr` later gained a `#[test]`, `advance_window_matches_typescript`
+(xochi-fi/pxe-bridge#67). Test functions are not contract functions, so the
+class id, artifact hash, private functions root and public bytecode commitment
+above are unchanged; the source text in `file_map` is not, which moved the
+digest from `38ca99d673e5cf4c81fae00f942dd51a33ff3a78b9983ce0d7b7f42ef1d135f8`
+to the value above. A native arm64 build and the x86 `contract` job computed
+the same class id and digest for it.
 
 `ARTIFACT_SHA256` pins the whole file, ABI, storage layout and metadata
 included, which the class ID does not cover. It is a sha256 with each
