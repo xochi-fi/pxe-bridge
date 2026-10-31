@@ -358,11 +358,14 @@ export class SettlementJournal {
     if (!this.healthState.writable) return;
     try {
       this.migrateSchema(db);
-      // Not schema: no row changes and an older binary ignores it. Keeps the
-      // exposure lookups proportional to live and just-resolved operations
-      // rather than to every operation the journal has ever held.
+      // Not schema: no row changes and an older binary ignores it. The
+      // exposure lookups select attempts by this expression, so they read
+      // only attempts that can still be included, not every attempt the
+      // journal has ever held.
       if (this.healthState.writable) {
-        db.exec("CREATE INDEX IF NOT EXISTS operations_state_updated ON operations(state, updated_at)");
+        db.exec(
+          "CREATE INDEX IF NOT EXISTS attempts_expiration ON attempts(CAST(expiration_timestamp AS INTEGER))",
+        );
       }
     } catch (cause) {
       this.classifyOpenError(cause);
@@ -966,45 +969,43 @@ export class SettlementJournal {
   }
 
   /**
-   * Operations that may still take a fee and principal from the finalized
-   * state at `finalized`, as observed by a probe that started at `sinceMs`.
+   * Operations whose transfer may still take a fee and principal from the
+   * finalized state at `finalized`: every marked or terminal operation whose
+   * current attempt's protocol expiration is not before `finalized.timestamp`,
+   * less terminal ones recorded in a block at or below `finalized.number`.
    *
-   * - A `may_broadcast` operation counts until `finalized.timestamp` passes
-   *   its attempt's protocol expiration. The node admits a transaction only
-   *   into a block whose timestamp is at most that expiration, so past it the
-   *   transaction either landed at or before `finalized`, which already shows
-   *   its spend and fee, or it never will. Expired rows are filtered in SQL,
-   *   so rows no caller ever resolves cost nothing here.
-   * - A terminal operation recorded at or after `sinceMs` counts while its
-   *   recorded block is above `finalized.number`: its terminal record can
-   *   land between the probe's finalized read and this one, and then the
-   *   transfer is in neither the finalized state nor the marked set. One
-   *   recorded before the probe began was finalized at a tip the probe's
-   *   tip is at or after.
+   * The node admits a transaction only into a block whose timestamp is at
+   * most its expiration, and block timestamps never decrease. So once
+   * `finalized.timestamp` passes the expiration, the transaction landed below
+   * `finalized`, which already shows its spend and fee, or it never will.
+   * Before that, a terminal operation is in the finalized state exactly when
+   * its block is at or below `finalized.number`. Both hold for any finalized
+   * reference, including one read from a node behind the one that reported
+   * the terminal receipt. A marked operation's block is unknown until it is
+   * terminal, so it counts. Expired attempts are excluded through the
+   * `attempts_expiration` index and cost nothing here.
    */
-  mayBroadcastExposure(
-    finalized: { number: number; timestamp: bigint },
-    sinceMs: number,
-  ): { transfers: number; principal: bigint } {
+  mayBroadcastExposure(finalized: { number: number; timestamp: bigint }): {
+    transfers: number;
+    principal: bigint;
+  } {
     const rows = this.read((db) =>
       db
         .prepare(
           `SELECT operations.state AS state, attempts.expiration_timestamp AS expiration,
                   spends.amount AS amount,
                   json_extract(operations.observation_json, '$.blockNumber') AS block_number
-           FROM operations
-           LEFT JOIN attempts ON attempts.operation_id = operations.operation_id
-                             AND attempts.attempt = operations.current_attempt
+           FROM attempts
+           JOIN operations ON operations.operation_id = attempts.operation_id
+                          AND operations.current_attempt = attempts.attempt
            LEFT JOIN spends ON spends.operation_id = operations.operation_id
-           WHERE (operations.state = 'may_broadcast'
-                  AND (attempts.expiration_timestamp IS NULL
-                       OR CAST(attempts.expiration_timestamp AS INTEGER) >= ?))
-              OR (operations.state IN ('finalized', 'reverted') AND operations.updated_at >= ?)`,
+           WHERE CAST(attempts.expiration_timestamp AS INTEGER) >= ?
+             AND operations.state IN ('may_broadcast', 'finalized', 'reverted')`,
         )
-        .all(finalized.timestamp, sinceMs),
+        .all(finalized.timestamp),
     ) as {
       state: string;
-      expiration: string | null;
+      expiration: string;
       amount: string | null;
       block_number: string | number | null;
     }[];
@@ -1014,11 +1015,11 @@ export class SettlementJournal {
       if (row.amount === null || !/^[1-9][0-9]*$/.test(row.amount)) {
         throw new JournalUnreadableError(`${row.state} operation has no valid spend amount`);
       }
-      if (row.state === "may_broadcast") {
-        if (row.expiration === null || !/^[0-9]+$/.test(row.expiration)) {
-          throw new JournalUnreadableError("marked operation has no valid current attempt expiration");
-        }
-      } else if (
+      if (!/^[0-9]+$/.test(row.expiration)) {
+        throw new JournalUnreadableError(`${row.state} operation has no valid current attempt expiration`);
+      }
+      if (
+        row.state !== "may_broadcast" &&
         row.block_number !== null &&
         /^[0-9]+$/.test(String(row.block_number)) &&
         BigInt(row.block_number) <= BigInt(finalized.number)
@@ -1032,29 +1033,31 @@ export class SettlementJournal {
   }
 
   /**
-   * Marked operations last observed included at or below `finalized.number`
-   * and not yet expired: the ones whose transfer the finalized state may
-   * already show while `mayBroadcastExposure` still counts it. Oldest
-   * observation first, at most `limit`.
+   * Marked, unexpired operations whose transfer the finalized state at
+   * `finalized` may already show while `mayBroadcastExposure` still counts
+   * it, in operation id order: every one except those last observed included
+   * above `finalized.number`, which cannot be in it yet. That includes
+   * operations whose inclusion was never observed, such as a send that timed
+   * out after its mark.
    */
-  landedCandidates(finalized: { number: number; timestamp: bigint }, limit: number): string[] {
+  landedCandidates(finalized: { number: number; timestamp: bigint }): string[] {
     const rows = this.read((db) =>
       db
         .prepare(
           `SELECT operations.operation_id AS operation_id
-           FROM operations
-           JOIN attempts ON attempts.operation_id = operations.operation_id
-                        AND attempts.attempt = operations.current_attempt
-           WHERE operations.state = 'may_broadcast'
-             AND CAST(attempts.expiration_timestamp AS INTEGER) >= ?
-             AND json_extract(operations.observation_json, '$.state') = 'included'
-             AND CAST(json_extract(operations.observation_json, '$.blockNumber') AS INTEGER) <= ?
-           ORDER BY operations.updated_at
-           LIMIT ?`,
+           FROM attempts
+           JOIN operations ON operations.operation_id = attempts.operation_id
+                          AND operations.current_attempt = attempts.attempt
+           WHERE CAST(attempts.expiration_timestamp AS INTEGER) >= ?
+             AND operations.state = 'may_broadcast'
+             AND NOT (json_extract(operations.observation_json, '$.state') IS 'included'
+                      AND (CAST(json_extract(operations.observation_json, '$.blockNumber') AS INTEGER) > ?) IS 1)`,
         )
-        .all(finalized.timestamp, finalized.number, limit),
+        .all(finalized.timestamp, finalized.number),
     ) as { operation_id: string }[];
-    return rows.map((row) => row.operation_id);
+    // Sorted here, not in SQL: an ORDER BY makes SQLite walk every operation
+    // in key order instead of selecting attempts through the expiration index.
+    return rows.map((row) => row.operation_id).sort();
   }
 
   /**

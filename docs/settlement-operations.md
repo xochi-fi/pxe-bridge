@@ -451,19 +451,27 @@ prepared.
 
 Before that, a marked transfer that landed at or below the finalized block
 would be counted twice: once in the finalized state, once as exposure. Each
-readiness observation therefore resolves up to eight marked operations last
-observed included at or below the finalized block number, through the same
-node observation `aztec_getSettlement` uses (`reconcileLanded`). Only a
-finalized receipt records the outcome; anything else leaves the operation as
-it was, still counted, and nothing is replayed. An operation whose inclusion
-was never observed stays counted until its expiration.
+readiness observation therefore checks up to eight unexpired marked
+operations, through the same node observation `aztec_getSettlement` uses
+(`createLandedReconciler`): every one except those last observed included
+above the finalized block, so including those whose inclusion was never
+observed, such as a send that timed out after its mark. Each observation
+resumes after the last operation the previous one checked, so operations the
+node never resolves cannot take every place. Only a finalized receipt records
+the outcome; anything else leaves the operation as it was, still counted, and
+nothing is replayed. Reconciliation gets at most 5 seconds of each
+observation (`RECONCILE_BUDGET_MS`), and the abort reaches the node read
+itself; running out leaves the operations counted and is not a readiness
+failure.
 
-A terminal record can land between the probe's finalized read and the
-exposure read, after finality has moved past the transfer's block; it is then
-in neither. So an operation recorded terminal at or after the probe began
-still counts while its recorded block is above the probe's finalized block.
-Expired and long-resolved rows are filtered in SQL (index
-`operations_state_updated`), so the lookup does not grow with the journal.
+A terminal operation stays counted while its attempt's expiration is not
+before the finalized timestamp and its recorded block is above the finalized
+block number. That is exact for any finalized reference, including one read
+from a node behind the one that reported the receipt: block timestamps never
+decrease, so a finalized timestamp past the expiration is past the block too.
+Both lookups select attempts through the `attempts_expiration` expression
+index, so expired and long-resolved operations cost nothing and the lookup
+does not grow with the journal.
 
 **Admissible headroom** is the smaller of the bridge's own 24h window
 (`rollingWindow.localHeadroom`) and the contract's

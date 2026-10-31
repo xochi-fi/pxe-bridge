@@ -725,9 +725,10 @@ timestamp exactly as the contract would, less the volume of marked transfers
 that may still land after it and of in-flight reservations. A marked transfer
 stops counting once the finalized timestamp passes its protocol expiration:
 by then it either landed at or before that block or never will. Before that,
-each readiness observation resolves up to eight marked transfers last seen
-included at or below the finalized block, recording those the node reports
-finalized, so a landed transfer is not owed twice.
+each readiness observation checks up to eight marked transfers the finalized
+block may already include, recording those the node reports finalized, so a
+landed transfer is not owed twice. That check has a 5-second budget; running
+out leaves the transfers counted rather than failing readiness.
 
 The fee runway shown by `/ready` reports both observed and required fee juice.
 Required fee juice is:

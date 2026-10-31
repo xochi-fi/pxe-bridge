@@ -1356,10 +1356,18 @@ export class AztecClient implements IAztecClient {
     return { txHash: prepared.txHash, observation: await this.observeTx(prepared.txHash) };
   }
 
-  async observeTx(txHash: string): Promise<NodeObservation> {
+  async observeTx(txHash: string, signal?: AbortSignal): Promise<NodeObservation> {
     if (!this.node) throw new Error("Client not connected");
     const { TxHash } = await import("@aztec-labs/aztec.js/tx");
-    const receipt = await this.node.getTxReceipt(TxHash.fromString(txHash), {
+    let node = this.node;
+    if (signal) {
+      const { createAztecNodeClient } = await import("@aztec-labs/aztec.js/node");
+      signal.throwIfAborted();
+      node = createAztecNodeClient(this.nodeUrl, {
+        fetch: boundedNodeFetch(NODE_RPC_TIMEOUT_MS, signal),
+      });
+    }
+    const receipt = await node.getTxReceipt(TxHash.fromString(txHash), {
       includeTxEffect: true,
     });
     return nodeObservation(receipt);

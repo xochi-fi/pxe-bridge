@@ -35,8 +35,8 @@ import { legacyAuditRefusal } from "./legacy-audit.js";
 import { httpMayBroadcastClient, type MayBroadcastClient } from "./may-broadcast.js";
 import { CorridorConfigSchema, type CorridorConfig } from "./settlement.js";
 import { resolveSecretKey } from "./secrets.js";
-import { createReadinessObserver, type FinalizedTipObservation } from "./readiness.js";
-import { reconcileLanded } from "./rpc.js";
+import { createReadinessObserver } from "./readiness.js";
+import { createLandedReconciler } from "./rpc.js";
 import type { SpendingLimitConfig } from "./spending-limit-account.js";
 import { AllowlistTree } from "./allowlist-tree.js";
 import {
@@ -706,12 +706,7 @@ async function main(): Promise<void> {
     limits,
     mayBroadcastConfigured: mayBroadcast !== undefined,
     corridor,
-    ...(settlement
-      ? {
-          reconcile: (finalized: FinalizedTipObservation, signal?: AbortSignal) =>
-            reconcileLanded(settlement, client, finalized, signal),
-        }
-      : {}),
+    ...(settlement ? { reconcile: createLandedReconciler(settlement, client) } : {}),
   });
   let initialized = false;
   application = createApp(client, {

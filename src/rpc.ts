@@ -430,6 +430,7 @@ async function observe(
   s: SettlementContext,
   client: IAztecClient,
   op: StoredOperation,
+  signal?: AbortSignal,
 ): Promise<Observation> {
   switch (op.state) {
     case "claimed":
@@ -463,7 +464,7 @@ async function observe(
       if (!attempt) return { state: "unknown", reason: "missing_transaction_identity" };
       let node: NodeObservation;
       try {
-        node = await client.observeTx(attempt.txHash);
+        node = await client.observeTx(attempt.txHash, signal);
       } catch {
         console.error("[rpc] Settlement node observation failed");
         return {
@@ -520,27 +521,39 @@ function recordObservation(s: SettlementContext, operationId: string, observatio
 const RECONCILE_PER_PROBE = 8;
 
 /**
- * Resolves marked operations last observed included at or below `finalized`
- * through the same node observation `aztec_getSettlement` uses: one the node
- * reports finalized is recorded terminal and stops counting as marked
- * exposure, which would otherwise count it a second time on top of the
- * finalized state until its protocol expiration. Anything short of a
+ * Resolves marked operations the finalized state may already show
+ * (`landedCandidates`) through the same node observation `aztec_getSettlement`
+ * uses: one the node reports finalized is recorded terminal and stops counting
+ * as marked exposure, which would otherwise count it a second time on top of
+ * the finalized state until its protocol expiration. Anything short of a
  * finalized receipt leaves the operation as it was; nothing is replayed.
+ *
+ * Each call resumes after the last operation the previous one checked,
+ * wrapping, so operations whose observation never changes (still pending, or
+ * pruned from a block finality later passed) cannot hold the first
+ * `RECONCILE_PER_PROBE` places on every probe. `signal` reaches the node
+ * read, so an abort ends an in-flight observation rather than waiting it out.
  */
-export async function reconcileLanded(
+export function createLandedReconciler(
   s: SettlementContext,
   client: IAztecClient,
-  finalized: { number: number; timestamp: bigint },
-  signal?: AbortSignal,
-): Promise<void> {
-  if (!s.journal.health().writable) return;
-  for (const operationId of s.journal.landedCandidates(finalized, RECONCILE_PER_PROBE)) {
-    signal?.throwIfAborted();
-    // A request already driving it records its own outcome.
-    if (s.inFlight.has(operationId)) continue;
-    const op = s.journal.get(operationId);
-    if (op?.state === "may_broadcast") await observe(s, client, op);
-  }
+): (finalized: { number: number; timestamp: bigint }, signal?: AbortSignal) => Promise<void> {
+  let lastChecked: string | undefined;
+  return async (finalized, signal) => {
+    if (!s.journal.health().writable) return;
+    const candidates = s.journal.landedCandidates(finalized);
+    const resumeAt = lastChecked === undefined ? -1 : candidates.findIndex((id) => id > lastChecked!);
+    const ordered =
+      resumeAt <= 0 ? candidates : [...candidates.slice(resumeAt), ...candidates.slice(0, resumeAt)];
+    for (const operationId of ordered.slice(0, RECONCILE_PER_PROBE)) {
+      signal?.throwIfAborted();
+      lastChecked = operationId;
+      // A request already driving it records its own outcome.
+      if (s.inFlight.has(operationId)) continue;
+      const op = s.journal.get(operationId);
+      if (op?.state === "may_broadcast") await observe(s, client, op, signal);
+    }
+  };
 }
 
 /** The wire answer for an observation of operation `op`. */

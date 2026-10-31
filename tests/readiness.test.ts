@@ -8,6 +8,7 @@ import {
   evaluateReadiness,
   known,
   preparedCapacityReasons,
+  RECONCILE_BUDGET_MS,
   unknown,
   SPEND_BUCKET_COUNT,
   type ChainReadinessFacts,
@@ -324,6 +325,41 @@ describe("authoritative readiness predicate", () => {
       expect(result.feeRunway.mayBroadcastTransfers).toBe(0);
     } finally {
       journal.close();
+    }
+  });
+
+  it("evaluates with marked operations still counted when reconciliation overruns its budget", async () => {
+    vi.useFakeTimers();
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const journal = openBoundJournal();
+    mark(journal, "stuck", "1000");
+    const signals: AbortSignal[] = [];
+    const observer = createReadinessObserver(
+      { observeReadinessChain: async () => healthyFacts() },
+      {
+        journal,
+        limits: new TransactionLimits({ maxAmount: 1_000n, dailyLimit: 10_000n }),
+        mayBroadcastConfigured: true,
+        corridor: CORRIDOR,
+        now: () => NOW,
+        // A node read that never answers and ignores its signal.
+        reconcile: (_finalized, signal) => {
+          if (signal) signals.push(signal);
+          return new Promise(() => undefined);
+        },
+      },
+    );
+    try {
+      const pending = observer.observe();
+      await vi.advanceTimersByTimeAsync(RECONCILE_BUDGET_MS);
+      const result = await pending;
+      expect(signals.map((signal) => signal.aborted)).toEqual([true]);
+      expect(result.inventory.mayBroadcastPrincipal).toBe("1000");
+      expect(result.feeRunway.mayBroadcastTransfers).toBe(1);
+    } finally {
+      journal.close();
+      log.mockRestore();
+      vi.useRealTimers();
     }
   });
 

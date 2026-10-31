@@ -161,8 +161,11 @@ export interface IAztecClient {
    * nullifiers, so they can be included at most once.
    */
   broadcastPrepared(txBytes: Buffer, gate: BroadcastGate): Promise<TransferOutcome>;
-  /** Read-only: what the node currently says about `txHash`. */
-  observeTx(txHash: string): Promise<NodeObservation>;
+  /**
+   * Read-only: what the node currently says about `txHash`. `signal` aborts
+   * the node read itself, not only the wait for it.
+   */
+  observeTx(txHash: string, signal?: AbortSignal): Promise<NodeObservation>;
   /** Live read of the node's network identity. */
   networkIdentity(): Promise<NodeNetwork>;
   /** Which account class signs: decided by configuration at construction. */

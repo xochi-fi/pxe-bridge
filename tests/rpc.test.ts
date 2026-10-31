@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { writeFileSync } from "node:fs";
 import Database from "better-sqlite3";
-import { handleRpcRequest, reconcileLanded, type RpcContext, type SettlementContext } from "../src/rpc.js";
+import { createLandedReconciler, handleRpcRequest, type RpcContext, type SettlementContext } from "../src/rpc.js";
 import { RPC_ERRORS, SUBMITTED_UNKNOWN_MESSAGE } from "../src/types.js";
 import { SettlementJournal } from "../src/journal.js";
 import { TransactionLimits } from "../src/limits.js";
@@ -262,32 +262,74 @@ describe("aztec_createNote: capacity against the live window", () => {
 
   it("reconciles a landed marked operation only on a finalized receipt", async () => {
     await createNote(client, ctx);
+    const reconcile = createLandedReconciler(s, client);
     const atBlock = { number: 7, timestamp: 0n };
     expect(journal.get("op-1")?.observation).toMatchObject({ state: "included", blockNumber: "7" });
 
     // Included, not finalized at the node: still marked and still owed.
-    await reconcileLanded(s, client, atBlock);
+    await reconcile(atBlock);
     expect(journal.get("op-1")?.state).toBe("may_broadcast");
-    expect(journal.mayBroadcastExposure(atBlock, Date.now())).toEqual({ transfers: 1, principal: 1000n });
+    expect(journal.mayBroadcastExposure(atBlock)).toEqual({ transfers: 1, principal: 1000n });
 
     client.finalizeAll();
-    await reconcileLanded(s, client, atBlock);
+    await reconcile(atBlock);
     expect(journal.get("op-1")?.state).toBe("finalized");
     expect(client.sends).toHaveLength(1);
     // The finalized state at block 7 shows it, so it is no longer owed...
-    expect(journal.mayBroadcastExposure(atBlock, 0)).toEqual({ transfers: 0, principal: 0n });
-    // ...but a probe whose finalized read was block 6, and which started
-    // before the terminal record, still owes it.
-    expect(journal.mayBroadcastExposure({ number: 6, timestamp: 0n }, 0)).toEqual({
+    expect(journal.mayBroadcastExposure(atBlock)).toEqual({ transfers: 0, principal: 0n });
+    // ...but a finalized reference below block 7, such as one read from a
+    // node behind the one that reported the receipt, does not show it yet,
+    // however long ago the terminal record was written.
+    expect(journal.mayBroadcastExposure({ number: 6, timestamp: 0n })).toEqual({
       transfers: 1,
       principal: 1000n,
     });
-    // A terminal record from before the probe began was finalized at a tip
-    // the probe's own is at or after.
-    expect(journal.mayBroadcastExposure({ number: 6, timestamp: 0n }, Date.now() + 1_000)).toEqual({
+    // Once that reference's timestamp is past the attempt's expiration, the
+    // transfer's block is at or below it, so it is shown.
+    const expiration = BigInt(journal.attempts("op-1")[0]!.expirationTimestamp);
+    expect(journal.mayBroadcastExposure({ number: 6, timestamp: expiration })).toEqual({
+      transfers: 1,
+      principal: 1000n,
+    });
+    expect(journal.mayBroadcastExposure({ number: 6, timestamp: expiration + 1n })).toEqual({
       transfers: 0,
       principal: 0n,
     });
+  });
+
+  it("reaches past marked operations whose observation never changes", async () => {
+    const ids = ["op-a", "op-b", "op-c", "op-d", "op-e", "op-f", "op-g", "op-h", "op-i"];
+    const hashes = new Map<string, string>();
+    for (const operationId of ids) {
+      const terms = termsFrom(CreateNoteV1Schema.parse(v1Params({ operationId, amount: "10" })));
+      journal.claim(operationId, fingerprintTerms(terms), terms);
+      const txHash = "0x" + Buffer.from(operationId).toString("hex").padStart(64, "0");
+      const attempt = journal.recordPrepared(operationId, {
+        txHash,
+        txBytes: Buffer.from(operationId),
+        expirationTimestamp: 1_900_000_000n,
+      });
+      journal.markMayBroadcast(operationId, attempt, terms.amount);
+      hashes.set(operationId, txHash);
+    }
+    // Never observed included (the send's response was lost), and the node
+    // knows only the last: the first eight read as absent on every probe.
+    client.chain.set(hashes.get("op-i")!, {
+      kind: "mined",
+      executionResult: "success",
+      blockHash: "0x" + "b".repeat(64),
+      blockNumber: "7",
+      receiptStatus: "finalized",
+      effects: { state: "available", noteHashes: [], nullifiers: [] },
+    });
+    const reconcile = createLandedReconciler(s, client);
+    const finalized = { number: 7, timestamp: 1_800_000_000n };
+
+    await reconcile(finalized);
+    expect(journal.get("op-i")?.state).toBe("may_broadcast");
+    await reconcile(finalized);
+    expect(journal.get("op-i")?.state).toBe("finalized");
+    expect(journal.mayBroadcastExposure(finalized)).toEqual({ transfers: 8, principal: 80n });
   });
 });
 
