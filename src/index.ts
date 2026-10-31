@@ -36,6 +36,7 @@ import { httpMayBroadcastClient, type MayBroadcastClient } from "./may-broadcast
 import { CorridorConfigSchema, type CorridorConfig } from "./settlement.js";
 import { resolveSecretKey } from "./secrets.js";
 import { createReadinessObserver } from "./readiness.js";
+import { createLandedReconciler } from "./rpc.js";
 import type { SpendingLimitConfig } from "./spending-limit-account.js";
 import { AllowlistTree } from "./allowlist-tree.js";
 import {
@@ -691,11 +692,21 @@ async function main(): Promise<void> {
       attestationAudit,
     );
   }
+  const settlement = journal
+    ? {
+        journal,
+        mayBroadcast,
+        corridor,
+        inFlight: new Set<string>(),
+        timeoutMs: SETTLEMENT_DEADLINE_MS,
+      }
+    : undefined;
   const readiness = createReadinessObserver(client, {
     journal,
     limits,
     mayBroadcastConfigured: mayBroadcast !== undefined,
     corridor,
+    ...(settlement ? { reconcile: createLandedReconciler(settlement, client) } : {}),
   });
   let initialized = false;
   application = createApp(client, {
@@ -708,18 +719,7 @@ async function main(): Promise<void> {
     initialized: () => initialized,
     attestationApiKey: attestationEnvironment?.apiKey,
     attestation,
-    ...(journal
-      ? {
-          settlement: {
-            journal,
-            mayBroadcast,
-            corridor,
-            inFlight: new Set<string>(),
-            timeoutMs: SETTLEMENT_DEADLINE_MS,
-            readiness,
-          },
-        }
-      : {}),
+    ...(settlement ? { settlement: { ...settlement, readiness } } : {}),
   });
 
   server.requestTimeout = application.requestTimeout;

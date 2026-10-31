@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { writeFileSync } from "node:fs";
 import Database from "better-sqlite3";
-import { handleRpcRequest, type RpcContext, type SettlementContext } from "../src/rpc.js";
+import { createLandedReconciler, handleRpcRequest, type RpcContext, type SettlementContext } from "../src/rpc.js";
 import { RPC_ERRORS, SUBMITTED_UNKNOWN_MESSAGE } from "../src/types.js";
 import { SettlementJournal } from "../src/journal.js";
 import { TransactionLimits } from "../src/limits.js";
@@ -13,6 +13,7 @@ import {
   fakeMayBroadcast,
   openBoundJournal,
   rpcBody,
+  readyLimits,
   readyObserver,
   settlementContext,
   tempJournalPath,
@@ -41,6 +42,7 @@ async function createNote(
   key: string | undefined = String(params["operationId"]),
 ): Promise<Answer> {
   return (await handleRpcRequest(rpcBody("aztec_createNote", [params]), client, {
+    limits: readyLimits(),
     ...ctx,
     idempotencyKey: key,
   })) as Answer;
@@ -80,7 +82,7 @@ beforeEach(() => {
   journal = openBoundJournal();
   gate = fakeMayBroadcast("allow");
   s = settlementContext(journal, gate.client);
-  ctx = { settlement: s };
+  ctx = { settlement: s, limits: readyLimits() };
 });
 
 describe("aztec_createNote: the versioned payload", () => {
@@ -167,6 +169,169 @@ describe("aztec_createNote: the versioned payload", () => {
     expect(client.proofs).toBe(0);
     expect(limits.windowStatus().reserved).toBe(0n);
   });
+
+describe("aztec_createNote: capacity against the live window", () => {
+  // One chain observation shared by both requests, as the server's
+  // single-flight readiness hands it out.
+  it("cannot admit two transfers into a contract window with room for one", async () => {
+    s.readiness = readyObserver({
+      rollingWindow: {
+        committed: "0",
+        reserved: "0",
+        headroom: "1000",
+        localHeadroom: "10000",
+        onChainSpent: "9000",
+        onChainHeadroom: "1000",
+        inFlightTransfers: 0,
+      },
+    });
+    const answers = await Promise.all([
+      createNote(client, ctx, v1Params({ operationId: "op-a" })),
+      createNote(client, ctx, v1Params({ operationId: "op-b" })),
+    ]);
+
+    expect(answers.filter((a) => a.result?.observation.state === "included")).toHaveLength(1);
+    const refused = answers.find((a) => a.error !== undefined);
+    expect(refused?.error?.code).toBe(RPC_ERRORS.NOT_READY);
+    expect(refused?.error?.data?.["reasons"]).toEqual(["spend_window_exhausted"]);
+    expect(client.proofs).toBe(1);
+    expect(client.sends).toHaveLength(1);
+  });
+
+  it("cannot admit two transfers on fee juice for one", async () => {
+    s.readiness = readyObserver({
+      maxAmount: "1000",
+      dailyLimit: "1000",
+      feeRunway: {
+        observed: "1000",
+        required: "1000",
+        perTransferFeeLimit: "1000",
+        mayBroadcastTransfers: 0,
+      },
+    });
+    const limits = new TransactionLimits({ maxAmount: 1000n, dailyLimit: 1000n });
+    // Both fit the 1000 window; only one fee is covered.
+    const answers = await Promise.all([
+      createNote(client, { settlement: s, limits }, v1Params({ operationId: "op-a", amount: "400" })),
+      createNote(client, { settlement: s, limits }, v1Params({ operationId: "op-b", amount: "400" })),
+    ]);
+
+    expect(answers.filter((a) => a.result?.observation.state === "included")).toHaveLength(1);
+    const refused = answers.find((a) => a.error !== undefined);
+    expect(refused?.error?.code).toBe(RPC_ERRORS.NOT_READY);
+    expect(refused?.error?.data?.["reasons"]).toEqual(["fee_runway_insufficient"]);
+    expect(client.sends).toHaveLength(1);
+  });
+
+  it("holds a resumed prepared attempt that inventory or fee juice cannot cover", async () => {
+    gate.decision = "unknown";
+    await createNote(client, ctx);
+    const [attempt] = journal.attempts("op-1");
+    gate.decision = "allow";
+
+    s.readiness = readyObserver({
+      inventory: { observed: "999", required: "10000", mayBroadcastPrincipal: "0" },
+    });
+    const shortInventory = await createNote(client, ctx);
+    expect(shortInventory.error?.code).toBe(RPC_ERRORS.NOT_READY);
+    expect(shortInventory.error?.data?.["reasons"]).toEqual(["operation_inventory_insufficient"]);
+    expect(shortInventory.error?.data?.observation).toMatchObject({
+      state: "prepared",
+      txHash: attempt!.txHash,
+    });
+
+    s.readiness = readyObserver({
+      feeRunway: {
+        observed: "999",
+        required: "10000",
+        perTransferFeeLimit: "1000",
+        mayBroadcastTransfers: 0,
+      },
+    });
+    const shortFee = await createNote(client, ctx);
+    expect(shortFee.error?.data?.["reasons"]).toEqual(["operation_fee_runway_insufficient"]);
+    expect(client.sends).toEqual([]);
+    expect(ctx.limits!.windowStatus().reserved).toBe(0n);
+    expect(journal.get("op-1")).toMatchObject({ state: "prepared" });
+
+    s.readiness = readyObserver();
+    const sent = await createNote(client, ctx);
+    expect(sent.result?.observation).toMatchObject({ state: "included", txHash: attempt!.txHash });
+    expect(client.proofs).toBe(1);
+  });
+
+  it("reconciles a landed marked operation only on a finalized receipt", async () => {
+    await createNote(client, ctx);
+    const reconcile = createLandedReconciler(s, client);
+    const atBlock = { number: 7, timestamp: 0n };
+    expect(journal.get("op-1")?.observation).toMatchObject({ state: "included", blockNumber: "7" });
+
+    // Included, not finalized at the node: still marked and still owed.
+    await reconcile(atBlock);
+    expect(journal.get("op-1")?.state).toBe("may_broadcast");
+    expect(journal.mayBroadcastExposure(atBlock)).toEqual({ transfers: 1, principal: 1000n });
+
+    client.finalizeAll();
+    await reconcile(atBlock);
+    expect(journal.get("op-1")?.state).toBe("finalized");
+    expect(client.sends).toHaveLength(1);
+    // The finalized state at block 7 shows it, so it is no longer owed...
+    expect(journal.mayBroadcastExposure(atBlock)).toEqual({ transfers: 0, principal: 0n });
+    // ...but a finalized reference below block 7, such as one read from a
+    // node behind the one that reported the receipt, does not show it yet,
+    // however long ago the terminal record was written.
+    expect(journal.mayBroadcastExposure({ number: 6, timestamp: 0n })).toEqual({
+      transfers: 1,
+      principal: 1000n,
+    });
+    // Once that reference's timestamp is past the attempt's expiration, the
+    // transfer's block is at or below it, so it is shown.
+    const expiration = BigInt(journal.attempts("op-1")[0]!.expirationTimestamp);
+    expect(journal.mayBroadcastExposure({ number: 6, timestamp: expiration })).toEqual({
+      transfers: 1,
+      principal: 1000n,
+    });
+    expect(journal.mayBroadcastExposure({ number: 6, timestamp: expiration + 1n })).toEqual({
+      transfers: 0,
+      principal: 0n,
+    });
+  });
+
+  it("reaches past marked operations whose observation never changes", async () => {
+    const ids = ["op-a", "op-b", "op-c", "op-d", "op-e", "op-f", "op-g", "op-h", "op-i"];
+    const hashes = new Map<string, string>();
+    for (const operationId of ids) {
+      const terms = termsFrom(CreateNoteV1Schema.parse(v1Params({ operationId, amount: "10" })));
+      journal.claim(operationId, fingerprintTerms(terms), terms);
+      const txHash = "0x" + Buffer.from(operationId).toString("hex").padStart(64, "0");
+      const attempt = journal.recordPrepared(operationId, {
+        txHash,
+        txBytes: Buffer.from(operationId),
+        expirationTimestamp: 1_900_000_000n,
+      });
+      journal.markMayBroadcast(operationId, attempt, terms.amount);
+      hashes.set(operationId, txHash);
+    }
+    // Never observed included (the send's response was lost), and the node
+    // knows only the last: the first eight read as absent on every probe.
+    client.chain.set(hashes.get("op-i")!, {
+      kind: "mined",
+      executionResult: "success",
+      blockHash: "0x" + "b".repeat(64),
+      blockNumber: "7",
+      receiptStatus: "finalized",
+      effects: { state: "available", noteHashes: [], nullifiers: [] },
+    });
+    const reconcile = createLandedReconciler(s, client);
+    const finalized = { number: 7, timestamp: 1_800_000_000n };
+
+    await reconcile(finalized);
+    expect(journal.get("op-i")?.state).toBe("may_broadcast");
+    await reconcile(finalized);
+    expect(journal.get("op-i")?.state).toBe("finalized");
+    expect(journal.mayBroadcastExposure(finalized)).toEqual({ transfers: 8, principal: 80n });
+  });
+});
 
 describe("aztec_createNote: the broadcast gate", () => {
   it("journals, asks, marks, then broadcasts once and returns the observation", async () => {
@@ -335,17 +500,60 @@ describe("aztec_createNote: the broadcast gate", () => {
     expect(client.proofs).toBe(1);
     expect(client.sends).toEqual([beforeAttempts[0]!.txHash]);
   });
-  it("resumes a prepared attempt when readiness observation fails", async () => {
+
+  // Without a read of inventory or the contract window the exact bytes could
+  // revert after paying their fee; holding them loses nothing.
+  it.each([
+    [
+      "readiness observation fails",
+      (): RpcContext["readiness"] => ({
+        observe: () => Promise.reject(new Error("readiness transport unavailable")),
+      }),
+      "readiness_observation_failed",
+    ],
+    [
+      "the contract window is unread",
+      (): RpcContext["readiness"] =>
+        readyObserver({
+          ready: false,
+          reasons: ["spend_window_unknown"],
+          rollingWindow: {
+            committed: "0",
+            reserved: "0",
+            headroom: null,
+            localHeadroom: "10000",
+            onChainSpent: null,
+            onChainHeadroom: null,
+            inFlightTransfers: 0,
+          },
+        }),
+      "spend_window_unknown",
+    ],
+    [
+      "the token inventory is unread",
+      (): RpcContext["readiness"] =>
+        readyObserver({
+          ready: false,
+          reasons: ["inventory_unknown"],
+          inventory: { observed: null, required: null, mayBroadcastPrincipal: "0" },
+        }),
+      "inventory_unknown",
+    ],
+  ] as const)("holds a prepared attempt when %s, then resumes it", async (_name, observer, reason) => {
     gate.decision = "unknown";
     await createNote(client, ctx);
     const prepared = journal.attempts("op-1")[0]!;
-
-    s.readiness = {
-      observe: () => Promise.reject(new Error("readiness transport unavailable")),
-    };
     gate.decision = "allow";
-    const recovered = await createNote(client, ctx);
 
+    s.readiness = observer();
+    const held = await createNote(client, ctx);
+    expect(held.error?.code).toBe(RPC_ERRORS.NOT_READY);
+    expect(held.error?.data?.["reasons"]).toEqual([reason]);
+    expect(held.error?.data?.observation).toMatchObject({ state: "prepared", txHash: prepared.txHash });
+    expect(client.sends).toEqual([]);
+
+    s.readiness = readyObserver();
+    const recovered = await createNote(client, ctx);
     expect(recovered.result?.observation).toMatchObject({
       state: "included",
       txHash: prepared.txHash,
@@ -779,7 +987,12 @@ describe("the gate is the last word on both bounds", () => {
 
 describe("one deadline for the whole request", () => {
   it("counts the cooldown against it: a cooldown past the deadline proves nothing", async () => {
-    const limits = new TransactionLimits({ cooldownThreshold: 1n, cooldownDelayMs: 300 });
+    const limits = new TransactionLimits({
+      maxAmount: 1000n,
+      dailyLimit: 10_000n,
+      cooldownThreshold: 1n,
+      cooldownDelayMs: 300,
+    });
     const res = await createNote(client, { settlement: { ...s, timeoutMs: 50 }, limits });
     expect(res.error?.data?.observation).toEqual({
       state: "not_submitted",

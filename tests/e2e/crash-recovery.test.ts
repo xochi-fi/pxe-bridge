@@ -107,6 +107,7 @@ describe("hard crash mid-broadcast (e2e)", () => {
   let account: string;
   let token: string;
   let admin: string;
+  let funderWallet: unknown;
   let deployment: AccountDeployment;
   let proxy: Server;
   let proxyUrl: string;
@@ -154,7 +155,11 @@ describe("hard crash mid-broadcast (e2e)", () => {
       cwd: workDir,
       env: {
         PATH: process.env["PATH"] ?? "",
-
+        // bb's native prover looks for its CRS cache under $HOME/.bb-crs.
+        // Without HOME, on a network where crs.aztec-cdn.foundation timed out,
+        // every proof failed "Downloaded BN254 G1 CRS first element does not
+        // match expected point" (2026-10-31); with it the cache is used.
+        HOME: process.env["HOME"] ?? "",
         AZTEC_NODE_URL: proxyUrl,
         PXE_BRIDGE_SECRET_KEY: config.secretKey,
         PXE_BRIDGE_ACCOUNT_ADDRESS: account,
@@ -258,7 +263,7 @@ describe("hard crash mid-broadcast (e2e)", () => {
     admin = funder.getAddress()!;
     // Test access to the SDK wallet is unavailable on AztecClient's public API.
     const funderInternal = funder as unknown as { wallet: unknown };
-    const funderWallet = funderInternal.wallet;
+    funderWallet = funderInternal.wallet;
     observer = new AztecClient(
       config.nodeUrl,
       config.secretKey,
@@ -570,4 +575,41 @@ describe("hard crash mid-broadcast (e2e)", () => {
     await bridge.exited;
     bridge = undefined;
   }, 600_000);
+
+  // The production wiring in index.ts: the readiness observer resolves a
+  // landed marked transfer itself, so /ready stops owing it twice (once in
+  // the finalized balance, once as marked exposure) with no settlement query.
+  // Last: driving finality pushes the sandbox clock ahead, and every test
+  // above needs a bridge that passes /ready.
+  it("resolves a landed transfer from /ready, with no settlement query", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pxe-reconcile-"));
+    const journal = adoptedJournal(workDir);
+    const operationId = `reconcile-${randomBytes(4).toString("hex")}`;
+    bridge = await startBridge(workDir, journal);
+    const sent = await rpc(bridge.url, "aztec_createNote", await terms(operationId), operationId);
+    expect(sent.result?.observation.state, `${JSON.stringify(sent)}\n${bridge.log()}`).toBe("included");
+
+    await advanceFinalizedTip(config.nodeUrl, () => mintOne(funderWallet, token, admin));
+    // The projection either way: a clock pushed ahead by the blocks above
+    // makes it 503, and exposure is computed regardless.
+    const readiness = (await (
+      await fetch(`${bridge.url}/ready`, { headers: { authorization: `Bearer ${RPC_KEY}` } })
+    ).json()) as {
+      inventory: { mayBroadcastPrincipal: string | null };
+      feeRunway: { mayBroadcastTransfers: number | null };
+    };
+    // Unreconciled, a marked transfer counts until its expiration a day out.
+    expect(readiness.inventory.mayBroadcastPrincipal, bridge.log()).toBe("0");
+    expect(readiness.feeRunway.mayBroadcastTransfers).toBe(0);
+    expect(bridge.log()).not.toContain("reconciliation of marked operations failed");
+
+    const settled = await rpc(bridge.url, "aztec_getSettlement", {
+      version: SETTLEMENT_VERSION,
+      operationId,
+    });
+    expect(settled.result).toMatchObject({ found: true, state: "finalized" });
+    bridge.child.kill("SIGTERM");
+    await bridge.exited;
+    bridge = undefined;
+  }, 900_000);
 });

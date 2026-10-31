@@ -358,6 +358,15 @@ export class SettlementJournal {
     if (!this.healthState.writable) return;
     try {
       this.migrateSchema(db);
+      // Not schema: no row changes and an older binary ignores it. The
+      // exposure lookups select attempts by this expression, so they read
+      // only attempts that can still be included, not every attempt the
+      // journal has ever held.
+      if (this.healthState.writable) {
+        db.exec(
+          "CREATE INDEX IF NOT EXISTS attempts_expiration ON attempts(CAST(expiration_timestamp AS INTEGER))",
+        );
+      }
     } catch (cause) {
       this.classifyOpenError(cause);
       return;
@@ -960,20 +969,95 @@ export class SettlementJournal {
   }
 
   /**
-   * Transactions that may still consume one transfer fee. Terminal rows no
-   * longer need runway; every `may_broadcast` row does, regardless of whether
-   * its in-memory limit reservation survived.
+   * Operations whose transfer may still take a fee and principal from the
+   * finalized state at `finalized`: every marked or terminal operation whose
+   * current attempt's protocol expiration is not before `finalized.timestamp`,
+   * less terminal ones recorded in a block at or below `finalized.number`.
+   *
+   * The node admits a transaction only into a block whose timestamp is at
+   * most its expiration, and block timestamps never decrease. So once
+   * `finalized.timestamp` passes the expiration, the transaction landed below
+   * `finalized`, which already shows its spend and fee, or it never will.
+   * Before that, a terminal operation is in the finalized state exactly when
+   * its block is at or below `finalized.number`. Both hold for any finalized
+   * reference, including one read from a node behind the one that reported
+   * the terminal receipt. A marked operation's block is unknown until it is
+   * terminal, so it counts. Expired attempts are excluded through the
+   * `attempts_expiration` index and cost nothing here.
    */
-  mayBroadcastOperationCount(): number {
-    const row = this.read((db) =>
+  mayBroadcastExposure(finalized: { number: number; timestamp: bigint }): {
+    transfers: number;
+    principal: bigint;
+  } {
+    const rows = this.read((db) =>
       db
-        .prepare("SELECT count(*) AS count FROM operations WHERE state = 'may_broadcast'")
-        .get(),
-    ) as { count: number };
-    if (!Number.isSafeInteger(row.count) || row.count < 0) {
-      throw new JournalUnreadableError("invalid may-broadcast operation count");
+        .prepare(
+          `SELECT operations.state AS state, attempts.expiration_timestamp AS expiration,
+                  spends.amount AS amount,
+                  json_extract(operations.observation_json, '$.blockNumber') AS block_number
+           FROM attempts
+           JOIN operations ON operations.operation_id = attempts.operation_id
+                          AND operations.current_attempt = attempts.attempt
+           LEFT JOIN spends ON spends.operation_id = operations.operation_id
+           WHERE CAST(attempts.expiration_timestamp AS INTEGER) >= ?
+             AND operations.state IN ('may_broadcast', 'finalized', 'reverted')`,
+        )
+        .all(finalized.timestamp),
+    ) as {
+      state: string;
+      expiration: string;
+      amount: string | null;
+      block_number: string | number | null;
+    }[];
+    let transfers = 0;
+    let principal = 0n;
+    for (const row of rows) {
+      if (row.amount === null || !/^[1-9][0-9]*$/.test(row.amount)) {
+        throw new JournalUnreadableError(`${row.state} operation has no valid spend amount`);
+      }
+      if (!/^[0-9]+$/.test(row.expiration)) {
+        throw new JournalUnreadableError(`${row.state} operation has no valid current attempt expiration`);
+      }
+      if (
+        row.state !== "may_broadcast" &&
+        row.block_number !== null &&
+        /^[0-9]+$/.test(String(row.block_number)) &&
+        BigInt(row.block_number) <= BigInt(finalized.number)
+      ) {
+        continue;
+      }
+      transfers += 1;
+      principal += BigInt(row.amount);
     }
-    return row.count;
+    return { transfers, principal };
+  }
+
+  /**
+   * Marked, unexpired operations whose transfer the finalized state at
+   * `finalized` may already show while `mayBroadcastExposure` still counts
+   * it, in operation id order: every one except those last observed included
+   * above `finalized.number`, which cannot be in it yet. That includes
+   * operations whose inclusion was never observed, such as a send that timed
+   * out after its mark.
+   */
+  landedCandidates(finalized: { number: number; timestamp: bigint }): string[] {
+    const rows = this.read((db) =>
+      db
+        .prepare(
+          `SELECT operations.operation_id AS operation_id
+           FROM attempts
+           JOIN operations ON operations.operation_id = attempts.operation_id
+                          AND operations.current_attempt = attempts.attempt
+           WHERE CAST(attempts.expiration_timestamp AS INTEGER) >= ?
+             AND operations.state = 'may_broadcast'
+             AND NOT (json_extract(operations.observation_json, '$.state') IS 'included'
+                      AND (CAST(json_extract(operations.observation_json, '$.blockNumber') AS INTEGER) > ?) IS 1)`,
+        )
+        .all(finalized.timestamp, finalized.number),
+    ) as { operation_id: string }[];
+    // Sorted here, not in SQL: an ORDER BY makes SQLite walk every operation
+    // in key order instead of selecting attempts through the expiration index.
+    return rows.map((row) => row.operation_id).sort();
   }
 
   /**

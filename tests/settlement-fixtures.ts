@@ -13,6 +13,7 @@ import type {
 import type { AccountMode, CorridorConfig, NodeObservation } from "../src/settlement.js";
 import { SETTLEMENT_VERSION } from "../src/settlement.js";
 import { SettlementJournal } from "../src/journal.js";
+import { TransactionLimits } from "../src/limits.js";
 import type { MayBroadcastClient, MayBroadcastDecision } from "../src/may-broadcast.js";
 import type { SettlementContext } from "../src/rpc.js";
 import type { OperationalReadiness, ReadinessObserver } from "../src/readiness.js";
@@ -115,6 +116,11 @@ export function bindingMayBroadcast(): { client: MayBroadcastClient; answers: st
   return { client, answers };
 }
 
+/** The window readyObserver() projects; admission re-evaluates capacity against it. */
+export function readyLimits(): TransactionLimits {
+  return new TransactionLimits({ maxAmount: 1000n, dailyLimit: 10_000n });
+}
+
 export function readyObserver(
   overrides: Partial<OperationalReadiness> = {},
 ): ReadinessObserver {
@@ -154,17 +160,21 @@ export function readyObserver(
       allowlistRoot: "0x" + "c".repeat(64),
       configuredAllowlistRoot: "0x" + "c".repeat(64),
     },
-    inventory: { observed: "10000", required: "10000" },
+    inventory: { observed: "10000", required: "10000", mayBroadcastPrincipal: "0" },
     rollingWindow: {
       committed: "0",
       reserved: "0",
       headroom: "10000",
+      localHeadroom: "10000",
+      onChainSpent: "0",
+      onChainHeadroom: "10000",
       inFlightTransfers: 0,
     },
     feeRunway: {
       observed: "100000",
       required: "10000",
       perTransferFeeLimit: "1000",
+      mayBroadcastTransfers: 0,
     },
     journal: { writable: true, writerFenceHeld: true },
     ...overrides,

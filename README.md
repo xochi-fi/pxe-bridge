@@ -709,7 +709,8 @@ no operational state.
 Hard readiness requires design-A `spending_limit` mode and its durable
 deployment record; the exact derived account address and compiled class;
 initialized, unpaused account state; exact token, allowlist root and live
-limits; sufficient finalized token inventory and rolling-window headroom;
+limits; sufficient finalized token inventory and rolling-window headroom in
+both the bridge's 24h window and the contract's own 25-bucket window;
 sufficient fee juice; a healthy writable journal with its exclusive writer
 fence; complete network identity; node transaction readiness; and synchronized
 world-state history. All contract, storage, inventory and fee observations use
@@ -718,18 +719,32 @@ one exact, nonzero `finalized` block number and hash. There is no
 than 7,200 seconds old or 300 seconds ahead of local time; a missing or
 unreadable value is not ready.
 
+Admissible headroom is the smaller of the two windows. The contract's is read
+from its spend buckets at the finalized block, advanced to that block's
+timestamp exactly as the contract would, less the volume of marked transfers
+that may still land after it and of in-flight reservations. A marked transfer
+stops counting once the finalized timestamp passes its protocol expiration:
+by then it either landed at or before that block or never will. Before that,
+each readiness observation checks up to eight marked transfers the finalized
+block may already include, recording those the node reports finalized, so a
+landed transfer is not owed twice. That check has a 5-second budget; running
+out leaves the transfers counted rather than failing readiness.
+
 The fee runway shown by `/ready` reports both observed and required fee juice.
 Required fee juice is:
 
 ```
-(pre-mark in-flight reservations + durable may-broadcast operations
-  + ceil(rolling-window headroom / live per-tx cap))
+(pre-mark in-flight reservations + still-includable marked operations
+  + ceil(admissible headroom / live per-tx cap))
   * (transaction gas limits * predicted maximum fees per gas)
 ```
 
-Inventory likewise reports observed finalized balance and the volume still
-admissible, including reservations. A static minimum-balance setting is not a
-substitute for this operation-count-based policy.
+Required inventory is reservations + admissible headroom + the principal of
+still-includable marked operations, which the finalized balance has not paid
+yet. A static minimum-balance setting is not a substitute for this
+operation-count-based policy. Concurrent requests share one chain observation,
+so admission re-evaluates capacity against the live window in the same turn
+as it reserves.
 
 `aztec_createNote` invokes this same observer before proving or broadcasting
 new work and returns JSON-RPC `-32006` with
@@ -741,9 +756,10 @@ marked operation is never replayed when one node reports it absent. An already
 admitted `prepared` operation keeps resuming its exact journaled bytes, held
 only on per-operation facts
 (journal or fence lost, network mismatch, account paused, on-chain root not
-the configured one, inventory below its amount, rolling window full; see
-docs/settlement-operations.md). A new operation cannot pass admission while
-the bridge is unready.
+the configured one, inventory, fee juice or contract window unable to cover it
+on top of marked operations and other reservations, inventory or contract
+window unread, rolling window full; see docs/settlement-operations.md). A new
+operation cannot pass admission while the bridge is unready.
 
 The Docker `HEALTHCHECK` reads only `/status`'s HTTP code (`curl -sf`).
 

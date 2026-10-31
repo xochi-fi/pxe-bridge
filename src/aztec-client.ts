@@ -36,6 +36,7 @@ import type {
 import {
   finalizedTimeReason,
   known,
+  SPEND_BUCKET_COUNT,
   unknown,
   type AccountStateObservation,
   type ChainReadinessFacts,
@@ -1355,10 +1356,18 @@ export class AztecClient implements IAztecClient {
     return { txHash: prepared.txHash, observation: await this.observeTx(prepared.txHash) };
   }
 
-  async observeTx(txHash: string): Promise<NodeObservation> {
+  async observeTx(txHash: string, signal?: AbortSignal): Promise<NodeObservation> {
     if (!this.node) throw new Error("Client not connected");
     const { TxHash } = await import("@aztec-labs/aztec.js/tx");
-    const receipt = await this.node.getTxReceipt(TxHash.fromString(txHash), {
+    let node = this.node;
+    if (signal) {
+      const { createAztecNodeClient } = await import("@aztec-labs/aztec.js/node");
+      signal.throwIfAborted();
+      node = createAztecNodeClient(this.nodeUrl, {
+        fetch: boundedNodeFetch(NODE_RPC_TIMEOUT_MS, signal),
+      });
+    }
+    const receipt = await node.getTxReceipt(TxHash.fromString(txHash), {
       includeTxEffect: true,
     });
     return nodeObservation(receipt);
@@ -1675,6 +1684,7 @@ export class AztecClient implements IAztecClient {
       unknown("token_class_unknown");
     let inventory: ChainReadinessFacts["inventory"] = unknown("inventory_unknown");
     let feeRunway: ChainReadinessFacts["feeRunway"] = unknown("fee_runway_unknown");
+    let spendWindow: ChainReadinessFacts["spendWindow"] = unknown("spend_window_unknown");
 
     signal?.throwIfAborted();
     if (
@@ -1732,6 +1742,12 @@ export class AztecClient implements IAztecClient {
               permittedToken,
             };
             accountState = known(state);
+            spendWindow = await this.readSpendWindow(
+              readinessNode,
+              reference,
+              accountArtifact,
+              signal,
+            );
           }
         }
       } catch (cause) {
@@ -1828,7 +1844,53 @@ export class AztecClient implements IAztecClient {
       tokenContractClassId,
       inventory,
       feeRunway,
+      spendWindow,
     };
+  }
+
+  /**
+   * `spend_buckets[0..25)` and `spend_bucket` at `reference`, the slots
+   * `check_spending_public` reads. Unreadable or out-of-range values are
+   * unknown, never zero: a zero window would hand back the daily budget.
+   */
+  private async readSpendWindow(
+    node: AztecNode,
+    reference: { number: BlockNumber; hash: BlockHash },
+    artifact: ContractArtifact,
+    signal: AbortSignal | undefined,
+  ): Promise<ChainReadinessFacts["spendWindow"]> {
+    try {
+      const bucketsLayout = artifact.storageLayout["spend_buckets"];
+      const lastBucketLayout = artifact.storageLayout["spend_bucket"];
+      if (!bucketsLayout || !lastBucketLayout) {
+        throw new Error("compiled artifact has no spend_buckets/spend_bucket storage");
+      }
+      const [lastBucket, buckets] = await Promise.all([
+        node.getPublicStorageAt(reference, this.solverAddress!, lastBucketLayout.slot),
+        Promise.all(
+          Array.from({ length: SPEND_BUCKET_COUNT }, async (_, index) =>
+            node.getPublicStorageAt(
+              reference,
+              this.solverAddress!,
+              await deriveStorageSlotInMap(bucketsLayout.slot, new Fr(index)),
+            ),
+          ),
+        ),
+      ]);
+      const values = buckets.map((value, index) => {
+        const bucket = value.toBigInt();
+        if (bucket >= 1n << 128n) throw new Error(`spend_buckets[${index}] holds ${bucket}, not a u128`);
+        return bucket;
+      });
+      if (lastBucket.toBigInt() >= 1n << 64n) {
+        throw new Error(`spend_bucket holds ${lastBucket.toBigInt()}, not a u64`);
+      }
+      return known({ buckets: values, lastBucket: lastBucket.toBigInt() });
+    } catch (cause) {
+      if (signal?.aborted) signal.throwIfAborted();
+      console.error("[pxe-bridge] Readiness spend window read failed:", cause);
+      return unknown("spend_window_unknown");
+    }
   }
 
   async getVersion(): Promise<string> {
