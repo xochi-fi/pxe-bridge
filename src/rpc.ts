@@ -951,9 +951,9 @@ async function admissionRefusal(
  * that makes this transaction unsendable or certain to fail; each leaves it
  * prepared with the same bytes and hash, resumed by the next call. A fact
  * that cannot be observed is not a hold -- the node and the account still
- * decide -- except the contract's spend window: with no projection at all,
- * or one that could not read the window, the attempt is held, because an
- * over-window transfer reverts after paying its fee. Capacity
+ * decide -- except the token inventory and the contract's spend window: with
+ * no projection at all, or one that could not read either, the attempt is
+ * held, because a shortfall in either reverts after paying its fee. Capacity
  * (`preparedCapacityReasons`) is checked by `runAttempt` against the returned
  * projection, synchronously with the reservation. `readiness` is null only
  * alongside a non-empty `reasons`.
@@ -970,8 +970,8 @@ async function preparedHoldReasons(
   if (!s.mayBroadcast) reasons.push("may_broadcast_unconfigured");
   if (reasons.length > 0) return { reasons, readiness: null };
 
-  // Without a projection the contract window is unread, and a transfer over
-  // it reverts after paying its fee (`preparedCapacityReasons`).
+  // Without a projection inventory and the contract window are unread, and a
+  // shortfall in either reverts after paying its fee (`preparedCapacityReasons`).
   const observer = ctx.readiness ?? s.readiness;
   if (!observer) return { reasons: ["readiness_observation_failed"], readiness: null };
   let readiness: OperationalReadiness | typeof TIMED_OUT;

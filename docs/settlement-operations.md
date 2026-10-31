@@ -504,7 +504,8 @@ resumed by the next call, only while one of these per-operation facts holds:
 | --- | --- |
 | `journal_unwritable`, `writer_fence_lost` | local journal |
 | `may_broadcast_unconfigured` | local configuration |
-| `readiness_observation_failed` | no readiness projection at all, so the contract window is unread |
+| `readiness_observation_failed` | no readiness projection at all, so inventory and the contract window are unread |
+| `inventory_unknown` | the probe could not read the finalized public token balance |
 | `network_identity_mismatch` | node identity vs the operation's `network` |
 | `account_paused` | finalized `paused` read by the readiness probe |
 | `allowlist_root_mismatch` | finalized on-chain root vs the configured tree the attempt was proven against |
@@ -524,10 +525,13 @@ would still mark the operation and leave it counted as marked exposure until
 its expiry, so the fee hold keeps it `prepared` instead.
 
 A fact the probe could not read is not a hold -- the node and the account
-decide -- except the contract's window. Only that window sees spend the
-bridge's own 24h window has already dropped, and a transfer over it reverts
-after paying its fee, so an unread window holds the operation (a missing
-projection included). Past `validUntil` the operation is `not_submitted`;
+decide -- except the token inventory and the contract's window. A shortfall
+in either reverts in public after the fee is paid (the Token's
+`_finalize_transfer_to_private`, the account's `check_spending_public`), and
+only the contract's window sees spend the bridge's own 24h window has already
+dropped, so either unread holds the operation (a missing projection included).
+An unread fee juice balance does not: the node refuses an underfunded fee
+payer without charging it. Past `validUntil` the operation is `not_submitted`;
 past the attempt's protocol expiry a new attempt is prepared, as before.
 
 ## Recipient readiness attestations

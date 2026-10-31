@@ -756,10 +756,9 @@ admitted `prepared` operation keeps resuming its exact journaled bytes, held
 only on per-operation facts
 (journal or fence lost, network mismatch, account paused, on-chain root not
 the configured one, inventory, fee juice or contract window unable to cover it
-on top of marked operations and other reservations, contract window unread,
-rolling window full; see
-docs/settlement-operations.md). A new operation cannot pass admission while
-the bridge is unready.
+on top of marked operations and other reservations, inventory or contract
+window unread, rolling window full; see docs/settlement-operations.md). A new
+operation cannot pass admission while the bridge is unready.
 
 The Docker `HEALTHCHECK` reads only `/status`'s HTTP code (`curl -sf`).
 

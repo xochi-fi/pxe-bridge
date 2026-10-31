@@ -751,9 +751,10 @@ export function admissionCapacityReasons(
  * contract window cannot cover it on top of every marked operation that may
  * still land and every other reservation. Synchronous for the same reason as
  * `admissionCapacityReasons`. Unlike admission it does not require the
- * bridge's full runway. An unread inventory or fee juice is not a hold; an
- * unread contract window is, since only that window sees spend the local one
- * has dropped, and an over-window transfer reverts after paying its fee.
+ * bridge's full runway. An unread fee juice balance is not a hold: the node
+ * refuses an underfunded fee payer without charging it. An unread inventory
+ * or contract window is, since a shortfall in either reverts in public after
+ * the fee is paid.
  */
 export function preparedCapacityReasons(
   readiness: OperationalReadiness,
@@ -774,9 +775,8 @@ export function preparedCapacityReasons(
   const reserved = window?.reserved ?? 0n;
   const owed = exposure.principal + reserved + amount;
   const reasons: ReadinessReason[] = [];
-  if (chain.inventory !== null && chain.inventory < owed) {
-    reasons.push("operation_inventory_insufficient");
-  }
+  if (chain.inventory === null) reasons.push("inventory_unknown");
+  else if (chain.inventory < owed) reasons.push("operation_inventory_insufficient");
   if (
     chain.fee !== null &&
     chain.fee.observed <

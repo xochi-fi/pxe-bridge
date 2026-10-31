@@ -459,8 +459,8 @@ describe("aztec_createNote: the broadcast gate", () => {
     expect(client.sends).toEqual([beforeAttempts[0]!.txHash]);
   });
 
-  // Without a read of the contract window the exact bytes could revert after
-  // paying their fee; holding them loses nothing.
+  // Without a read of inventory or the contract window the exact bytes could
+  // revert after paying their fee; holding them loses nothing.
   it.each([
     [
       "readiness observation fails",
@@ -486,6 +486,16 @@ describe("aztec_createNote: the broadcast gate", () => {
           },
         }),
       "spend_window_unknown",
+    ],
+    [
+      "the token inventory is unread",
+      (): RpcContext["readiness"] =>
+        readyObserver({
+          ready: false,
+          reasons: ["inventory_unknown"],
+          inventory: { observed: null, required: null, mayBroadcastPrincipal: "0" },
+        }),
+      "inventory_unknown",
     ],
   ] as const)("holds a prepared attempt when %s, then resumes it", async (_name, observer, reason) => {
     gate.decision = "unknown";
