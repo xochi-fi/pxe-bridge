@@ -1,5 +1,6 @@
 import { createServer, request, type RequestListener } from "node:http";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
@@ -54,10 +55,7 @@ const FixtureSchema = z.object({
 const fixture = FixtureSchema.parse(
   JSON.parse(
     readFileSync(
-      new URL(
-        "../vendor/xochi-sdk/50e8dc26f8d2c9dff7b0f0f3361fc03fa33cd6fb/shielded-recipient.json",
-        import.meta.url,
-      ),
+      createRequire(import.meta.url).resolve("@xochi/spec/conformance/shielded-recipient.json"),
       "utf8",
     ),
   ),

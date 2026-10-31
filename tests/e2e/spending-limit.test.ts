@@ -32,6 +32,7 @@ import { createReadinessObserver } from "../../src/readiness.js";
 import { createApp } from "../../src/server.js";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -144,10 +145,7 @@ const RecipientFixtureSchema = z.object({
 const recipientFixture = RecipientFixtureSchema.parse(
   JSON.parse(
     readFileSync(
-      new URL(
-        "../../vendor/xochi-sdk/50e8dc26f8d2c9dff7b0f0f3361fc03fa33cd6fb/shielded-recipient.json",
-        import.meta.url,
-      ),
+      createRequire(import.meta.url).resolve("@xochi/spec/conformance/shielded-recipient.json"),
       "utf8",
     ),
   ),
