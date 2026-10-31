@@ -724,7 +724,10 @@ from its spend buckets at the finalized block, advanced to that block's
 timestamp exactly as the contract would, less the volume of marked transfers
 that may still land after it and of in-flight reservations. A marked transfer
 stops counting once the finalized timestamp passes its protocol expiration:
-by then it either landed at or before that block or never will.
+by then it either landed at or before that block or never will. Before that,
+each readiness observation resolves up to eight marked transfers last seen
+included at or below the finalized block, recording those the node reports
+finalized, so a landed transfer is not owed twice.
 
 The fee runway shown by `/ready` reports both observed and required fee juice.
 Required fee juice is:
@@ -753,7 +756,8 @@ admitted `prepared` operation keeps resuming its exact journaled bytes, held
 only on per-operation facts
 (journal or fence lost, network mismatch, account paused, on-chain root not
 the configured one, inventory, fee juice or contract window unable to cover it
-on top of marked operations and other reservations, rolling window full; see
+on top of marked operations and other reservations, contract window unread,
+rolling window full; see
 docs/settlement-operations.md). A new operation cannot pass admission while
 the bridge is unready.
 

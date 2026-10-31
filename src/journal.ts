@@ -358,6 +358,12 @@ export class SettlementJournal {
     if (!this.healthState.writable) return;
     try {
       this.migrateSchema(db);
+      // Not schema: no row changes and an older binary ignores it. Keeps the
+      // exposure lookups proportional to live and just-resolved operations
+      // rather than to every operation the journal has ever held.
+      if (this.healthState.writable) {
+        db.exec("CREATE INDEX IF NOT EXISTS operations_state_updated ON operations(state, updated_at)");
+      }
     } catch (cause) {
       this.classifyOpenError(cause);
       return;
@@ -960,41 +966,95 @@ export class SettlementJournal {
   }
 
   /**
-   * Marked operations that may still take a fee and principal from the
-   * finalized state at `finalizedTimestamp`. A marked transaction whose
-   * protocol expiration is before that timestamp can no longer be included
-   * anywhere past it: either it was, and the finalized state already shows
-   * its spend and fee, or it never will be. Every other `may_broadcast` row
-   * counts, regardless of whether its in-memory limit reservation survived
-   * and whether a caller ever asks about it again.
+   * Operations that may still take a fee and principal from the finalized
+   * state at `finalized`, as observed by a probe that started at `sinceMs`.
+   *
+   * - A `may_broadcast` operation counts until `finalized.timestamp` passes
+   *   its attempt's protocol expiration. The node admits a transaction only
+   *   into a block whose timestamp is at most that expiration, so past it the
+   *   transaction either landed at or before `finalized`, which already shows
+   *   its spend and fee, or it never will. Expired rows are filtered in SQL,
+   *   so rows no caller ever resolves cost nothing here.
+   * - A terminal operation recorded at or after `sinceMs` counts while its
+   *   recorded block is above `finalized.number`: its terminal record can
+   *   land between the probe's finalized read and this one, and then the
+   *   transfer is in neither the finalized state nor the marked set. One
+   *   recorded before the probe began was finalized at a tip the probe's
+   *   tip is at or after.
    */
-  mayBroadcastExposure(finalizedTimestamp: bigint): { transfers: number; principal: bigint } {
+  mayBroadcastExposure(
+    finalized: { number: number; timestamp: bigint },
+    sinceMs: number,
+  ): { transfers: number; principal: bigint } {
     const rows = this.read((db) =>
       db
         .prepare(
-          `SELECT attempts.expiration_timestamp AS expiration, spends.amount AS amount
+          `SELECT operations.state AS state, attempts.expiration_timestamp AS expiration,
+                  spends.amount AS amount,
+                  json_extract(operations.observation_json, '$.blockNumber') AS block_number
            FROM operations
            LEFT JOIN attempts ON attempts.operation_id = operations.operation_id
                              AND attempts.attempt = operations.current_attempt
            LEFT JOIN spends ON spends.operation_id = operations.operation_id
-           WHERE operations.state = 'may_broadcast'`,
+           WHERE (operations.state = 'may_broadcast'
+                  AND (attempts.expiration_timestamp IS NULL
+                       OR CAST(attempts.expiration_timestamp AS INTEGER) >= ?))
+              OR (operations.state IN ('finalized', 'reverted') AND operations.updated_at >= ?)`,
         )
-        .all(),
-    ) as { expiration: string | null; amount: string | null }[];
+        .all(finalized.timestamp, sinceMs),
+    ) as {
+      state: string;
+      expiration: string | null;
+      amount: string | null;
+      block_number: string | number | null;
+    }[];
     let transfers = 0;
     let principal = 0n;
     for (const row of rows) {
-      if (row.expiration === null || !/^[0-9]+$/.test(row.expiration)) {
-        throw new JournalUnreadableError("marked operation has no valid current attempt expiration");
-      }
       if (row.amount === null || !/^[1-9][0-9]*$/.test(row.amount)) {
-        throw new JournalUnreadableError("marked operation has no valid spend amount");
+        throw new JournalUnreadableError(`${row.state} operation has no valid spend amount`);
       }
-      if (BigInt(row.expiration) < finalizedTimestamp) continue;
+      if (row.state === "may_broadcast") {
+        if (row.expiration === null || !/^[0-9]+$/.test(row.expiration)) {
+          throw new JournalUnreadableError("marked operation has no valid current attempt expiration");
+        }
+      } else if (
+        row.block_number !== null &&
+        /^[0-9]+$/.test(String(row.block_number)) &&
+        BigInt(row.block_number) <= BigInt(finalized.number)
+      ) {
+        continue;
+      }
       transfers += 1;
       principal += BigInt(row.amount);
     }
     return { transfers, principal };
+  }
+
+  /**
+   * Marked operations last observed included at or below `finalized.number`
+   * and not yet expired: the ones whose transfer the finalized state may
+   * already show while `mayBroadcastExposure` still counts it. Oldest
+   * observation first, at most `limit`.
+   */
+  landedCandidates(finalized: { number: number; timestamp: bigint }, limit: number): string[] {
+    const rows = this.read((db) =>
+      db
+        .prepare(
+          `SELECT operations.operation_id AS operation_id
+           FROM operations
+           JOIN attempts ON attempts.operation_id = operations.operation_id
+                        AND attempts.attempt = operations.current_attempt
+           WHERE operations.state = 'may_broadcast'
+             AND CAST(attempts.expiration_timestamp AS INTEGER) >= ?
+             AND json_extract(operations.observation_json, '$.state') = 'included'
+             AND CAST(json_extract(operations.observation_json, '$.blockNumber') AS INTEGER) <= ?
+           ORDER BY operations.updated_at
+           LIMIT ?`,
+        )
+        .all(finalized.timestamp, finalized.number, limit),
+    ) as { operation_id: string }[];
+    return rows.map((row) => row.operation_id);
   }
 
   /**

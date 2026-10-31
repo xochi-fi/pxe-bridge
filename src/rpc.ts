@@ -215,7 +215,7 @@ interface DriveState {
  */
 type GateMode =
   | { kind: "fresh"; readiness: OperationalReadiness }
-  | { kind: "resume"; attempt: Attempt; readiness: OperationalReadiness | null };
+  | { kind: "resume"; attempt: Attempt; readiness: OperationalReadiness };
 
 /**
  * The per-attempt broadcast gate: journal the exact transaction, ask Riddler,
@@ -516,6 +516,33 @@ function recordObservation(s: SettlementContext, operationId: string, observatio
   }
 }
 
+/** Marked operations one readiness probe resolves at most, bounding its node reads. */
+const RECONCILE_PER_PROBE = 8;
+
+/**
+ * Resolves marked operations last observed included at or below `finalized`
+ * through the same node observation `aztec_getSettlement` uses: one the node
+ * reports finalized is recorded terminal and stops counting as marked
+ * exposure, which would otherwise count it a second time on top of the
+ * finalized state until its protocol expiration. Anything short of a
+ * finalized receipt leaves the operation as it was; nothing is replayed.
+ */
+export async function reconcileLanded(
+  s: SettlementContext,
+  client: IAztecClient,
+  finalized: { number: number; timestamp: bigint },
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!s.journal.health().writable) return;
+  for (const operationId of s.journal.landedCandidates(finalized, RECONCILE_PER_PROBE)) {
+    signal?.throwIfAborted();
+    // A request already driving it records its own outcome.
+    if (s.inFlight.has(operationId)) continue;
+    const op = s.journal.get(operationId);
+    if (op?.state === "may_broadcast") await observe(s, client, op);
+  }
+}
+
 /** The wire answer for an observation of operation `op`. */
 function answer(
   id: number | string,
@@ -806,7 +833,7 @@ async function resumeExisting(
       // Already admitted: recovery is not gated on admission readiness, only
       // on facts that make this exact transaction unsendable or certain to fail.
       const hold = await preparedHoldReasons(ctx, s, op.terms, deadline);
-      if (hold.reasons.length > 0) {
+      if (hold.readiness === null || hold.reasons.length > 0) {
         return notReady(id, ctx, s, op, op.fingerprint, { kind: "not_ready", reasons: hold.reasons });
       }
       return runAttempt(
@@ -923,9 +950,13 @@ async function admissionRefusal(
  * may-broadcast query and the exact journaled bytes. It holds only on a fact
  * that makes this transaction unsendable or certain to fail; each leaves it
  * prepared with the same bytes and hash, resumed by the next call. A fact
- * that cannot be observed is not a hold: the node and the account still
- * decide. Capacity (`preparedCapacityReasons`) is checked by `runAttempt`
- * against the returned projection, synchronously with the reservation.
+ * that cannot be observed is not a hold -- the node and the account still
+ * decide -- except the contract's spend window: with no projection at all,
+ * or one that could not read the window, the attempt is held, because an
+ * over-window transfer reverts after paying its fee. Capacity
+ * (`preparedCapacityReasons`) is checked by `runAttempt` against the returned
+ * projection, synchronously with the reservation. `readiness` is null only
+ * alongside a non-empty `reasons`.
  */
 async function preparedHoldReasons(
   ctx: RpcContext,
@@ -939,14 +970,16 @@ async function preparedHoldReasons(
   if (!s.mayBroadcast) reasons.push("may_broadcast_unconfigured");
   if (reasons.length > 0) return { reasons, readiness: null };
 
+  // Without a projection the contract window is unread, and a transfer over
+  // it reverts after paying its fee (`preparedCapacityReasons`).
   const observer = ctx.readiness ?? s.readiness;
-  if (!observer) return { reasons, readiness: null };
+  if (!observer) return { reasons: ["readiness_observation_failed"], readiness: null };
   let readiness: OperationalReadiness | typeof TIMED_OUT;
   try {
     readiness = await deadline.race(observer.observe());
   } catch {
     console.error("[rpc] Readiness observation for a prepared attempt failed");
-    return { reasons, readiness: null };
+    return { reasons: ["readiness_observation_failed"], readiness: null };
   }
   // The request deadline is spent, so the gate would close before any mark.
   if (readiness === TIMED_OUT) return { reasons: ["readiness_observation_failed"], readiness: null };
@@ -1109,14 +1142,12 @@ async function runAttempt(
   const capacity =
     mode.kind === "fresh"
       ? admissionCapacityReasons(mode.readiness, window, s.journal, amount)
-      : mode.readiness === null
-        ? []
-        : preparedCapacityReasons(mode.readiness, window, s.journal, amount);
+      : preparedCapacityReasons(mode.readiness, window, s.journal, amount);
   if (capacity.length > 0) {
     return notReady(id, ctx, s, op, fingerprint, {
       kind: "not_ready",
       reasons: capacity,
-      ...(mode.readiness !== null ? { readiness: mode.readiness } : {}),
+      readiness: mode.readiness,
     });
   }
 

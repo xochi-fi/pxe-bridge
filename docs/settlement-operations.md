@@ -446,8 +446,24 @@ transaction either landed at or before the finalized block, which then already
 shows its spend and fee, or it never will. So every marked operation counts
 against inventory, the contract window and fee juice until then, with or
 without a caller asking about it, and stops counting at most one protocol
-transaction lifetime after it was prepared. Its journal row is unchanged:
-nothing resolves it short of an authoritative observation.
+transaction lifetime (86,400 seconds from its anchor block) after it was
+prepared.
+
+Before that, a marked transfer that landed at or below the finalized block
+would be counted twice: once in the finalized state, once as exposure. Each
+readiness observation therefore resolves up to eight marked operations last
+observed included at or below the finalized block number, through the same
+node observation `aztec_getSettlement` uses (`reconcileLanded`). Only a
+finalized receipt records the outcome; anything else leaves the operation as
+it was, still counted, and nothing is replayed. An operation whose inclusion
+was never observed stays counted until its expiration.
+
+A terminal record can land between the probe's finalized read and the
+exposure read, after finality has moved past the transfer's block; it is then
+in neither. So an operation recorded terminal at or after the probe began
+still counts while its recorded block is above the probe's finalized block.
+Expired and long-resolved rows are filtered in SQL (index
+`operations_state_updated`), so the lookup does not grow with the journal.
 
 **Admissible headroom** is the smaller of the bridge's own 24h window
 (`rollingWindow.localHeadroom`) and the contract's
@@ -488,9 +504,11 @@ resumed by the next call, only while one of these per-operation facts holds:
 | --- | --- |
 | `journal_unwritable`, `writer_fence_lost` | local journal |
 | `may_broadcast_unconfigured` | local configuration |
+| `readiness_observation_failed` | no readiness projection at all, so the contract window is unread |
 | `network_identity_mismatch` | node identity vs the operation's `network` |
 | `account_paused` | finalized `paused` read by the readiness probe |
 | `allowlist_root_mismatch` | finalized on-chain root vs the configured tree the attempt was proven against |
+| `spend_window_unknown`, `spend_window_inconsistent` | the probe could not read the contract's window, or read one ahead of the finalized block |
 | `operation_inventory_insufficient` | finalized public token balance below the operation's amount plus marked principal and other reservations |
 | `operation_fee_runway_insufficient` | finalized fee juice below one per-transfer fee limit for this operation, each marked operation and each other reservation |
 | `operation_spend_window_insufficient` | the contract's window at the finalized timestamp cannot take the operation's amount on top of marked principal and other reservations |
@@ -505,9 +523,12 @@ at block building, where it is dropped rather than included. Sending anyway
 would still mark the operation and leave it counted as marked exposure until
 its expiry, so the fee hold keeps it `prepared` instead.
 
-A fact the probe could not read is not a hold: the node and the account
-decide. Past `validUntil` the operation is `not_submitted`; past the attempt's
-protocol expiry a new attempt is prepared, as before.
+A fact the probe could not read is not a hold -- the node and the account
+decide -- except the contract's window. Only that window sees spend the
+bridge's own 24h window has already dropped, and a transfer over it reverts
+after paying its fee, so an unread window holds the operation (a missing
+projection included). Past `validUntil` the operation is `not_submitted`;
+past the attempt's protocol expiry a new attempt is prepared, as before.
 
 ## Recipient readiness attestations
 

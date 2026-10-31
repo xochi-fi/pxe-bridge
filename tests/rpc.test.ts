@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { writeFileSync } from "node:fs";
 import Database from "better-sqlite3";
-import { handleRpcRequest, type RpcContext, type SettlementContext } from "../src/rpc.js";
+import { handleRpcRequest, reconcileLanded, type RpcContext, type SettlementContext } from "../src/rpc.js";
 import { RPC_ERRORS, SUBMITTED_UNKNOWN_MESSAGE } from "../src/types.js";
 import { SettlementJournal } from "../src/journal.js";
 import { TransactionLimits } from "../src/limits.js";
@@ -259,6 +259,36 @@ describe("aztec_createNote: capacity against the live window", () => {
     expect(sent.result?.observation).toMatchObject({ state: "included", txHash: attempt!.txHash });
     expect(client.proofs).toBe(1);
   });
+
+  it("reconciles a landed marked operation only on a finalized receipt", async () => {
+    await createNote(client, ctx);
+    const atBlock = { number: 7, timestamp: 0n };
+    expect(journal.get("op-1")?.observation).toMatchObject({ state: "included", blockNumber: "7" });
+
+    // Included, not finalized at the node: still marked and still owed.
+    await reconcileLanded(s, client, atBlock);
+    expect(journal.get("op-1")?.state).toBe("may_broadcast");
+    expect(journal.mayBroadcastExposure(atBlock, Date.now())).toEqual({ transfers: 1, principal: 1000n });
+
+    client.finalizeAll();
+    await reconcileLanded(s, client, atBlock);
+    expect(journal.get("op-1")?.state).toBe("finalized");
+    expect(client.sends).toHaveLength(1);
+    // The finalized state at block 7 shows it, so it is no longer owed...
+    expect(journal.mayBroadcastExposure(atBlock, 0)).toEqual({ transfers: 0, principal: 0n });
+    // ...but a probe whose finalized read was block 6, and which started
+    // before the terminal record, still owes it.
+    expect(journal.mayBroadcastExposure({ number: 6, timestamp: 0n }, 0)).toEqual({
+      transfers: 1,
+      principal: 1000n,
+    });
+    // A terminal record from before the probe began was finalized at a tip
+    // the probe's own is at or after.
+    expect(journal.mayBroadcastExposure({ number: 6, timestamp: 0n }, Date.now() + 1_000)).toEqual({
+      transfers: 0,
+      principal: 0n,
+    });
+  });
 });
 
 describe("aztec_createNote: the broadcast gate", () => {
@@ -428,17 +458,50 @@ describe("aztec_createNote: the broadcast gate", () => {
     expect(client.proofs).toBe(1);
     expect(client.sends).toEqual([beforeAttempts[0]!.txHash]);
   });
-  it("resumes a prepared attempt when readiness observation fails", async () => {
+
+  // Without a read of the contract window the exact bytes could revert after
+  // paying their fee; holding them loses nothing.
+  it.each([
+    [
+      "readiness observation fails",
+      (): RpcContext["readiness"] => ({
+        observe: () => Promise.reject(new Error("readiness transport unavailable")),
+      }),
+      "readiness_observation_failed",
+    ],
+    [
+      "the contract window is unread",
+      (): RpcContext["readiness"] =>
+        readyObserver({
+          ready: false,
+          reasons: ["spend_window_unknown"],
+          rollingWindow: {
+            committed: "0",
+            reserved: "0",
+            headroom: null,
+            localHeadroom: "10000",
+            onChainSpent: null,
+            onChainHeadroom: null,
+            inFlightTransfers: 0,
+          },
+        }),
+      "spend_window_unknown",
+    ],
+  ] as const)("holds a prepared attempt when %s, then resumes it", async (_name, observer, reason) => {
     gate.decision = "unknown";
     await createNote(client, ctx);
     const prepared = journal.attempts("op-1")[0]!;
-
-    s.readiness = {
-      observe: () => Promise.reject(new Error("readiness transport unavailable")),
-    };
     gate.decision = "allow";
-    const recovered = await createNote(client, ctx);
 
+    s.readiness = observer();
+    const held = await createNote(client, ctx);
+    expect(held.error?.code).toBe(RPC_ERRORS.NOT_READY);
+    expect(held.error?.data?.["reasons"]).toEqual([reason]);
+    expect(held.error?.data?.observation).toMatchObject({ state: "prepared", txHash: prepared.txHash });
+    expect(client.sends).toEqual([]);
+
+    s.readiness = readyObserver();
+    const recovered = await createNote(client, ctx);
     expect(recovered.result?.observation).toMatchObject({
       state: "included",
       txHash: prepared.txHash,

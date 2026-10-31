@@ -3,6 +3,7 @@ import { TransactionLimits } from "../src/limits.js";
 import type { SettlementJournal } from "../src/journal.js";
 import {
   admissionCapacityReasons,
+  createReadinessObserver,
   effectiveRollingSpent,
   evaluateReadiness,
   known,
@@ -283,6 +284,47 @@ describe("authoritative readiness predicate", () => {
     expect(result.inventory.mayBroadcastPrincipal).toBe("1000");
     expect(result.feeRunway.mayBroadcastTransfers).toBe(1);
     expect(result.rollingWindow.onChainHeadroom).toBe("9000");
+  });
+
+  it("reconciles marked operations against the observed finalized tip before evaluating", async () => {
+    const journal = openBoundJournal();
+    mark(journal, "landed", "1000");
+    const facts = healthyFacts();
+    const seen: unknown[] = [];
+    const observer = createReadinessObserver(
+      { observeReadinessChain: async () => facts },
+      {
+        journal,
+        limits: new TransactionLimits({ maxAmount: 1_000n, dailyLimit: 10_000n }),
+        mayBroadcastConfigured: true,
+        corridor: CORRIDOR,
+        now: () => NOW,
+        // What reconcileLanded does on a finalized receipt at block 7.
+        reconcile: async (finalized) => {
+          seen.push(finalized);
+          const [attempt] = journal.attempts("landed");
+          journal.recordTerminal("landed", {
+            state: "finalized",
+            txHash: attempt!.txHash,
+            expirationTimestamp: attempt!.expirationTimestamp,
+            executionResult: "success",
+            blockHash: "0x" + "b".repeat(64),
+            blockNumber: "7",
+            receiptStatus: "finalized",
+            observedAt: NOW,
+            effects: { state: "available", noteHashes: [], nullifiers: [] },
+          });
+        },
+      },
+    );
+    try {
+      const result = await observer.observe();
+      expect(seen).toEqual([facts.finalized.state === "known" ? facts.finalized.value : null]);
+      expect(result.inventory.mayBroadcastPrincipal).toBe("0");
+      expect(result.feeRunway.mayBroadcastTransfers).toBe(0);
+    } finally {
+      journal.close();
+    }
   });
 
   describe("contract spend window", () => {

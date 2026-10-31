@@ -264,6 +264,13 @@ export interface ReadinessObserverOptions {
   mayBroadcastConfigured: boolean;
   corridor?: CorridorConfig | undefined;
   now?: (() => number) | undefined;
+  /**
+   * Runs after the chain observation, before evaluation: resolves marked
+   * operations the finalized state may already show (`rpc.ts`
+   * `reconcileLanded`), so they stop counting as marked exposure without
+   * waiting for a caller. A failure is logged; the operations stay counted.
+   */
+  reconcile?: ((finalized: FinalizedTipObservation, signal?: AbortSignal) => Promise<void>) | undefined;
 }
 
 
@@ -490,7 +497,10 @@ export function evaluateReadiness(
   let exposure: MayBroadcastExposure | null = null;
   if (options.journal !== undefined) {
     try {
-      exposure = options.journal.mayBroadcastExposure(finalized?.timestamp ?? 0n);
+      exposure = options.journal.mayBroadcastExposure(
+        { number: finalized?.number ?? 0, timestamp: finalized?.timestamp ?? 0n },
+        facts.observedAt * 1_000,
+      );
     } catch {
       reasons.add("journal_unwritable");
     }
@@ -625,6 +635,16 @@ export function createReadinessObserver(
   return {
     async observe(signal?: AbortSignal): Promise<OperationalReadiness> {
       const facts = await probe.observeReadinessChain(signal);
+      if (options.reconcile !== undefined && facts.finalized.state === "known") {
+        try {
+          await options.reconcile(facts.finalized.value, signal);
+        } catch (cause) {
+          if (signal?.aborted) signal.throwIfAborted();
+          // Unreconciled operations stay counted as marked exposure, which
+          // only overstates what is owed.
+          console.error("[pxe-bridge] Readiness reconciliation of marked operations failed:", cause);
+        }
+      }
       return evaluateReadiness(
         facts,
         options.limits?.windowStatus() ?? null,
@@ -637,7 +657,9 @@ export function createReadinessObserver(
 
 /** The finalized-state inputs a projection carries, parsed back. */
 interface ProjectedChain {
-  finalizedTimestamp: bigint | null;
+  finalized: { number: number; timestamp: bigint } | null;
+  /** Start of the probe that produced the projection (whole seconds, floored). */
+  observedSinceMs: number;
   dailyLimit: bigint | null;
   maxAmount: bigint | null;
   onChainSpent: bigint | null;
@@ -649,8 +671,13 @@ function projectedChain(readiness: OperationalReadiness): ProjectedChain {
   const parse = (value: string | null): bigint | null => (value === null ? null : BigInt(value));
   const observed = parse(readiness.feeRunway.observed);
   const perTransferFeeLimit = parse(readiness.feeRunway.perTransferFeeLimit);
+  const finalizedTimestamp = parse(readiness.finalized.timestamp);
   return {
-    finalizedTimestamp: parse(readiness.finalized.timestamp),
+    finalized:
+      readiness.finalized.blockNumber !== null && finalizedTimestamp !== null
+        ? { number: Number(readiness.finalized.blockNumber), timestamp: finalizedTimestamp }
+        : null,
+    observedSinceMs: readiness.observedAt * 1_000,
     dailyLimit: parse(readiness.dailyLimit),
     maxAmount: parse(readiness.maxAmount),
     onChainSpent: parse(readiness.rollingWindow.onChainSpent),
@@ -682,7 +709,7 @@ export function admissionCapacityReasons(
   }
   const chain = projectedChain(readiness);
   if (
-    chain.finalizedTimestamp === null ||
+    chain.finalized === null ||
     chain.dailyLimit === null ||
     chain.onChainSpent === null ||
     chain.inventory === null ||
@@ -692,7 +719,7 @@ export function admissionCapacityReasons(
   }
   let exposure: MayBroadcastExposure;
   try {
-    exposure = journal.mayBroadcastExposure(chain.finalizedTimestamp);
+    exposure = journal.mayBroadcastExposure(chain.finalized, chain.observedSinceMs);
   } catch {
     return ["journal_unwritable"];
   }
@@ -724,7 +751,9 @@ export function admissionCapacityReasons(
  * contract window cannot cover it on top of every marked operation that may
  * still land and every other reservation. Synchronous for the same reason as
  * `admissionCapacityReasons`. Unlike admission it does not require the
- * bridge's full runway, and a fact the projection lacks is not a hold.
+ * bridge's full runway. An unread inventory or fee juice is not a hold; an
+ * unread contract window is, since only that window sees spend the local one
+ * has dropped, and an over-window transfer reverts after paying its fee.
  */
 export function preparedCapacityReasons(
   readiness: OperationalReadiness,
@@ -735,7 +764,10 @@ export function preparedCapacityReasons(
   const chain = projectedChain(readiness);
   let exposure: MayBroadcastExposure;
   try {
-    exposure = journal.mayBroadcastExposure(chain.finalizedTimestamp ?? 0n);
+    exposure = journal.mayBroadcastExposure(
+      chain.finalized ?? { number: 0, timestamp: 0n },
+      chain.observedSinceMs,
+    );
   } catch {
     return ["journal_unwritable"];
   }
@@ -753,11 +785,13 @@ export function preparedCapacityReasons(
   ) {
     reasons.push("operation_fee_runway_insufficient");
   }
-  if (
-    chain.onChainSpent !== null &&
-    chain.dailyLimit !== null &&
-    chain.onChainSpent + owed > chain.dailyLimit
-  ) {
+  if (chain.onChainSpent === null || chain.dailyLimit === null) {
+    reasons.push(
+      readiness.reasons.includes("spend_window_inconsistent")
+        ? "spend_window_inconsistent"
+        : "spend_window_unknown",
+    );
+  } else if (chain.onChainSpent + owed > chain.dailyLimit) {
     reasons.push("operation_spend_window_insufficient");
   }
   return reasons;
