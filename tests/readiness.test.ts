@@ -1,9 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { TransactionLimits } from "../src/limits.js";
+import type { SettlementJournal } from "../src/journal.js";
 import {
+  admissionCapacityReasons,
+  effectiveRollingSpent,
   evaluateReadiness,
   known,
+  preparedCapacityReasons,
   unknown,
+  SPEND_BUCKET_COUNT,
   type ChainReadinessFacts,
   type ReadinessReason,
 } from "../src/readiness.js";
@@ -17,6 +22,19 @@ import {
   v1Params,
 } from "./settlement-fixtures.js";
 
+const NO_SPEND = { buckets: Array<bigint>(SPEND_BUCKET_COUNT).fill(0n), lastBucket: 0n };
+
+/** Claims, prepares and marks one operation of `amount` expiring at `expiration`. */
+function mark(journal: SettlementJournal, operationId: string, amount: string, expiration = 1_900_000_000n): void {
+  const terms = termsFrom(CreateNoteV1Schema.parse(v1Params({ operationId, amount })));
+  journal.claim(operationId, fingerprintTerms(terms), terms);
+  const attempt = journal.recordPrepared(operationId, {
+    txHash: "0x" + Buffer.from(operationId).toString("hex").padStart(64, "0"),
+    txBytes: Buffer.from(operationId),
+    expirationTimestamp: expiration,
+  });
+  journal.markMayBroadcast(operationId, attempt, terms.amount);
+}
 const NOW = Date.parse("2026-10-29T12:00:00Z");
 const CLASS_ID = "0x" + "a".repeat(64);
 const TOKEN_CLASS_ID = "0x" + "d".repeat(64);
@@ -67,14 +85,16 @@ function healthyFacts(): ChainReadinessFacts {
     tokenContractClassId: known(TOKEN_CLASS_ID),
     inventory: known(10_000n),
     feeRunway: known({ observed: 1_000n, perTransferFeeLimit: 100n }),
+    spendWindow: known(NO_SPEND),
   };
 }
 
 function projection(
   facts: ChainReadinessFacts,
   limits = new TransactionLimits({ maxAmount: 1_000n, dailyLimit: 10_000n }),
+  journal = openBoundJournal(),
+  nowMs = NOW,
 ) {
-  const journal = openBoundJournal();
   try {
     return evaluateReadiness(
       facts,
@@ -84,7 +104,7 @@ function projection(
         mayBroadcastConfigured: true,
         corridor: CORRIDOR,
       },
-      NOW,
+      nowMs,
     );
   } finally {
     journal.close();
@@ -104,11 +124,25 @@ describe("authoritative readiness predicate", () => {
       ageSeconds: 60,
       maxAgeSeconds: 7_200,
     });
-    expect(result.inventory).toEqual({ observed: "10000", required: "10000" });
+    expect(result.inventory).toEqual({
+      observed: "10000",
+      required: "10000",
+      mayBroadcastPrincipal: "0",
+    });
+    expect(result.rollingWindow).toEqual({
+      committed: "0",
+      reserved: "0",
+      headroom: "10000",
+      localHeadroom: "10000",
+      onChainSpent: "0",
+      onChainHeadroom: "10000",
+      inFlightTransfers: 0,
+    });
     expect(result.feeRunway).toEqual({
       observed: "1000",
       required: "1000",
       perTransferFeeLimit: "100",
+      mayBroadcastTransfers: 0,
     });
   });
 
@@ -125,6 +159,8 @@ describe("authoritative readiness predicate", () => {
     ["root drift", (facts) => (facts.configuredAllowlistRoot = "0x" + "e".repeat(64)), "allowlist_root_mismatch"],
     ["inventory", (facts) => (facts.inventory = known(9_999n)), "inventory_insufficient"],
     ["fee runway", (facts) => (facts.feeRunway = known({ observed: 999n, perTransferFeeLimit: 100n })), "fee_runway_insufficient"],
+    ["unknown spend window", (facts) => (facts.spendWindow = unknown("spend_window_unknown")), "spend_window_unknown"],
+    ["spend window ahead of finalized", (facts) => (facts.spendWindow = known({ ...NO_SPEND, lastBucket: 1n << 40n })), "spend_window_inconsistent"],
     ["history", (facts) => (facts.worldState = known({ latestBlockNumber: 10, finalizedBlockNumber: 6, oldestHistoricBlockNumber: 1, treesAreSynched: true })), "finalized_history_unavailable"],
     ["unknown inventory", (facts) => (facts.inventory = unknown("inventory_unknown")), "inventory_unknown"],
     ["standard mode", (facts) => (facts.accountMode = "standard"), "account_mode_not_spending_limit"],
@@ -204,18 +240,151 @@ describe("authoritative readiness predicate", () => {
   it("keeps fee runway for every durable may-broadcast operation", () => {
     const journal = openBoundJournal();
     const limits = new TransactionLimits({ maxAmount: 1_000n, dailyLimit: 10_000n });
-    const terms = termsFrom(CreateNoteV1Schema.parse(v1Params()));
-    const fingerprint = fingerprintTerms(terms);
-    journal.claim("marked", fingerprint, terms);
-    const attempt = journal.recordPrepared("marked", {
-      txHash: "0x" + "1".repeat(64),
-      txBytes: Buffer.from("marked"),
-      expirationTimestamp: 1_900_000_000n,
-    });
-    journal.markMayBroadcast("marked", attempt, terms.amount);
+    mark(journal, "marked", "1000");
     limits.recordSpend(1_000n);
     const facts = healthyFacts();
     facts.feeRunway = known({ observed: 999n, perTransferFeeLimit: 100n });
+    const result = projection(facts, limits, journal);
+    // One marked plus ceil(9000 / 1000) future transfers.
+    expect(result.feeRunway.required).toBe("1000");
+    expect(result.feeRunway.mayBroadcastTransfers).toBe(1);
+    expect(result.reasons).toContain("fee_runway_insufficient");
+  });
+
+  it("owes marked, unfinalized principal from inventory: committed 6000 against 7000 is refused", () => {
+    const journal = openBoundJournal();
+    const limits = new TransactionLimits({ maxAmount: 1_000n, dailyLimit: 10_000n });
+    for (let i = 0; i < 6; i++) {
+      mark(journal, `marked-${i}`, "1000");
+      limits.recordSpend(1_000n);
+    }
+    const facts = healthyFacts();
+    facts.inventory = known(7_000n);
+    facts.feeRunway = known({ observed: 100_000n, perTransferFeeLimit: 100n });
+    const result = projection(facts, limits, journal);
+
+    // 4000 still admissible, and 6000 the finalized balance has not paid yet.
+    expect(result.inventory).toEqual({
+      observed: "7000",
+      required: "10000",
+      mayBroadcastPrincipal: "6000",
+    });
+    expect(result.reasons).toEqual(["inventory_insufficient"]);
+    expect(result.ready).toBe(false);
+  });
+
+  it("stops owing a marked operation once finalized is past its protocol expiration", () => {
+    const journal = openBoundJournal();
+    const finalizedAt = BigInt(Math.floor(NOW / 1_000) - 60);
+    mark(journal, "expired", "1000", finalizedAt - 1n);
+    mark(journal, "includable", "1000", finalizedAt);
+    const result = projection(healthyFacts(), undefined, journal);
+
+    expect(result.inventory.mayBroadcastPrincipal).toBe("1000");
+    expect(result.feeRunway.mayBroadcastTransfers).toBe(1);
+    expect(result.rollingWindow.onChainHeadroom).toBe("9000");
+  });
+
+  describe("contract spend window", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("mirrors advance_window (pinned in main.nr advance_window_matches_typescript)", () => {
+      const buckets = Array.from({ length: SPEND_BUCKET_COUNT }, (_, i) => BigInt(i + 1) * 1_000n);
+      // The last second of each bucket: the bucket, not the second, decides.
+      const at = (bucket: bigint): bigint => bucket * 3_600n + 3_599n;
+      expect(effectiveRollingSpent(buckets, 100n, at(100n))).toBe(325_000n);
+      expect(effectiveRollingSpent(buckets, 100n, at(101n))).toBe(323_000n);
+      expect(effectiveRollingSpent(buckets, 100n, at(124n))).toBe(1_000n);
+      expect(effectiveRollingSpent(buckets, 100n, at(125n))).toBe(0n);
+      expect(effectiveRollingSpent(buckets, 100n, at(126n))).toBe(0n);
+      expect(effectiveRollingSpent(buckets, 123n, at(126n))).toBe(297_000n);
+      // advance_window asserts "Block timestamp went backwards".
+      expect(effectiveRollingSpent(buckets, 100n, at(99n))).toBeNull();
+    });
+
+    it("refuses at an hour boundary where the local window has dropped a spend the contract still counts", () => {
+      const spentBucket = 490_000n;
+      const spentAtMs = Number(spentBucket * 3_600n + 3_540n) * 1_000;
+      vi.useFakeTimers({ now: spentAtMs, toFake: ["Date"] });
+      const limits = new TransactionLimits({ maxAmount: 1_000n, dailyLimit: 10_000n });
+      limits.recordSpend(10_000n);
+      const buckets = [...NO_SPEND.buckets];
+      buckets[Number(spentBucket % BigInt(SPEND_BUCKET_COUNT))] = 10_000n;
+      const factsAt = (nowMs: number): ChainReadinessFacts => {
+        const facts = healthyFacts();
+        facts.finalized = known({
+          number: 7,
+          hash: "0x" + "b".repeat(64),
+          timestamp: BigInt(Math.floor(nowMs / 1_000) - 10),
+        });
+        facts.spendWindow = known({ buckets, lastBucket: spentBucket });
+        return facts;
+      };
+
+      // 24h and 30s after the spend: past the local 24h window, still inside
+      // the contract's 25th hourly bucket.
+      const boundaryMs = spentAtMs + 86_400_000 + 30_000;
+      vi.setSystemTime(boundaryMs);
+      const atBoundary = projection(factsAt(boundaryMs), limits, openBoundJournal(), boundaryMs);
+      expect(atBoundary.rollingWindow).toMatchObject({
+        localHeadroom: "10000",
+        onChainSpent: "10000",
+        onChainHeadroom: "0",
+        headroom: "0",
+      });
+      expect(atBoundary.reasons).toEqual(["spend_window_exhausted"]);
+
+      // Once the finalized tip is in the next bucket the contract drops it too.
+      const nextBucketMs = boundaryMs + 3_600_000;
+      vi.setSystemTime(nextBucketMs);
+      const afterBucket = projection(factsAt(nextBucketMs), limits, openBoundJournal(), nextBucketMs);
+      expect(afterBucket.rollingWindow.onChainSpent).toBe("0");
+      expect(afterBucket.ready).toBe(true);
+    });
+
+    it("admits only what the contract window can still take", () => {
+      const journal = openBoundJournal();
+      const limits = new TransactionLimits({ maxAmount: 1_000n, dailyLimit: 10_000n });
+      const facts = healthyFacts();
+      const finalized = facts.finalized.state === "known" ? facts.finalized.value.timestamp : 0n;
+      const current = finalized / 3_600n;
+      const buckets = [...NO_SPEND.buckets];
+      buckets[Number(current % BigInt(SPEND_BUCKET_COUNT))] = 9_500n;
+      facts.spendWindow = known({ buckets, lastBucket: current });
+      try {
+        const result = evaluateReadiness(
+          facts,
+          limits.windowStatus(),
+          { journal, mayBroadcastConfigured: true, corridor: CORRIDOR },
+          NOW,
+        );
+        expect(result.ready).toBe(true);
+        expect(result.rollingWindow).toMatchObject({ localHeadroom: "10000", onChainHeadroom: "500" });
+        // The local window would take 1000; the contract would revert it.
+        expect(admissionCapacityReasons(result, limits.windowStatus(), journal, 1_000n)).toEqual([
+          "spend_window_insufficient",
+        ]);
+        expect(admissionCapacityReasons(result, limits.windowStatus(), journal, 500n)).toEqual([]);
+      } finally {
+        journal.close();
+      }
+    });
+  });
+
+  it("holds a prepared operation that marked operations leave uncovered", () => {
+    const journal = openBoundJournal();
+    const limits = new TransactionLimits({ maxAmount: 1_000n, dailyLimit: 10_000n });
+    for (let i = 0; i < 6; i++) mark(journal, `marked-${i}`, "1000");
+    const facts = healthyFacts();
+    const finalized = facts.finalized.state === "known" ? facts.finalized.value.timestamp : 0n;
+    const current = finalized / 3_600n;
+    const buckets = [...NO_SPEND.buckets];
+    buckets[Number(current % BigInt(SPEND_BUCKET_COUNT))] = 3_500n;
+    facts.spendWindow = known({ buckets, lastBucket: current });
+    facts.inventory = known(6_999n);
+    facts.feeRunway = known({ observed: 699n, perTransferFeeLimit: 100n });
     try {
       const result = evaluateReadiness(
         facts,
@@ -223,8 +392,15 @@ describe("authoritative readiness predicate", () => {
         { journal, mayBroadcastConfigured: true, corridor: CORRIDOR },
         NOW,
       );
-      expect(result.feeRunway.required).toBe("1000");
-      expect(result.reasons).toContain("fee_runway_insufficient");
+      // 6000 marked + 1000 for this one; 7 fees; 3500 + 7000 against 10000.
+      expect(preparedCapacityReasons(result, limits.windowStatus(), journal, 1_000n)).toEqual([
+        "operation_inventory_insufficient",
+        "operation_fee_runway_insufficient",
+        "operation_spend_window_insufficient",
+      ]);
+      expect(preparedCapacityReasons(result, limits.windowStatus(), journal, 1n)).toEqual([
+        "operation_fee_runway_insufficient",
+      ]);
     } finally {
       journal.close();
     }

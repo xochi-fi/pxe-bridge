@@ -960,20 +960,41 @@ export class SettlementJournal {
   }
 
   /**
-   * Transactions that may still consume one transfer fee. Terminal rows no
-   * longer need runway; every `may_broadcast` row does, regardless of whether
-   * its in-memory limit reservation survived.
+   * Marked operations that may still take a fee and principal from the
+   * finalized state at `finalizedTimestamp`. A marked transaction whose
+   * protocol expiration is before that timestamp can no longer be included
+   * anywhere past it: either it was, and the finalized state already shows
+   * its spend and fee, or it never will be. Every other `may_broadcast` row
+   * counts, regardless of whether its in-memory limit reservation survived
+   * and whether a caller ever asks about it again.
    */
-  mayBroadcastOperationCount(): number {
-    const row = this.read((db) =>
+  mayBroadcastExposure(finalizedTimestamp: bigint): { transfers: number; principal: bigint } {
+    const rows = this.read((db) =>
       db
-        .prepare("SELECT count(*) AS count FROM operations WHERE state = 'may_broadcast'")
-        .get(),
-    ) as { count: number };
-    if (!Number.isSafeInteger(row.count) || row.count < 0) {
-      throw new JournalUnreadableError("invalid may-broadcast operation count");
+        .prepare(
+          `SELECT attempts.expiration_timestamp AS expiration, spends.amount AS amount
+           FROM operations
+           LEFT JOIN attempts ON attempts.operation_id = operations.operation_id
+                             AND attempts.attempt = operations.current_attempt
+           LEFT JOIN spends ON spends.operation_id = operations.operation_id
+           WHERE operations.state = 'may_broadcast'`,
+        )
+        .all(),
+    ) as { expiration: string | null; amount: string | null }[];
+    let transfers = 0;
+    let principal = 0n;
+    for (const row of rows) {
+      if (row.expiration === null || !/^[0-9]+$/.test(row.expiration)) {
+        throw new JournalUnreadableError("marked operation has no valid current attempt expiration");
+      }
+      if (row.amount === null || !/^[1-9][0-9]*$/.test(row.amount)) {
+        throw new JournalUnreadableError("marked operation has no valid spend amount");
+      }
+      if (BigInt(row.expiration) < finalizedTimestamp) continue;
+      transfers += 1;
+      principal += BigInt(row.amount);
     }
-    return row.count;
+    return { transfers, principal };
   }
 
   /**

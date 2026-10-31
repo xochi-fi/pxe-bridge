@@ -33,7 +33,13 @@ import {
 import type { MayBroadcastClient } from "./may-broadcast.js";
 import type { TransactionLimits } from "./limits.js";
 import type { AuditLogger } from "./audit.js";
-import type { OperationalReadiness, ReadinessObserver, ReadinessReason } from "./readiness.js";
+import {
+  admissionCapacityReasons,
+  preparedCapacityReasons,
+  type OperationalReadiness,
+  type ReadinessObserver,
+  type ReadinessReason,
+} from "./readiness.js";
 
 export interface SettlementContext {
   journal: SettlementJournal;
@@ -204,8 +210,12 @@ interface DriveState {
  * `fresh` proves a new attempt; `resume` re-asks for a journaled, unmarked
  * attempt. A marked attempt is observation-only: absence from one node is
  * never proof that the transaction did not reach another node or a prior fork.
+ * `readiness` is the projection the attempt was admitted or resumed on; its
+ * capacity is re-evaluated against the live window right before reserving.
  */
-type GateMode = { kind: "fresh" } | { kind: "resume"; attempt: Attempt };
+type GateMode =
+  | { kind: "fresh"; readiness: OperationalReadiness }
+  | { kind: "resume"; attempt: Attempt; readiness: OperationalReadiness | null };
 
 /**
  * The per-attempt broadcast gate: journal the exact transaction, ask Riddler,
@@ -733,14 +743,23 @@ async function driveOperation(
     return journalFault(id, s, operationId, cause);
   }
 
-  const refusal = await admissionRefusal(ctx, s, terms, deadline);
-  if (refusal) {
-    return refusal.kind === "not_ready"
-      ? notReady(id, ctx, s, op, fingerprint, refusal)
-      : notSubmitted(id, ctx, s, op, fingerprint, refusal.reason, true);
+  const admission = await admissionRefusal(ctx, s, terms, deadline);
+  if (admission.kind !== "admitted") {
+    return admission.kind === "not_ready"
+      ? notReady(id, ctx, s, op, fingerprint, admission)
+      : notSubmitted(id, ctx, s, op, fingerprint, admission.reason, true);
   }
 
-  return runAttempt(id, client, ctx, s, { op, fingerprint, terms }, { kind: "fresh" }, background, deadline);
+  return runAttempt(
+    id,
+    client,
+    ctx,
+    s,
+    { op, fingerprint, terms },
+    { kind: "fresh", readiness: admission.readiness },
+    background,
+    deadline,
+  );
 }
 
 /**
@@ -787,10 +806,19 @@ async function resumeExisting(
       // Already admitted: recovery is not gated on admission readiness, only
       // on facts that make this exact transaction unsendable or certain to fail.
       const hold = await preparedHoldReasons(ctx, s, op.terms, deadline);
-      if (hold.length > 0) {
-        return notReady(id, ctx, s, op, op.fingerprint, { kind: "not_ready", reasons: hold });
+      if (hold.reasons.length > 0) {
+        return notReady(id, ctx, s, op, op.fingerprint, { kind: "not_ready", reasons: hold.reasons });
       }
-      return runAttempt(id, client, ctx, s, state, { kind: "resume", attempt }, background, deadline);
+      return runAttempt(
+        id,
+        client,
+        ctx,
+        s,
+        state,
+        { kind: "resume", attempt, readiness: hold.readiness },
+        background,
+        deadline,
+      );
     }
 
     case "may_broadcast": {
@@ -821,13 +849,17 @@ type AdmissionRefusal =
       readiness?: OperationalReadiness;
     };
 
-/** Every check a fresh or unmarked resumed attempt must pass before preparing. */
+/**
+ * Every check a fresh or unmarked resumed attempt must pass before preparing,
+ * except capacity against the live window, which `runAttempt` re-evaluates
+ * synchronously with its reservation.
+ */
 async function admissionRefusal(
   ctx: RpcContext,
   s: SettlementContext,
   terms: SettlementTerms,
   deadline: RequestDeadline,
-): Promise<AdmissionRefusal | undefined> {
+): Promise<AdmissionRefusal | { kind: "admitted"; readiness: OperationalReadiness }> {
   const observer = ctx.readiness ?? s.readiness;
   if (!observer) {
     return { kind: "not_ready", reasons: ["readiness_observation_failed"] };
@@ -880,42 +912,44 @@ async function admissionRefusal(
   if (nowSeconds(s) >= terms.validUntil) {
     return { kind: "terms", reason: "validity_bound_passed" };
   }
-  return undefined;
+  return { kind: "admitted", readiness };
 }
 
 /**
  * Why an admitted, journaled, unmarked attempt is not sent now. Admission
- * readiness -- the /ready verdict, fee runway, finalized-tip freshness,
- * corridor admission -- closes NEW admission only and is not consulted: an
- * attempt already admitted keeps recovering through the may-broadcast query
- * and the exact journaled bytes. It holds only on a fact that makes this
- * transaction unsendable or certain to fail; each leaves it prepared with the
- * same bytes and hash, resumed by the next call. A fact that cannot be
- * observed is not a hold: the node and the account still decide.
+ * readiness -- the /ready verdict, the full fee runway, finalized-tip
+ * freshness, corridor admission -- closes NEW admission only and is not
+ * consulted: an attempt already admitted keeps recovering through the
+ * may-broadcast query and the exact journaled bytes. It holds only on a fact
+ * that makes this transaction unsendable or certain to fail; each leaves it
+ * prepared with the same bytes and hash, resumed by the next call. A fact
+ * that cannot be observed is not a hold: the node and the account still
+ * decide. Capacity (`preparedCapacityReasons`) is checked by `runAttempt`
+ * against the returned projection, synchronously with the reservation.
  */
 async function preparedHoldReasons(
   ctx: RpcContext,
   s: SettlementContext,
   terms: SettlementTerms,
   deadline: RequestDeadline,
-): Promise<ReadinessReason[]> {
+): Promise<{ reasons: ReadinessReason[]; readiness: OperationalReadiness | null }> {
   const reasons: ReadinessReason[] = [];
   if (!s.journal.health().writable) reasons.push("journal_unwritable");
   if (!s.journal.writerFenceHeld()) reasons.push("writer_fence_lost");
   if (!s.mayBroadcast) reasons.push("may_broadcast_unconfigured");
-  if (reasons.length > 0) return reasons;
+  if (reasons.length > 0) return { reasons, readiness: null };
 
   const observer = ctx.readiness ?? s.readiness;
-  if (!observer) return reasons;
+  if (!observer) return { reasons, readiness: null };
   let readiness: OperationalReadiness | typeof TIMED_OUT;
   try {
     readiness = await deadline.race(observer.observe());
   } catch {
     console.error("[rpc] Readiness observation for a prepared attempt failed");
-    return reasons;
+    return { reasons, readiness: null };
   }
   // The request deadline is spent, so the gate would close before any mark.
-  if (readiness === TIMED_OUT) return ["readiness_observation_failed"];
+  if (readiness === TIMED_OUT) return { reasons: ["readiness_observation_failed"], readiness: null };
 
   const network = readiness.network;
   if (
@@ -938,13 +972,7 @@ async function preparedHoldReasons(
   ) {
     reasons.push("allowlist_root_mismatch");
   }
-  if (
-    readiness.inventory.observed !== null &&
-    BigInt(readiness.inventory.observed) < BigInt(terms.amount)
-  ) {
-    reasons.push("inventory_insufficient");
-  }
-  return reasons;
+  return { reasons, readiness };
 }
 
 async function notReady(
@@ -1072,6 +1100,24 @@ async function runAttempt(
     } catch (cause) {
       return journalFault(id, s, op.operationId, cause);
     }
+  }
+
+  // No await from here to the reservation: concurrent requests each see the
+  // others' reservations and marks, not the window their shared chain
+  // observation was evaluated against.
+  const window = ctx.limits?.windowStatus() ?? null;
+  const capacity =
+    mode.kind === "fresh"
+      ? admissionCapacityReasons(mode.readiness, window, s.journal, amount)
+      : mode.readiness === null
+        ? []
+        : preparedCapacityReasons(mode.readiness, window, s.journal, amount);
+  if (capacity.length > 0) {
+    return notReady(id, ctx, s, op, fingerprint, {
+      kind: "not_ready",
+      reasons: capacity,
+      ...(mode.readiness !== null ? { readiness: mode.readiness } : {}),
+    });
   }
 
   let reservationId: number | undefined;
