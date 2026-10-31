@@ -13,6 +13,7 @@ import {
   fakeMayBroadcast,
   openBoundJournal,
   rpcBody,
+  readyLimits,
   readyObserver,
   settlementContext,
   tempJournalPath,
@@ -41,6 +42,7 @@ async function createNote(
   key: string | undefined = String(params["operationId"]),
 ): Promise<Answer> {
   return (await handleRpcRequest(rpcBody("aztec_createNote", [params]), client, {
+    limits: readyLimits(),
     ...ctx,
     idempotencyKey: key,
   })) as Answer;
@@ -80,7 +82,7 @@ beforeEach(() => {
   journal = openBoundJournal();
   gate = fakeMayBroadcast("allow");
   s = settlementContext(journal, gate.client);
-  ctx = { settlement: s };
+  ctx = { settlement: s, limits: readyLimits() };
 });
 
 describe("aztec_createNote: the versioned payload", () => {
@@ -167,6 +169,97 @@ describe("aztec_createNote: the versioned payload", () => {
     expect(client.proofs).toBe(0);
     expect(limits.windowStatus().reserved).toBe(0n);
   });
+
+describe("aztec_createNote: capacity against the live window", () => {
+  // One chain observation shared by both requests, as the server's
+  // single-flight readiness hands it out.
+  it("cannot admit two transfers into a contract window with room for one", async () => {
+    s.readiness = readyObserver({
+      rollingWindow: {
+        committed: "0",
+        reserved: "0",
+        headroom: "1000",
+        localHeadroom: "10000",
+        onChainSpent: "9000",
+        onChainHeadroom: "1000",
+        inFlightTransfers: 0,
+      },
+    });
+    const answers = await Promise.all([
+      createNote(client, ctx, v1Params({ operationId: "op-a" })),
+      createNote(client, ctx, v1Params({ operationId: "op-b" })),
+    ]);
+
+    expect(answers.filter((a) => a.result?.observation.state === "included")).toHaveLength(1);
+    const refused = answers.find((a) => a.error !== undefined);
+    expect(refused?.error?.code).toBe(RPC_ERRORS.NOT_READY);
+    expect(refused?.error?.data?.["reasons"]).toEqual(["spend_window_exhausted"]);
+    expect(client.proofs).toBe(1);
+    expect(client.sends).toHaveLength(1);
+  });
+
+  it("cannot admit two transfers on fee juice for one", async () => {
+    s.readiness = readyObserver({
+      maxAmount: "1000",
+      dailyLimit: "1000",
+      feeRunway: {
+        observed: "1000",
+        required: "1000",
+        perTransferFeeLimit: "1000",
+        mayBroadcastTransfers: 0,
+      },
+    });
+    const limits = new TransactionLimits({ maxAmount: 1000n, dailyLimit: 1000n });
+    // Both fit the 1000 window; only one fee is covered.
+    const answers = await Promise.all([
+      createNote(client, { settlement: s, limits }, v1Params({ operationId: "op-a", amount: "400" })),
+      createNote(client, { settlement: s, limits }, v1Params({ operationId: "op-b", amount: "400" })),
+    ]);
+
+    expect(answers.filter((a) => a.result?.observation.state === "included")).toHaveLength(1);
+    const refused = answers.find((a) => a.error !== undefined);
+    expect(refused?.error?.code).toBe(RPC_ERRORS.NOT_READY);
+    expect(refused?.error?.data?.["reasons"]).toEqual(["fee_runway_insufficient"]);
+    expect(client.sends).toHaveLength(1);
+  });
+
+  it("holds a resumed prepared attempt that inventory or fee juice cannot cover", async () => {
+    gate.decision = "unknown";
+    await createNote(client, ctx);
+    const [attempt] = journal.attempts("op-1");
+    gate.decision = "allow";
+
+    s.readiness = readyObserver({
+      inventory: { observed: "999", required: "10000", mayBroadcastPrincipal: "0" },
+    });
+    const shortInventory = await createNote(client, ctx);
+    expect(shortInventory.error?.code).toBe(RPC_ERRORS.NOT_READY);
+    expect(shortInventory.error?.data?.["reasons"]).toEqual(["operation_inventory_insufficient"]);
+    expect(shortInventory.error?.data?.observation).toMatchObject({
+      state: "prepared",
+      txHash: attempt!.txHash,
+    });
+
+    s.readiness = readyObserver({
+      feeRunway: {
+        observed: "999",
+        required: "10000",
+        perTransferFeeLimit: "1000",
+        mayBroadcastTransfers: 0,
+      },
+    });
+    const shortFee = await createNote(client, ctx);
+    expect(shortFee.error?.data?.["reasons"]).toEqual(["operation_fee_runway_insufficient"]);
+    expect(client.sends).toEqual([]);
+    expect(ctx.limits!.windowStatus().reserved).toBe(0n);
+    expect(journal.get("op-1")).toMatchObject({ state: "prepared" });
+
+    s.readiness = readyObserver();
+    const sent = await createNote(client, ctx);
+    expect(sent.result?.observation).toMatchObject({ state: "included", txHash: attempt!.txHash });
+    expect(client.proofs).toBe(1);
+  });
+});
 
 describe("aztec_createNote: the broadcast gate", () => {
   it("journals, asks, marks, then broadcasts once and returns the observation", async () => {
@@ -779,7 +872,12 @@ describe("the gate is the last word on both bounds", () => {
 
 describe("one deadline for the whole request", () => {
   it("counts the cooldown against it: a cooldown past the deadline proves nothing", async () => {
-    const limits = new TransactionLimits({ cooldownThreshold: 1n, cooldownDelayMs: 300 });
+    const limits = new TransactionLimits({
+      maxAmount: 1000n,
+      dailyLimit: 10_000n,
+      cooldownThreshold: 1n,
+      cooldownDelayMs: 300,
+    });
     const res = await createNote(client, { settlement: { ...s, timeoutMs: 50 }, limits });
     expect(res.error?.data?.observation).toEqual({
       state: "not_submitted",

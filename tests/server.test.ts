@@ -14,6 +14,7 @@ import {
   FakeAztecClient as SettlementFakeClient,
   openBoundJournal,
   fakeMayBroadcast,
+  readyLimits,
   readyObserver,
   settlementContext,
   v1Params,
@@ -38,7 +39,7 @@ let baseUrl: string;
 
 beforeAll(async () => {
   client = new FakeAztecClient();
-  server = createApp(client, { settlement: settlementContext(openBoundJournal()) });
+  server = createApp(client, { settlement: settlementContext(openBoundJournal()), limits: readyLimits() });
   await new Promise<void>((resolve) => {
     server.listen(0, () => {
       const addr = server.address();
@@ -420,6 +421,7 @@ describe("public liveness isolation", () => {
     const client = new FakeAztecClient();
     const settlement = settlementContext(openBoundJournal(), undefined, { readiness });
     const srv = createApp(client, {
+      limits: readyLimits(),
       apiKey: key,
       readiness,
       settlement,
@@ -796,7 +798,11 @@ describe("public liveness isolation", () => {
     const stuck = new FakeAztecClient();
     stuck.createNote = () => new Promise<never>(() => {});
     let readinessFails = false;
-    const healthyReadiness = readyObserver();
+    // Room for all 17 transfers in both windows, inventory and fee juice.
+    const healthyReadiness = readyObserver({
+      dailyLimit: "100000",
+      inventory: { observed: "100000", required: "100000", mayBroadcastPrincipal: "0" },
+    });
     const readiness = {
       observe: (signal?: AbortSignal) =>
         readinessFails
@@ -807,6 +813,7 @@ describe("public liveness isolation", () => {
     const settlement = settlementContext(openBoundJournal(), gate.client, { readiness });
     settlement.timeoutMs = 10;
     const srv = createApp(stuck, {
+      limits: new TransactionLimits({ maxAmount: 1000n, dailyLimit: 100_000n }),
       apiKey: key,
       recoveryApiKey: recoveryKey,
       settlement,
@@ -1101,6 +1108,7 @@ describe("HTTP response deadline", () => {
       });
     };
     const srv = createApp(client, {
+      limits: readyLimits(),
       settlement: settlementContext(journal, late, { timeoutMs: 60_000 }),
       responseTimeoutMs: 200,
     });
@@ -1131,7 +1139,7 @@ describe("Idempotency-Key header", () => {
     close: () => Promise<void>;
   }> {
     const c = new FakeAztecClient();
-    const srv = createApp(c, { settlement: settlementContext(openBoundJournal()) });
+    const srv = createApp(c, { settlement: settlementContext(openBoundJournal()), limits: readyLimits() });
     await new Promise<void>((resolve) => srv.listen(0, resolve));
     const addr = srv.address();
     const port = addr && typeof addr === "object" ? addr.port : 0;

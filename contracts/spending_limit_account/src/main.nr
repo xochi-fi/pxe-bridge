@@ -1736,6 +1736,33 @@ pub contract SpendingLimitAccount {
         let _ = advance_window(empty_buckets(), 1_000, 999, 1);
     }
 
+    // CROSS-CHECK of the window against effectiveRollingSpent in
+    // src/readiness.ts, which simulates advance_window with a zero amount to
+    // decide how much the account can still send. Distinct per-slot values,
+    // so clearing the wrong slot, one slot too many or too few, or failing to
+    // wrap changes the total. Pinned identically in tests/readiness.test.ts.
+    #[test]
+    fn advance_window_matches_typescript() {
+        let mut buckets: [u128; BUCKET_COUNT] = [0; BUCKET_COUNT];
+        for i in 0..BUCKET_COUNT {
+            buckets[i] = (i as u128 + 1) * 1000;
+        }
+        // last_bucket 100 sits at slot 0.
+        let (_b0, elapsed_0) = advance_window(buckets, 100, 100, 0);
+        assert_eq(elapsed_0, 325_000);
+        let (_b1, elapsed_1) = advance_window(buckets, 100, 101, 0);
+        assert_eq(elapsed_1, 323_000);
+        let (_b24, elapsed_24) = advance_window(buckets, 100, 124, 0);
+        assert_eq(elapsed_24, 1_000);
+        let (_b25, elapsed_25) = advance_window(buckets, 100, 125, 0);
+        assert_eq(elapsed_25, 0);
+        let (_b26, elapsed_26) = advance_window(buckets, 100, 126, 0);
+        assert_eq(elapsed_26, 0);
+        // last_bucket 123 sits at slot 23; three buckets clear 24, 0 and 1.
+        let (_bw, wrapped) = advance_window(buckets, 123, 126, 0);
+        assert_eq(wrapped, 297_000);
+    }
+
     // ---- Limit validation ----
 
     #[test]

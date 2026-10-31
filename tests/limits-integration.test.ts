@@ -12,6 +12,7 @@ import {
   FakeAztecClient,
   openBoundJournal,
   rpcBody,
+  readyObserver,
   settlementContext,
   v1Params,
 } from "./settlement-fixtures.js";
@@ -40,7 +41,15 @@ describe("limits integration through server", () => {
     server = createApp(new FakeAztecClient(), {
       limits,
       audit,
-      settlement: settlementContext(journal),
+      // The chain agrees with the local limits, so the ceiling is the
+      // reservation's refusal rather than the contract window's.
+      settlement: settlementContext(journal, undefined, {
+        readiness: readyObserver({
+          maxAmount: "10000",
+          dailyLimit: "50000",
+          inventory: { observed: "50000", required: "50000", mayBroadcastPrincipal: "0" },
+        }),
+      }),
     });
 
     await new Promise<void>((resolve) => {
