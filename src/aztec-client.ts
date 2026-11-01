@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { mkdirSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import { EmbeddedWallet } from "@aztec-labs/wallets/embedded";
+import { EmbeddedWallet, type EmbeddedWalletPXEOptions } from "@aztec-labs/wallets/embedded";
 import { TokenContract } from "@aztec-labs/noir-contracts.js/Token";
 import { SponsoredFPCContract } from "@aztec-labs/noir-contracts.js/SponsoredFPC";
 import { FEE_JUICE_BALANCES_SLOT } from "@aztec-labs/constants";
@@ -190,6 +190,39 @@ export function boundedNodeFetch(
     }
   };
 }
+
+type ResolveTaggingSecretStrategy = NonNullable<
+  NonNullable<EmbeddedWalletPXEOptions["hooks"]>["resolveTaggingSecretStrategy"]
+>;
+
+/**
+ * How the bridge's PXE tags a message to a recipient it has no landed
+ * handshake with (xochi shielded-execution.md D4, amended 2026-11-01 to
+ * address-derived tagging for both designs).
+ *
+ * Without a hook PXE establishes a non-interactive handshake, which publishes
+ * a log the HandshakeRegistry's `get_non_interactive_handshakes(recipient)`
+ * returns to anyone holding the recipient's address. Address-derived tagging
+ * derives the secret from the two addresses' keys and publishes nothing that
+ * names the recipient; the recipient finds the note after registering the
+ * bridge account as a sender (`registerSender`). The token's
+ * `transfer_to_private` delivers its note unconstrained, which is the only
+ * mode address-derived is sound for.
+ *
+ * Constrained delivery to anyone else is refused rather than sent through the
+ * revealing handshake: the send fails while proving, before any may-broadcast
+ * mark. Constrained delivery to the sending account itself keeps PXE's
+ * default, which names only the bridge's own public address.
+ */
+export const bridgeTaggingSecretStrategy: ResolveTaggingSecretStrategy = async (request) => {
+  if (request.deliveryMode === "unconstrained") return { type: "address-derived" };
+  if (request.recipient.equals(request.sender)) return { type: "non-interactive-handshake" };
+  throw new Error(
+    `Refusing constrained message delivery to ${request.recipient.toString()} from ` +
+      `${request.contractAddress.toString()}: its only tagging strategy here is a ` +
+      "handshake that reveals the recipient on chain",
+  );
+};
 
 export const TX_TIMEOUT_MS = 120_000; // 2 minutes
 
@@ -772,7 +805,11 @@ export class AztecClient implements IAztecClient {
     this.claimedDataDirectory ??= claimWalletDataDirectory(this.dataDirectory);
     this.wallet = await EmbeddedWallet.create(this.nodeUrl, {
       nodeClientOptions: { fetch: this.nodeFetch },
-      pxe: { proverEnabled: true, dataDirectory: this.claimedDataDirectory },
+      pxe: {
+        proverEnabled: true,
+        dataDirectory: this.claimedDataDirectory,
+        hooks: { resolveTaggingSecretStrategy: bridgeTaggingSecretStrategy },
+      },
     });
     console.log("[pxe-bridge] EmbeddedWallet created");
     const { createAztecNodeClient } = await import("@aztec-labs/aztec.js/node");
