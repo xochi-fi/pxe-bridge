@@ -267,6 +267,8 @@ jobs:
         with:
           name: contract-artifact
           path: contracts/spending_limit_account/target
+      - name: Require the contract artifact in the build context
+        run: test -s contracts/spending_limit_account/target/spending_limit_account_contract-SpendingLimitAccount.json
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -281,6 +283,15 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
       - uses: docker/build-push-action@v6
         with:
+          # The workspace, not the action's default Git context: the downloaded
+          # artifact is untracked, so a Git context silently built v0.2.0 without
+          # it and every spending-limit start failed with ERR_MODULE_NOT_FOUND.
+          context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+      - name: Verify the published image carries the contract artifact
+        run: >-
+          docker run --rm --entrypoint test
+          "${{ fromJSON(steps.meta.outputs.json).tags[0] }}"
+          -s /app/contracts/spending_limit_account/target/spending_limit_account_contract-SpendingLimitAccount.json
