@@ -367,10 +367,14 @@ too. Legacy-route reconciliation uses ordinary capacity, so an ordinary RPC
 credential cannot consume the dedicated reconciliation budget.
 
 The readiness projection contains the flat checker fields `ready`,
-`nodeVersion`, `l1ChainId`, `rollupVersion`, `account {address,classId}`,
-`token`, `maxAmount` and `dailyLimit`, plus finalized reference, policy,
-inventory, rolling-window, fee-runway, node and journal observations. No
-nested object other than `account` has an `address` member.
+`nodeVersion`, `l1ChainId`, `rollupVersion`, `accountAddress`,
+`accountClassId`, `token`, `maxAmount` and `dailyLimit`, plus finalized
+reference, policy, inventory, rolling-window, fee-runway, node and journal
+observations. xochimilco's testnet gate compares every alias it knows
+(`account`, `address`, `accountAddress`, `version`, `chainId`, `token`, ...)
+at the top level and one object deep, so no field may reuse one of those
+names for anything but its pinned value; `tests/readiness.test.ts` ports
+that comparison (#68).
 
 Point container restarts at `/status` and traffic/deploy gates at `/ready`.
 Never restart merely because readiness is false: recovery for already marked

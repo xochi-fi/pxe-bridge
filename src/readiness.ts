@@ -193,7 +193,8 @@ export interface OperationalReadiness {
   l1ChainId: string | null;
   rollupVersion: string | null;
   accountMode: "spending_limit" | "standard" | null;
-  account: { address: string | null; classId: string | null };
+  accountAddress: string | null;
+  accountClassId: string | null;
   token: string | null;
   maxAmount: string | null;
   dailyLimit: string | null;
@@ -577,7 +578,8 @@ export function evaluateReadiness(
     l1ChainId: network?.l1ChainId ?? null,
     rollupVersion: network?.rollupVersion ?? null,
     accountMode: facts.accountMode,
-    account: { address: facts.derivedAccountAddress, classId: accountClassId },
+    accountAddress: facts.derivedAccountAddress,
+    accountClassId,
     token: accountState?.permittedToken ?? facts.configuredToken,
     maxAmount: accountState?.maxAmount.toString() ?? facts.configuredMaxAmount?.toString() ?? null,
     dailyLimit: accountState?.dailyLimit.toString() ?? facts.configuredDailyLimit?.toString() ?? null,
