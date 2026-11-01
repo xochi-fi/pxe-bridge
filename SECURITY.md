@@ -101,7 +101,7 @@ tracked in #27.
 
 ## Incident runbook
 
-Commands are in `README.md` under "Account administration". Every admin
+Commands are in `docs/operations.md` under "Account administration". Every admin
 command except `status` needs `SPENDING_LIMIT_ADMIN_KEY`.
 
 Prerequisite: the admin account is deployed and funded, and stays funded. It

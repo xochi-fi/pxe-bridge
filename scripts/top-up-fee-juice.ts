@@ -225,7 +225,7 @@ async function main(): Promise<void> {
     fail(
       "FEE_JUICE_PAYER_DEPLOYER=true is refused under NODE_ENV=production: it loads the " +
         "bridge's signing key onto this machine. Pay from a separate account with " +
-        "FEE_JUICE_PAYER_KEY instead (README, Topping up the spending-limit account).",
+        "FEE_JUICE_PAYER_KEY instead (docs/operations.md, Topping up the spending-limit account).",
     );
   }
 
