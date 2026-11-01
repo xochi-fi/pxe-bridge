@@ -30,7 +30,7 @@ import { SettlementJournal } from "../../src/journal.js";
 import { TransactionLimits } from "../../src/limits.js";
 import { createReadinessObserver, type OperationalReadiness } from "../../src/readiness.js";
 import { handleRpcRequest } from "../../src/rpc.js";
-import { fakeMayBroadcast, rpcBody, v1Params } from "../settlement-fixtures.js";
+import { fakeMayBroadcast, rpcBody, settlementParams } from "../settlement-fixtures.js";
 import { createApp } from "../../src/server.js";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -51,6 +51,7 @@ import {
   FUNDER_KEY,
   registerPublished,
   recordingGate,
+  proveMinedPayout,
 } from "./helpers.js";
 import { readAccountState, statusExitCode } from "../../scripts/spending-limit-admin.js";
 
@@ -541,7 +542,7 @@ describe("spending limit account (e2e)", () => {
       try {
         const projection = await readiness.observe();
         const response = (await handleRpcRequest(
-          rpcBody("aztec_createNote", [v1Params({ operationId })]),
+          rpcBody("aztec_createNote", [settlementParams({ operationId })]),
           observed,
           {
             settlement: {
@@ -780,15 +781,67 @@ describe("spending limit account (e2e)", () => {
     return res;
   }
 
-  it("transfers within the per-tx limit", async (ctx) => {
+  // Also the hook pin of xochi-fi/pxe-bridge#78 against a real proof: the
+  // randomness the bridge captured while proving must open the proven
+  // transaction's partial-note commitment for the signed recipient, and from
+  // the signed terms alone recompute a note hash and the validity nullifier
+  // that the mined transaction actually holds. An Aztec version that stops
+  // routing transfer_to_private's randomness through getRandomField fails
+  // here (the transfer is refused before the gate), not silently.
+  it("transfers within the per-tx limit, with randomness that proves the recipient on chain", async (ctx) => {
     if (deployFailure) return ctx.skip();
-    const res = await transfer({
-      token: tokenAddress,
-      recipient: SEED_RECIPIENT,
-      amount: (MAX_PER_TX / 2n).toString(),
-    });
+    const amount = MAX_PER_TX / 2n;
+    const gate = recordingGate();
+    const res = await client.createNote(
+      { token: tokenAddress, recipient: SEED_RECIPIENT, amount: amount.toString() },
+      gate,
+    );
     expect(res.txHash).toBeTruthy();
     expect(res.observation).toMatchObject({ kind: "mined", executionResult: "success" });
+
+    expect(gate.seen).toHaveLength(1);
+    const prepared = gate.seen[0]!;
+    expect(prepared.txHash).toBe(res.txHash);
+    expect(prepared.partialNoteRandomness).toMatch(/^0x[0-9a-f]{64}$/);
+    const proof = await proveMinedPayout(config.nodeUrl, {
+      txHash: res.txHash,
+      token: tokenAddress,
+      recipient: SEED_RECIPIENT,
+      payoutAccount: accountAddress,
+      amount,
+      partialNoteRandomness: prepared.partialNoteRandomness,
+      txBytes: prepared.txBytes,
+    });
+    console.log(
+      "[e2e] payout proof:",
+      JSON.stringify({
+        txHash: res.txHash,
+        commitmentFromBytes: proof.commitmentFromBytes,
+        partialCommitment: proof.partialCommitment,
+        noteHashIndex: proof.noteHashIndex,
+        uniqueNoteHash: proof.uniqueNoteHash,
+        noteHashes: proof.noteHashes,
+        siloedValidityNullifier: proof.siloedValidityNullifier,
+        nullifiers: proof.nullifiers,
+        completionLogFields: proof.completionLogFields,
+      }),
+    );
+    expect(proof.commitmentFromBytes).toBe(proof.partialCommitment);
+    expect(proof.noteHashIndex).toBeDefined();
+    expect(proof.noteHashes).toContain(proof.uniqueNoteHash);
+    expect(proof.nullifiers).toContain(proof.siloedValidityNullifier);
+    expect(proof.completionLogFields).toEqual(["3", amount.toString()]);
+    // The same randomness proves nothing for another allowlisted recipient.
+    const other = await proveMinedPayout(config.nodeUrl, {
+      txHash: res.txHash,
+      token: tokenAddress,
+      recipient: ATTESTATION_RECIPIENT,
+      payoutAccount: accountAddress,
+      amount,
+      partialNoteRandomness: prepared.partialNoteRandomness,
+    });
+    expect(other.noteHashIndex).toBeUndefined();
+    expect(other.nullifiers).not.toContain(other.siloedValidityNullifier);
   });
 
   // PHASE ORDERING. Reverting is necessary but not sufficient: the transfer

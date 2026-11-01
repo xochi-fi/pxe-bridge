@@ -6,6 +6,7 @@ import { EmbeddedWallet, type EmbeddedWalletPXEOptions } from "@aztec-labs/walle
 import { TokenContract } from "@aztec-labs/noir-contracts.js/Token";
 import { SponsoredFPCContract } from "@aztec-labs/noir-contracts.js/SponsoredFPC";
 import { FEE_JUICE_BALANCES_SLOT } from "@aztec-labs/constants";
+import { FunctionSelector } from "@aztec-labs/aztec.js/abi";
 import { AztecAddress } from "@aztec-labs/aztec.js/addresses";
 import type { FeePaymentMethod } from "@aztec-labs/aztec.js/fee";
 import { Fr } from "@aztec-labs/aztec.js/fields";
@@ -24,15 +25,28 @@ import {
 } from "@aztec-labs/stdlib/hash";
 import { jsonStringify } from "@aztec-labs/foundation/json-rpc";
 import { ACCOUNT_ADDRESS_ENV, assertAccountIdentity } from "./account-identity.js";
-import type {
-  BroadcastGate,
-  FeeJuiceClaim,
-  IAztecClient,
-  NodeNetwork,
-  PreparedTransaction,
-  TransferOutcome,
-  TransferParams,
+import {
+  PartialNoteUnresolved,
+  type BroadcastGate,
+  type FeeJuiceClaim,
+  type IAztecClient,
+  type JournaledTransfer,
+  type NodeNetwork,
+  type PreparedTransaction,
+  type TransferOutcome,
+  type TransferParams,
 } from "./types.js";
+import {
+  bindPxeOperations,
+  captureRandomness,
+  takeDrawnRandomness,
+  finalizeCommitment,
+  installRandomnessCapture,
+  partialNoteCommitment,
+  randomnessHex,
+  selectPartialNoteRandomness,
+  type PayoutTerms,
+} from "./partial-note.js";
 import {
   finalizedTimeReason,
   known,
@@ -596,34 +610,75 @@ export async function feeJuiceMessageHash(
     .toString();
 }
 /**
- * Which operation's gate a broadcast on this async path belongs to. The
- * wallet's `sendTx` proves, derives the hash, then calls `aztecNode.sendTx`;
- * the node is wrapped so that last call first runs the gate bound here.
+ * Which operation's gate a broadcast on this async path belongs to, and the
+ * payout its transaction must carry. The wallet's `sendTx` proves, derives
+ * the hash, then calls `aztecNode.sendTx`; the node is wrapped so that last
+ * call first resolves the partial-note randomness, then runs the gate bound
+ * here.
  */
-const broadcastGates = new AsyncLocalStorage<BroadcastGate>();
+interface GatedSend {
+  gate: BroadcastGate;
+  payout: PayoutTerms;
+}
+
+const broadcastGates = new AsyncLocalStorage<GatedSend>();
+
+let finalizeSelector: Promise<Fr> | undefined;
+
+/** Selector of Token `_finalize_transfer_to_private_unsafe`, from the pinned artifact. */
+function finalizeTransferSelector(): Promise<Fr> {
+  finalizeSelector ??= (async () => {
+    const fn = TokenContract.artifact.nonDispatchPublicFunctions.find(
+      (f) => f.name === "_finalize_transfer_to_private_unsafe",
+    );
+    if (!fn) throw new Error("Token artifact has no _finalize_transfer_to_private_unsafe");
+    return (await FunctionSelector.fromNameAndParameters(fn.name, fn.parameters)).toField();
+  })();
+  return finalizeSelector;
+}
+
+/** The partial-note commitment `tx` finalizes for `payout`. */
+async function provenCommitment(tx: Tx, payout: PayoutTerms): Promise<Fr> {
+  const calls = tx.getPublicCallRequestsWithCalldata().map((call) => ({
+    contractAddress: call.request.contractAddress,
+    functionSelector: call.functionSelector,
+    args: call.args,
+  }));
+  return finalizeCommitment(calls, await finalizeTransferSelector(), payout);
+}
 
 /** The proven transaction as the gate and journal see it. */
-async function preparedTransaction(tx: Tx): Promise<PreparedTransaction> {
+async function preparedTransaction(tx: Tx, partialNoteRandomness: string): Promise<PreparedTransaction> {
   return {
     txHash: (await tx.getTxHash()).toString(),
     txBytes: tx.toBuffer(),
     expirationTimestamp: tx.data.expirationTimestamp,
+    partialNoteRandomness,
   };
 }
 
 /**
  * Wraps a node so `sendTx` runs the gate bound to the current async path.
- * Calls outside any gate (account deployment, fee juice claims) pass through:
- * those are not settlement operations.
+ * Before the gate, the proven transaction's partial-note commitment is read
+ * and the one captured value opening it for the recipient is selected; none,
+ * or more than one, throws `PartialNoteUnresolved` and nothing is journaled
+ * or sent. Calls outside any gate (account deployment, fee juice claims) pass
+ * through: those are not settlement operations.
  */
 function gatedNode(node: AztecNode): AztecNode {
   return new Proxy(node, {
     get(target, property, receiver) {
       if (property === "sendTx") {
         return async (tx: Tx) => {
-          const gate = broadcastGates.getStore();
-          if (gate) {
-            const prepared = await preparedTransaction(tx);
+          const send = broadcastGates.getStore();
+          if (send) {
+            const { gate, payout } = send;
+            const randomness = await selectPartialNoteRandomness(
+              takeDrawnRandomness() ?? [],
+              payout.recipient.toField(),
+              await provenCommitment(tx, payout),
+            );
+            const prepared = await preparedTransaction(tx, randomnessHex(randomness));
             await gate.beforeBroadcast(prepared);
             // No await from here to the call: the final bound check and the
             // send happen in one synchronous run.
@@ -818,8 +873,14 @@ export class AztecClient implements IAztecClient {
     // aztecNode.sendTx. Wrapping that one call is what lets a settlement
     // journal the exact transaction and ask before anything is broadcast,
     // without re-implementing the wallet's fee and authwit handling.
-    const walletInternals = this.wallet as unknown as { aztecNode: AztecNode };
+    const walletInternals = this.wallet as unknown as { aztecNode: AztecNode; pxe: unknown };
     walletInternals.aztecNode = gatedNode(walletInternals.aztecNode);
+    // A payout's partial-note randomness is drawn inside the PXE's queued
+    // simulation and proof and stored nowhere; these two make the oracle
+    // report it to the send that queued it (partial-note.ts). Both refuse,
+    // and connect() with them, an SDK whose internals no longer fit.
+    installRandomnessCapture();
+    bindPxeOperations(walletInternals.pxe);
 
     const secretKey = this.secretKey;
     this.secretKey = null; // clear string reference immediately
@@ -1340,6 +1401,10 @@ export class AztecClient implements IAztecClient {
   /**
    * Proves one `transfer_to_private` and broadcasts it through `gate`.
    *
+   * The proof runs inside a partial-note randomness capture scoped to this
+   * call alone; the gate sees the transaction only once the one captured
+   * value opening its commitment for `params.recipient` is selected.
+   *
    * The send waits for a proposed block and does not throw on a revert, so a
    * mined revert comes back as an observation rather than an exception. No
    * timeout here: the caller bounds the whole call and closes its gate, which
@@ -1355,32 +1420,51 @@ export class AztecClient implements IAztecClient {
     const from = this.solverAddress;
     const token = await this.getToken(tokenAddress);
     const gasSettings = await headroomGasSettings(this.nodeUrl, this.nodeFetch);
+    const payout: PayoutTerms = { token: tokenAddress, from, recipient: recipientAddress, amount };
 
-
-    const sent = await broadcastGates.run(gate, () =>
-      token.methods
-        .transfer_to_private(recipientAddress, amount)
-        .send({
-          from,
-          fee: { gasSettings },
-          wait: { dontThrowOnRevert: true },
-        }),
+    const sent = await captureRandomness(() =>
+      broadcastGates.run({ gate, payout }, () =>
+        token.methods
+          .transfer_to_private(recipientAddress, amount)
+          .send({
+            from,
+            fee: { gasSettings },
+            wait: { dontThrowOnRevert: true },
+          }),
+      ),
     );
     const txHash = sent.receipt.txHash.toString();
     return { txHash, observation: await this.observeTx(txHash) };
   }
 
   /**
-   * Sends journaled bytes as they are. The gate runs first, exactly as for a
-   * fresh send; then the node gets the identical transaction, which carries
-   * the identical hash and protocol nullifier and so lands at most once.
+   * Sends journaled bytes as they are. First the journaled randomness must
+   * still open the bytes' partial-note commitment for the journaled
+   * recipient; then the gate runs, exactly as for a fresh send; then the node
+   * gets the identical transaction, which carries the identical hash and
+   * protocol nullifier and so lands at most once.
    */
-  async broadcastPrepared(txBytes: Buffer, gate: BroadcastGate): Promise<TransferOutcome> {
-    if (!this.node) throw new Error("Client not connected");
+  async broadcastPrepared(journaled: JournaledTransfer, gate: BroadcastGate): Promise<TransferOutcome> {
+    if (!this.node || !this.solverAddress) throw new Error("Client not connected");
     const { Tx, TxStatus } = await import("@aztec-labs/aztec.js/tx");
     const { waitForTx } = await import("@aztec-labs/aztec.js/node");
-    const tx = Tx.fromBuffer(txBytes);
-    const prepared = await preparedTransaction(tx);
+    const tx = Tx.fromBuffer(journaled.txBytes);
+    const recipient = AztecAddress.fromStringUnsafe(journaled.recipient);
+    const commitment = await provenCommitment(tx, {
+      token: AztecAddress.fromStringUnsafe(journaled.token),
+      from: this.solverAddress,
+      recipient,
+      amount: BigInt(journaled.amount),
+    });
+    if (
+      !/^0x[0-9a-f]{64}$/.test(journaled.partialNoteRandomness) ||
+      !(await partialNoteCommitment(recipient.toField(), Fr.fromString(journaled.partialNoteRandomness))).equals(
+        commitment,
+      )
+    ) {
+      throw new PartialNoteUnresolved("mismatch");
+    }
+    const prepared = await preparedTransaction(tx, journaled.partialNoteRandomness);
     await gate.beforeBroadcast(prepared);
     // Synchronous from the final check to the call (see BroadcastGate).
     gate.beforeSend(prepared);

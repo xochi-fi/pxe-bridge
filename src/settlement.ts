@@ -12,7 +12,17 @@ import { z } from "zod";
  * operation, whatever the JSON-RPC envelope id; same id + different
  * fingerprint is a conflict and does no work.
  */
-export const SETTLEMENT_VERSION = "pxe-bridge.settlement.v1";
+export const SETTLEMENT_VERSION = "pxe-bridge.settlement.v2";
+
+/**
+ * v1 -> v2 (xochi-fi/pxe-bridge#78): every mined observation (`included`,
+ * `finalized`, `reverted`) carries `partialNoteRandomness`. The request
+ * shape, its encodings and the fingerprint are unchanged; the version moves
+ * so that a consumer which does not read the new member is refused
+ * (`settlement_version_unsupported`) instead of silently treating a payout as
+ * proven without it.
+ */
+export const SETTLEMENT_VERSIONS_RETIRED = ["pxe-bridge.settlement.v1"] as const;
 
 const HEX32 = /^0x[0-9a-fA-F]{64}$/;
 const HEX20 = /^0x[0-9a-fA-F]{40}$/;
@@ -150,12 +160,12 @@ const OperationIdSchema = z
   .regex(/^[\x20-\x7e]+$/, "operationId must be printable ASCII")
   .refine((s) => s.trim() === s, "operationId must not carry surrounding whitespace");
 
-export const CreateNoteV1Schema = SettlementTermsSchema.extend({
+export const CreateNoteSchema = SettlementTermsSchema.extend({
   version: z.literal(SETTLEMENT_VERSION),
   operationId: OperationIdSchema,
 }).strict();
 
-export type CreateNoteV1 = z.infer<typeof CreateNoteV1Schema>;
+export type CreateNoteParams = z.infer<typeof CreateNoteSchema>;
 
 export const GetSettlementSchema = z
   .object({
@@ -174,6 +184,16 @@ export function isLegacyCreateNoteParams(value: unknown): boolean {
     value !== null &&
     !("version" in value) &&
     ("chainId" in value || "recipient" in value)
+  );
+}
+
+/** Params naming a retired settlement contract version, refused with that reason. */
+export function namesRetiredVersion(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "version" in value &&
+    (SETTLEMENT_VERSIONS_RETIRED as readonly unknown[]).includes(value.version)
   );
 }
 
@@ -201,6 +221,8 @@ export function canonicalTerms(terms: SettlementTerms): SettlementTerms {
   };
 }
 
+// Not the contract version: the terms it covers did not change in v2, and a
+// new domain would turn every journaled operation into a conflict.
 const FINGERPRINT_DOMAIN = "pxe-bridge/settlement-fingerprint/v1";
 
 /**
@@ -234,7 +256,7 @@ export function fingerprintTerms(terms: SettlementTerms): string {
   return "0x" + createHash("sha256").update(lines.join("\n"), "utf8").digest("hex");
 }
 
-export function termsFrom(params: CreateNoteV1): SettlementTerms {
+export function termsFrom(params: CreateNoteParams): SettlementTerms {
   const { version: _v, operationId: _o, ...terms } = params;
   return canonicalTerms(terms);
 }
@@ -274,6 +296,15 @@ export type Observation =
       receiptStatus: MinedStatus;
       observedAt: number;
       effects: Effects;
+      /**
+       * The `transfer_to_private` partial-note randomness, `0x` + 64
+       * lowercase hex: with the signed recipient, token and amount it
+       * recomputes the payout's unique note hash and validity nullifier
+       * (docs/settlement-operations.md "Partial-note randomness"). `null` only
+       * for an attempt journaled before the bridge captured it; such a payout
+       * cannot be proven and must be held.
+       */
+      partialNoteRandomness: string | null;
     }
   | { state: "unknown"; reason: string };
 

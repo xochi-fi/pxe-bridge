@@ -1,8 +1,8 @@
 {
-  "version": 1,
+  "version": 2,
   "generator": "scripts/settlement-vectors.ts (npm run generate:settlement-vectors)",
-  "contract": "pxe-bridge.settlement.v1",
-  "source": "docs/settlement-operations.md; values from @xochi/spec 0.9.0 conformance/shielded.json recipientBinding \"baseline\" (network fixture-a)",
+  "contract": "pxe-bridge.settlement.v2",
+  "source": "docs/settlement-operations.md; values from @xochi/spec 0.9.0 conformance/shielded.json recipientBinding \"baseline\" (network fixture-a); payout inputs from Riddler test/support/vectors/aztec_payment_proof.json",
   "networkIdentity": {
     "typeString": "NetworkIdentity(uint256 aztecChainId,uint256 protocolVersion,address rollupAddress,uint256 l1ChainId,bytes32 genesisOrNetworkDigest)",
     "typehash": "0xd30a9f62f8e7b404cb3181a16d547adec2b019fa08cadb19ea0a97528c727cff",
@@ -25,7 +25,7 @@
       "method": "aztec_createNote",
       "params": [
         {
-          "version": "pxe-bridge.settlement.v1",
+          "version": "pxe-bridge.settlement.v2",
           "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
           "network": {
             "aztecChainId": "11155111",
@@ -73,7 +73,7 @@
       {
         "name": "uppercase hex in every hex member",
         "params": {
-          "version": "pxe-bridge.settlement.v1",
+          "version": "pxe-bridge.settlement.v2",
           "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
           "network": {
             "aztecChainId": "11155111",
@@ -108,7 +108,7 @@
       {
         "name": "aztecChainId zero",
         "params": {
-          "version": "pxe-bridge.settlement.v1",
+          "version": "pxe-bridge.settlement.v2",
           "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
           "network": {
             "aztecChainId": "0",
@@ -136,7 +136,7 @@
       {
         "name": "protocolVersion at the BN254 modulus",
         "params": {
-          "version": "pxe-bridge.settlement.v1",
+          "version": "pxe-bridge.settlement.v2",
           "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
           "network": {
             "aztecChainId": "11155111",
@@ -164,7 +164,7 @@
       {
         "name": "l1ChainId zero",
         "params": {
-          "version": "pxe-bridge.settlement.v1",
+          "version": "pxe-bridge.settlement.v2",
           "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
           "network": {
             "aztecChainId": "11155111",
@@ -192,7 +192,7 @@
       {
         "name": "l1ChainId as a JSON number",
         "params": {
-          "version": "pxe-bridge.settlement.v1",
+          "version": "pxe-bridge.settlement.v2",
           "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
           "network": {
             "aztecChainId": "11155111",
@@ -220,7 +220,7 @@
       {
         "name": "rollupAddress zero",
         "params": {
-          "version": "pxe-bridge.settlement.v1",
+          "version": "pxe-bridge.settlement.v2",
           "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
           "network": {
             "aztecChainId": "11155111",
@@ -248,7 +248,7 @@
       {
         "name": "genesisOrNetworkDigest zero",
         "params": {
-          "version": "pxe-bridge.settlement.v1",
+          "version": "pxe-bridge.settlement.v2",
           "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
           "network": {
             "aztecChainId": "11155111",
@@ -276,7 +276,7 @@
       {
         "name": "recipient as a 20-byte EVM address",
         "params": {
-          "version": "pxe-bridge.settlement.v1",
+          "version": "pxe-bridge.settlement.v2",
           "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
           "network": {
             "aztecChainId": "11155111",
@@ -304,7 +304,7 @@
       {
         "name": "amount with a leading zero",
         "params": {
-          "version": "pxe-bridge.settlement.v1",
+          "version": "pxe-bridge.settlement.v2",
           "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
           "network": {
             "aztecChainId": "11155111",
@@ -332,7 +332,7 @@
       {
         "name": "amount as a JSON number",
         "params": {
-          "version": "pxe-bridge.settlement.v1",
+          "version": "pxe-bridge.settlement.v2",
           "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
           "network": {
             "aztecChainId": "11155111",
@@ -360,7 +360,7 @@
       {
         "name": "an unknown member",
         "params": {
-          "version": "pxe-bridge.settlement.v1",
+          "version": "pxe-bridge.settlement.v2",
           "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
           "network": {
             "aztecChainId": "11155111",
@@ -386,7 +386,78 @@
           "code": -32602
         }
       }
-    ]
+    ],
+    "result": {
+      "note": "A finalized success for these terms. Every included/finalized/reverted observation carries partialNoteRandomness (0x + 64 lowercase hex, or null for an attempt journaled before v2); aztec_getSettlement answers the same observation.",
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+          "version": "pxe-bridge.settlement.v2",
+          "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
+          "fingerprint": "0xef29c46772683bcab6d096ab4b5288111ba8f64cb8392ba6c72b802fcdbb6f88",
+          "observation": {
+            "state": "finalized",
+            "txHash": "0x7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a",
+            "expirationTimestamp": "1900000000",
+            "executionResult": "success",
+            "blockHash": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+            "blockNumber": "4242",
+            "receiptStatus": "finalized",
+            "observedAt": 1899990000,
+            "effects": {
+              "state": "available",
+              "noteHashes": [
+                "0x3131313131313131313131313131313131313131313131313131313131313131",
+                "0x3232323232323232323232323232323232323232323232323232323232323232",
+                "0x3333333333333333333333333333333333333333333333333333333333333333",
+                "0x3434343434343434343434343434343434343434343434343434343434343434",
+                "0x3535353535353535353535353535353535353535353535353535353535353535",
+                "0x22f0affca3f1681d09d20263af3abee59393fae0e5126108ebdace132c530e4b"
+              ],
+              "nullifiers": [
+                "0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+                "0x23dbb29697678f351de5b9739b26ae5b853c5802f984402a327913dd06653a01"
+              ]
+            },
+            "partialNoteRandomness": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
+          }
+        }
+      }
+    },
+    "partialNote": {
+      "note": "Recompute from the signed recipient, token and amount, the payout account and observation.partialNoteRandomness; require uniqueNoteHash(i) in effects.noteHashes for some i < 64 and siloedValidityNullifier in effects.nullifiers (effects.nullifiers[0] is the nonce's first nullifier). Values are the @aztec-labs 6.0.0 hashes.",
+      "formula": {
+        "partialCommitment": "P2([recipient, partialNoteRandomness], DOM_SEP__PARTIAL_NOTE_COMMITMENT)",
+        "noteHash": "P2([TOKEN_BALANCES_SLOT, partialCommitment, amount], DOM_SEP__NOTE_HASH)",
+        "siloedNoteHash": "siloNoteHash(token, noteHash)",
+        "uniqueNoteHash": "computeUniqueNoteHash(computeNoteHashNonce(effects.nullifiers[0], i), siloedNoteHash)",
+        "siloedValidityNullifier": "siloNullifier(token, P2([partialCommitment, payoutAccount], DOM_SEP__PARTIAL_NOTE_VALIDITY_COMMITMENT))",
+        "completionLogTag": "P2([partialCommitment], DOM_SEP__NOTE_COMPLETION_LOG_TAG)"
+      },
+      "constants": {
+        "DOM_SEP__PARTIAL_NOTE_COMMITMENT": 568912195,
+        "DOM_SEP__NOTE_HASH": 116501019,
+        "DOM_SEP__PARTIAL_NOTE_VALIDITY_COMMITMENT": 623934423,
+        "DOM_SEP__NOTE_COMPLETION_LOG_TAG": 3372669888,
+        "TOKEN_BALANCES_SLOT": 3
+      },
+      "inputs": {
+        "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+        "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        "amount": "1000000",
+        "payoutAccount": "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+        "partialNoteRandomness": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+        "firstNullifier": "0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+        "noteHashIndex": 5
+      },
+      "partialCommitment": "0x29866fe70a7476cce0a0354b2f6d8cb27feff779d3bb9306e0b48fa1e15de584",
+      "noteHash": "0x044d3b26e38d083ab5b9638fdc4ac25a3dbadf0b62163c55313aa4ac48214351",
+      "siloedNoteHash": "0x0155405e61af0153c5a1e2f259e15d1b02473f98c9ddb77af4f4fbe0cc91b526",
+      "uniqueNoteHash": "0x22f0affca3f1681d09d20263af3abee59393fae0e5126108ebdace132c530e4b",
+      "siloedValidityNullifier": "0x23dbb29697678f351de5b9739b26ae5b853c5802f984402a327913dd06653a01",
+      "completionLogTag": "0x2d400ce7e384f5e4d64387d317d8102e062adde6e0c16af5ba7fac679cd51622"
+    }
   },
   "getSettlement": {
     "body": {
@@ -395,12 +466,35 @@
       "method": "aztec_getSettlement",
       "params": [
         {
-          "version": "pxe-bridge.settlement.v1",
+          "version": "pxe-bridge.settlement.v2",
           "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001"
         }
       ]
     }
   },
+  "retiredVersions": [
+    {
+      "version": "pxe-bridge.settlement.v1",
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "aztec_getSettlement",
+        "params": [
+          {
+            "version": "pxe-bridge.settlement.v1",
+            "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001"
+          }
+        ]
+      },
+      "error": {
+        "code": -32602,
+        "data": {
+          "reason": "settlement_version_unsupported",
+          "supported": "pxe-bridge.settlement.v2"
+        }
+      }
+    }
+  ],
   "mayBroadcast": {
     "request": {
       "method": "POST",

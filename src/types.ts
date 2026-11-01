@@ -24,7 +24,7 @@ export type JsonRpcResponse =
 
 /**
  * What the client moves: one `transfer_to_private` of `amount` of `token` to
- * `recipient`. Validated upstream by `CreateNoteV1Schema` (settlement.ts); the
+ * `recipient`. Validated upstream by `CreateNoteSchema` (settlement.ts); the
  * client never sees the operation terms it does not need.
  */
 export interface TransferParams {
@@ -39,6 +39,37 @@ export interface PreparedTransaction {
   txBytes: Buffer;
   /** Protocol expiry (unix seconds): the node refuses inclusion after it. */
   expirationTimestamp: bigint;
+  /**
+   * The `transfer_to_private` partial-note randomness (`0x` + 64 lowercase
+   * hex) that opens this transaction's partial-note commitment for the
+   * recipient. Journaled with the bytes; never logged.
+   */
+  partialNoteRandomness: string;
+}
+
+/** Journaled bytes plus what a resend re-verifies them against. */
+export interface JournaledTransfer extends TransferParams {
+  txBytes: Buffer;
+  partialNoteRandomness: string;
+}
+
+/**
+ * The proven payout's partial-note randomness could not be resolved, so the
+ * transaction was not broadcast (xochi-fi/pxe-bridge#78). `detail` says which
+ * check failed; it never carries a value.
+ *
+ * - `no_commitment`: no unique `_finalize_transfer_to_private_unsafe` call
+ *   with the payout's `from` and `amount`.
+ * - `no_match`: no captured value opens the commitment for the recipient.
+ * - `ambiguous`: more than one does.
+ * - `mismatch`: journaled randomness does not open the journaled bytes'
+ *   commitment.
+ */
+export class PartialNoteUnresolved extends Error {
+  constructor(readonly detail: "no_commitment" | "no_match" | "ambiguous" | "mismatch") {
+    super(`partial-note randomness unresolved (${detail}); nothing was broadcast`);
+    this.name = "PartialNoteUnresolved";
+  }
 }
 
 /**
@@ -152,15 +183,20 @@ export interface IAztecClient {
   /**
    * Proves a transfer and broadcasts it through `gate`. Everything thrown
    * before `gate.beforeBroadcast` resolves happened before the network saw
-   * anything; the caller tracks which side of the gate a failure is on.
+   * anything; the caller tracks which side of the gate a failure is on. The
+   * gate sees the proven transaction with its partial-note randomness; a
+   * proof whose randomness cannot be resolved throws `PartialNoteUnresolved`
+   * before the gate.
    */
   createNote(params: TransferParams, gate: BroadcastGate): Promise<TransferOutcome>;
   /**
    * Broadcasts journaled bytes exactly as prepared, through `gate`. Never
    * rebuilds or re-proves: the same bytes carry the same transaction hash and
-   * nullifiers, so they can be included at most once.
+   * nullifiers, so they can be included at most once. Refuses, before the
+   * gate, bytes whose partial-note commitment the journaled randomness does
+   * not open for the journaled recipient (`PartialNoteUnresolved`).
    */
-  broadcastPrepared(txBytes: Buffer, gate: BroadcastGate): Promise<TransferOutcome>;
+  broadcastPrepared(prepared: JournaledTransfer, gate: BroadcastGate): Promise<TransferOutcome>;
   /**
    * Read-only: what the node currently says about `txHash`. `signal` aborts
    * the node read itself, not only the wait for it.

@@ -1,7 +1,8 @@
 /**
- * Canonical `pxe-bridge.settlement.v1` request vector, generated here in
- * TypeScript from the bridge's own schema and fingerprint (decision D-C,
- * docs/settlement-operations.md "Frozen encodings").
+ * Canonical `pxe-bridge.settlement.v2` vector, generated here in TypeScript
+ * from the bridge's own schema, fingerprint and partial-note derivation
+ * (decision D-C, docs/settlement-operations.md "Frozen encodings" and
+ * "Partial-note randomness").
  *
  * The bridge is the PRODUCER of this vector: the fingerprint is bridge-owned,
  * so the expectation must come from the code that computes it, and a consumer
@@ -14,27 +15,45 @@
  * from what this builds, so a schema or fingerprint change cannot land
  * without the vector moving in the same commit.
  *
- * Every value is `@xochi/spec` 0.9.0 `conformance/shielded.json`'s
+ * Every request value is `@xochi/spec` 0.9.0 `conformance/shielded.json`'s
  * `recipientBinding` "baseline" vector (network fixture-a, corridor, Aztec
  * recipient/token, descriptor digest), so the request names the same
  * NetworkIdentity whose digest that file pins. The corridor values are spec
  * fixtures, NOT the rev 1 corridor: those are still open and are deployment
  * configuration (PXE_BRIDGE_SETTLEMENT_CORRIDOR), refused when absent.
+ *
+ * The finalized observation's payout account, randomness, first nullifier and
+ * note-hash position are the inputs of Riddler's
+ * `test/support/vectors/aztec_payment_proof.json`; its recipient and amount
+ * are this request's. Its effects are derived with the 6.0.0 hashes
+ * (src/partial-note.ts), so `Shielded.PaymentProof.recipient_paid?/2` holds
+ * over them for the request's terms.
  */
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { Fr } from "@aztec-labs/foundation/curves/bn254";
+import { AztecAddress } from "@aztec-labs/stdlib/aztec-address";
+import { DomainSeparator } from "@aztec-labs/constants";
 import { encodeAbiParameters, keccak256, stringToHex, type Hex } from "viem";
 import { MAY_BROADCAST_VERSION } from "../src/may-broadcast.js";
 import {
-  CreateNoteV1Schema,
+  NOTE_COMPLETION_LOG_TAG_SEPARATOR,
+  PARTIAL_NOTE_COMMITMENT_SEPARATOR,
+  TOKEN_BALANCES_SLOT,
+  payoutEvidence,
+} from "../src/partial-note.js";
+import {
+  CreateNoteSchema,
   SETTLEMENT_VERSION,
+  SETTLEMENT_VERSIONS_RETIRED,
   fingerprintTerms,
   termsFrom,
   type NetworkIdentity,
+  type Observation,
 } from "../src/settlement.js";
 
-export const VECTOR_PATH = resolve(import.meta.dirname, "../docs/vectors/settlement-v1.json");
+export const VECTOR_PATH = resolve(import.meta.dirname, "../docs/vectors/settlement-v2.json");
 
 /** §7, byte for byte as `@xochi/spec` `shielded.json` `networkIdentity.typeString`. */
 export const NETWORK_IDENTITY_TYPE_STRING =
@@ -153,29 +172,120 @@ const REFUSALS: { name: string; params: Record<string, unknown> }[] = [
   { name: "an unknown member", params: { ...PARAMS, chainId: 1 } },
 ];
 
-export function buildSettlementVectors(): Record<string, unknown> {
-  const parsed = CreateNoteV1Schema.parse(PARAMS);
+/**
+ * Riddler `aztec_payment_proof.json` inputs (generated from the 6.0.0
+ * runtime): the account that called `transfer_to_private`, the randomness,
+ * the transaction's first nullifier and the note's position.
+ */
+export const PAYOUT_FIXTURE = {
+  payoutAccount: "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+  partialNoteRandomness: "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+  firstNullifier: "0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+  noteHashIndex: 5,
+} as const;
+
+/** The request's payout, finalized, with the effects its randomness proves. */
+async function finalizedPayout(): Promise<{ observation: Observation; partialNote: Record<string, unknown> }> {
+  const evidence = await payoutEvidence({
+    token: AztecAddress.fromStringUnsafe(PARAMS.token),
+    recipient: AztecAddress.fromStringUnsafe(PARAMS.recipient),
+    payoutAccount: AztecAddress.fromStringUnsafe(PAYOUT_FIXTURE.payoutAccount),
+    amount: BigInt(PARAMS.amount),
+    randomness: Fr.fromString(PAYOUT_FIXTURE.partialNoteRandomness),
+  });
+  const uniqueNoteHash = (
+    await evidence.uniqueNoteHash(Fr.fromString(PAYOUT_FIXTURE.firstNullifier), PAYOUT_FIXTURE.noteHashIndex)
+  ).toString();
+  // The tx's other note hashes (fee and change notes) are uninterpreted
+  // evidence; fixed filler stands in for them.
+  const noteHashes = Array.from({ length: PAYOUT_FIXTURE.noteHashIndex }, (_, i) =>
+    "0x" + (i + 0x31).toString(16).repeat(32),
+  );
+  noteHashes.push(uniqueNoteHash);
+  const observation: Observation = {
+    state: "finalized",
+    txHash: TX_HASH,
+    expirationTimestamp: "1900000000",
+    executionResult: "success",
+    blockHash: "0x" + "b1".repeat(32),
+    blockNumber: "4242",
+    receiptStatus: "finalized",
+    observedAt: 1899990000,
+    effects: {
+      state: "available",
+      noteHashes,
+      nullifiers: [PAYOUT_FIXTURE.firstNullifier, evidence.siloedValidityNullifier.toString()],
+    },
+    partialNoteRandomness: PAYOUT_FIXTURE.partialNoteRandomness,
+  };
+  return {
+    observation,
+    partialNote: {
+      note:
+        "Recompute from the signed recipient, token and amount, the payout account and " +
+        "observation.partialNoteRandomness; require uniqueNoteHash(i) in effects.noteHashes for some " +
+        "i < 64 and siloedValidityNullifier in effects.nullifiers (effects.nullifiers[0] is the " +
+        "nonce's first nullifier). Values are the @aztec-labs 6.0.0 hashes.",
+      formula: {
+        partialCommitment: "P2([recipient, partialNoteRandomness], DOM_SEP__PARTIAL_NOTE_COMMITMENT)",
+        noteHash: "P2([TOKEN_BALANCES_SLOT, partialCommitment, amount], DOM_SEP__NOTE_HASH)",
+        siloedNoteHash: "siloNoteHash(token, noteHash)",
+        uniqueNoteHash: "computeUniqueNoteHash(computeNoteHashNonce(effects.nullifiers[0], i), siloedNoteHash)",
+        siloedValidityNullifier:
+          "siloNullifier(token, P2([partialCommitment, payoutAccount], DOM_SEP__PARTIAL_NOTE_VALIDITY_COMMITMENT))",
+        completionLogTag: "P2([partialCommitment], DOM_SEP__NOTE_COMPLETION_LOG_TAG)",
+      },
+      constants: {
+        DOM_SEP__PARTIAL_NOTE_COMMITMENT: PARTIAL_NOTE_COMMITMENT_SEPARATOR,
+        DOM_SEP__NOTE_HASH: DomainSeparator.NOTE_HASH,
+        DOM_SEP__PARTIAL_NOTE_VALIDITY_COMMITMENT: DomainSeparator.PARTIAL_NOTE_VALIDITY_COMMITMENT,
+        DOM_SEP__NOTE_COMPLETION_LOG_TAG: NOTE_COMPLETION_LOG_TAG_SEPARATOR,
+        TOKEN_BALANCES_SLOT: Number(TOKEN_BALANCES_SLOT),
+      },
+      inputs: {
+        recipient: PARAMS.recipient,
+        token: PARAMS.token,
+        amount: PARAMS.amount,
+        payoutAccount: PAYOUT_FIXTURE.payoutAccount,
+        partialNoteRandomness: PAYOUT_FIXTURE.partialNoteRandomness,
+        firstNullifier: PAYOUT_FIXTURE.firstNullifier,
+        noteHashIndex: PAYOUT_FIXTURE.noteHashIndex,
+      },
+      partialCommitment: evidence.partialCommitment.toString(),
+      noteHash: evidence.noteHash.toString(),
+      siloedNoteHash: evidence.siloedNoteHash.toString(),
+      uniqueNoteHash,
+      siloedValidityNullifier: evidence.siloedValidityNullifier.toString(),
+      completionLogTag: evidence.completionLogTag.toString(),
+    },
+  };
+}
+
+export async function buildSettlementVectors(): Promise<Record<string, unknown>> {
+  const parsed = CreateNoteSchema.parse(PARAMS);
   const terms = termsFrom(parsed);
   const fingerprint = fingerprintTerms(terms);
   const shout = shouted(PARAMS);
-  if (fingerprintTerms(termsFrom(CreateNoteV1Schema.parse(shout))) !== fingerprint) {
+  if (fingerprintTerms(termsFrom(CreateNoteSchema.parse(shout))) !== fingerprint) {
     throw new Error("case changed the fingerprint");
   }
   for (const refusal of REFUSALS) {
-    if (CreateNoteV1Schema.safeParse(refusal.params).success) {
+    if (CreateNoteSchema.safeParse(refusal.params).success) {
       throw new Error(`refusal vector "${refusal.name}" is accepted`);
     }
   }
   if (networkIdentityDigest(SPEC_FIXTURE_A.network) !== SPEC_FIXTURE_A.networkIdentityDigest) {
     throw new Error("NetworkIdentity digest does not reproduce @xochi/spec fixture-a");
   }
+  const payout = await finalizedPayout();
   return {
-    version: 1,
+    version: 2,
     generator: "scripts/settlement-vectors.ts (npm run generate:settlement-vectors)",
     contract: SETTLEMENT_VERSION,
     source:
       "docs/settlement-operations.md; values from @xochi/spec 0.9.0 conformance/shielded.json " +
-      "recipientBinding \"baseline\" (network fixture-a)",
+      "recipientBinding \"baseline\" (network fixture-a); payout inputs from Riddler " +
+      "test/support/vectors/aztec_payment_proof.json",
     networkIdentity: {
       typeString: NETWORK_IDENTITY_TYPE_STRING,
       typehash: keccak256(stringToHex(NETWORK_IDENTITY_TYPE_STRING)),
@@ -202,6 +312,23 @@ export function buildSettlementVectors(): Record<string, unknown> {
         { name: "another JSON-RPC id", body: { jsonrpc: "2.0", id: "retry-7", method: "aztec_createNote" } },
       ],
       refusals: REFUSALS.map((r) => ({ ...r, error: { code: -32602 } })),
+      result: {
+        note:
+          "A finalized success for these terms. Every included/finalized/reverted observation carries " +
+          "partialNoteRandomness (0x + 64 lowercase hex, or null for an attempt journaled before v2); " +
+          "aztec_getSettlement answers the same observation.",
+        body: {
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            version: SETTLEMENT_VERSION,
+            operationId: OPERATION_ID,
+            fingerprint,
+            observation: payout.observation,
+          },
+        },
+      },
+      partialNote: payout.partialNote,
     },
     getSettlement: {
       body: {
@@ -211,6 +338,19 @@ export function buildSettlementVectors(): Record<string, unknown> {
         params: [{ version: SETTLEMENT_VERSION, operationId: OPERATION_ID }],
       },
     },
+    retiredVersions: SETTLEMENT_VERSIONS_RETIRED.map((retired) => ({
+      version: retired,
+      body: {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "aztec_getSettlement",
+        params: [{ version: retired, operationId: OPERATION_ID }],
+      },
+      error: {
+        code: -32602,
+        data: { reason: "settlement_version_unsupported", supported: SETTLEMENT_VERSION },
+      },
+    })),
     mayBroadcast: {
       request: {
         method: "POST",
@@ -232,11 +372,11 @@ export function buildSettlementVectors(): Record<string, unknown> {
   };
 }
 
-export function renderSettlementVectors(): string {
-  return JSON.stringify(buildSettlementVectors(), null, 2) + "\n";
+export async function renderSettlementVectors(): Promise<string> {
+  return JSON.stringify(await buildSettlementVectors(), null, 2) + "\n";
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  writeFileSync(VECTOR_PATH, renderSettlementVectors());
+  writeFileSync(VECTOR_PATH, await renderSettlementVectors());
   console.log(`wrote ${VECTOR_PATH}`);
 }

@@ -1,7 +1,13 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { AztecClient } from "../../src/aztec-client.js";
 import { ACCOUNT_ADDRESS_ENV, SCHNORR_CLASS_ID_6_0_0 } from "../../src/account-identity.js";
-import { getTestConfig, recordingGate, requireTestToken, walletDataDirectory } from "./helpers.js";
+import {
+  getTestConfig,
+  proveMinedPayout,
+  recordingGate,
+  requireTestToken,
+  walletDataDirectory,
+} from "./helpers.js";
 
 // Never deployed by this suite: the guard refuses before connect() reaches the
 // deploy, which is what the test below checks on the node.
@@ -111,6 +117,20 @@ describe("AztecClient (e2e)", () => {
         expect(result.observation.effects.nullifiers.length).toBeGreaterThan(0);
       }
       expect(await client.observeTx(result.txHash)).toMatchObject({ kind: "mined" });
+
+      // The plain Schnorr path captures the same randomness (#78).
+      const proof = await proveMinedPayout(config.nodeUrl, {
+        txHash: result.txHash,
+        token: requireTestToken(),
+        recipient: client.getAddress()!,
+        payoutAccount: client.getAddress()!,
+        amount: 1000n,
+        partialNoteRandomness: gate.seen[0]!.partialNoteRandomness,
+        txBytes: gate.seen[0]!.txBytes,
+      });
+      expect(proof.commitmentFromBytes).toBe(proof.partialCommitment);
+      expect(proof.noteHashes).toContain(proof.uniqueNoteHash);
+      expect(proof.nullifiers).toContain(proof.siloedValidityNullifier);
     });
 
     it("sends nothing when the gate refuses", async () => {

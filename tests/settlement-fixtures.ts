@@ -2,13 +2,15 @@ import { createHash } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-  BroadcastGate,
-  IAztecClient,
-  NodeNetwork,
-  PreparedTransaction,
-  TransferOutcome,
-  TransferParams,
+import {
+  PartialNoteUnresolved,
+  type BroadcastGate,
+  type IAztecClient,
+  type JournaledTransfer,
+  type NodeNetwork,
+  type PreparedTransaction,
+  type TransferOutcome,
+  type TransferParams,
 } from "../src/types.js";
 import type { AccountMode, CorridorConfig, NodeObservation } from "../src/settlement.js";
 import { SETTLEMENT_VERSION } from "../src/settlement.js";
@@ -45,8 +47,8 @@ export const CORRIDOR: CorridorConfig = {
  */
 export const VALID_UNTIL = Math.floor(Date.now() / 1000) + 3600;
 
-/** A valid `pxe-bridge.settlement.v1` createNote payload. */
-export function v1Params(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+/** A valid `pxe-bridge.settlement.v2` createNote payload. */
+export function settlementParams(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     version: SETTLEMENT_VERSION,
     operationId: "op-1",
@@ -203,6 +205,8 @@ export function settlementContext(
  *
  * - `land`: gate, then the "node" includes the transaction.
  * - `fail_before_gate`: proving fails; the gate never runs.
+ * - `unresolved_randomness`: the proof is made, but no captured value opens
+ *   its partial-note commitment; the gate never runs.
  * - `lose_response`: gate, inclusion, then the call throws (the response is
  *   lost after the broadcast).
  * - `die_after_mark`: gate passes, then the call throws WITHOUT reaching the
@@ -212,6 +216,7 @@ export function settlementContext(
 export type FakeBehaviour =
   | "land"
   | "fail_before_gate"
+  | "unresolved_randomness"
   | "lose_response"
   | "die_after_mark"
   | "hang_after_broadcast";
@@ -245,14 +250,29 @@ export class FakeAztecClient implements IAztecClient {
   async createNote(params: TransferParams, gate: BroadcastGate): Promise<TransferOutcome> {
     if (this.behaviour === "fail_before_gate") throw new Error("simulation failed");
     this.proofs += 1;
+    if (this.behaviour === "unresolved_randomness") throw new PartialNoteUnresolved("no_match");
     const tx = this.prepare(params, this.proofs);
     return this.send(tx, gate);
   }
 
-  async broadcastPrepared(txBytes: Buffer, gate: BroadcastGate): Promise<TransferOutcome> {
-    const decoded = JSON.parse(txBytes.toString("utf8")) as { txHash: string; expiration: string };
+  /**
+   * As AztecClient: the journaled randomness must open the bytes' commitment
+   * (here: equal the randomness the bytes were proven with) before the gate.
+   */
+  async broadcastPrepared(journaled: JournaledTransfer, gate: BroadcastGate): Promise<TransferOutcome> {
+    const decoded = JSON.parse(journaled.txBytes.toString("utf8")) as {
+      txHash: string;
+      expiration: string;
+      randomness: string;
+    };
+    if (decoded.randomness !== journaled.partialNoteRandomness) throw new PartialNoteUnresolved("mismatch");
     return this.send(
-      { txHash: decoded.txHash, txBytes, expirationTimestamp: BigInt(decoded.expiration) },
+      {
+        txHash: decoded.txHash,
+        txBytes: journaled.txBytes,
+        expirationTimestamp: BigInt(decoded.expiration),
+        partialNoteRandomness: journaled.partialNoteRandomness,
+      },
       gate,
     );
   }
@@ -310,10 +330,14 @@ export class FakeAztecClient implements IAztecClient {
         .update(`${params.recipient}|${params.token}|${params.amount}|${proof}|${Math.random()}`)
         .digest("hex");
     const expiration = this.expiration.toString();
+    // Each proof draws its own randomness, bound into its bytes as the real
+    // commitment binds it into the transaction.
+    const randomness = "0x" + createHash("sha256").update(`randomness|${txHash}`).digest("hex");
     return {
       txHash,
-      txBytes: Buffer.from(JSON.stringify({ txHash, expiration })),
+      txBytes: Buffer.from(JSON.stringify({ txHash, expiration, randomness })),
       expirationTimestamp: this.expiration,
+      partialNoteRandomness: randomness,
     };
   }
 
