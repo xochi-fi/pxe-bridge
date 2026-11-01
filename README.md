@@ -105,7 +105,7 @@ The variables most deployments set. The complete table is in
 | `GET /status` | none | Process liveness only; point container restarts here, never at `/ready` |
 | `POST /admin/resume` | `PXE_BRIDGE_ADMIN_KEY` | Clear the rolling-limit circuit breaker |
 
-`aztec_createNote` takes the versioned `pxe-bridge.settlement.v1` payload and
+`aztec_createNote` takes the versioned `pxe-bridge.settlement.v2` payload and
 requires an `Idempotency-Key` equal to its `operationId`; legacy
 `{recipient, token, amount, chainId}` params are refused. Methods, error codes,
 observations, readiness and attestations:

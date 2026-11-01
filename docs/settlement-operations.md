@@ -1,4 +1,4 @@
-# Settlement operation contract (`pxe-bridge.settlement.v1`)
+# Settlement operation contract (`pxe-bridge.settlement.v2`)
 
 xochi-fi/pxe-bridge#45 and #46; consumer axol-io/Riddler#1351 (tracker issue
 1356). Decisions: xochi `docs/planning/shielded-execution.md` §7 "Decided
@@ -7,13 +7,32 @@ store, versioned payload, bridge-owned fingerprint, may-broadcast query), and
 the 2026-10-27 integrator decisions D-A (single-use may-broadcast), D-B
 (legacy migration) and D-C (term encodings), recorded where each applies
 below. Issue #46 adds the finalized-only hard-readiness gate described under
-Deployment.
+Deployment. Issue #78 (v2) adds the partial-note randomness to every mined
+observation ("Partial-note randomness" below).
+
+## Versions
+
+| Version | Change | Status |
+| --- | --- | --- |
+| `pxe-bridge.settlement.v1` | #45 | retired: both methods answer `-32602`, `data {reason: "settlement_version_unsupported", supported: "pxe-bridge.settlement.v2"}` |
+| `pxe-bridge.settlement.v2` | #78: mined observations carry `partialNoteRandomness` | current |
+
+The request shape, its encodings and the fingerprint (still domain
+`pxe-bridge/settlement-fingerprint/v1`) are unchanged in v2, so an operation
+journaled under v1 keeps its fingerprint and is answered under v2. The version
+moved, rather than the member being added to v1, because a v1 consumer that
+does not read `partialNoteRandomness` must not go on treating a payout as
+proven without it. **Riddler** moves `Settlement.AztecRpc`'s `@version` to v2,
+re-vendors `docs/vectors/settlement-v2.json` byte for byte (it replaces
+`settlement-v1.json`), and requires a non-null `partialNoteRandomness` before
+it treats a finalized success as delivered (its `PaymentProof.recipient_paid?/2`
+over each domain's effects); `null` holds the obligation.
 
 ## Methods
 
 | Method | Params | Answer |
 | --- | --- | --- |
-| `aztec_createNote` | one object: `version: "pxe-bridge.settlement.v1"`, `operationId` (1-128 printable ASCII, MUST equal the `Idempotency-Key` header), `network` (§7 `NetworkIdentity`), `corridor {corridorId, corridorRevision, manifestDigest}`, `accountMode` (`spending_limit` \| `standard`), `recipient`, `recipientDescriptorDigest`, `token`, `amount`, `validUntil` (unix seconds). Encodings: "Frozen encodings" below. Unknown keys refused. | `result {version, operationId, fingerprint, observation}` for `pending`/`included`/`finalized`/`reverted`; otherwise a JSON-RPC error below. |
+| `aztec_createNote` | one object: `version: "pxe-bridge.settlement.v2"`, `operationId` (1-128 printable ASCII, MUST equal the `Idempotency-Key` header), `network` (§7 `NetworkIdentity`), `corridor {corridorId, corridorRevision, manifestDigest}`, `accountMode` (`spending_limit` \| `standard`), `recipient`, `recipientDescriptorDigest`, `token`, `amount`, `validUntil` (unix seconds). Encodings: "Frozen encodings" below. Unknown keys refused. | `result {version, operationId, fingerprint, observation}` for `pending`/`included`/`finalized`/`reverted`; otherwise a JSON-RPC error below. |
 | `aztec_getSettlement` | `{version, operationId}` | `result {version, operationId, found, fingerprint?, terms?, state?, attempts?: [{attempt, txHash, expirationTimestamp, mayBroadcast}], observation, journal {writable, reason?, detail?}}`. Read-only; served while journal writes are disabled. `found: false` answers `observation {state: "unknown", reason: "operation_not_journaled"}`: absence never means "no payout". |
 
 Send `aztec_getSettlement` to `POST /api/recovery` with Bearer
@@ -61,12 +80,12 @@ createNote (`corridor_unconfigured`, and `/ready` is 503); a request naming
 any other corridor is `corridor_mismatch`, another network digest
 `network_mismatch`, both before anything is prepared.
 
-### Canonical request vector
+### Canonical vector
 
-`docs/vectors/settlement-v1.json`, generated in TypeScript by
+`docs/vectors/settlement-v2.json`, generated in TypeScript by
 `scripts/settlement-vectors.ts` (`npm run generate:settlement-vectors`) from
-the bridge's own schema and fingerprint, and checked by
-`tests/settlement-vectors.test.ts` (the committed file must equal the
+the bridge's own schema, fingerprint and partial-note derivation, and checked
+by `tests/settlement-vectors.test.ts` (the committed file must equal the
 generator's output). The bridge is the producer: Riddler vendors the file and
 checks `Settlement.AztecRpc`'s request builder against it; never compute the
 expectation on the consumer side, and never hand-edit the JSON. It holds:
@@ -79,17 +98,25 @@ expectation on the consumer side, and never hand-edit the JSON. It holds:
 - inputs that keep the fingerprint (uppercase hex, another envelope id) and
   single-change refusals (zero chain id, scalar at r, EVM-width recipient,
   JSON-number amount, unknown member, ...);
+- `createNote.result`: a finalized success for those terms, its
+  `partialNoteRandomness` and effects, and `createNote.partialNote`: the
+  formulas, separators, inputs and every intermediate value (commitment, note
+  hash, siloed and unique note hash, validity nullifier, completion log tag)
+  that prove it. The payout account, randomness, first nullifier and note
+  position are Riddler's `aztec_payment_proof.json` inputs, and the
+  recipient-and-amount-only values reproduce that file's;
+- `retiredVersions`: the refusal a v1 request gets;
 - the may-broadcast query the bridge sends for it, the one answer that marks
   and answers that hold.
 
-Its values are the spec's `recipientBinding` "baseline" fixtures, not a real
-corridor.
+Its request values are the spec's `recipientBinding` "baseline" fixtures, not
+a real corridor.
 
 ## Error codes
 
 | Code | Name | Meaning | `data` |
 | --- | --- | --- | --- |
-| -32602 | invalid params | schema, legacy params, `Idempotency-Key != operationId` | `reason?` |
+| -32602 | invalid params | schema, legacy params, `Idempotency-Key != operationId`, a retired contract version | `reason?` (`legacy_params_refused`, `operation_id_mismatch`, `settlement_version_unsupported` with `supported`) |
 | -32001 | request_in_flight | this operation is being driven now; wait and read | `operationId, fingerprint, observation {state: "request_in_flight"}` |
 | -32002 | submitted_unknown | may-broadcast was marked; outcome unknown. Never resend; read `aztec_getSettlement` | `operationId, fingerprint, txHash?, observation` |
 | -32003 | operation_conflict | same `operationId`, different fingerprint; no work done | `operationId, fingerprint, storedFingerprint` |
@@ -106,12 +133,14 @@ corridor.
 | `request_in_flight` | maybe | -- | wait, then read |
 | `submitted_unknown` | maybe | `txHash, expirationTimestamp, reason` (`post_mark_failure`, `response_deadline`, `node_reports_dropped_or_unknown`, `node_read_failed`, `validity_bound_passed`, `expiration_passed`) | hold and reconcile; never replay it. Absence from one node is not proof that the transaction never reached another node or an earlier fork |
 | `pending` | yes | `txHash, expirationTimestamp` | wait |
-| `included` | yes | `txHash, expirationTimestamp, executionResult: success, blockHash, blockNumber, receiptStatus (proposed\|checkpointed\|proven), observedAt, effects {state, noteHashes, nullifiers}` | non-terminal; wait for `finalized` |
+| `included` | yes | `txHash, expirationTimestamp, executionResult: success, blockHash, blockNumber, receiptStatus (proposed\|checkpointed\|proven), observedAt, effects {state, noteHashes, nullifiers}, partialNoteRandomness` | non-terminal; wait for `finalized` |
 | `finalized` | yes | as `included`, `receiptStatus: finalized` (durably recorded) | delivery evidence (never "completed" alone) |
 | `reverted` | yes, reverted | as `included`, `executionResult: reverted`; terminal only at `receiptStatus: finalized` | no payout only at finalized |
 | `unknown` | maybe | `reason` | hold |
 
-Effects are uninterpreted evidence: no element is "the" recipient note.
+Effects are uninterpreted evidence: no element is "the" recipient note. Which
+element pays the signed recipient is proven by `partialNoteRandomness` (below),
+never asserted by the bridge.
 
 `not_submitted` reasons include the admission refusals (`corridor_mismatch`,
 `network_mismatch`, `account_mode_mismatch`, `token_mismatch`,
@@ -120,8 +149,9 @@ Effects are uninterpreted evidence: no element is "the" recipient note.
 (the prepared transaction's protocol expiration passed BEFORE Riddler was
 asked; retryable, a retry proves a fresh attempt), `expired_after_allow` (it
 passed after Riddler answered `allow` and before the mark; NOT retryable, see
-below), `prepare_failed`, and `response_deadline` (the request deadline passed
-before anything was prepared; retry the same operation).
+below), `partial_note_randomness_unresolved` (NOT retryable, see "Partial-note
+randomness"), `prepare_failed`, and `response_deadline` (the request deadline
+passed before anything was prepared; retry the same operation).
 
 **`expired_after_allow` is terminal for the operation id.** Riddler's `allow`
 durably bound that txHash (D-A). The attempt was never marked, so it provably
@@ -146,6 +176,67 @@ requote under a NEW operation id; a retry of the old id answers the same
    was marked.
 
 Earlier checks (admission, resume) only save work.
+
+## Partial-note randomness
+
+`Token.transfer_to_private(to, amount)` (`@aztec-labs` 6.0.0) hides the
+recipient in a partial-note commitment and enqueues
+`_finalize_transfer_to_private_unsafe(from, amount, C)`:
+
+```
+C = P2([to, r], 568912195)                                   DOM_SEP__PARTIAL_NOTE_COMMITMENT
+N = P2([3, C, amount], DOM_SEP__NOTE_HASH)                   3 = Token.balances slot
+S = siloNoteHash(token, N)
+U = computeUniqueNoteHash(computeNoteHashNonce(nullifiers[0], i), S), some i < 64
+validity nullifier = siloNullifier(token, P2([C, from], DOM_SEP__PARTIAL_NOTE_VALIDITY_COMMITMENT))
+completion log (token, public) = [P2([C], 3372669888), 3, amount]
+```
+
+`r` is drawn by the sending PXE's `aztec_misc_getRandomField` oracle and kept
+nowhere: the token returns nothing, the partial note never reaches the
+sender's note store, and the only other copy is encrypted to `to`. Every mined
+observation (`included`, `finalized`, `reverted`) therefore carries it as
+`partialNoteRandomness` (`0x` + 64 lowercase hex). With it, anyone holding the
+signed `(to, token, amount)` and the payout account (`from`, the bridge
+account) recomputes `U` and the validity nullifier and requires them among the
+effects. A Poseidon2 opening of `C` to another recipient is infeasible, so a
+bridge that paid a different allowlisted recipient cannot pass. `r` lets its
+holder confirm which recipient a note pays, which Riddler already knows; it is
+never logged, audited or metered, and appears in no error message.
+
+**Capture.** While `createNote` proves the transfer, every value the oracle
+returns is recorded into an AsyncLocalStorage scope opened around that one
+send (`src/partial-note.ts`): `UtilityExecutionOracle.prototype.getRandomField`
+(which `PrivateExecutionOracle` inherits) is wrapped once per process, and the
+wallet's PXE operation queue is bound so a queued simulation or proof runs in
+the async context of the send that queued it. The simulation, the proof and
+the note message's encryption draw separate values; after proving, the bridge
+reads `C` from the proven transaction's one
+`_finalize_transfer_to_private_unsafe` call on the token (with the payout's
+own `from` and `amount`) and selects the one captured value with
+`P2([recipient, r]) == C`. None or more than one: nothing is journaled or
+sent, and the operation is `not_submitted`,
+`partial_note_randomness_unresolved`, not retryable (another proof of the same
+terms would fail the same check: requote under a new operation id, and treat
+it as an SDK incompatibility).
+
+**Journal before broadcast.** `r` is written in the same SQLite transaction
+as the prepared bytes (journal schema 3), so no attempt is journaled without
+it, and a crash between prepare and broadcast keeps it: the resend never
+re-proves. Before a resend the client re-derives `C` from the journaled bytes
+and refuses (`partial_note_randomness_unresolved`, nothing sent) unless the
+journaled `r` opens it for the journaled recipient.
+
+**Attempts journaled before v2** have no `r` (`NULL` after the schema 3
+migration), and none is ever inferred for them:
+
+- an unmarked one is never sent. Like an expired attempt, it is replaced by a
+  fresh proof under the same operation; if Riddler had already bound its hash,
+  the new hash is denied and the operation held `prepared`, never paid twice;
+- a marked one (it may have broadcast) is observation-only as before, and its
+  mined observations carry `partialNoteRandomness: null`, as does a terminal
+  observation recorded before v2. Such a payout cannot be proven: Riddler
+  holds it.
 
 ## Fingerprint
 
@@ -256,7 +347,10 @@ that got a 504 reads `aztec_getSettlement` and retries the same operation.
 SQLite via better-sqlite3, `synchronous=FULL`, rollback journal,
 `locking_mode=EXCLUSIVE` taken by a write at open: a second process on the same
 file refuses to start. Operations and attempts are never pruned; spend rows are
-a separate table.
+a separate table. Schema 3 (#78) adds each attempt's partial-note randomness,
+written with its bytes; schema 1 and 2 journals migrate in one transaction at
+open, their attempts keeping `NULL` (see "Partial-note randomness"). A stored
+value that is not `0x` + 64 lowercase hex is `journal_inconsistent`.
 
 **Permissions.** The journal holds signed transaction bytes from before the
 may-broadcast query, so anyone who can read it can submit them. At open the
