@@ -26,11 +26,14 @@ solvers have no PXE. pxe-bridge embeds one behind a JSON-RPC interface: the
 solver asks for a shielded note, and the bridge proves, sends and journals the
 transfer.
 
-> **What "shielded" covers.** The note's owner and randomness are private. The
-> transfer **amount and sender are public** in both account modes, and
-> recipient privacy is **not** delivered today: PXE's default tagging
-> handshake publishes a tag any holder of the recipient's address can match.
-> Details and Aztec 6.0.0 sources: [SECURITY.md](SECURITY.md#what-is-public).
+> **What "shielded" covers.** The note's owner and randomness are private, and
+> so is the recipient: the bridge tags each note with a secret derived from its
+> own and the recipient's address keys, so nothing published can be matched
+> against the recipient's address. The recipient's wallet finds the note after
+> registering the bridge account as a sender (`registerSender`). Recipients the
+> bridge paid before this keep the handshake tag their first transfer
+> published. The transfer **amount and sender are public** in both account
+> modes. Details and Aztec 6.0.0 sources: [SECURITY.md](SECURITY.md#what-is-public).
 
 ## Quick start
 

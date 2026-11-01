@@ -200,9 +200,9 @@ constructor's enqueued initializer has not been mined yet.
 Combined with the rest of this change set:
 
 - Recipient allowlist: enforced, but `check_spending_public` receives neither
-  the recipient nor the set. (The transaction is not recipient-blind: a
-  transfer to a recipient the bridge has no landed handshake with publishes a
-  recipient-keyed handshake tag; see "What is public".) Membership is proven in
+  the recipient nor the set. (Recipients first paid before the bridge installed
+  address-derived tagging keep the recipient-keyed handshake tag that first
+  transfer published; see "What is public".) Membership is proven in
   private against a Merkle root, and public asserts only that the proven root
   equals the stored one. That
   equality is evaluated at inclusion time, which is what lets a revocation
@@ -380,8 +380,9 @@ arguments are part of the transaction. Every transfer therefore publishes:
 - **The token.** Pinned at construction and visible as the call target.
 - **The allowlist root**, and the fact that a transfer proved membership against
   it. The contract's public calls carry neither the recipient nor the set.
-- **A recipient-keyed handshake tag**, on the first transfer to each recipient
-  and any proven before that one lands, in either account mode. See below.
+- **For recipients first paid before address-derived tagging, a
+  recipient-keyed handshake tag**, published by that first transfer in either
+  account mode. Recipients first paid since publish none. See below.
 
 This is inherent to checking a value against public storage and is not
 remediated for the amount. Enforcing that privately would mean nullifier-based
@@ -408,24 +409,41 @@ the wallet's `resolveTaggingSecretStrategy` hook for a tagging strategy
 Without a hook PXE uses `non-interactive-handshake`, which "reveals the
 recipient onchain"
 ([`resolve_tagging_secret_strategy.ts:9-17, 42-43`](https://github.com/aztec-labs-eng/aztec-node/blob/v6.0.0/yarn-project/pxe/src/hooks/resolve_tagging_secret_strategy.ts#L9-L43)).
-This bridge's `EmbeddedWallet` is created with no hooks
-([`src/aztec-client.ts`](src/aztec-client.ts)), so every transfer proven while
-the bridge account has no landed handshake with the recipient (the first to
-each recipient, plus any proven before that one lands, since the lookup reads
-committed state only:
+Until address-derived tagging, this bridge's `EmbeddedWallet` had no hooks, so
+every transfer proven while the bridge account had no landed handshake with
+the recipient (the first to each recipient, plus any proven before that one
+landed, since the lookup reads committed state only:
 [`handshake.nr:115-124`](https://github.com/aztec-labs-eng/aztec-node/blob/v6.0.0/noir-projects/aztec-nr/aztec/src/messages/delivery/handshake.nr#L115-L124))
-calls the HandshakeRegistry's `non_interactive_handshake`, which publishes a
+called the HandshakeRegistry's `non_interactive_handshake`, which publishes a
 log tagged by a fixed hash of the recipient's address
 ([`handshake_registry_contract/src/main.nr:75-94`](https://github.com/aztec-labs-eng/aztec-node/blob/v6.0.0/noir-projects/noir-contracts/contracts/standard/handshake_registry_contract/src/main.nr#L75-L94)).
 The address is not in clear, but anyone holding a candidate address can confirm
 that the bridge account, named as `from` in the same transaction, paid it, and
-the number of distinct tags counts the recipients paid. The tag is visible once
-the transaction is broadcast, whether or not it lands. Later transfers reuse
-the handshake and are not linkable to the recipient. Recipient privacy is
-**not** delivered today. The
-`interactive-handshake` strategy reveals nothing about the recipient onchain but
-needs the recipient to answer the handshake registry's request. The allowlist
-design below keeps the recipient out of the bridge's own public calls only.
+the number of distinct tags counts the recipients paid. Those tags stay on
+chain: recipients paid that way remain confirmable, and later transfers to
+them reuse the handshake.
+
+The bridge now installs a `resolveTaggingSecretStrategy` hook
+(`bridgeTaggingSecretStrategy` in [`src/aztec-client.ts`](src/aztec-client.ts))
+that returns `address-derived` for unconstrained delivery: PXE derives the
+tagging secret from the bridge's and the recipient's address keys, so no
+published tag can be computed from the recipient's address alone. It never
+returns the non-interactive handshake for another account, and refuses
+constrained delivery to one before the transaction is sent.
+`tests/e2e/recipient-privacy.test.ts` checks both sides on a sandbox: after a
+bridge transfer the registry's `get_non_interactive_handshakes` finds no
+handshake for the recipient, while the same transfer from a wallet without
+the hook publishes one. Recipient privacy holds for recipients first paid with
+the hook in place (xochi shielded-execution D4, amended 2026-11-01).
+
+The cost is discovery. Address-derived delivery is unconstrained, so inclusion
+does not prove the recipient can find the note, and a recipient finds it only
+after registering the bridge account as a sender
+(`registerSender(<bridge account address>)`, which is
+`registerTaggingSecretSource({kind: "address-derived"})`). The e2e test shows
+the recipient's balance at zero before registration and credited after it;
+registering late re-discovers earlier notes on the next sync. The allowlist
+design below keeps the recipient out of the bridge's own public calls.
 
 The recipient is a different story since NM-1019 [Medium]. The array design
 published a candidate set of up to eight addresses per transfer, and the set was
@@ -455,10 +473,11 @@ without the seed; see "An attacker holding the admin key". Tracked in #32.
 
 Anonymity is still bounded by how many recipients are actually allowlisted. A
 tree removes the mechanism's ceiling; it does not supply recipients. Run with
-three and the set is three. The tree keeps the number allowlisted off chain,
-but not the number paid: each paid recipient has a distinct handshake tag on
-chain (see above), so how many recipients the bridge has paid is public, and
-each one is confirmable by anyone holding its address.
+three and the set is three. The tree keeps the number allowlisted off chain.
+Recipients first paid before address-derived tagging each have a distinct
+handshake tag on chain (see above), so how many of them the bridge paid is
+public and each is confirmable by anyone holding its address; recipients
+first paid since add no tag.
 
 ## Losing the allowlist
 
@@ -479,8 +498,8 @@ is unrecoverable -- and this is one more.
 The seed is a secret, but a weaker one than the signing key: holding it lets
 someone test a candidate address against a leaf, which costs membership
 privacy for allowlisted recipients the bridge has not yet paid, and which
-position each occupies, not custody. Paid recipients are confirmable from their
-handshake tags without it; see [What is public](#what-is-public). It is warned
+position each occupies, not custody. Recipients paid before address-derived
+tagging are confirmable from their handshake tags without it; see [What is public](#what-is-public). It is warned
 about rather than refused when read from the environment in production.
 
 The bridge checks its copy against the chain before every send, via
