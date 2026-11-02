@@ -10,5 +10,8 @@
     "noEmit": true,
     "rootDir": "."
   },
-  "include": ["src/**/*", "tests/**/*", "scripts/**/*.ts"]
+  "include": ["src/**/*", "tests/**/*", "scripts/**/*.ts"],
+  "exclude": ["node_modules", "dist", "src/oxide/vendor"],
+  // Not inherited through `extends`.
+  "references": [{ "path": "src/oxide/vendor" }]
 }
