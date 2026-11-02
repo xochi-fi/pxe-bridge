@@ -1,0 +1,248 @@
+{
+    "schemaVersion": "5",
+    "deployments": [
+        {
+            "deploymentId": "dep-v6",
+            "deploymentType": "oxide-app",
+            "gitSha": "3d8e29dc359023012a91d75538ed757dc9add937",
+            "deployedAt": "2026-10-26T14:17:20.299Z",
+            "updatedAt": "2026-10-29T13:31:03.698Z",
+            "chainId": "1",
+            "rollupVersion": "2070860440",
+            "teeRegistry": "0x8b705c3519169f29850d156574ec377b686bd9cd",
+            "portalFactory": "0xceae64c7211a2208affc4f396add1d46996cd2a2",
+            "certManager": "0xe3dddf3d4b624f49b4ceb81807338cca14f5dd86",
+            "nitroValidator": "0x13114c5c847a414d20755dbc2ecbe00cc98039df",
+            "pcr0": "4d28e5b10f51d67b1383f1cf738b567fe9e19efa6043d8470a5dad299d2e30c9e76e7493c0df7bb5e9c2cc2156348b73",
+            "enclaveUrl": "https://flt-v6.v6-prod.oxide.zk.money/rpc",
+            "bridges": [
+                {
+                    "key": "dai",
+                    "bridgeId": "brg-dai-v6",
+                    "deployedAtBlock": "26276712",
+                    "token": "0x6b175474e89094c44da98b954eedeac495271d0f",
+                    "underlying": "0x6b175474e89094c44da98b954eedeac495271d0f",
+                    "portal": "0xCB99C58Fe81Ae6b2cB4835e46F7b703745879042",
+                    "l2Token": "0x11d2bed21a36289fd6f6a6af93a546b5be7115caf957f0f700f42d56e25fe0a3",
+                    "l2TokenImmutables": {
+                        "portal": "0xCB99C58Fe81Ae6b2cB4835e46F7b703745879042",
+                        "teeRegistry": "0x8b705c3519169f29850d156574ec377b686bd9cd",
+                        "name": "Oxide DAI",
+                        "symbol": "OXDAI",
+                        "decimals": 18,
+                        "maxNoteAmount": "5166000000000000000000"
+                    },
+                    "fpcFunder": "0x88ef976262bf715a3b0d24146fc3bb1b18464e61",
+                    "fpcBeneficiary": "0x15cd6b14759b315baf74cd8f5934fa951ad9a2336e2968038835e84e1261612b",
+                    "fpcBeneficiarySalt": "0x08ca18cb71b040d6133b7f1a476e7088ff26ef4b1b3911e05250855fc419dd6b",
+                    "proverSubsidy": "0x2664c45cb6d85ae979f455067675cf9b8bbdded7",
+                    "withdrawalSubsidy": "0xa53659a22e3d5b55d2301691A97f42ff663199D6",
+                    "plainWithdrawalExecutor": "0x7c8c2147d1bb8b83e0a0501097372de170ee702a",
+                    "firstProverProofSubmitter": "0x6e4e3dd6a405b5e615863344b9cc1453fdc303f9",
+                    "frozenNotesRefundVerifier": "0x880f3c8356a930522896a7c539157d4c87f95377",
+                    "frozenDepositsRefundVerifier": "0xa460c3130d1701a94f76d1122362c0d127f1c6a3",
+                    "unprocessedDepositRefundVerifier": "0xf15780eb45c49a7cb4fb0bf178d3daf0f1d68c8a",
+                    "frozenNotesRefundVkSha256": "7eb20a895fc3a75ace09796385d84e05f75228de0e5b838e13f5ee44a1e43772",
+                    "frozenDepositsRefundVkSha256": "071dc869b6946c05dae3402b7a7b62a37204c652fcb09507562186ace4ac2fcd",
+                    "unprocessedDepositRefundVkSha256": "15ad2311cf674596c077d20cdabed5220483103558f8071546c07fd40b411b37",
+                    "depositSubsidy": "0x971cafea2916dc6aa890450f5e0e79c31beedc45"
+                },
+                {
+                    "key": "susds",
+                    "bridgeId": "brg-susds-v6",
+                    "deployedAtBlock": "26276922",
+                    "token": "0xa3931d71877c0e7a3148cb7eb4463524fec27fbd",
+                    "underlying": "0xa3931d71877c0e7a3148cb7eb4463524fec27fbd",
+                    "portal": "0x2EbFEE284bABf94869FAC44BC85eDb3C34e536D8",
+                    "l2Token": "0x2905e147613fbf166db8a599524724b1fedce4d97caaf55a9d9b174ba2dc18ac",
+                    "l2TokenImmutables": {
+                        "portal": "0x2EbFEE284bABf94869FAC44BC85eDb3C34e536D8",
+                        "teeRegistry": "0x8b705c3519169f29850d156574ec377b686bd9cd",
+                        "name": "Oxide sUSDS",
+                        "symbol": "OXSUSDS",
+                        "decimals": 18,
+                        "maxNoteAmount": "5166000000000000000000"
+                    },
+                    "fpcFunder": "0x4a311a8dac3ab9553722e615472f70459b09de27",
+                    "fpcBeneficiary": "0x2474c467e9e903c372395fdcb6d3ad31b1f20b98e9dbd4f27497acdbcaeca643",
+                    "fpcBeneficiarySalt": "0x013e20cf438a03a1f7d94e3e641124b5b545b961d97c3b18ec1b27a05027a223",
+                    "proverSubsidy": "0x4d775fee553fe8dba8c1abf8be5bffa7566783e5",
+                    "withdrawalSubsidy": "0xfb249879D3C72e9CC7BB497e1e94b7FbC6b92d54",
+                    "plainWithdrawalExecutor": "0xd0d8e5c5b128ea7e5f2d461afd6c669bc0877df8",
+                    "firstProverProofSubmitter": "0x5d47e9bf7ae7e1b5559602ba8c68b6938f9f4aaf",
+                    "frozenNotesRefundVerifier": "0x880f3c8356a930522896a7c539157d4c87f95377",
+                    "frozenDepositsRefundVerifier": "0xa460c3130d1701a94f76d1122362c0d127f1c6a3",
+                    "unprocessedDepositRefundVerifier": "0xf15780eb45c49a7cb4fb0bf178d3daf0f1d68c8a",
+                    "frozenNotesRefundVkSha256": "7eb20a895fc3a75ace09796385d84e05f75228de0e5b838e13f5ee44a1e43772",
+                    "frozenDepositsRefundVkSha256": "071dc869b6946c05dae3402b7a7b62a37204c652fcb09507562186ace4ac2fcd",
+                    "unprocessedDepositRefundVkSha256": "15ad2311cf674596c077d20cdabed5220483103558f8071546c07fd40b411b37",
+                    "depositSubsidy": "0x5e10b9ae6ad4bc705d88e62dfbd6ea59d7b2b3e2"
+                }
+            ],
+            "features": {
+                "fea-across-v6": {
+                    "project": "across",
+                    "bridges": {
+                        "dai": "brg-dai-v6"
+                    },
+                    "contracts": {
+                        "acrossBridgeEscrowFactory": "0x482fcb714eb34075453a9e5954ebee9c85bc9142",
+                        "acrossBridgeEscrowFactoryImplementation": "0x49e5a38c822e22222d1c7a7445e73b33b484eff6"
+                    },
+                    "variables": {
+                        "acrossSpokePoolAddress": "0x5c7bcd6e7de5423a257d81b442095a1a6ced35c5",
+                        "acrossSpokePoolCodeHash": "0x932cddc50793da935ccf915651ad67f6b746e9936fcc5614f0ff492563782c75",
+                        "curveThreePoolAddress": "0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7",
+                        "curveThreePoolCodeHash": "0x954a1e212c557c85043985931498ffa3e2fcbe7dfe9cd61513f36eb47d6f4dfc",
+                        "daiCodeHash": "0x4e36f96ee1667a663dfaac57c4d185a0e369a3a217e0079d49620f34f85d1ac7",
+                        "usdcAddress": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                        "usdcCodeHash": "0xd80d4b7c890cb9d6a4893e6b52bc34b56b25335cb13716e0d1d31383e6b41505",
+                        "usdtAddress": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+                        "usdtCodeHash": "0xb44fb4e949d0f78f87f79ee46428f23a2a5713ce6fc6e0beb3dda78c2ac1ea55"
+                    }
+                },
+                "fea-cctp-v6": {
+                    "project": "cctp",
+                    "bridges": {
+                        "dai": "brg-dai-v6"
+                    },
+                    "contracts": {
+                        "cctpBridgeEscrowFactory": "0x447c04eef113fc686369de526206b53591d28e7d",
+                        "cctpBridgeEscrowFactoryImplementation": "0xe2ec3eba582226a58047470f75caeb8211513560"
+                    },
+                    "variables": {
+                        "cctpTokenMessengerAddress": "0x28b5a0e9c621a5badaa536219b3a228c8168cf5d",
+                        "cctpTokenMessengerCodeHash": "0xd2c8d48075d832fb7d07f6db5545a1bee37fdf886325c441a8dd1cef4c9dae99",
+                        "curveThreePoolAddress": "0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7",
+                        "curveThreePoolCodeHash": "0x954a1e212c557c85043985931498ffa3e2fcbe7dfe9cd61513f36eb47d6f4dfc",
+                        "daiCodeHash": "0x4e36f96ee1667a663dfaac57c4d185a0e369a3a217e0079d49620f34f85d1ac7",
+                        "hyperEvmCctpForwarderAddress": "0xb21d281dedb17ae5b501f6aa8256fe38c4e45757",
+                        "usdcAddress": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                        "usdcCodeHash": "0xd80d4b7c890cb9d6a4893e6b52bc34b56b25335cb13716e0d1d31383e6b41505"
+                    }
+                },
+                "fea-migdai-v6": {
+                    "project": "migration",
+                    "bridges": {
+                        "destination": "brg-dai-v6"
+                    },
+                    "contracts": {
+                        "migrationExecutor": "0x70e9c762b02ec645df4bc2456271805cba80126c",
+                        "migrationExecutorSubsidy": "0x2988ce414ca04787e081634793a3c09041829abf"
+                    },
+                    "variables": {
+                        "maxSubsidyPerOperation": "50000000000000000000",
+                        "minMigratedAmount": "1000000000000000",
+                        "operationExecutorCodeHash": "0x23c4ad752879b3280b11ccab3ddec004ade77eae41996a829101f3b678bb3ccc",
+                        "payoutToken": "0x6b175474e89094c44da98b954eedeac495271d0f",
+                        "payoutTokenCodeHash": "0x4e36f96ee1667a663dfaac57c4d185a0e369a3a217e0079d49620f34f85d1ac7",
+                        "priceFeed": "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419",
+                        "priceFeedCodeHash": "0x4b79b5c8aee6da0f7b393e8b53e6265ef7320a1d16184c65bd3841b5aa3d700d",
+                        "sourcePortal": "0xdf410ad448a0f7165181fbdb32f8896f4a0d9449",
+                        "sourcePortalCodeHash": "0xf59ba825b9bf7b6e1c4d4ba1504d327bc8b5b2ee1ca98f5de0dfc8e49a941bbe",
+                        "targetRelayerProfit": "50000000000000000"
+                    }
+                },
+                "fea-migsusds-v6": {
+                    "project": "migration",
+                    "bridges": {
+                        "destination": "brg-susds-v6"
+                    },
+                    "contracts": {
+                        "migrationExecutor": "0x92270578f3a311b3ced0019a4e15701e7405b4ae",
+                        "migrationExecutorSubsidy": "0x1cddb370320af73dd871f28193ff394d11e38453"
+                    },
+                    "variables": {
+                        "maxSubsidyPerOperation": "50000000000000000000",
+                        "minMigratedAmount": "1000000000000000",
+                        "operationExecutorCodeHash": "0x23c4ad752879b3280b11ccab3ddec004ade77eae41996a829101f3b678bb3ccc",
+                        "payoutToken": "0x6b175474e89094c44da98b954eedeac495271d0f",
+                        "payoutTokenCodeHash": "0x4e36f96ee1667a663dfaac57c4d185a0e369a3a217e0079d49620f34f85d1ac7",
+                        "priceFeed": "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419",
+                        "priceFeedCodeHash": "0x4b79b5c8aee6da0f7b393e8b53e6265ef7320a1d16184c65bd3841b5aa3d700d",
+                        "sourcePortal": "0xd7ae00b91ba0b8e0240b22cd75fe447d177c260f",
+                        "sourcePortalCodeHash": "0xc7dcc0a087218fd61f7a0fe7446b62e13eced2ef99537869be7ba5d9ab5c7ae5",
+                        "targetRelayerProfit": "50000000000000000"
+                    }
+                },
+                "fea-sky-v6": {
+                    "project": "sky",
+                    "bridges": {
+                        "dai": "brg-dai-v6",
+                        "sUsds": "brg-susds-v6"
+                    },
+                    "contracts": {
+                        "skyEscrowFactory": "0x7f890e5df3b4165d1ce4e9a42e97c44f1d7dcc09",
+                        "skyEscrowFactoryImplementation": "0xb61d97faf96ec8de617aaf54f4764d01cfd25b8b",
+                        "skyWithdrawalExecutor": "0xfe0b2b24cca52d1680103e258985a5aca33742d5",
+                        "skyWithdrawalExecutorSubsidy": "0xacb0900f218d5c4d0590dc82bab0fdfaa2459f35"
+                    },
+                    "variables": {
+                        "skyDaiAddress": "0x6b175474e89094c44da98b954eedeac495271d0f",
+                        "skyDaiCodeHash": "0x4e36f96ee1667a663dfaac57c4d185a0e369a3a217e0079d49620f34f85d1ac7",
+                        "skyDaiUsdsAddress": "0x3225737a9bbb6473cb4a45b7244aca2befdb276a",
+                        "skyDaiUsdsCodeHash": "0x33081b81d984b67f4030e6b6997c819a7d06e514fca11cf13bee083948a33103",
+                        "skySUsdsCodeHash": "0xa55c01da656c715cec222ea8fbd63256eb3ca6cbb7236071f2bcbff927f6e35b",
+                        "skyUsdsAddress": "0xdc035d45d973e3ec169d2276ddab16f1e407384f",
+                        "skyUsdsCodeHash": "0x13670c37dbba93ae2e7a2538198c3048a60f5fbd567e29ba8b45eed10e3e29f5",
+                        "withdrawalPriceFeedAddress": "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419",
+                        "withdrawalPriceFeedCodeHash": "0x4b79b5c8aee6da0f7b393e8b53e6265ef7320a1d16184c65bd3841b5aa3d700d"
+                    }
+                },
+                "fea-swap-v6": {
+                    "project": "swap",
+                    "bridges": {
+                        "dai": "brg-dai-v6"
+                    },
+                    "contracts": {
+                        "swapEscrowFactory": "0x8f4105a55c457d796adab90d5d9e649861e81625",
+                        "swapEscrowFactoryImplementation": "0xc953308e66da19881d8ddd240e6369db8ef72ab9"
+                    },
+                    "variables": {
+                        "curveThreePoolAddress": "0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7",
+                        "curveThreePoolCodeHash": "0x954a1e212c557c85043985931498ffa3e2fcbe7dfe9cd61513f36eb47d6f4dfc",
+                        "daiCodeHash": "0x4e36f96ee1667a663dfaac57c4d185a0e369a3a217e0079d49620f34f85d1ac7",
+                        "ethUsdFeedAddress": "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419",
+                        "ethUsdFeedCodeHash": "0x4b79b5c8aee6da0f7b393e8b53e6265ef7320a1d16184c65bd3841b5aa3d700d",
+                        "uniswapUniversalRouterAddress": "0x66a9893cc07d91d95644aedd05d03f95e1dba8af",
+                        "uniswapUniversalRouterCodeHash": "0x6a5f46971b50c6e1b7eef97902311444e479d734e4f80ad88367783cf373fe7f",
+                        "uniswapV2DaiWethPairAddress": "0xa478c2975ab1ea89e8196811f51a7b7ade33eb11",
+                        "uniswapV2DaiWethPairCodeHash": "0x5b83bdbcc56b2e630f2807bbadd2b0c21619108066b92a58de081261089e9ce5",
+                        "usdcAddress": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                        "usdcCodeHash": "0xd80d4b7c890cb9d6a4893e6b52bc34b56b25335cb13716e0d1d31383e6b41505",
+                        "usdtAddress": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+                        "usdtCodeHash": "0xb44fb4e949d0f78f87f79ee46428f23a2a5713ce6fc6e0beb3dda78c2ac1ea55",
+                        "wethAddress": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+                        "wethCodeHash": "0xd0a06b12ac47863b5c7be4185c2deaad1c61557033f56c7d4ea74429cbb25e23"
+                    }
+                }
+            },
+            "operationExecutor": "0x5ece3b4ebe7137b1b6f92406de17d9816d585c1c",
+            "l2Broadcaster": "0x1baa45197097c8c59887433f6b530c031b885002cb757ed8a9ecd0b8abf277f9",
+            "withdrawalProtocol": "l1-operation",
+            "nameRegistry": "0xa9863b8f573d62377d987ccb9af6e0000f99d14a",
+            "accountMetadataRegistry": "0xda79bae4485c40291363d885aae5b543d2d0efa9",
+            "registrationController": "0x45f626e2a4d63232677c96b163ac46e20514a915",
+            "namePortal": "0x158161b257f9bad34c12dd8d52638424b216c3a2",
+            "sipaFactory": "0x186c20f0f294378e1deca7419c667e44c73e992c",
+            "sipaRecoveryProtocol": "account",
+            "depositSIPAImplementation": "0xbfe3de3c4466cbc5803a756847208c69b3bae401",
+            "registrationSIPAImplementation": "0x96a52ed47af73423d4b8a920913e5c1cefdc1319",
+            "userOpSIPAImplementation": "0x5180f0659d021368cdf5c4499967b9a329c775a0",
+            "forwardingTable": "0xff839a8be7c90c804f42563f352324cebcdfe41c",
+            "feeToken": "0x6b175474e89094c44da98b954eedeac495271d0f",
+            "sipaResolver": "0xc329a74542688a3c4948b7d46f204d3d7e5dd525",
+            "resolverProofVerifier": "0x1e63715af06bb12331f6a319b46253713e4d0206",
+            "zkTranscriptLib": "0x428fa81b22aaf7c9acb9c73d114894886e3f7d4d",
+            "accountFactory": "0x187d19eccbf2909ad3d71b798a8704d950b9c3ee",
+            "entryPoint": "0x4337084D9E255Ff0702461CF8895CE9E3b5Ff108",
+            "paymaster": "0x0000000000000000000000000000000000000000",
+            "resolverGatewayUrl": "https://rop-v6.v6-prod.oxide.zk.money/{sender}/{data}.json",
+            "resolverOperator": "0x4748f1359c4dff0cfb7a36968c05cc314016b664",
+            "ensDomain": "zk.money",
+            "ensNode": "0xf605999a299a7229da9f2a3c65acf5cb829ae965cfe467f053e1b97c50b0eec2",
+            "accountServiceUrl": "",
+            "label": "dep-v6"
+        }
+    ]
+}
