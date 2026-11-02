@@ -39,7 +39,10 @@ function boot(path: string, c: ReturnType<typeof clock>, node = new FakeNode(), 
 const req = (_c: ReturnType<typeof clock>, operationId: string, amount: bigint) =>
   request({ operationId, amount: amount.toString(), validUntil: Math.floor(T0 / 1000) + 2 * 86_400 });
 
-describe("Oxide caps", () => {
+// Each send round-trips a real SQLite journal with synchronous=FULL; the
+// window tests do 10-12 of them, so they get headroom over the 5s default
+// when the whole suite runs in parallel.
+describe("Oxide caps", { timeout: 30_000 }, () => {
   it("defaults to 1,000 DAI per tx and 10,000 DAI per 24h, under the 5,166 DAI note max", () => {
     const caps = capsFromEnv({});
     expect(caps).toEqual({ maxPerTx: DEFAULT_MAX_PER_TX, dailyLimit: DEFAULT_DAILY_LIMIT, maxNoteAmount: NOTE_MAX });

@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Buffer32 } from "@aztec-labs/foundation/buffer";
 import { EthAddress } from "@aztec-labs/stdlib/block";
 import {
@@ -12,6 +12,10 @@ import {
 import { OXIDE_V6_MAINNET } from "../src/oxide/pins.js";
 import type { AttestationData } from "../src/oxide/vendor/oxide-lib/attestation/attestation_data.js";
 import { ethAddressFromSecpPublicKey } from "../src/oxide/vendor/oxide-lib/attestation/user_data.js";
+import { DEFAULT_TIMEOUTS } from "../src/oxide/vendor/oxide-client/enclave_transport.js";
+import { verifyAndPin, type FleetRegistry } from "../src/oxide/vendor/oxide-client/fleet_signer.js";
+import { encodeOkResponse } from "../src/oxide/vendor/oxide-lib-tee/codec.js";
+import { frame } from "../src/oxide/vendor/oxide-lib/framing.js";
 
 /**
  * A real attestation document from the v6 fleet (enclave 0xcb88..., registry leaf 7, fetched
@@ -136,5 +140,66 @@ describe("assertL1Pinned", () => {
 
   it("refuses a frozen portal", async () => {
     await expect(assertL1Pinned(reader({ frozen: true }))).rejects.toMatchObject({ reason: "portal_frozen" });
+  });
+});
+
+describe("verifyAndPin", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  /** The fleet's plaintext getAttestation answer, framed as on the wire: the network boundary, faked. */
+  function serveAttestation(att: AttestationData) {
+    const fetch = vi.fn(async () => new Response(new Uint8Array(frame(encodeOkResponse(att))), { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    return fetch;
+  }
+
+  /** A registry that records the order of its calls around a real one. */
+  function recording(inner: FleetRegistry) {
+    const calls: string[] = [];
+    const registry: FleetRegistry = {
+      portalDomain: inner.portalDomain,
+      verifyAttestation: async (att) => {
+        calls.push("verifyAttestation");
+        await inner.verifyAttestation(att);
+      },
+      getRegistration: async (tee) => {
+        calls.push("getRegistration");
+        return inner.getRegistration(tee);
+      },
+    };
+    return { registry, calls };
+  }
+
+  it("verifies the attestation before comparing or trusting any key in it, then pins", async () => {
+    serveAttestation(fixture());
+    const { registry, calls } = recording(new OxideFleetRegistry(reader()));
+    const pinned = await verifyAndPin(OXIDE_V6_MAINNET.enclaveUrl, registry, DEFAULT_TIMEOUTS);
+    expect(calls).toEqual(["verifyAttestation", "getRegistration"]);
+    expect(pinned.ethAddress.toString()).toBe("0xcb88d07f5d30837d3de8a10fcdb7ba8abb3fbec6");
+    expect(pinned.registrationLeafIndex).toBe(7n);
+  });
+
+  it("an attestation that fails verification is refused before the registry is read", async () => {
+    serveAttestation(fixture());
+    const { registry, calls } = recording(new OxideFleetRegistry(reader({ pcr0Hash: "0x" + "ee".repeat(32) })));
+    await expect(verifyAndPin(OXIDE_V6_MAINNET.enclaveUrl, registry, DEFAULT_TIMEOUTS)).rejects.toMatchObject({
+      reason: "pcr0_hash_mismatch",
+    });
+    expect(calls).toEqual(["verifyAttestation"]);
+  });
+
+  it("refuses an enclave whose attested keys are not the ones TeeRegistry holds", async () => {
+    serveAttestation(fixture());
+    const base = reader();
+    const other: OxideL1Reader = {
+      ...base,
+      registration: async (tee) => {
+        const registration = await base.registration(tee);
+        return { ...registration, keys: { ...registration.keys, encPubKeyX: "0x" + "12".repeat(32) } };
+      },
+    };
+    await expect(verifyAndPin(OXIDE_V6_MAINNET.enclaveUrl, new OxideFleetRegistry(other), DEFAULT_TIMEOUTS)).rejects.toThrow(
+      /does not match the keys registered/,
+    );
   });
 });
