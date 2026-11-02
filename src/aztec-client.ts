@@ -1516,6 +1516,25 @@ export class AztecClient implements IAztecClient {
     return this.spendingLimitConfig?.token;
   }
 
+  /**
+   * The connected wallet, account and node for the Oxide sender
+   * (src/oxide/backend.ts). Standard Schnorr mode only: the spending-limit
+   * entrypoint admits exactly one `transfer_to_private` call, and an Oxide
+   * send is `transfer` + `publish_da`.
+   *
+   * `node` is the ungated client. The wallet's own node is wrapped by
+   * `gatedNode`, which passes any send outside a settlement gate straight
+   * through, so the Oxide backend proves through the PXE and sends only
+   * journaled bytes on `node`; it never calls `wallet.sendTx`.
+   */
+  oxideContext(): { wallet: EmbeddedWallet; account: AztecAddress; node: AztecNode } {
+    if (this.spendingLimitConfig) {
+      throw new Error("The Oxide sender needs the standard Schnorr account, not the spending-limit account");
+    }
+    if (!this.wallet || !this.solverAddress || !this.node) throw new Error("Client not connected");
+    return { wallet: this.wallet, account: this.solverAddress, node: this.node };
+  }
+
   async observeAttestationChain(
     recipient: string | undefined,
     genesisOrNetworkDigest: string,
