@@ -29,6 +29,7 @@ interface Vector {
           fingerprint: string;
           observation: {
             state: string;
+            expirationTimestamp: string;
             partialNoteRandomness: string;
             effects: { noteHashes: string[]; nullifiers: string[] };
           };
@@ -37,6 +38,13 @@ interface Vector {
     };
   };
   mayBroadcast: { request: { body: { fingerprint: string; operationId: string } } };
+  transactionExpiry: {
+    maxTxLifetime: number;
+    anchorBlockTimestamp: string;
+    validUntil: number;
+    expirationTimestamp: string;
+    preparedObservation: { state: string; expirationTimestamp: string };
+  };
 }
 
 const committed = readFileSync(VECTOR_PATH, "utf8");
@@ -50,6 +58,22 @@ describe("docs/vectors/settlement-v2.json (D-C canonical vector)", () => {
   it("names the current contract version", () => {
     expect(vector.contract).toBe(SETTLEMENT_VERSION);
     expect(SETTLEMENT_VERSION).toBe("pxe-bridge.settlement.v2");
+  });
+
+  // Riddler#1428: a vector whose expiry equals validUntil hid that consumers
+  // compared the two. The expiry is the transaction's own protocol bound.
+  it("journals the transaction's protocol expiry, distinct from validUntil", () => {
+    const expiry = vector.transactionExpiry;
+    const validUntil = Number(vector.createNote.body.params[0]["validUntil"]);
+    const expirationTimestamp = Number(expiry.expirationTimestamp);
+    expect(expiry.maxTxLifetime).toBe(86400);
+    expect(expiry.validUntil).toBe(validUntil);
+    expect(expirationTimestamp).not.toBe(validUntil);
+    expect(expirationTimestamp).toBeGreaterThan(validUntil);
+    expect(expirationTimestamp).toBeLessThan(validUntil + expiry.maxTxLifetime);
+    expect(expirationTimestamp - Number(expiry.anchorBlockTimestamp)).toBe(expiry.maxTxLifetime);
+    expect(expiry.preparedObservation).toMatchObject({ state: "prepared", expirationTimestamp: expiry.expirationTimestamp });
+    expect(vector.createNote.result.body.result.observation.expirationTimestamp).toBe(expiry.expirationTimestamp);
   });
 
   // The vector's finalized observation must be one Riddler's recipient check
