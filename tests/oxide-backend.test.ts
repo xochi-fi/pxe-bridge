@@ -1,6 +1,16 @@
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { Fr } from "@aztec-labs/aztec.js/fields";
-import { identifyTxBytes, orderFingerprintMeta, oxideGasSettings, pinnedTokenImmutables } from "../src/oxide/backend.js";
+import {
+  identifyTxBytes,
+  loadOxideTokenArtifact,
+  orderFingerprintMeta,
+  OXIDE_TOKEN_ARTIFACT,
+  oxideGasSettings,
+  pinnedTokenImmutables,
+} from "../src/oxide/backend.js";
 import { JournaledBytesInvalid } from "../src/oxide/sender.js";
 import { mockTx } from "@aztec-labs/stdlib/testing";
 import { computeTokenImmutablesHash } from "../src/oxide/vendor/oxide-lib/token_immutables.js";
@@ -53,5 +63,30 @@ describe("identifyTxBytes (real stdlib Tx codec)", () => {
     const bytes = Buffer.from((await mockTx(2)).toBuffer());
     bytes[200] = bytes[200]! ^ 0xff;
     await expect(identifyTxBytes(bytes)).rejects.toBeInstanceOf(JournaledBytesInvalid);
+  });
+});
+
+/**
+ * The artifact is gitignored and built by `npm run build:oxide-token` (CI's
+ * `contract` job runs this file after building it). Elsewhere it is absent
+ * and these skip.
+ */
+describe("OxideToken artifact", () => {
+  const built = existsSync(OXIDE_TOKEN_ARTIFACT);
+  const skipped = built ? "" : ` (skipped: ${OXIDE_TOKEN_ARTIFACT} absent; run \`npm run build:oxide-token\`)`;
+
+  it.skipIf(!built)(`the source build is the deployed OXDAI class${skipped}`, async () => {
+    const artifact = await loadOxideTokenArtifact(OXIDE_TOKEN_ARTIFACT);
+    expect(artifact.functions.map((f) => f.name)).toEqual(expect.arrayContaining(["transfer", "publish_da", "store_immutables"]));
+  });
+
+  it.skipIf(!built)(`refuses the build with one function's bytecode changed${skipped}`, async () => {
+    const raw = JSON.parse(readFileSync(OXIDE_TOKEN_ARTIFACT, "utf8")) as { functions: { name: string; bytecode: string }[] };
+    const transfer = raw.functions.find((f) => f.name === "transfer")!;
+    const at = transfer.bytecode.length >> 1;
+    transfer.bytecode = transfer.bytecode.slice(0, at) + (transfer.bytecode[at] === "A" ? "B" : "A") + transfer.bytecode.slice(at + 1);
+    const path = join(mkdtempSync(join(tmpdir(), "oxide-artifact-")), "tampered.json");
+    writeFileSync(path, JSON.stringify(raw));
+    await expect(loadOxideTokenArtifact(path)).rejects.toThrow(/not the pinned 0x27df40f9/);
   });
 });

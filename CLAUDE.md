@@ -35,11 +35,13 @@ npm run update-allowlist -- --revoke 0x<addr>            # revoke one allowlist 
 npm run admin -- status [--expect-root <hex>] [--expect-paused] [--min-fee-juice <n>]   # exit bits 2 pause, 4 proposal, 8 root, 16 fee juice
 npm run admin -- pause|unpause|apply-limits|cancel-limits
 npm run admin -- propose-limits --max-per-tx <n> --daily <n>
+npm run build:oxide-token   # compile the OxideToken artifact from contracts/oxide (aztec-up 6.0.0), refuse unless OXDAI's class
+npm run check:oxide-token [-- <artifact.json>]   # the class check alone
 ```
 
 Admin commands read `SPENDING_LIMIT_ACCOUNT`, `SPENDING_LIMIT_ADMIN_KEY` (not needed by `status`) and `AZTEC_NODE_URL`; `update-allowlist` also `PXE_BRIDGE_ALLOWLIST_SEED` and `PXE_BRIDGE_ALLOWLIST_RECIPIENTS`, which `status` uses for the expected root when `--expect-root` is absent. All need the artifact in `contracts/spending_limit_account/target/`.
 
-CI runs `typecheck` -> `test` -> `build`, then a separate `e2e` job via docker compose.
+CI runs `typecheck` -> `test` -> `build`, then a separate `e2e` job via docker compose. The `contract` job also builds the OxideToken artifact (`npm run build:oxide-token`) and fails unless it is the deployed OXDAI class.
 
 ## E2E Tests
 
@@ -95,7 +97,7 @@ Compose pins no platform, so the sandbox (`azteclabs/aztec:6.0.0`, tracking the 
 | `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY`  | No       | --                      | `1` lets a production bridge deploy the spending limit account without a record. First deployment only; remove once the record is persisted |
 | `PXE_BRIDGE_OXIDE_JOURNAL`         | With Oxide | --                    | Oxide sender journal (`src/oxide/journal.ts`): its own SQLite file beside, never the same as, `PXE_BRIDGE_JOURNAL`; same directory/permission rules. Read by `createOxideSender` callers; the sender is not wired into `index.ts` yet (#84 phase 1) |
 | `PXE_BRIDGE_OXIDE_L1_RPC_URL`      | With Oxide | --                    | Ethereum mainnet RPC, view calls only: TeeRegistry `PCR0_HASH`/`$teeKeys`/`$registrationMessages`, CertManager root hash, OxidePortal immutables and `$frozen` |
-| `PXE_BRIDGE_OXIDE_TOKEN_ARTIFACT`  | With Oxide | --                    | Compiled OxideToken JSON (not committed, see `src/oxide/vendor/VENDORED.md`); refused unless its class is the deployed OXDAI class |
+| `PXE_BRIDGE_OXIDE_TOKEN_ARTIFACT`  | With Oxide | --                    | Compiled OxideToken JSON, not committed: `npm run build:oxide-token` writes `contracts/oxide/oxide_token_contract/target/oxide_token_contract-OxideToken.json` (the image carries it there; `src/oxide/vendor/VENDORED.md`); refused unless its class is the deployed OXDAI class |
 | `PXE_BRIDGE_OXIDE_MAX_PER_TX`      | No       | 1000 DAI (1e21)         | Oxide off-chain per-tx cap, base units. Never above the token's 5,166 DAI `maxNoteAmount`, which is checked as well |
 | `PXE_BRIDGE_OXIDE_DAILY_LIMIT`     | No       | 10000 DAI (1e22)        | Oxide rolling-24h cap, base units, rebuilt from the journal's spend rows and re-checked inside the may-broadcast mark transaction |
 

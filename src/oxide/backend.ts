@@ -137,11 +137,14 @@ export function pinnedTokenImmutables(pins: OxidePins = OXIDE_V6_MAINNET): Oxide
   };
 }
 
+/** Where `npm run build:oxide-token` writes the artifact, relative to the repository root. */
+export const OXIDE_TOKEN_ARTIFACT = "contracts/oxide/oxide_token_contract/target/oxide_token_contract-OxideToken.json";
+
 /**
  * Loads the compiled OxideToken artifact (`PXE_BRIDGE_OXIDE_TOKEN_ARTIFACT`)
  * and refuses one whose class is not the deployed OXDAI class. Not committed:
- * ~4 MB, built from zkmoney-public vendor/oxide/noir-projects at the pinned
- * commit (VENDORED.md).
+ * ~4 MB, built from the Noir sources vendored in contracts/oxide by
+ * `npm run build:oxide-token` (VENDORED.md).
  */
 export async function loadOxideTokenArtifact(path: string, pins: OxidePins = OXIDE_V6_MAINNET): Promise<ContractArtifact> {
   const artifact = loadContractArtifact(JSON.parse(readFileSync(path, "utf8")));

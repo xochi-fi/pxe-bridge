@@ -34,15 +34,42 @@ transaction is journaled before it is sent.
 no edits for this repository's stricter flags. Build with `tsc -b` (the
 `build` and `typecheck` scripts do).
 
+## Noir sources and the OxideToken artifact
+
+The sender registers the OxideToken contract, so it needs its compiled
+artifact (~4 MB). The artifact is not committed; its sources are.
+`../../../contracts/oxide/` holds `noir-projects/{oxide_token_contract,
+oxide_token_lib, oxide_lib}` from the same upstream commit, byte for byte
+(`Nargo.toml` and `src/` of each; the relative `path` dependencies between
+them are unchanged), with upstream's `LICENSE` and `NOTICE`.
+
+`npm run build:oxide-token` (`scripts/build-oxide-token.sh`) compiles it the
+way upstream's `noir-projects/bootstrap.sh` does, with the toolchain upstream
+pins in `vendor/oxide/aztec-toolchain.sh`:
+
+- aztec-up `6.0.0` (`aztec --version` is asserted; nargo
+  `1.0.0-rc.3+5a7ee9bf`), `NARGO`/`BB`/`BB_BINARY_PATH` unset;
+- `aztec compile --silence-warnings --inliner-aggressiveness 0 --package oxide_token_contract`,
+  with `HARDWARE_CONCURRENCY=1` (the CI `contract` job's reason);
+- git dependencies by tag: aztec-node `v6.0.0`, noir-lang keccak256 `v0.1.3`,
+  sha256 `v0.2.1`, noir_base64 `v0.5.1`.
+
+It writes `contracts/oxide/oxide_token_contract/target/oxide_token_contract-OxideToken.json`
+and then runs `npm run check:oxide-token`, which is the sender's own load gate
+(`loadOxideTokenArtifact`): it refuses the artifact unless its class is the
+deployed OXDAI class `0x27df40f9...3f949`. The class ID covers the private
+functions' verification keys, the public bytecode and the artifact hash, and
+the artifact hash leaves out `file_map`, so the absolute build paths the
+artifact records do not move it: a native arm64 build under two different
+checkout paths (2026-11-03) gave exactly the deployed class. A tag that moved,
+another toolchain or other flags fail the check. CI builds and checks it in the
+`contract` job and hands it to the `docker` job; the image's builder stage runs
+the check again on whatever artifact the build context carries.
+
 ## Not vendored
 
 - `@oxide/l1-contracts` (generated ABIs and viem wrappers): the three view
   calls the sender needs are declared in `../enclave.ts`.
-- The OxideToken contract artifact: ~4 MB of compiled Noir, built from
-  `vendor/oxide/noir-projects/oxide_token_contract` at the same commit with the
-  Aztec 6.0.0 toolchain. The sender loads it from
-  `PXE_BRIDGE_OXIDE_TOKEN_ARTIFACT` and refuses it unless its class is the
-  deployed OXDAI class `0x27df40f9...3f949`.
 
 ## Files
 
@@ -100,7 +127,9 @@ no edits for this repository's stricter flags. Build with `tsc -b` (the
 
 1. Check out the new upstream commit, rerun the copy with the two rewrites over
    the same file list (plus anything new the import closure pulls in), and
-   re-apply the three edits.
+   re-apply the three edits. Copy the three Noir packages into
+   `contracts/oxide/` unchanged.
 2. Update the commit, the Oxide pin and the deployment pins (`../pins.ts`)
    together; a new Oxide deployment is a new pin, reviewed, never absorbed.
-3. `npm run typecheck && npm test`.
+   A new OxideToken class is `oxideTokenClassId` there.
+3. `npm run build:oxide-token && npm run typecheck && npm test`.

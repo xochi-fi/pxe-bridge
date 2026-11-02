@@ -42,7 +42,9 @@
     "top-up-fee-juice": "tsx scripts/top-up-fee-juice.ts",
     "update-allowlist": "tsx scripts/update-allowlist.ts",
     "admin": "tsx scripts/admin.ts",
-    "generate:settlement-vectors": "tsx scripts/settlement-vectors.ts"
+    "generate:settlement-vectors": "tsx scripts/settlement-vectors.ts",
+    "build:oxide-token": "bash scripts/build-oxide-token.sh",
+    "check:oxide-token": "tsx scripts/oxide-token-artifact.ts"
   },
   "dependencies": {
     "@aws-sdk/client-secrets-manager": "^3.1032.0",
