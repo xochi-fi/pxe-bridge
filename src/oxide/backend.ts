@@ -32,6 +32,7 @@ import {
 } from "./vendor/oxide-client/token_registration.js";
 import type { RegisteredSignTokenOperationOutput } from "./vendor/oxide-client/types.js";
 import { computeSiloedNoteHash } from "./vendor/oxide-lib-tee/hash.js";
+import { ethAddressFromSecpPublicKey } from "./vendor/oxide-lib/attestation/user_data.js";
 import type { OxideTokenImmutables } from "./vendor/oxide-lib/token_immutables.js";
 import type { TokenOperation } from "./vendor/oxide-lib/types.js";
 import type { BlockHeader, Capsule } from "@aztec-labs/stdlib/tx";
@@ -357,11 +358,12 @@ export class PxeOxideBackend implements OxideBackend {
 
     const notes = s.tokenOperation.createdNotes;
     const recipientNoteIndex = notes.findIndex((n) => !n.owner.equals(account));
-    const enclave = this.fleet.enclave;
     const evidence: OxideSendEvidence = {
       anchorBlockHash: anchorBlockHash.toString(),
       enclave: {
-        address: enclave.ethAddress.toString(),
+        // From the key that signed, not the current pin: FleetSigner can re-pin
+        // to another enclave between this sign and any later read.
+        address: ethAddressFromSecpPublicKey(s.signOutput.publicKey).toString(),
         registrationLeafIndex: s.signOutput.registrationLeafIndex.toString(),
         publicKeyX: s.signOutput.publicKey.x.toString(),
         publicKeyY: s.signOutput.publicKey.y.toString(),
