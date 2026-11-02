@@ -399,7 +399,7 @@
           "observation": {
             "state": "finalized",
             "txHash": "0x7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a",
-            "expirationTimestamp": "1900000000",
+            "expirationTimestamp": "1900076355",
             "executionResult": "success",
             "blockHash": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
             "blockNumber": "4242",
@@ -457,6 +457,19 @@
       "uniqueNoteHash": "0x22f0affca3f1681d09d20263af3abee59393fae0e5126108ebdace132c530e4b",
       "siloedValidityNullifier": "0x23dbb29697678f351de5b9739b26ae5b853c5802f984402a327913dd06653a01",
       "completionLogTag": "0x2d400ce7e384f5e4d64387d317d8102e062adde6e0c16af5ba7fac679cd51622"
+    }
+  },
+  "transactionExpiry": {
+    "note": "expirationTimestamp is the transaction's Aztec protocol expiry (tx.data.expirationTimestamp), NOT validUntil. The PXE sets it to min(anchor + MAX_TX_LIFETIME, any lower expiry a call set, rounded down to whole hours, then 30 minutes, then seconds past the anchor). The bridge refuses to send past either bound, but a transaction sent before validUntil can be included until expirationTimestamp. A consumer admits validUntil <= expirationTimestamp < validUntil + maxTxLifetime and must not refund before expirationTimestamp has passed.",
+    "maxTxLifetime": 86400,
+    "anchorBlockTimestamp": "1899989955",
+    "validUntil": 1900000000,
+    "expirationTimestamp": "1900076355",
+    "preparedObservation": {
+      "state": "prepared",
+      "txHash": "0x7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a",
+      "expirationTimestamp": "1900076355",
+      "hold": "may_broadcast_unknown"
     }
   },
   "getSettlement": {
