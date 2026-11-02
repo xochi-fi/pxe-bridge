@@ -869,6 +869,59 @@ describe("partial-note randomness (xochi-fi/pxe-bridge#78)", () => {
   });
 });
 
+describe("journaled bytes that are not the journaled transaction (#85 second-pass review)", () => {
+  /** Prepares and holds op-1 in a file journal, rewrites its bytes, and reopens it as a restart would. */
+  async function heldThenTampered(
+    tamper: (bytes: { txHash: string; expiration: string; randomness: string }) => void,
+  ): Promise<RpcContext> {
+    const path = tempJournalPath();
+    journal = openBoundJournal(path);
+    gate.decision = "unknown";
+    await createNote(client, { settlement: settlementContext(journal, gate.client), limits: readyLimits() });
+    expect(journal.get("op-1")).toMatchObject({ state: "prepared", hold: "may_broadcast_unknown" });
+    journal.close();
+
+    const db = new Database(path);
+    const row = db.prepare("SELECT tx_bytes FROM attempts WHERE operation_id = 'op-1'").get() as { tx_bytes: Buffer };
+    const decoded = JSON.parse(row.tx_bytes.toString("utf8")) as { txHash: string; expiration: string; randomness: string };
+    tamper(decoded);
+    db.prepare("UPDATE attempts SET tx_bytes = ? WHERE operation_id = 'op-1'").run(Buffer.from(JSON.stringify(decoded)));
+    db.close();
+
+    journal = SettlementJournal.open(path);
+    journal.bindAccount(client.getAddress()!, true);
+    expect(journal.health()).toEqual({ writable: true });
+    gate.calls.length = 0;
+    gate.decision = "allow";
+    return { settlement: settlementContext(journal, gate.client), limits: readyLimits() };
+  }
+
+  it.each([
+    ["a later expiry", (b: { expiration: string }) => (b.expiration = (BigInt(b.expiration) + 3_600n).toString())],
+    ["another transaction hash", (b: { txHash: string }) => (b.txHash = "0x" + "ab".repeat(32))],
+  ])("never sends bytes carrying %s and never asks Riddler", async (_name, tamper) => {
+    const after = await heldThenTampered(tamper);
+    const before = journal.attempts("op-1");
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      for (let call = 0; call < 2; call++) {
+        const res = await createNote(client, after);
+        expect(res.error?.code).toBe(RPC_ERRORS.SUBMITTED_UNKNOWN);
+        expect(res.error?.data?.observation).toEqual({ state: "unknown", reason: "journaled_bytes_mismatch" });
+      }
+    } finally {
+      log.mockRestore();
+    }
+    expect(gate.calls).toEqual([]);
+    expect(client.sends).toEqual([]);
+    expect(client.proofs).toBe(1);
+    // Kept prepared, unmarked and as held: the journaled bytes stay for an operator.
+    expect(journal.get("op-1")).toMatchObject({ state: "prepared", hold: "may_broadcast_unknown" });
+    expect(journal.attempts("op-1")).toEqual(before);
+    expect(journal.spendsSince(0)).toEqual([]);
+  });
+});
+
 describe("ambiguity after the mark is submitted_unknown, never a retryable error", () => {
   it("keeps -32002 with the transaction hash when the response is lost", async () => {
     client.behaviour = "lose_response";
