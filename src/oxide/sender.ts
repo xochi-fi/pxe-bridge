@@ -40,6 +40,10 @@ export interface OxidePayout {
 
 /** The TokenOperation the enclave will be asked to sign, reduced to what the sender checks. */
 export interface TokenOperationSummary {
+  /** Every nullifier the simulated tx emits (siloed): spent notes, spent deposits, the tx nullifier. */
+  nullifiers: string[];
+  /** Block the simulation (and so the PXE's note selection) is anchored at. */
+  anchorBlockNumber: number;
   createdNotes: { owner: string; amount: bigint }[];
   spentNoteOwners: string[];
   depositRecipients: string[];
@@ -147,6 +151,14 @@ export function payoutNoteIndex(summary: TokenOperationSummary, sender: string, 
   return index;
 }
 
+/** The simulation spends inputs a live attempt already spends. Nothing was signed; retry once that attempt resolves. */
+class InputsPending extends Error {
+  constructor() {
+    super("the simulation spends notes a live attempt already spends");
+    this.name = "InputsPending";
+  }
+}
+
 export interface OxideSenderOptions {
   journal: OxideJournal;
   backend: OxideBackend;
@@ -156,6 +168,9 @@ export interface OxideSenderOptions {
   mayBroadcast: MayBroadcastClient;
   now?: () => number;
 }
+
+/** At most this many marked operations are re-read before a fresh attempt. */
+const RECONCILE_LIMIT = 8;
 
 class Answer {
   constructor(readonly answer: OxideSendAnswer) {}
@@ -169,6 +184,8 @@ export class OxideSender {
   private readonly mayBroadcast: MayBroadcastClient;
   private readonly now: () => number;
   private readonly inFlight = new Set<string>();
+  /** Fresh attempts run simulate -> recordPrepared one at a time (see `fresh`). */
+  private laneTail: Promise<void> = Promise.resolve();
 
   constructor(options: OxideSenderOptions) {
     this.journal = options.journal;
@@ -298,16 +315,48 @@ export class OxideSender {
       return this.refuse(op, reason, true);
     }
 
-    const proven = await this.prepare(op, payout);
-    if (proven.expirationTimestamp < BigInt(terms.validUntil)) {
-      // Decided on #84 / Riddler#1428: the protocol expiry is its own bound and
-      // must not fall before validUntil, or the consumer could read "expired"
-      // while its own deadline is still open.
-      return this.refuse(op, "expiration_before_valid_until", false);
+    // One account, one set of notes. The PXE selects notes from what it has
+    // synced and knows nothing of an attempt that is journaled or sent but not
+    // yet mined in a block it has seen, so two operations proven side by side
+    // spend the same notes and the node takes at most one: the other is marked,
+    // counted against the window and stranded at submitted_unknown. So fresh
+    // attempts run one at a time from simulation to the journal, and a
+    // simulation that emits a nullifier some live attempt already carries is
+    // refused before the enclave is asked (`inputs_pending`, retryable).
+    const release = await this.acquireLane();
+    let recorded: OxideAttempt;
+    try {
+      await this.reconcileMarked();
+      const proven = await this.prepare(op, payout);
+      if (proven.expirationTimestamp < BigInt(terms.validUntil)) {
+        // Decided on #84 / Riddler#1428: the protocol expiry is its own bound and
+        // must not fall before validUntil, or the consumer could read "expired"
+        // while its own deadline is still open.
+        return this.refuse(op, "expiration_before_valid_until", false);
+      }
+      const attempt = this.journal.recordPrepared(id, proven);
+      recorded = this.journal.attempts(id).find((a) => a.attempt === attempt)!;
+    } finally {
+      release();
     }
-    const attempt = this.journal.recordPrepared(id, proven);
-    const recorded = this.journal.attempts(id).find((a) => a.attempt === attempt)!;
     return this.broadcast(this.journal.get(id)!, recorded);
+  }
+
+  private async acquireLane(): Promise<() => void> {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const previous = this.laneTail;
+    this.laneTail = previous.then(() => held);
+    await previous;
+    return release;
+  }
+
+  /** Re-reads marked operations not yet seen mined, so a landed one stops counting as live. */
+  private async reconcileMarked(): Promise<void> {
+    for (const id of this.journal.unminedMarked(this.nowSeconds()).slice(0, RECONCILE_LIMIT)) {
+      const op = this.journal.get(id);
+      if (op) await this.observe(op);
+    }
   }
 
   /** simulate -> check -> sign -> prove. Any failure here provably sent nothing. */
@@ -317,6 +366,12 @@ export class OxideSender {
       const simulation = await this.backend.simulate(payout);
       step = "check";
       payoutNoteIndex(simulation.summary, this.backend.account, payout);
+      const live = this.journal.liveNullifiers(
+        this.nowSeconds(),
+        simulation.summary.anchorBlockNumber,
+        op.operationId,
+      );
+      if (simulation.summary.nullifiers.some((n) => live.has(n.toLowerCase()))) throw new InputsPending();
       step = "sign";
       const signed = await this.backend.sign(simulation);
       step = "prove";
@@ -332,6 +387,7 @@ export class OxideSender {
     } catch (cause) {
       if (cause instanceof JournalWriteError || cause instanceof JournalUnreadableError) throw cause;
       console.error(`[oxide] ${step} failed: ${(cause as Error).message ?? String(cause)}`);
+      if (cause instanceof InputsPending) throw new Answer(this.refuse(op, "inputs_pending", true));
       if (cause instanceof UnexpectedTokenOperation) throw new Answer(this.refuse(op, "token_operation_unexpected", false));
       if (cause instanceof EnclaveTrustRefused) throw new Answer(this.refuse(op, `enclave_refused:${cause.reason}`, true));
       throw new Answer(this.refuse(op, `${step}_failed`, true));

@@ -282,6 +282,8 @@ export class PxeOxideBackend implements OxideBackend {
       },
     });
     const summary: TokenOperationSummary = {
+      nullifiers: result.publicInputs.getNonEmptyNullifiers().map((n) => n.toString().toLowerCase()),
+      anchorBlockNumber: Number(anchor.globalVariables.blockNumber),
       createdNotes: tokenOperation.createdNotes.map((n) => ({ owner: n.owner.toString(), amount: n.amount })),
       spentNoteOwners: tokenOperation.spentNotes.map((s) => s.note.owner.toString()),
       depositRecipients: tokenOperation.deposits.map((d) => d.recipient.toString()),
@@ -368,6 +370,7 @@ export class PxeOxideBackend implements OxideBackend {
       recipientNoteIndex,
       teeNotes: s.signOutput.teeNotes.map((h) => h.toString()),
       requiredNullifiers: s.signOutput.requiredNullifiers.map((h) => h.toString()),
+      txNullifiers: tx.data.getNonEmptyNullifiers().map((n) => n.toString().toLowerCase()),
       signatures: s.signOutput.signatures.map((g) => ({
         sLo: g.sLo.toString(),
         sHi: g.sHi.toString(),

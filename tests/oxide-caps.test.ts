@@ -164,8 +164,11 @@ describe("Oxide caps", () => {
     // Admitted against 9,000 spent: fits. Held before the mark.
     expect(observation(await sender.send(req(c, "held", 1_000n * DAI)))).toMatchObject({ state: "prepared" });
     gate.state.decision = "allow";
-    // Another operation takes the last 1,000 DAI first.
+    // Another operation, spending a note the held one does not (the account
+    // holds several), takes the last 1,000 DAI first.
+    backend.forceNote = 99;
     expect(observation(await sender.send(req(c, "other", 1_000n * DAI))).state).toBe("finalized");
+    backend.forceNote = undefined;
     // The held attempt's exact bytes are re-asked and allowed, but the mark
     // refuses: the durable window is full. Not marked, not sent, still prepared.
     expect(observation(await sender.send(req(c, "held", 1_000n * DAI)))).toMatchObject({

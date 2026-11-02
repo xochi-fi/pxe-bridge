@@ -563,6 +563,71 @@ export class OxideJournal {
     );
   }
 
+  /**
+   * Nullifiers of every other operation's attempt that may still land on a
+   * chain whose state a simulation anchored at `anchorBlock` has not seen:
+   * a prepared attempt whose bounds are open (it can still be allowed and
+   * sent); a marked one not yet observed mined, before its protocol expiry;
+   * and any attempt observed mined ABOVE `anchorBlock`, finalized included,
+   * because the PXE that selected the notes has not synced that block. One
+   * mined at or below the anchor is not live: the PXE has seen its nullifiers
+   * and will not select those notes again.
+   */
+  liveNullifiers(nowSeconds: number, anchorBlock: number, exclude: string): Set<string> {
+    const rows = this.read((db) =>
+      db
+        .prepare(
+          `SELECT o.state, o.terms_json, a.expiration_timestamp, a.evidence_json,
+                  CAST(json_extract(o.observation_json, '$.blockNumber') AS INTEGER) AS mined_block
+           FROM operations o JOIN attempts a ON a.operation_id = o.operation_id AND a.attempt = o.current_attempt
+           WHERE o.operation_id != ? AND (
+             o.state = 'prepared'
+             OR (o.state = 'may_broadcast' AND json_extract(o.observation_json, '$.blockNumber') IS NULL)
+             OR (o.state IN ('may_broadcast', 'finalized', 'reverted')
+                 AND CAST(json_extract(o.observation_json, '$.blockNumber') AS INTEGER) > ?)
+           )`,
+        )
+        .all(exclude, anchorBlock),
+    ) as {
+      state: OxideOperationState;
+      terms_json: string;
+      expiration_timestamp: string;
+      evidence_json: string;
+      mined_block: number | null;
+    }[];
+    const live = new Set<string>();
+    for (const row of rows) {
+      const unexpired = BigInt(nowSeconds) < BigInt(row.expiration_timestamp);
+      const counts =
+        row.mined_block !== null
+          ? row.mined_block > anchorBlock
+          : row.state === "prepared"
+            ? unexpired && nowSeconds < (JSON.parse(row.terms_json) as OxideTerms).validUntil
+            : unexpired;
+      if (!counts) continue;
+      const evidence = JSON.parse(row.evidence_json) as OxideSendEvidence;
+      for (const n of evidence.txNullifiers) live.add(n.toLowerCase());
+    }
+    return live;
+  }
+
+  /** Marked operations before their protocol expiry with no mined observation recorded: worth one node read. */
+  unminedMarked(nowSeconds: number): string[] {
+    const rows = this.read((db) =>
+      db
+        .prepare(
+          `SELECT o.operation_id, o.observation_json, a.expiration_timestamp
+           FROM operations o JOIN attempts a ON a.operation_id = o.operation_id AND a.attempt = o.current_attempt
+           WHERE o.state = 'may_broadcast' ORDER BY o.updated_at`,
+        )
+        .all(),
+    ) as { operation_id: string; observation_json: string | null; expiration_timestamp: string }[];
+    return rows
+      .filter((r) => BigInt(nowSeconds) < BigInt(r.expiration_timestamp))
+      .filter((r) => !r.observation_json || !("blockNumber" in (JSON.parse(r.observation_json) as object)))
+      .map((r) => r.operation_id);
+  }
+
   /** Total of durable spends at or after `sinceMs`. */
   spentSince(sinceMs: number): bigint {
     return this.read((db) => sumSpends(db, sinceMs));

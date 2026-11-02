@@ -94,6 +94,13 @@ export interface OxideSendEvidence {
   /** Siloed note hashes the enclave signed, parallel to `createdNotes`. */
   teeNotes: string[];
   requiredNullifiers: string[];
+  /**
+   * Every nullifier the proven tx emits (siloed, lowercase). While the attempt
+   * may still land, a new attempt whose simulation emits any of them is refused
+   * before the enclave is asked (sender.ts `inputs_pending`): the node would take
+   * at most one of the two.
+   */
+  txNullifiers: string[];
   signatures: { sLo: string; sHi: string; rLo: string; rHi: string }[];
   gasLimits: { daGas: number; l2Gas: number };
   maxFeesPerGas: { feePerDaGas: string; feePerL2Gas: string };
@@ -111,6 +118,8 @@ export function isOxideSendEvidence(value: unknown): value is OxideSendEvidence 
     typeof e["recipientNoteIndex"] === "number" &&
     Array.isArray(e["teeNotes"]) &&
     Array.isArray(e["requiredNullifiers"]) &&
+    Array.isArray(e["txNullifiers"]) &&
+    (e["txNullifiers"] as unknown[]).every((n) => typeof n === "string") &&
     Array.isArray(e["signatures"]) &&
     (e["teeNotes"] as unknown[]).length === (e["createdNotes"] as unknown[]).length &&
     (e["signatures"] as unknown[]).length === (e["createdNotes"] as unknown[]).length &&

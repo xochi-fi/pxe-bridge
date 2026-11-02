@@ -257,9 +257,84 @@ describe("OxideSender", () => {
   });
 });
 
+describe("one account, one set of notes", () => {
+  it("refuses a second operation on the notes a held attempt spends, before the enclave sees it", async () => {
+    const node = new FakeNode();
+    const gate = fakeGate("deny");
+    const { sender, backend } = boot(tempJournalPath(), node, { gate });
+    expect(observed(await sender.send(request({ operationId: "op-1" }))).observation).toMatchObject({ state: "prepared" });
+    backend.calls.length = 0;
+    gate.state.decision = "allow";
+    expect(observed(await sender.send(request({ operationId: "op-2" }))).observation).toEqual({
+      state: "not_submitted",
+      reason: "inputs_pending",
+      retryable: true,
+    });
+    expect(backend.calls).toEqual(["simulate"]);
+    // The held one lands, the PXE sees it, and the retry selects the next note.
+    expect(observed(await sender.send(request({ operationId: "op-1" }))).observation.state).toBe("finalized");
+    expect(observed(await sender.send(request({ operationId: "op-2" }))).observation.state).toBe("finalized");
+    expect(node.sent).toHaveLength(2);
+    expect(node.rejected).toEqual([]);
+  });
+
+  it("treats a mined attempt as live until the PXE has synced its block", async () => {
+    const node = new FakeNode();
+    node.pxeLag = 1;
+    const { sender } = boot(tempJournalPath(), node);
+    expect(observed(await sender.send(request({ operationId: "op-1" }))).observation.state).toBe("finalized");
+    expect(observed(await sender.send(request({ operationId: "op-2" }))).observation).toMatchObject({ reason: "inputs_pending" });
+    node.pxeLag = 0;
+    expect(observed(await sender.send(request({ operationId: "op-2" }))).observation.state).toBe("finalized");
+    expect(node.rejected).toEqual([]);
+  });
+
+  it("a marked attempt the node never saw holds its notes until its protocol expiry", async () => {
+    const path = tempJournalPath();
+    const node = new FakeNode();
+    const c = clock();
+    const first = boot(path, node, { c });
+    first.backend.crashAt = "send";
+    first.backend.crashBeforeNode = true;
+    void first.sender.send(request({ operationId: "op-1" }));
+    await settle();
+    first.journal.close();
+
+    const second = boot(path, node, { c });
+    const late = Math.floor(T0 / 1000) + 86_400 + 600;
+    expect(observed(await second.sender.send(request({ operationId: "op-2", validUntil: late }))).observation).toMatchObject({
+      reason: "inputs_pending",
+    });
+    c.t = T0 + 86_400_000; // op-1's expiry: it can no longer land
+    second.backend.expiration = BigInt(late + 86_400);
+    expect(observed(await second.sender.send(request({ operationId: "op-2", validUntil: late }))).observation.state).toBe(
+      "finalized",
+    );
+    expect(node.sent).toHaveLength(1);
+    expect(node.rejected).toEqual([]);
+  });
+
+  it("concurrent sends never hand the node two spends of one note", async () => {
+    const node = new FakeNode();
+    const { sender } = boot(tempJournalPath(), node);
+    const outcomes = await Promise.all(
+      ["op-1", "op-2", "op-3", "op-4"].map((operationId) => sender.send(request({ operationId }))),
+    );
+    const states = outcomes.map((o) => observed(o).observation);
+    for (const s of states) {
+      expect(s.state === "finalized" || (s.state === "not_submitted" && s.reason === "inputs_pending")).toBe(true);
+    }
+    expect(states.filter((s) => s.state === "finalized").length).toBeGreaterThan(0);
+    expect(node.rejected).toEqual([]);
+    expect(states.some((s) => s.state === "submitted_unknown")).toBe(false);
+  });
+});
+
 describe("payoutNoteIndex", () => {
   const payout = { recipient: RECIPIENT, amount: 5n, orderFingerprint: "0x" + "00".repeat(32) };
   const base = {
+    nullifiers: [],
+    anchorBlockNumber: 0,
     createdNotes: [
       { owner: SENDER, amount: 1n },
       { owner: RECIPIENT, amount: 5n },
