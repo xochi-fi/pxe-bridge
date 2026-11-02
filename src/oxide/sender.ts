@@ -79,6 +79,8 @@ export interface OxideBackend {
   simulate(payout: OxidePayout): Promise<OxideSimulation>;
   sign(simulation: OxideSimulation): Promise<OxideSigned>;
   prove(signed: OxideSigned): Promise<OxideProvenTx>;
+  /** The hash the node will assign `txBytes` (0x, lowercase). Synchronous. */
+  hashOf(txBytes: Buffer): string;
   send(txBytes: Buffer): Promise<void>;
   observe(txHash: string): Promise<NodeObservation>;
 }
@@ -402,6 +404,12 @@ export class OxideSender {
   private async broadcast(op: OxideStoredOperation, attempt: OxideAttempt): Promise<OxideSendAnswer> {
     const id = op.operationId;
     const bytes = this.journal.attemptBytes(id, attempt.attempt);
+    // The bytes must still be the transaction the journal (and so the gate)
+    // names: a hash the gate allowed is the only thing it vouches for.
+    if (this.backend.hashOf(bytes).toLowerCase() !== attempt.txHash.toLowerCase()) {
+      console.error(`[oxide] Journaled bytes of ${id} attempt ${attempt.attempt} no longer hash to the journaled txHash`);
+      return this.answer(op, { state: "unknown", reason: "journaled_bytes_mismatch" });
+    }
     const answer = await this.mayBroadcast({ operationId: id, fingerprint: op.fingerprint, txHash: attempt.txHash });
     if (answer.decision !== "allow") {
       const hold: OxideHold = answer.decision === "deny" ? "may_broadcast_denied" : "may_broadcast_unknown";

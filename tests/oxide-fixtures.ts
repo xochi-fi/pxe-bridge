@@ -192,6 +192,10 @@ export class FakeBackend implements OxideBackend {
     });
   }
 
+  hashOf(txBytes: Buffer): string {
+    return hashOfBytes(txBytes);
+  }
+
   send(txBytes: Buffer): Promise<void> {
     this.calls.push("send");
     if (this.throwAt === "send") return Promise.reject(new Error("send failed"));

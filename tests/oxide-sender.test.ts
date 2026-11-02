@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import Database from "better-sqlite3";
 import { DAI, type OxideCapsConfig } from "../src/oxide/caps.js";
 import { OxideJournal } from "../src/oxide/journal.js";
 import { OxideSender, payoutNoteIndex, UnexpectedTokenOperation, type OxideSendOutcome } from "../src/oxide/sender.js";
@@ -16,6 +17,8 @@ import {
   SENDER,
   T0,
   tempJournalPath,
+  noteNullifier,
+  txBytesFor,
   type Step,
 } from "./oxide-fixtures.js";
 
@@ -162,6 +165,26 @@ describe("OxideSender", () => {
       expect(again.observation.state).toBe("submitted_unknown");
       expect(backend.calls.filter((s) => s === "send")).toHaveLength(1);
     });
+  });
+
+  it("never resends journaled bytes that no longer hash to the journaled txHash", async () => {
+    const path = tempJournalPath();
+    const node = new FakeNode();
+    const first = boot(path, node, { gate: fakeGate("unknown") });
+    expect(observed(await first.sender.send(request())).observation).toMatchObject({ state: "prepared" });
+    first.journal.close();
+    const db = new Database(path);
+    db.prepare("UPDATE attempts SET tx_bytes = ? WHERE operation_id = 'op-1'").run(txBytesFor([noteNullifier(7)]));
+    db.close();
+
+    const second = boot(path, node);
+    expect(observed(await second.sender.send(request())).observation).toEqual({
+      state: "unknown",
+      reason: "journaled_bytes_mismatch",
+    });
+    expect(second.gate.queries).toEqual([]); // the gate is never asked about other bytes
+    expect(second.journal.get("op-1")?.state).toBe("prepared");
+    expect(node.sent).toEqual([]);
   });
 
   it("a pipeline failure before the journal is not_submitted and retryable", async () => {

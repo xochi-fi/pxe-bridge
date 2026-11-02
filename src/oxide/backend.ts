@@ -391,6 +391,10 @@ export class PxeOxideBackend implements OxideBackend {
     };
   }
 
+  hashOf(txBytes: Buffer): string {
+    return Tx.fromBuffer(txBytes).getTxHash().toString().toLowerCase();
+  }
+
   /** Exact journaled bytes to the ungated node, with nothing awaited before the call. */
   send(txBytes: Buffer): Promise<void> {
     return this.options.node.sendTx(Tx.fromBuffer(txBytes));
