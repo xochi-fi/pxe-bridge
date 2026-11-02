@@ -197,9 +197,11 @@ async function finalizedPayout(): Promise<{ observation: Observation; partialNot
     await evidence.uniqueNoteHash(Fr.fromString(PAYOUT_FIXTURE.firstNullifier), PAYOUT_FIXTURE.noteHashIndex)
   ).toString();
   // The tx's other note hashes (fee and change notes) are uninterpreted
-  // evidence; fixed filler stands in for them.
+  // evidence; fixed filler stands in for them. Filler must be BN254 field
+  // elements, as every note hash a node reports is: a consumer that parses
+  // effects as fields (Riddler's PaymentProof) refuses anything else.
   const noteHashes = Array.from({ length: PAYOUT_FIXTURE.noteHashIndex }, (_, i) =>
-    "0x" + (i + 0x31).toString(16).repeat(32),
+    "0x" + (i + 0x11).toString(16).repeat(32),
   );
   noteHashes.push(uniqueNoteHash);
   const observation: Observation = {

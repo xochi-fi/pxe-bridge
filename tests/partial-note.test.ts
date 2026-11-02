@@ -69,7 +69,7 @@ describe("the payout relation Riddler checks (6.0.0)", () => {
 
   it("accepts effects holding the payout, and refuses another recipient, amount or account", async () => {
     const effects = {
-      noteHashes: ["0x" + "31".repeat(32), RIDDLER.uniqueNoteHash],
+      noteHashes: ["0x" + "21".repeat(32), RIDDLER.uniqueNoteHash],
       nullifiers: [RIDDLER.inputs.firstNullifier, RIDDLER.siloedValidityNullifier],
     };
     expect(await effectsProvePayout(effects, riddlerProof)).toBe(true);

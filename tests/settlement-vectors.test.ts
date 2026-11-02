@@ -60,6 +60,11 @@ describe("docs/vectors/settlement-v2.json (D-C canonical vector)", () => {
     const { observation } = vector.createNote.result.body.result;
     expect(vector.createNote.result.body.result.fingerprint).toBe(vector.createNote.fingerprint);
     expect(observation.partialNoteRandomness).toMatch(/^0x[0-9a-f]{64}$/);
+    // Every published effect is a field element, as on a real chain; out-of-field
+    // filler would make a strict consumer refuse the vector's own proof.
+    for (const value of [...observation.effects.noteHashes, ...observation.effects.nullifiers]) {
+      expect(() => Fr.fromString(value)).not.toThrow();
+    }
     const proof = {
       token: AztecAddress.fromStringUnsafe(String(params["token"])),
       recipient: AztecAddress.fromStringUnsafe(String(params["recipient"])),
