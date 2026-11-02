@@ -303,16 +303,28 @@ describe("hard crash mid-broadcast (e2e)", () => {
     // tests' own traffic the full 300 s; never relax the policy. An external
     // Anvil clock cannot be advanced with fake timers.
     const skewDeadline = Date.now() + 20 * 60_000;
+    let lastSkew = "unknown";
+    let nextReport = 0;
     for (;;) {
       const facts = await observer.observeReadinessChain();
-      if (
-        facts.finalized.state === "known" &&
-        Number(facts.finalized.value.timestamp) <= Math.floor(Date.now() / 1000)
-      ) {
-        break;
+      const now = Math.floor(Date.now() / 1000);
+      if (facts.finalized.state === "known") {
+        const skew = Number(facts.finalized.value.timestamp) - now;
+        lastSkew = `${skew} s`;
+        if (skew <= 0) {
+          console.log(`[crash-recovery] finalized tip at wall time (skew ${lastSkew}); starting tests`);
+          break;
+        }
+      } else {
+        lastSkew = `finalized ${facts.finalized.state}`;
       }
       if (Date.now() >= skewDeadline) {
-        throw new Error("finalized tip did not return to wall time within 20 minutes");
+        throw new Error(`finalized tip did not return to wall time within 20 minutes (last skew: ${lastSkew})`);
+      }
+      if (Date.now() >= nextReport) {
+        const left = Math.round((skewDeadline - Date.now()) / 1000);
+        console.log(`[crash-recovery] waiting for finalized tip to reach wall time: skew ${lastSkew}, ${left} s left`);
+        nextReport = Date.now() + 60_000;
       }
       await new Promise((r) => setTimeout(r, 5_000));
     }
