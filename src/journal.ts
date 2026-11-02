@@ -1418,25 +1418,7 @@ export class SettlementJournal {
   }
 
   private writeHighWaterMark(): void {
-    const tmp = `${this.hwmPath}.tmp`;
-    const body = JSON.stringify({ journalId: this.journalId, generation: this.generation });
-    const fd = openSync(tmp, "w", 0o600);
-    try {
-      // The mode above applies only when the file is created; a leftover
-      // temp file keeps whatever mode it had.
-      fchmodSync(fd, 0o600);
-      writeSync(fd, body);
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
-    renameSync(tmp, this.hwmPath);
-    const dir = openSync(dirname(this.hwmPath), "r");
-    try {
-      fsyncSync(dir);
-    } finally {
-      closeSync(dir);
-    }
+    writeHighWaterMarkFile(this.hwmPath, this.journalId, this.generation);
   }
 
   private disable(reason: WriteDisabledReason, detail: string): void {
@@ -1448,9 +1430,36 @@ export class SettlementJournal {
 
 class StateError extends Error {}
 
-function isBusy(cause: unknown): boolean {
+/** Exported for the Oxide sender's journal (src/oxide/journal.ts), which shares the fence. */
+export function isBusy(cause: unknown): boolean {
   const code = (cause as { code?: string } | null)?.code;
   return code === "SQLITE_BUSY" || code === "SQLITE_LOCKED";
+}
+
+/**
+ * Mirrors `{journalId, generation}` into `hwmPath`: owner-only temp file,
+ * fsync, rename, fsync of the directory. Shared with src/oxide/journal.ts.
+ */
+export function writeHighWaterMarkFile(hwmPath: string, journalId: string, generation: number): void {
+  const tmp = `${hwmPath}.tmp`;
+  const body = JSON.stringify({ journalId, generation });
+  const fd = openSync(tmp, "w", 0o600);
+  try {
+    // The mode above applies only when the file is created; a leftover
+    // temp file keeps whatever mode it had.
+    fchmodSync(fd, 0o600);
+    writeSync(fd, body);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, hwmPath);
+  const dir = openSync(dirname(hwmPath), "r");
+  try {
+    fsyncSync(dir);
+  } finally {
+    closeSync(dir);
+  }
 }
 
 /**
@@ -1460,7 +1469,7 @@ function isBusy(cause: unknown): boolean {
  * `-shm`) with the database file's own mode, so a 0600 database keeps them
  * 0600; any that exist now are tightened too.
  */
-function enforceOwnerOnly(path: string, hwmPath: string): void {
+export function enforceOwnerOnly(path: string, hwmPath: string): void {
   const dir = dirname(path);
   let dirMode: number;
   try {
