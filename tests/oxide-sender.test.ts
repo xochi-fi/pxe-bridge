@@ -187,6 +187,23 @@ describe("OxideSender", () => {
     expect(node.sent).toEqual([]);
   });
 
+  it("re-runs the preflight before resending a held attempt", async () => {
+    const node = new FakeNode();
+    const gate = fakeGate("unknown");
+    let refusal: Error | undefined;
+    const preflight = { assertPinned: () => (refusal ? Promise.reject(refusal) : Promise.resolve()) };
+    const { sender, backend } = boot(tempJournalPath(), node, { gate, preflight });
+    expect(observed(await sender.send(request())).observation).toMatchObject({ state: "prepared" });
+    gate.state.decision = "allow";
+    refusal = new EnclaveTrustRefused("portal_frozen", "frozen");
+    expect(observed(await sender.send(request())).observation).toMatchObject({ state: "prepared", hold: "preflight_refused" });
+    expect(gate.queries).toHaveLength(1); // not re-asked: nothing past the preflight ran
+    expect(node.sent).toEqual([]);
+    refusal = undefined;
+    expect(observed(await sender.send(request())).observation.state).toBe("finalized");
+    expect(backend.calls).toEqual(["simulate", "sign", "prove", "send"]);
+  });
+
   it("a pipeline failure before the journal is not_submitted and retryable", async () => {
     const node = new FakeNode();
     const { sender, backend } = boot(tempJournalPath(), node);

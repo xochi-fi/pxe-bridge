@@ -130,7 +130,12 @@ export function isOxideSendEvidence(value: unknown): value is OxideSendEvidence 
 }
 
 /** Why a prepared (journaled, unmarked) attempt is held; a later call resends its exact bytes. */
-export type OxideHold = "may_broadcast_unknown" | "may_broadcast_denied" | "interrupted" | "cap_window_full";
+export type OxideHold =
+  | "may_broadcast_unknown"
+  | "may_broadcast_denied"
+  | "interrupted"
+  | "cap_window_full"
+  | "preflight_refused";
 
 /** The sender's answer. Same vocabulary as the settlement contract's observations. */
 export type OxideObservation =

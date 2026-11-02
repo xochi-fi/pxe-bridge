@@ -283,6 +283,17 @@ export class OxideSender {
           this.journal.reclaim(op.operationId);
           return undefined;
         }
+        // The deployment must still be the pinned one before held bytes go
+        // out: a portal frozen, or a registry or manifest that moved, since the
+        // attempt was proven. Refused, the attempt stays prepared and a later
+        // call retries these exact bytes.
+        try {
+          await this.preflight.assertPinned();
+        } catch (cause) {
+          console.error(`[oxide] Preflight refused a held attempt: ${(cause as Error).message}`);
+          this.journal.recordHold(op.operationId, "preflight_refused");
+          return this.answer(this.journal.get(op.operationId)!, this.preparedObservation(attempt, "preflight_refused"));
+        }
         return this.broadcast(op, attempt);
       }
     }
