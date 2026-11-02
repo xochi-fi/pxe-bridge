@@ -8,6 +8,7 @@ import {
 } from "../src/server.js";
 import { TransactionLimits } from "../src/limits.js";
 import type { MayBroadcastClient } from "../src/may-broadcast.js";
+import { SETTLEMENT_VERSION } from "../src/settlement.js";
 import { RPC_ERRORS } from "../src/types.js";
 import { rpcJson } from "./helpers.js";
 import {
@@ -17,7 +18,7 @@ import {
   readyLimits,
   readyObserver,
   settlementContext,
-  v1Params,
+  settlementParams,
 } from "./settlement-fixtures.js";
 
 const JSON_HEADERS = { "Content-Type": "application/json" };
@@ -157,7 +158,7 @@ describe("HTTP server", () => {
     });
 
     it("handles aztec_createNote", async () => {
-      const res = await jsonPost(baseUrl, rpcBody("aztec_createNote", [v1Params()]), {
+      const res = await jsonPost(baseUrl, rpcBody("aztec_createNote", [settlementParams()]), {
         "Idempotency-Key": "op-1",
       });
       expect(res.status).toBe(200);
@@ -168,10 +169,38 @@ describe("HTTP server", () => {
     it("handles aztec_getSettlement", async () => {
       const res = await jsonPost(
         baseUrl,
-        rpcBody("aztec_getSettlement", [{ version: "pxe-bridge.settlement.v1", operationId: "op-1" }]),
+        rpcBody("aztec_getSettlement", [{ version: SETTLEMENT_VERSION, operationId: "op-1" }]),
       );
       const body = await rpcJson<{ found: boolean }>(res);
       expect(body.result?.found).toBe(true);
+    });
+
+    // v1 does not carry partialNoteRandomness; a consumer still pinned to it
+    // is told why rather than handed observations it cannot prove from.
+    it("refuses a retired settlement version on both methods, naming it", async () => {
+      const read = await rpcJson(
+        await jsonPost(
+          baseUrl,
+          rpcBody("aztec_getSettlement", [{ version: "pxe-bridge.settlement.v1", operationId: "op-1" }]),
+        ),
+      );
+      expect(read.error).toMatchObject({
+        code: RPC_ERRORS.INVALID_PARAMS,
+        data: { reason: "settlement_version_unsupported", supported: SETTLEMENT_VERSION },
+      });
+      const create = await rpcJson(
+        await jsonPost(
+          baseUrl,
+          rpcBody("aztec_createNote", [
+            settlementParams({ operationId: "op-v1", version: "pxe-bridge.settlement.v1" }),
+          ]),
+          { "Idempotency-Key": "op-v1" },
+        ),
+      );
+      expect(create.error).toMatchObject({
+        code: RPC_ERRORS.INVALID_PARAMS,
+        data: { reason: "settlement_version_unsupported", supported: SETTLEMENT_VERSION },
+      });
     });
   });
 
@@ -438,7 +467,7 @@ describe("public liveness isolation", () => {
         fetch(`${url}/ready`, {
           headers: { Authorization: `Bearer ${key}` },
         }),
-        jsonPost(url, rpcBody("aztec_createNote", [v1Params()]), {
+        jsonPost(url, rpcBody("aztec_createNote", [settlementParams()]), {
           Authorization: `Bearer ${key}`,
           "Idempotency-Key": "op-1",
         }),
@@ -585,7 +614,7 @@ describe("public liveness isolation", () => {
         const operationId = `mismatched-operation-${i}`;
         const response = await jsonPost(
           url,
-          rpcBody("aztec_createNote", [v1Params({ operationId })]),
+          rpcBody("aztec_createNote", [settlementParams({ operationId })]),
           headers,
         );
         expect(response.status).toBe(200);
@@ -727,7 +756,7 @@ describe("public liveness isolation", () => {
       const ordinaryCaller = await jsonPost(
         `${url}/api/recovery`,
         rpcBody("aztec_getSettlement", [
-          { version: "pxe-bridge.settlement.v1", operationId: "wrong-credential" },
+          { version: SETTLEMENT_VERSION, operationId: "wrong-credential" },
         ]),
         ordinaryHeaders,
       );
@@ -762,7 +791,7 @@ describe("public liveness isolation", () => {
       const recovery = await jsonPost(
         `${url}/api/recovery`,
         rpcBody("aztec_getSettlement", [
-          { version: "pxe-bridge.settlement.v1", operationId: "recover-valid" },
+          { version: SETTLEMENT_VERSION, operationId: "recover-valid" },
         ]),
         headers,
       );
@@ -783,7 +812,7 @@ describe("public liveness isolation", () => {
       const response = await jsonPost(
         `${url}/api/recovery`,
         rpcBody("aztec_getSettlement", [
-          { version: "pxe-bridge.settlement.v1", operationId: "disabled-recovery" },
+          { version: SETTLEMENT_VERSION, operationId: "disabled-recovery" },
         ]),
         { Authorization: `Bearer ${key}` },
       );
@@ -826,7 +855,7 @@ describe("public liveness isolation", () => {
     const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
     const call = (index: number) => {
       const operationId = `background-${index}`;
-      return jsonPost(url, rpcBody("aztec_createNote", [v1Params({ operationId })]), {
+      return jsonPost(url, rpcBody("aztec_createNote", [settlementParams({ operationId })]), {
         Authorization: `Bearer ${key}`,
         "Idempotency-Key": operationId,
       });
@@ -856,7 +885,7 @@ describe("public liveness isolation", () => {
       });
       expect(rateLimited.status).toBe(429);
       const recoveryBody = rpcBody("aztec_getSettlement", [
-        { version: "pxe-bridge.settlement.v1", operationId: "background-0" },
+        { version: SETTLEMENT_VERSION, operationId: "background-0" },
       ]);
       const legacyRecovery = await jsonPost(url, recoveryBody, {
         Authorization: `Bearer ${key}`,
@@ -1070,7 +1099,7 @@ describe("GET /ready: authoritative routing", () => {
       const readyResponse = await fetch(`${url}/ready`, {
         headers: { Authorization: `Bearer ${key}` },
       });
-      const rpcResponse = await jsonPost(url, rpcBody("aztec_createNote", [v1Params()]), {
+      const rpcResponse = await jsonPost(url, rpcBody("aztec_createNote", [settlementParams()]), {
         Authorization: `Bearer ${key}`,
         "Idempotency-Key": "op-1",
       });
@@ -1117,7 +1146,7 @@ describe("HTTP response deadline", () => {
     const addr = srv.address();
     const url = `http://127.0.0.1:${addr && typeof addr === "object" ? addr.port : 0}`;
     try {
-      const res = await jsonPost(url, rpcBody("aztec_createNote", [v1Params()]), {
+      const res = await jsonPost(url, rpcBody("aztec_createNote", [settlementParams()]), {
         "Idempotency-Key": "op-1",
       });
       expect(res.status).toBe(504);
@@ -1152,7 +1181,7 @@ describe("Idempotency-Key header", () => {
   }
 
   const noteBody = (operationId: string) =>
-    rpcBody("aztec_createNote", [v1Params({ operationId })]);
+    rpcBody("aztec_createNote", [settlementParams({ operationId })]);
 
   it("answers a duplicate from the journal without sending again", async () => {
     const { url, client: c, close } = await boot();

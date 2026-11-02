@@ -14,26 +14,27 @@ import {
   type ChainReadinessFacts,
   type ReadinessReason,
 } from "../src/readiness.js";
-import { CreateNoteV1Schema, fingerprintTerms, termsFrom } from "../src/settlement.js";
+import { CreateNoteSchema, fingerprintTerms, termsFrom } from "../src/settlement.js";
 import {
   ACCOUNT,
   CORRIDOR,
   NETWORK,
   TOKEN,
   openBoundJournal,
-  v1Params,
+  settlementParams,
 } from "./settlement-fixtures.js";
 
 const NO_SPEND = { buckets: Array<bigint>(SPEND_BUCKET_COUNT).fill(0n), lastBucket: 0n };
 
 /** Claims, prepares and marks one operation of `amount` expiring at `expiration`. */
 function mark(journal: SettlementJournal, operationId: string, amount: string, expiration = 1_900_000_000n): void {
-  const terms = termsFrom(CreateNoteV1Schema.parse(v1Params({ operationId, amount })));
+  const terms = termsFrom(CreateNoteSchema.parse(settlementParams({ operationId, amount })));
   journal.claim(operationId, fingerprintTerms(terms), terms);
   const attempt = journal.recordPrepared(operationId, {
     txHash: "0x" + Buffer.from(operationId).toString("hex").padStart(64, "0"),
     txBytes: Buffer.from(operationId),
     expirationTimestamp: expiration,
+    partialNoteRandomness: "0x" + "0c".repeat(32),
   });
   journal.markMayBroadcast(operationId, attempt, terms.amount);
 }
@@ -314,6 +315,7 @@ describe("authoritative readiness predicate", () => {
             receiptStatus: "finalized",
             observedAt: NOW,
             effects: { state: "available", noteHashes: [], nullifiers: [] },
+            partialNoteRandomness: attempt!.partialNoteRandomness,
           });
         },
       },

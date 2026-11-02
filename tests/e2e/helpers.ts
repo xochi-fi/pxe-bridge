@@ -15,10 +15,17 @@ import {
   type PendingFeeJuiceDeposit,
 } from "../../src/fee-juice.js";
 import { headroomGasSettings } from "../../src/aztec-client.js";
+import { payoutEvidence } from "../../src/partial-note.js";
+import { MAX_NOTE_HASHES_PER_TX } from "@aztec-labs/constants";
+import { FunctionSelector } from "@aztec-labs/aztec.js/abi";
+import { AztecAddress } from "@aztec-labs/aztec.js/addresses";
 import { L1TokenManager } from "@aztec-labs/aztec.js/ethereum";
+import { Fr } from "@aztec-labs/aztec.js/fields";
 import { createLogger } from "@aztec-labs/aztec.js/log";
 import { createAztecNodeClient } from "@aztec-labs/aztec.js/node";
+import { Tx, TxHash } from "@aztec-labs/aztec.js/tx";
 import { createExtendedL1Client } from "@aztec-labs/ethereum/client";
+import { TokenContract } from "@aztec-labs/noir-contracts.js/Token";
 import { BlockHash } from "@aztec-labs/stdlib/block";
 
 export interface E2EConfig {
@@ -549,4 +556,93 @@ export async function deployTestToken(wallet: unknown, admin: string): Promise<s
     .send({ from: adminAddress, fee: await feeWithHeadroom(wallet) });
 
   return contract.address.toString();
+}
+
+/** What a mined payout shows, recomputed from its terms and randomness alone. */
+export interface PayoutProof {
+  /** C, read from the proven bytes' `_finalize_transfer_to_private_unsafe` call. */
+  commitmentFromBytes: string | undefined;
+  /** P2([recipient, randomness], DOM_SEP__PARTIAL_NOTE_COMMITMENT). */
+  partialCommitment: string;
+  /** i < 64 for which the recomputed unique note hash is in the effect, if any. */
+  noteHashIndex: number | undefined;
+  uniqueNoteHash: string | undefined;
+  noteHashes: string[];
+  siloedValidityNullifier: string;
+  nullifiers: string[];
+  completionLogTag: string;
+  /** The token's public log tagged with the completion tag, after the tag. */
+  completionLogFields: string[] | undefined;
+}
+
+/**
+ * Recomputes the payout of `amount` of `token` to `recipient` from the
+ * partial-note randomness (the relation Riddler checks) and reads the mined
+ * transaction's own effect from the node to compare. With `txBytes`, also
+ * reads C from the proven transaction the bridge journaled.
+ */
+export async function proveMinedPayout(
+  nodeUrl: string,
+  input: {
+    txHash: string;
+    token: string;
+    recipient: string;
+    payoutAccount: string;
+    amount: bigint;
+    partialNoteRandomness: string;
+    txBytes?: Buffer;
+  },
+): Promise<PayoutProof> {
+  const token = AztecAddress.fromStringUnsafe(input.token);
+  const evidence = await payoutEvidence({
+    token,
+    recipient: AztecAddress.fromStringUnsafe(input.recipient),
+    payoutAccount: AztecAddress.fromStringUnsafe(input.payoutAccount),
+    amount: input.amount,
+    randomness: Fr.fromString(input.partialNoteRandomness),
+  });
+
+  let commitmentFromBytes: string | undefined;
+  if (input.txBytes) {
+    const finalize = TokenContract.artifact.nonDispatchPublicFunctions.find(
+      (f) => f.name === "_finalize_transfer_to_private_unsafe",
+    )!;
+    const selector = await FunctionSelector.fromNameAndParameters(finalize.name, finalize.parameters);
+    const calls = Tx.fromBuffer(input.txBytes)
+      .getPublicCallRequestsWithCalldata()
+      .filter((c) => c.request.contractAddress.equals(token) && c.functionSelector.equals(selector));
+    commitmentFromBytes = calls.length === 1 ? calls[0]!.args[2]?.toString() : undefined;
+  }
+
+  const receipt = await createAztecNodeClient(nodeUrl).getTxReceipt(TxHash.fromString(input.txHash), {
+    includeTxEffect: true,
+  });
+  const effect = receipt.txEffect;
+  if (!effect) throw new Error(`no tx effect for ${input.txHash}`);
+  const noteHashes = effect.noteHashes.map((h) => h.toString());
+  const nullifiers = effect.nullifiers.map((n) => n.toString());
+  let noteHashIndex: number | undefined;
+  let uniqueNoteHash: string | undefined;
+  for (let i = 0; i < MAX_NOTE_HASHES_PER_TX && nullifiers[0] !== undefined; i += 1) {
+    const candidate = (await evidence.uniqueNoteHash(Fr.fromString(nullifiers[0]), i)).toString();
+    if (noteHashes.includes(candidate)) {
+      noteHashIndex = i;
+      uniqueNoteHash = candidate;
+      break;
+    }
+  }
+  const completionLog = effect.publicLogs.find(
+    (log) => log.contractAddress.equals(token) && log.fields[0]?.equals(evidence.completionLogTag),
+  );
+  return {
+    commitmentFromBytes,
+    partialCommitment: evidence.partialCommitment.toString(),
+    noteHashIndex,
+    uniqueNoteHash,
+    noteHashes,
+    siloedValidityNullifier: evidence.siloedValidityNullifier.toString(),
+    nullifiers,
+    completionLogTag: evidence.completionLogTag.toString(),
+    completionLogFields: completionLog?.fields.slice(1).map((f) => f.toBigInt().toString()),
+  };
 }

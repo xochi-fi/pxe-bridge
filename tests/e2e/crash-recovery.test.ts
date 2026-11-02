@@ -24,6 +24,7 @@ import {
   getTestConfig,
   mintOne,
   mintTo,
+  proveMinedPayout,
   registerPublished,
   requireTestToken,
   walletDataDirectory,
@@ -223,7 +224,14 @@ describe("hard crash mid-broadcast (e2e)", () => {
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: [params] }),
     });
     return (await res.json()) as {
-      result?: Record<string, unknown> & { observation: { state: string; txHash?: string } };
+      result?: Record<string, unknown> & {
+        observation: {
+          state: string;
+          txHash?: string;
+          partialNoteRandomness?: string | null;
+          effects?: { noteHashes: string[]; nullifiers: string[] };
+        };
+      };
       error?: { code: number; data?: { observation?: { state: string } } };
     };
   }
@@ -513,6 +521,12 @@ describe("hard crash mid-broadcast (e2e)", () => {
       `the first response must be lost to the kill, got ${JSON.stringify(first)}\n${bridge.log()}`,
     ).toBeInstanceOf(Error);
     expect(await bridge.exited).toBeNull();
+    // Proven, journaled and killed before the mark: the randomness is in the
+    // journal beside the bytes, and the restart below never re-proves.
+    const dead = SettlementJournal.open(journal);
+    const [journaledAttempt] = dead.attempts(operationId);
+    dead.close();
+    expect(journaledAttempt?.partialNoteRandomness).toMatch(/^0x[0-9a-f]{64}$/);
 
     // Restart under another corridor revision: the operation's own corridor no
     // longer admits new work, which must not stop its recovery.
@@ -553,6 +567,20 @@ describe("hard crash mid-broadcast (e2e)", () => {
       operationId,
     });
     expect(settled.result!["attempts"]).toHaveLength(1);
+    // The wire carries the randomness journaled before the kill, and it
+    // proves the payout to the signed recipient on the real chain.
+    expect(settled.result!.observation.partialNoteRandomness).toBe(journaledAttempt!.partialNoteRandomness);
+    const proof = await proveMinedPayout(config.nodeUrl, {
+      txHash: preparedAttempts[0]!.txHash,
+      token,
+      recipient: RECIPIENT,
+      payoutAccount: account,
+      amount: BigInt(AMOUNT),
+      partialNoteRandomness: journaledAttempt!.partialNoteRandomness!,
+    });
+    expect(settled.result!.observation.effects?.noteHashes).toContain(proof.uniqueNoteHash);
+    expect(settled.result!.observation.effects?.nullifiers).toContain(proof.siloedValidityNullifier);
+    expect(proof.completionLogFields).toEqual(["3", AMOUNT]);
     expect(gateCalls.filter((id) => id === operationId)).toHaveLength(2);
 
     bridge.child.kill("SIGTERM");
@@ -620,6 +648,17 @@ describe("hard crash mid-broadcast (e2e)", () => {
       operationId,
     });
     expect(settled.result).toMatchObject({ found: true, state: "finalized" });
+    const { observation } = settled.result!;
+    const finalized = await proveMinedPayout(config.nodeUrl, {
+      txHash: observation.txHash!,
+      token,
+      recipient: RECIPIENT,
+      payoutAccount: account,
+      amount: BigInt(AMOUNT),
+      partialNoteRandomness: observation.partialNoteRandomness!,
+    });
+    expect(observation.effects?.noteHashes).toContain(finalized.uniqueNoteHash);
+    expect(observation.effects?.nullifiers).toContain(finalized.siloedValidityNullifier);
     bridge.child.kill("SIGTERM");
     await bridge.exited;
     bridge = undefined;

@@ -1,22 +1,25 @@
 import {
   JsonRpcRequestSchema,
+  PartialNoteUnresolved,
   RPC_ERRORS,
   SUBMITTED_UNKNOWN_MESSAGE,
   type BroadcastGate,
   type IAztecClient,
+  type JournaledTransfer,
   type JsonRpcResponse,
   type PreparedTransaction,
   type TransferOutcome,
 } from "./types.js";
 import {
-  CreateNoteV1Schema,
+  CreateNoteSchema,
   GetSettlementSchema,
   SETTLEMENT_VERSION,
   fingerprintTerms,
   isLegacyCreateNoteParams,
+  namesRetiredVersion,
   termsFrom,
   type CorridorConfig,
-  type CreateNoteV1,
+  type CreateNoteParams,
   type NodeObservation,
   type Observation,
   type SettlementTerms,
@@ -208,14 +211,19 @@ interface DriveState {
 
 /**
  * `fresh` proves a new attempt; `resume` re-asks for a journaled, unmarked
- * attempt. A marked attempt is observation-only: absence from one node is
- * never proof that the transaction did not reach another node or a prior fork.
- * `readiness` is the projection the attempt was admitted or resumed on; its
- * capacity is re-evaluated against the live window right before reserving.
+ * attempt, which must carry its partial-note randomness. A marked attempt is
+ * observation-only: absence from one node is never proof that the
+ * transaction did not reach another node or a prior fork. `readiness` is the
+ * projection the attempt was admitted or resumed on; its capacity is
+ * re-evaluated against the live window right before reserving.
  */
 type GateMode =
   | { kind: "fresh"; readiness: OperationalReadiness }
-  | { kind: "resume"; attempt: Attempt; readiness: OperationalReadiness };
+  | {
+      kind: "resume";
+      attempt: Attempt & { partialNoteRandomness: string };
+      readiness: OperationalReadiness;
+    };
 
 /**
  * The per-attempt broadcast gate: journal the exact transaction, ask Riddler,
@@ -259,9 +267,15 @@ class OperationGate implements BroadcastGate {
       if (tx.txHash.toLowerCase() !== this.mode.attempt.txHash) {
         throw new Error("journaled bytes no longer produce the journaled hash");
       }
+      if (tx.partialNoteRandomness !== this.mode.attempt.partialNoteRandomness) {
+        throw new PartialNoteUnresolved("mismatch");
+      }
       // An unmarked prepared attempt re-asks Riddler for the same hash before
       // its exact bytes can be sent.
     } else {
+      // The bytes and their partial-note randomness in one durable write:
+      // nothing past this point can send an attempt the journal holds
+      // without it.
       const attempt = journal.recordPrepared(operationId, tx);
       this.attempt = {
         attempt,
@@ -269,6 +283,7 @@ class OperationGate implements BroadcastGate {
         expirationTimestamp: tx.expirationTimestamp.toString(),
         preparedAt: Date.now(),
         mayBroadcastAt: null,
+        partialNoteRandomness: tx.partialNoteRandomness,
       };
     }
     const attempt = this.attempt!;
@@ -387,6 +402,7 @@ function observationFrom(attempt: Attempt, node: NodeObservation, now: number): 
         receiptStatus: node.receiptStatus,
         observedAt: Math.floor(now / 1000),
         effects: node.effects,
+        partialNoteRandomness: attempt.partialNoteRandomness,
       };
   }
 }
@@ -412,7 +428,8 @@ function sameCanonicalOutcome(left: MinedObservation, right: MinedObservation): 
     left.receiptStatus === right.receiptStatus &&
     left.effects.state === right.effects.state &&
     sameStrings(left.effects.noteHashes, right.effects.noteHashes) &&
-    sameStrings(left.effects.nullifiers, right.effects.nullifiers)
+    sameStrings(left.effects.nullifiers, right.effects.nullifiers) &&
+    left.partialNoteRandomness === right.partialNoteRandomness
   );
 }
 
@@ -596,6 +613,20 @@ function answer(
   }
 }
 
+/**
+ * A consumer still speaking a retired contract version. Permanent: it does
+ * not read what this version answers (v2: `partialNoteRandomness`), so it is
+ * refused before anything is claimed, proven or read.
+ */
+function retiredVersion(id: number | string): JsonRpcResponse {
+  return rpcError(
+    id,
+    RPC_ERRORS.INVALID_PARAMS,
+    `Settlement contract version is retired; send ${SETTLEMENT_VERSION}`,
+    { reason: "settlement_version_unsupported", supported: SETTLEMENT_VERSION },
+  );
+}
+
 async function handleCreateNote(
   id: number | string,
   params: unknown[],
@@ -611,7 +642,8 @@ async function handleCreateNote(
       { reason: "legacy_params_refused" },
     );
   }
-  const parsed = CreateNoteV1Schema.safeParse(first);
+  if (namesRetiredVersion(first)) return retiredVersion(id);
+  const parsed = CreateNoteSchema.safeParse(first);
   if (!parsed.success || params.length !== 1) {
     console.error("[rpc] Invalid createNote params");
     return rpcError(id, RPC_ERRORS.INVALID_PARAMS, "Invalid params for aztec_createNote");
@@ -634,7 +666,7 @@ async function handleCreateNote(
 
 async function createNoteWithin(
   id: number | string,
-  params: CreateNoteV1,
+  params: CreateNoteParams,
   client: IAztecClient,
   ctx: RpcContext,
   s: SettlementContext,
@@ -843,6 +875,15 @@ async function resumeExisting(
         // prepare a new attempt under the same operation.
         return undefined;
       }
+      const partialNoteRandomness = attempt.partialNoteRandomness;
+      if (partialNoteRandomness === null) {
+        // Journaled before the bridge captured partial-note randomness: its
+        // payout could never be proven, so these bytes are never sent. Never
+        // marked, so a new attempt replaces it exactly as an expired one
+        // does (a hash Riddler already bound is denied and held, never paid
+        // twice).
+        return undefined;
+      }
       // Already admitted: recovery is not gated on admission readiness, only
       // on facts that make this exact transaction unsendable or certain to fail.
       const hold = await preparedHoldReasons(ctx, s, op.terms, deadline);
@@ -855,7 +896,7 @@ async function resumeExisting(
         ctx,
         s,
         state,
-        { kind: "resume", attempt, readiness: hold.readiness },
+        { kind: "resume", attempt: { ...attempt, partialNoteRandomness }, readiness: hold.readiness },
         background,
         deadline,
       );
@@ -1139,10 +1180,16 @@ async function runAttempt(
 ): Promise<JsonRpcResponse> {
   const { op, fingerprint, terms } = state;
   const amount = BigInt(terms.amount);
-  let journaledBytes: Buffer | undefined;
+  let journaled: JournaledTransfer | undefined;
   if (mode.kind !== "fresh") {
     try {
-      journaledBytes = s.journal.attemptBytes(op.operationId, mode.attempt.attempt);
+      journaled = {
+        recipient: terms.recipient,
+        token: terms.token,
+        amount: terms.amount,
+        txBytes: s.journal.attemptBytes(op.operationId, mode.attempt.attempt),
+        partialNoteRandomness: mode.attempt.partialNoteRandomness,
+      };
     } catch (cause) {
       return journalFault(id, s, op.operationId, cause);
     }
@@ -1204,9 +1251,9 @@ async function runAttempt(
     failure = new GateClosed();
   } else {
     const call: Promise<TransferOutcome> =
-      journaledBytes === undefined
+      journaled === undefined
         ? client.createNote({ recipient: terms.recipient, token: terms.token, amount: terms.amount }, gate)
-        : client.broadcastPrepared(journaledBytes, gate);
+        : client.broadcastPrepared(journaled, gate);
     background.track(call);
     try {
       outcome = await deadline.race(call);
@@ -1255,6 +1302,13 @@ async function runAttempt(
   if (failure instanceof Held) {
     await audit(ctx, failure.observation);
     return answer(id, { operationId: op.operationId, fingerprint }, failure.observation);
+  }
+  if (failure instanceof PartialNoteUnresolved) {
+    // Never journaled (fresh) or never sent (resume): no payout this bridge
+    // cannot prove may broadcast, and another proof of the same terms would
+    // fail the same check. Requote under a new operation id.
+    console.error(`[rpc] Settlement not broadcast: partial-note randomness unresolved (${failure.detail})`);
+    return notSubmitted(id, ctx, s, op, fingerprint, "partial_note_randomness_unresolved", false);
   }
   if (failure instanceof JournalWriteError || failure instanceof JournalUnreadableError) {
     return journalFault(id, s, op.operationId, failure);
@@ -1309,6 +1363,7 @@ async function handleGetSettlement(
   client: IAztecClient,
   ctx: RpcContext,
 ): Promise<JsonRpcResponse> {
+  if (namesRetiredVersion(params[0])) return retiredVersion(id);
   const parsed = GetSettlementSchema.safeParse(params[0]);
   if (!parsed.success || params.length !== 1) {
     return rpcError(id, RPC_ERRORS.INVALID_PARAMS, "Invalid params for aztec_getSettlement");

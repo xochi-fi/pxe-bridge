@@ -11,7 +11,12 @@ import {
   handleAttestationRpc,
   type AttestationProducer,
 } from "./attestation.js";
-import { CreateNoteV1Schema, GetSettlementSchema } from "./settlement.js";
+import {
+  CreateNoteSchema,
+  GetSettlementSchema,
+  SETTLEMENT_VERSION,
+  namesRetiredVersion,
+} from "./settlement.js";
 
 const MAX_BODY_BYTES = 64 * 1024; // 64 KB
 const RATE_LIMIT_WINDOW_MS = 60_000;
@@ -856,6 +861,9 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
             error: {
               code: RPC_ERRORS.INVALID_PARAMS,
               message: "Invalid params for aztec_getSettlement",
+              ...(params.length === 1 && namesRetiredVersion(params[0])
+                ? { data: { reason: "settlement_version_unsupported", supported: SETTLEMENT_VERSION } }
+                : {}),
             },
           });
           return;
@@ -874,7 +882,7 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
         }
         const createNoteParams =
           method === "aztec_createNote" && params.length === 1
-            ? CreateNoteV1Schema.safeParse(params[0])
+            ? CreateNoteSchema.safeParse(params[0])
             : undefined;
         const createNoteRequest =
           createNoteParams?.success === true &&

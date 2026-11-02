@@ -18,15 +18,17 @@ import {
   JournalWriteError,
   SettlementJournal,
 } from "../src/journal.js";
-import { CreateNoteV1Schema, fingerprintTerms, termsFrom } from "../src/settlement.js";
-import { ACCOUNT, openBoundJournal, tempJournalPath, v1Params } from "./settlement-fixtures.js";
+import { CreateNoteSchema, fingerprintTerms, termsFrom } from "../src/settlement.js";
+import { ACCOUNT, openBoundJournal, tempJournalPath, settlementParams } from "./settlement-fixtures.js";
 
-const terms = termsFrom(CreateNoteV1Schema.parse(v1Params()));
+const terms = termsFrom(CreateNoteSchema.parse(settlementParams()));
 const fingerprint = fingerprintTerms(terms);
+const randomness = (n: number) => "0x" + (n + 0xabc).toString(16).padStart(64, "0");
 const tx = (n: number) => ({
   txHash: "0x" + n.toString(16).padStart(64, "0"),
   txBytes: Buffer.from(`tx-${n}`),
   expirationTimestamp: 1_900_000_000n,
+  partialNoteRandomness: randomness(n),
 });
 
 /** Claims, prepares and marks one operation. */
@@ -368,6 +370,7 @@ describe("SettlementJournal", () => {
       DROP INDEX root_update_pending;
       DROP TABLE root_update_outbox;
       DROP TABLE allowlist_snapshots;
+      ALTER TABLE attempts DROP COLUMN partial_note_randomness;
       UPDATE meta SET value = '1' WHERE key = 'schema_version';
     `);
     db.close();
@@ -376,8 +379,125 @@ describe("SettlementJournal", () => {
     migrated.bindAccount(ACCOUNT, true);
     expect(migrated.health()).toEqual({ writable: true });
     expect(migrated.get("op-1")).toMatchObject({ state: "may_broadcast" });
+    expect(migrated.attempts("op-1")).toMatchObject([{ attempt: 1, partialNoteRandomness: null }]);
     migrated.recordAllowlistSnapshot("0x" + "56".repeat(32), []);
     expect(migrated.allowlistSnapshot("0x" + "56".repeat(32))).toBeDefined();
+  });
+
+  it("journals the partial-note randomness with the bytes, across a crash before broadcast", () => {
+    const path = tempJournalPath();
+    const journal = openBoundJournal(path);
+    journal.claim("op-1", fingerprint, terms);
+    expect(journal.recordPrepared("op-1", tx(1))).toBe(1);
+    // Proven and journaled, never asked about, never marked: what a crash
+    // between prepare and broadcast leaves. synchronous=FULL committed it.
+    journal.close();
+
+    const reopened = SettlementJournal.open(path);
+    reopened.bindAccount(ACCOUNT, true);
+    expect(reopened.health()).toEqual({ writable: true });
+    expect(reopened.get("op-1")).toMatchObject({ state: "prepared", currentAttempt: 1 });
+    expect(reopened.attempts("op-1")).toMatchObject([
+      { attempt: 1, txHash: tx(1).txHash, partialNoteRandomness: randomness(1), mayBroadcastAt: null },
+    ]);
+    expect(reopened.attemptBytes("op-1", 1)).toEqual(tx(1).txBytes);
+  });
+
+  it("refuses to journal a prepared transaction without well-formed randomness", () => {
+    const journal = openBoundJournal();
+    journal.claim("op-1", fingerprint, terms);
+    for (const partialNoteRandomness of ["", "0x" + "AB".repeat(32), "0x" + "ab".repeat(31)]) {
+      expect(() => journal.recordPrepared("op-1", { ...tx(1), partialNoteRandomness })).toThrow(
+        JournalWriteError,
+      );
+    }
+    // A caller bug, not a durability fault; and nothing was journaled.
+    expect(journal.health()).toEqual({ writable: true });
+    expect(journal.get("op-1")).toMatchObject({ state: "claimed", currentAttempt: null });
+    expect(journal.attempts("op-1")).toEqual([]);
+  });
+
+  /** Rewrites a current journal as schema 2: no randomness column. */
+  function asSchema2(path: string): void {
+    const db = new Database(path);
+    db.exec(`
+      UPDATE operations
+        SET observation_json = json_remove(observation_json, '$.partialNoteRandomness')
+        WHERE observation_json IS NOT NULL;
+      ALTER TABLE attempts DROP COLUMN partial_note_randomness;
+      UPDATE meta SET value = '2' WHERE key = 'schema_version';
+    `);
+    db.close();
+  }
+
+  it("migrates a schema 2 journal, never inventing randomness for its attempts", () => {
+    const path = tempJournalPath();
+    const journal = openBoundJournal(path);
+    marked(journal, "op-final");
+    journal.recordTerminal("op-final", {
+      state: "finalized",
+      txHash: tx(1).txHash,
+      expirationTimestamp: "1900000000",
+      executionResult: "success",
+      blockHash: "0x" + "b".repeat(64),
+      blockNumber: "7",
+      receiptStatus: "finalized",
+      observedAt: 1,
+      effects: { state: "available", noteHashes: ["0x01"], nullifiers: ["0x02"] },
+      partialNoteRandomness: randomness(1),
+    });
+    journal.claim("op-prepared", fingerprint, terms);
+    journal.recordPrepared("op-prepared", tx(2));
+    journal.close();
+    asSchema2(path);
+
+    const migrated = SettlementJournal.open(path);
+    migrated.bindAccount(ACCOUNT, true);
+    expect(migrated.health()).toEqual({ writable: true });
+    expect(migrated.attempts("op-prepared")).toMatchObject([{ attempt: 1, partialNoteRandomness: null }]);
+    // A terminal observation recorded before schema 3 reads as null, never
+    // as a value from anywhere else.
+    expect(migrated.get("op-final")?.observation).toMatchObject({
+      state: "finalized",
+      partialNoteRandomness: null,
+    });
+    // A new attempt under the same operation carries its own.
+    expect(migrated.recordPrepared("op-prepared", tx(3))).toBe(2);
+    expect(migrated.attempts("op-prepared").map((a) => a.partialNoteRandomness)).toEqual([
+      null,
+      randomness(3),
+    ]);
+  });
+
+  it("keeps recovery reads of an unmigrated schema 2 journal working", () => {
+    const path = tempJournalPath();
+    const journal = openBoundJournal(path);
+    marked(journal);
+    journal.close();
+    asSchema2(path);
+    // Writes disabled before migration: the file stays schema 2.
+    rmSync(`${path}.hwm`);
+
+    const reopened = SettlementJournal.open(path);
+    expect(reopened.health()).toMatchObject({ writable: false, reason: "rollback_detected" });
+    expect(reopened.attempts("op-1")).toMatchObject([
+      { attempt: 1, txHash: tx(1).txHash, partialNoteRandomness: null },
+    ]);
+  });
+
+  it("disables writes on malformed stored randomness without echoing it", () => {
+    const path = tempJournalPath();
+    const journal = openBoundJournal(path);
+    marked(journal);
+    journal.close();
+    const db = new Database(path);
+    db.prepare("UPDATE attempts SET partial_note_randomness = ?").run("0xnot-a-field");
+    db.close();
+
+    const reopened = SettlementJournal.open(path);
+    const health = reopened.health();
+    expect(health).toMatchObject({ writable: false, reason: "journal_inconsistent" });
+    expect(JSON.stringify(health)).not.toContain("not-a-field");
   });
 
   it("disables writes on a schema version it does not know", () => {

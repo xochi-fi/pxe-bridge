@@ -5,7 +5,7 @@ import { createLandedReconciler, handleRpcRequest, type RpcContext, type Settlem
 import { RPC_ERRORS, SUBMITTED_UNKNOWN_MESSAGE } from "../src/types.js";
 import { SettlementJournal } from "../src/journal.js";
 import { TransactionLimits } from "../src/limits.js";
-import { SETTLEMENT_VERSION, fingerprintTerms, termsFrom, CreateNoteV1Schema } from "../src/settlement.js";
+import { SETTLEMENT_VERSION, fingerprintTerms, termsFrom, CreateNoteSchema } from "../src/settlement.js";
 import type { MayBroadcastClient } from "../src/may-broadcast.js";
 import {
   FakeAztecClient,
@@ -17,7 +17,7 @@ import {
   readyObserver,
   settlementContext,
   tempJournalPath,
-  v1Params,
+  settlementParams,
   TOKEN,
   VALID_UNTIL,
   type FakeMayBroadcast,
@@ -38,7 +38,7 @@ interface Answer {
 async function createNote(
   client: FakeAztecClient,
   ctx: RpcContext,
-  params: Record<string, unknown> = v1Params(),
+  params: Record<string, unknown> = settlementParams(),
   key: string | undefined = String(params["operationId"]),
 ): Promise<Answer> {
   return (await handleRpcRequest(rpcBody("aztec_createNote", [params]), client, {
@@ -104,9 +104,9 @@ describe("aztec_createNote: the versioned payload", () => {
     ["amount above 2^128 - 1", { amount: (1n << 128n).toString() }],
     ["leading-zero amount", { amount: "01" }],
     ["wrong version", { version: "pxe-bridge.settlement.v0" }],
-    ["short rollup address", { network: { ...v1Params()["network"] as object, rollupAddress: "0x12" } }],
+    ["short rollup address", { network: { ...settlementParams()["network"] as object, rollupAddress: "0x12" } }],
   ])("refuses %s", async (_name, override) => {
-    const res = await createNote(client, ctx, v1Params(override));
+    const res = await createNote(client, ctx, settlementParams(override));
     expect(res.error?.code).toBe(RPC_ERRORS.INVALID_PARAMS);
     expect(client.proofs).toBe(0);
   });
@@ -116,7 +116,7 @@ describe("aztec_createNote: the versioned payload", () => {
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       const res = await createNote(client, ctx, {
-        ...v1Params(),
+        ...settlementParams(),
         accountMode: sentinel,
         [sentinel]: sentinel,
       });
@@ -129,7 +129,7 @@ describe("aztec_createNote: the versioned payload", () => {
   });
 
   it("requires the Idempotency-Key to equal the operation id", async () => {
-    const res = await createNote(client, ctx, v1Params(), "some-other-key");
+    const res = await createNote(client, ctx, settlementParams(), "some-other-key");
     expect(res.error?.code).toBe(RPC_ERRORS.INVALID_PARAMS);
     expect(res.error?.data).toEqual({ reason: "operation_id_mismatch" });
     expect(client.proofs).toBe(0);
@@ -186,8 +186,8 @@ describe("aztec_createNote: capacity against the live window", () => {
       },
     });
     const answers = await Promise.all([
-      createNote(client, ctx, v1Params({ operationId: "op-a" })),
-      createNote(client, ctx, v1Params({ operationId: "op-b" })),
+      createNote(client, ctx, settlementParams({ operationId: "op-a" })),
+      createNote(client, ctx, settlementParams({ operationId: "op-b" })),
     ]);
 
     expect(answers.filter((a) => a.result?.observation.state === "included")).toHaveLength(1);
@@ -212,8 +212,8 @@ describe("aztec_createNote: capacity against the live window", () => {
     const limits = new TransactionLimits({ maxAmount: 1000n, dailyLimit: 1000n });
     // Both fit the 1000 window; only one fee is covered.
     const answers = await Promise.all([
-      createNote(client, { settlement: s, limits }, v1Params({ operationId: "op-a", amount: "400" })),
-      createNote(client, { settlement: s, limits }, v1Params({ operationId: "op-b", amount: "400" })),
+      createNote(client, { settlement: s, limits }, settlementParams({ operationId: "op-a", amount: "400" })),
+      createNote(client, { settlement: s, limits }, settlementParams({ operationId: "op-b", amount: "400" })),
     ]);
 
     expect(answers.filter((a) => a.result?.observation.state === "included")).toHaveLength(1);
@@ -301,13 +301,14 @@ describe("aztec_createNote: capacity against the live window", () => {
     const ids = ["op-a", "op-b", "op-c", "op-d", "op-e", "op-f", "op-g", "op-h", "op-i"];
     const hashes = new Map<string, string>();
     for (const operationId of ids) {
-      const terms = termsFrom(CreateNoteV1Schema.parse(v1Params({ operationId, amount: "10" })));
+      const terms = termsFrom(CreateNoteSchema.parse(settlementParams({ operationId, amount: "10" })));
       journal.claim(operationId, fingerprintTerms(terms), terms);
       const txHash = "0x" + Buffer.from(operationId).toString("hex").padStart(64, "0");
       const attempt = journal.recordPrepared(operationId, {
         txHash,
         txBytes: Buffer.from(operationId),
         expirationTimestamp: 1_900_000_000n,
+        partialNoteRandomness: "0x" + "0c".repeat(32),
       });
       journal.markMayBroadcast(operationId, attempt, terms.amount);
       hashes.set(operationId, txHash);
@@ -336,7 +337,7 @@ describe("aztec_createNote: capacity against the live window", () => {
 describe("aztec_createNote: the broadcast gate", () => {
   it("journals, asks, marks, then broadcasts once and returns the observation", async () => {
     const res = await createNote(client, ctx);
-    const params = CreateNoteV1Schema.parse(v1Params());
+    const params = CreateNoteSchema.parse(settlementParams());
     expect(res.result?.observation.state).toBe("included");
     expect(res.result?.fingerprint).toBe(fingerprintTerms(termsFrom(params)));
     expect(gate.calls).toEqual(["op-1"]);
@@ -409,8 +410,8 @@ describe("aztec_createNote: the broadcast gate", () => {
       const beforeBytes = journal.attemptBytes("op-1", beforeOperation.currentAttempt!);
       const beforeGeneration = journal.meta().generation;
       expect(beforeOperation).toMatchObject({
-        fingerprint: fingerprintTerms(termsFrom(CreateNoteV1Schema.parse(v1Params()))),
-        terms: { recipient: v1Params()["recipient"] },
+        fingerprint: fingerprintTerms(termsFrom(CreateNoteSchema.parse(settlementParams()))),
+        terms: { recipient: settlementParams()["recipient"] },
         state: "prepared",
         hold,
         currentAttempt: 1,
@@ -565,7 +566,7 @@ describe("aztec_createNote: the broadcast gate", () => {
 
   it("refuses a same-id request with changed terms and does no work", async () => {
     await createNote(client, ctx);
-    const res = await createNote(client, ctx, v1Params({ amount: "999" }));
+    const res = await createNote(client, ctx, settlementParams({ amount: "999" }));
     expect(res.error?.code).toBe(RPC_ERRORS.OPERATION_CONFLICT);
     expect(res.error?.data).toMatchObject({ operationId: "op-1" });
     expect(client.proofs).toBe(1);
@@ -581,10 +582,10 @@ describe("aztec_createNote: the broadcast gate", () => {
   });
 
   it.each([
-    ["corridor_mismatch", () => ({ corridor: { ...(v1Params()["corridor"] as object), corridorRevision: 2 } })],
+    ["corridor_mismatch", () => ({ corridor: { ...(settlementParams()["corridor"] as object), corridorRevision: 2 } })],
     ["account_mode_mismatch", () => ({ accountMode: "standard" })],
   ])("refuses %s before preparing", async (reason, override) => {
-    const res = await createNote(client, ctx, v1Params(override()));
+    const res = await createNote(client, ctx, settlementParams(override()));
     expect(res.error?.code).toBe(RPC_ERRORS.NOT_SUBMITTED);
     expect(res.error?.data?.observation).toMatchObject({ state: "not_submitted", reason });
     expect(client.proofs).toBe(0);
@@ -618,7 +619,7 @@ describe("aztec_createNote: the broadcast gate", () => {
   });
 
   it("refuses an operation past its validity bound, permanently", async () => {
-    const res = await createNote(client, ctx, v1Params({ validUntil: 1 }));
+    const res = await createNote(client, ctx, settlementParams({ validUntil: 1 }));
     expect(res.error?.data?.observation).toEqual({
       state: "not_submitted",
       reason: "validity_bound_passed",
@@ -649,7 +650,7 @@ describe("aztec_createNote: the broadcast gate", () => {
     gate.decision = "allow";
     await createNote(client, { settlement: s, limits });
     expect(limits.windowStatus().committed).toBe(1000n);
-    const over = await createNote(client, { settlement: s, limits }, v1Params({ operationId: "op-2" }));
+    const over = await createNote(client, { settlement: s, limits }, settlementParams({ operationId: "op-2" }));
     expect(over.error?.data?.observation).toMatchObject({ state: "not_submitted" });
     expect(client.sends).toHaveLength(1);
   });
@@ -663,7 +664,7 @@ describe("aztec_createNote: the broadcast gate", () => {
       reasons: ["fee_runway_insufficient", "finalized_tip_stale"],
     });
 
-    const fresh = await createNote(client, ctx, v1Params({ operationId: "op-2" }));
+    const fresh = await createNote(client, ctx, settlementParams({ operationId: "op-2" }));
     expect(fresh.error?.code).toBe(RPC_ERRORS.NOT_READY);
     expect(client.proofs).toBe(1);
 
@@ -680,7 +681,7 @@ describe("aztec_createNote: the broadcast gate", () => {
     await createNote(client, { settlement: s, limits });
     const held = journal.attempts("op-1")[0]!.txHash;
     gate.decision = "allow";
-    await createNote(client, { settlement: s, limits }, v1Params({ operationId: "op-2" }));
+    await createNote(client, { settlement: s, limits }, settlementParams({ operationId: "op-2" }));
     expect(limits.windowStatus().committed).toBe(1000n);
 
     const denied = await createNote(client, { settlement: s, limits });
@@ -700,6 +701,171 @@ describe("aztec_createNote: the broadcast gate", () => {
     client.revert = true;
     const res = await createNote(client, ctx);
     expect(res.result?.observation).toMatchObject({ state: "reverted", executionResult: "reverted" });
+  });
+});
+
+describe("partial-note randomness (xochi-fi/pxe-bridge#78)", () => {
+  type Mined = { state: string; partialNoteRandomness?: string | null };
+
+  /** Reopens `path` after `edit` ran on the closed file, as a restart would. */
+  function reopenAfter(path: string, edit: (db: Database.Database) => void): RpcContext {
+    const db = new Database(path);
+    edit(db);
+    db.close();
+    const reopened = SettlementJournal.open(path);
+    reopened.bindAccount(client.getAddress()!, true);
+    expect(reopened.health()).toEqual({ writable: true });
+    journal = reopened;
+    return { settlement: settlementContext(reopened, gate.client), limits: readyLimits() };
+  }
+
+  it("journals the randomness with the bytes and returns it on every mined read", async () => {
+    const res = await createNote(client, ctx);
+    const [attempt] = journal.attempts("op-1");
+    expect(attempt!.partialNoteRandomness).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(res.result?.observation).toMatchObject({
+      state: "included",
+      partialNoteRandomness: attempt!.partialNoteRandomness,
+    });
+    client.finalizeAll();
+    const read = await getSettlement(client, ctx);
+    expect(read.observation).toMatchObject({
+      state: "finalized",
+      partialNoteRandomness: attempt!.partialNoteRandomness,
+    });
+    // Served from the durable terminal row.
+    expect(journal.get("op-1")?.observation).toMatchObject({
+      partialNoteRandomness: attempt!.partialNoteRandomness,
+    });
+  });
+
+  it("reports it on a revert too", async () => {
+    client.revert = true;
+    const res = await createNote(client, ctx);
+    expect((res.result?.observation as Mined).partialNoteRandomness).toBe(
+      journal.attempts("op-1")[0]!.partialNoteRandomness,
+    );
+  });
+
+  it("sends nothing and answers not_submitted, permanently, when no value opens the commitment", async () => {
+    client.behaviour = "unresolved_randomness";
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const res = await createNote(client, ctx);
+      expect(res.error?.code).toBe(RPC_ERRORS.NOT_SUBMITTED);
+      expect(res.error?.data?.observation).toEqual({
+        state: "not_submitted",
+        reason: "partial_note_randomness_unresolved",
+        retryableAfterRevalidation: false,
+      });
+      expect(gate.calls).toEqual([]);
+      expect(client.sends).toEqual([]);
+      expect(journal.attempts("op-1")).toEqual([]);
+      expect(journal.spendsSince(0)).toEqual([]);
+
+      // Another proof of the same terms would fail the same check.
+      client.behaviour = "land";
+      const retry = await createNote(client, ctx);
+      expect(retry.error?.data?.observation).toMatchObject({ reason: "partial_note_randomness_unresolved" });
+      expect(client.proofs).toBe(1);
+      expect(client.sends).toEqual([]);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("resends a prepared attempt after a restart with its journaled randomness, never re-proving", async () => {
+    const path = tempJournalPath();
+    journal = openBoundJournal(path);
+    gate.decision = "unknown";
+    await createNote(client, { settlement: settlementContext(journal, gate.client), limits: readyLimits() });
+    const [prepared] = journal.attempts("op-1");
+    journal.close();
+
+    const after = reopenAfter(path, () => undefined);
+    gate.decision = "allow";
+    const res = await createNote(client, after);
+    expect(res.result?.observation).toMatchObject({
+      state: "included",
+      txHash: prepared!.txHash,
+      partialNoteRandomness: prepared!.partialNoteRandomness,
+    });
+    expect(client.proofs).toBe(1);
+    expect(client.sends).toEqual([prepared!.txHash]);
+  });
+
+  it("never sends a prepared attempt whose journaled randomness does not open its bytes", async () => {
+    const path = tempJournalPath();
+    journal = openBoundJournal(path);
+    gate.decision = "unknown";
+    await createNote(client, { settlement: settlementContext(journal, gate.client), limits: readyLimits() });
+    journal.close();
+    const after = reopenAfter(path, (db) =>
+      db.prepare("UPDATE attempts SET partial_note_randomness = ?").run("0x" + "0d".repeat(32)),
+    );
+
+    gate.decision = "allow";
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const res = await createNote(client, after);
+      expect(res.error?.data?.observation).toEqual({
+        state: "not_submitted",
+        reason: "partial_note_randomness_unresolved",
+        retryableAfterRevalidation: false,
+      });
+      expect(JSON.stringify(log.mock.calls)).not.toContain("0d".repeat(32));
+    } finally {
+      log.mockRestore();
+    }
+    expect(client.sends).toEqual([]);
+    expect(journal.spendsSince(0)).toEqual([]);
+  });
+
+  it("replaces, never sends, a prepared attempt journaled before randomness was captured", async () => {
+    const path = tempJournalPath();
+    journal = openBoundJournal(path);
+    gate.decision = "unknown";
+    await createNote(client, { settlement: settlementContext(journal, gate.client), limits: readyLimits() });
+    const [legacy] = journal.attempts("op-1");
+    journal.close();
+    const after = reopenAfter(path, (db) => db.exec("UPDATE attempts SET partial_note_randomness = NULL"));
+    expect(journal.attempts("op-1")[0]!.partialNoteRandomness).toBeNull();
+
+    gate.decision = "allow";
+    const res = await createNote(client, after);
+    const attempts = journal.attempts("op-1");
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]!.partialNoteRandomness).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(res.result?.observation).toMatchObject({
+      state: "included",
+      txHash: attempts[1]!.txHash,
+      partialNoteRandomness: attempts[1]!.partialNoteRandomness,
+    });
+    expect(client.proofs).toBe(2);
+    expect(client.sends).toEqual([attempts[1]!.txHash]);
+    expect(client.sends).not.toContain(legacy!.txHash);
+  });
+
+  it("reports null, never a value, for a marked attempt journaled before randomness was captured", async () => {
+    const path = tempJournalPath();
+    journal = openBoundJournal(path);
+    client.behaviour = "lose_response";
+    await createNote(client, { settlement: settlementContext(journal, gate.client), limits: readyLimits() });
+    journal.close();
+    const after = reopenAfter(path, (db) =>
+      db.exec(`
+        UPDATE attempts SET partial_note_randomness = NULL;
+        UPDATE operations SET observation_json = NULL;
+      `),
+    );
+
+    client.behaviour = "land";
+    const read = await getSettlement(client, after);
+    expect(read.observation).toMatchObject({ state: "included", partialNoteRandomness: null });
+    client.finalizeAll();
+    const final = await getSettlement(client, after);
+    expect(final.observation).toMatchObject({ state: "finalized", partialNoteRandomness: null });
+    expect(client.sends).toHaveLength(1);
   });
 });
 
@@ -754,7 +920,7 @@ describe("ambiguity after the mark is submitted_unknown, never a retryable error
       observation: { state: "included", txHash: client.sends[0] },
       journal: { writable: true },
     });
-    expect(read.terms).toMatchObject({ amount: "1000", recipient: v1Params()["recipient"] });
+    expect(read.terms).toMatchObject({ amount: "1000", recipient: settlementParams()["recipient"] });
     client.behaviour = "land";
     const retry = await createNote(client, ctx);
     expect(retry.result?.observation.state).toBe("included");
@@ -930,7 +1096,7 @@ describe("the gate is the last word on both bounds", () => {
     expect((await riddler.client({ operationId: "op-1", fingerprint, txHash: fresh })).decision).toBe("deny");
 
     // The remedy is a requote under a NEW operation id.
-    const requoted = await createNote(client, { settlement: bound }, v1Params({ operationId: "op-2" }));
+    const requoted = await createNote(client, { settlement: bound }, settlementParams({ operationId: "op-2" }));
     expect(requoted.result?.observation.state).toBe("included");
     expect(client.sends).toHaveLength(1);
   });
@@ -1101,7 +1267,7 @@ describe("aztec_getSettlement", () => {
     const reopened = SettlementJournal.open(path);
     expect(reopened.health()).toMatchObject({ writable: false, reason: "rollback_detected" });
     const readOnly = { settlement: settlementContext(reopened, gate.client) };
-    const write = await createNote(client, readOnly, v1Params({ operationId: "op-2" }));
+    const write = await createNote(client, readOnly, settlementParams({ operationId: "op-2" }));
     expect(write.error?.code).toBe(RPC_ERRORS.JOURNAL_UNAVAILABLE);
     expect(write.error?.data).toMatchObject({ journal: { writable: false, reason: "rollback_detected" } });
     const read = await getSettlement(client, readOnly);

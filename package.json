@@ -49,6 +49,7 @@
     "@aztec-labs/accounts": "6.0.0",
     "@aztec-labs/aztec.js": "6.0.0",
     "@aztec-labs/noir-contracts.js": "6.0.0",
+    "@aztec-labs/pxe": "6.0.0",
     "@aztec-labs/wallets": "6.0.0",
     "@xochi/signer": "0.6.0",
     "better-sqlite3": "^12.11.1",

@@ -14,14 +14,14 @@ import {
   rpcBody,
   readyObserver,
   settlementContext,
-  v1Params,
+  settlementParams,
 } from "./settlement-fixtures.js";
 
 function createNote(baseUrl: string, operationId: string, amount: string): Promise<Response> {
   return fetch(baseUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json", "Idempotency-Key": operationId },
-    body: JSON.stringify(rpcBody("aztec_createNote", [v1Params({ operationId, amount })])),
+    body: JSON.stringify(rpcBody("aztec_createNote", [settlementParams({ operationId, amount })])),
   });
 }
 

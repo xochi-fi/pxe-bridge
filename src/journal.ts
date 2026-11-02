@@ -19,9 +19,18 @@ import { fingerprintTerms, type Observation, type SettlementTerms } from "./sett
  * The durable settlement journal (xochi-fi/pxe-bridge#45; decided 2026-10-25).
  *
  * One SQLite file holds every operation, the exact prepared transaction bytes
- * and hash, the may-broadcast mark and the rolling-spend window. It replaces
- * the JSONL audit-log replay and the 24h in-memory idempotency cache as the
- * recovery authority; the audit log is now an output log only.
+ * and hash, the payout's partial-note randomness, the may-broadcast mark and
+ * the rolling-spend window. It replaces the JSONL audit-log replay and the
+ * 24h in-memory idempotency cache as the recovery authority; the audit log is
+ * now an output log only.
+ *
+ * Partial-note randomness (schema 3, xochi-fi/pxe-bridge#78): the value that
+ * opens the attempt's `transfer_to_private` commitment for its recipient,
+ * written in the same transaction as the bytes it belongs to. Nothing on
+ * chain or in the PXE keeps it, and a resend never re-proves, so it must be
+ * here before anything may broadcast. An attempt journaled before schema 3
+ * has none (NULL): it is never sent, and its mined observations report
+ * `partialNoteRandomness: null`. No value is ever inferred for it.
  *
  * Durability: `synchronous=FULL` and a rollback journal, so a committed write
  * transaction is on stable storage before `commit` returns -- an OS append
@@ -58,7 +67,9 @@ import { fingerprintTerms, type Observation, type SettlementTerms } from "./sett
  * (`JournalPermissionError`) otherwise.
  */
 
-export const JOURNAL_SCHEMA_VERSION = 2;
+export const JOURNAL_SCHEMA_VERSION = 3;
+
+const RANDOMNESS = /^0x[0-9a-f]{64}$/;
 
 export type WriteDisabledReason =
   | "corrupt"
@@ -108,6 +119,8 @@ export interface Attempt {
   expirationTimestamp: string;
   preparedAt: number;
   mayBroadcastAt: number | null;
+  /** Lowercase hex; null only for an attempt journaled before schema 3. */
+  partialNoteRandomness: string | null;
 }
 
 export type ClaimResult =
@@ -207,6 +220,7 @@ interface AttemptRow {
   expiration_timestamp: string;
   prepared_at: number;
   may_broadcast_at: number | null;
+  partial_note_randomness: string | null;
 }
 
 const SCHEMA = `
@@ -232,6 +246,7 @@ CREATE TABLE IF NOT EXISTS attempts (
   expiration_timestamp TEXT NOT NULL,
   prepared_at INTEGER NOT NULL,
   may_broadcast_at INTEGER,
+  partial_note_randomness TEXT,
   PRIMARY KEY (operation_id, attempt)
 );
 CREATE TABLE IF NOT EXISTS spends (
@@ -402,13 +417,19 @@ export class SettlementJournal {
     this.writeHighWaterMark();
   }
 
+  /**
+   * Brings a schema 1 or 2 journal to the current schema in one transaction:
+   * 1 -> 2 adds the allowlist snapshots and RootUpdate outbox, 2 -> 3 the
+   * nullable attempt column for the partial-note randomness. Existing attempts
+   * keep NULL there (journaled before the bridge captured it).
+   */
   private migrateSchema(db: Database.Database): void {
     const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as
       | { value: string }
       | undefined;
     const version = Number(row?.value);
     if (version === JOURNAL_SCHEMA_VERSION) return;
-    if (version !== 1) {
+    if (version !== 1 && version !== 2) {
       this.disable(
         "unknown_schema_version",
         `journal schema ${row?.value ?? "(missing)"} is not supported`,
@@ -416,27 +437,30 @@ export class SettlementJournal {
       return;
     }
     db.transaction(() => {
-      db.exec(`
-        CREATE TABLE allowlist_snapshots (
-          root TEXT PRIMARY KEY,
-          recipients_json TEXT NOT NULL,
-          created_at INTEGER NOT NULL
-        );
-        CREATE TABLE root_update_outbox (
-          id TEXT PRIMARY KEY,
-          root TEXT NOT NULL,
-          root_block TEXT NOT NULL,
-          payload_json TEXT NOT NULL,
-          idempotency_key TEXT NOT NULL,
-          attempts INTEGER NOT NULL DEFAULT 0,
-          delivered_at INTEGER,
-          last_error TEXT,
-          created_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL
-        );
-        CREATE INDEX root_update_pending
-          ON root_update_outbox(delivered_at, created_at);
-      `);
+      if (version === 1) {
+        db.exec(`
+          CREATE TABLE allowlist_snapshots (
+            root TEXT PRIMARY KEY,
+            recipients_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+          );
+          CREATE TABLE root_update_outbox (
+            id TEXT PRIMARY KEY,
+            root TEXT NOT NULL,
+            root_block TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            delivered_at INTEGER,
+            last_error TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+          );
+          CREATE INDEX root_update_pending
+            ON root_update_outbox(delivered_at, created_at);
+        `);
+      }
+      db.exec("ALTER TABLE attempts ADD COLUMN partial_note_randomness TEXT");
       db.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'").run(
         String(JOURNAL_SCHEMA_VERSION),
       );
@@ -446,6 +470,18 @@ export class SettlementJournal {
     }).immediate();
     this.generation += 1;
     this.writeHighWaterMark();
+  }
+
+  /**
+   * The attempt column holding the randomness, or SQL NULL where the file
+   * predates it: a journal opened with writes disabled is not migrated, and
+   * its recovery reads must still work.
+   */
+  private randomnessColumn(db: Database.Database): string {
+    const columns = db.prepare("SELECT name FROM pragma_table_info('attempts')").all() as { name: string }[];
+    return columns.some((c) => c.name === "partial_note_randomness")
+      ? "partial_note_randomness"
+      : "NULL AS partial_note_randomness";
   }
 
   private loadMeta(db: Database.Database): void {
@@ -558,7 +594,7 @@ export class SettlementJournal {
     const attempts = db
       .prepare(
         `SELECT operation_id, attempt, tx_hash, expiration_timestamp, may_broadcast_at,
-                length(tx_bytes) AS byte_length
+                partial_note_randomness, length(tx_bytes) AS byte_length
          FROM attempts`,
       )
       .all() as (AttemptRow & { operation_id: string; byte_length: number })[];
@@ -572,6 +608,15 @@ export class SettlementJournal {
     const spent = new Set(spends.keys());
     const attemptsOf = new Map<string, typeof attempts>();
     for (const a of attempts) {
+      // NULL is an attempt journaled before schema 3; anything else must be
+      // exactly what recordPrepared writes. The value is never echoed.
+      if (a.partial_note_randomness !== null && !RANDOMNESS.test(a.partial_note_randomness)) {
+        this.disable(
+          "journal_inconsistent",
+          `attempt ${a.attempt} of operation ${a.operation_id} has a malformed partial-note randomness`,
+        );
+        return;
+      }
       const list = attemptsOf.get(a.operation_id) ?? [];
       list.push(a);
       attemptsOf.set(a.operation_id, list);
@@ -777,7 +822,8 @@ export class SettlementJournal {
     const rows = this.read((db) =>
       db
         .prepare(
-          `SELECT attempt, tx_hash, expiration_timestamp, prepared_at, may_broadcast_at
+          `SELECT attempt, tx_hash, expiration_timestamp, prepared_at, may_broadcast_at,
+                  ${this.randomnessColumn(db)}
            FROM attempts WHERE operation_id = ? ORDER BY attempt`,
         )
         .all(operationId),
@@ -788,6 +834,7 @@ export class SettlementJournal {
       expirationTimestamp: r.expiration_timestamp,
       preparedAt: r.prepared_at,
       mayBroadcastAt: r.may_broadcast_at,
+      partialNoteRandomness: r.partial_note_randomness,
     }));
   }
 
@@ -849,13 +896,18 @@ export class SettlementJournal {
   }
 
   /**
-   * Flushes the exact prepared transaction BEFORE anything may broadcast it.
+   * Flushes the exact prepared transaction, with the partial-note randomness
+   * that opens its commitment, BEFORE anything may broadcast it: both in one
+   * transaction, so no attempt is ever journaled without its randomness.
    * Returns the attempt number. Refused once any attempt is marked.
    */
   recordPrepared(
     operationId: string,
-    tx: { txHash: string; txBytes: Buffer; expirationTimestamp: bigint },
+    tx: { txHash: string; txBytes: Buffer; expirationTimestamp: bigint; partialNoteRandomness: string },
   ): number {
+    if (!RANDOMNESS.test(tx.partialNoteRandomness)) {
+      throw new JournalWriteError(this.healthState, "record prepared: partial-note randomness is malformed");
+    }
     let attempt = 0;
     this.transition("record prepared", operationId, ["claimed", "prepared"], (db, at) => {
       const marked = db
@@ -869,9 +921,18 @@ export class SettlementJournal {
         .get(operationId) as { n: number | null };
       attempt = (last.n ?? 0) + 1;
       db.prepare(
-        `INSERT INTO attempts (operation_id, attempt, tx_hash, tx_bytes, expiration_timestamp, prepared_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      ).run(operationId, attempt, tx.txHash.toLowerCase(), tx.txBytes, tx.expirationTimestamp.toString(), at);
+        `INSERT INTO attempts (operation_id, attempt, tx_hash, tx_bytes, expiration_timestamp, prepared_at,
+                               partial_note_randomness)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        operationId,
+        attempt,
+        tx.txHash.toLowerCase(),
+        tx.txBytes,
+        tx.expirationTimestamp.toString(),
+        at,
+        tx.partialNoteRandomness,
+      );
       return db
         .prepare(
           `UPDATE operations SET state = 'prepared', current_attempt = ?, hold = NULL,
@@ -1468,10 +1529,26 @@ function toOperation(row: OperationRow): StoredOperation {
     retryable: row.retryable === 1,
     hold: row.hold,
     currentAttempt: row.current_attempt,
-    observation: row.observation_json ? (JSON.parse(row.observation_json) as Observation) : null,
+    observation: row.observation_json ? storedObservation(row.observation_json) : null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+/**
+ * A mined observation recorded before schema 3 has no `partialNoteRandomness`
+ * member; its attempt had none to report, so it reads as `null`, the same
+ * answer a fresh read of that attempt gives. Never filled in from elsewhere.
+ */
+function storedObservation(json: string): Observation {
+  const observation = JSON.parse(json) as Observation;
+  if (
+    (observation.state === "included" || observation.state === "finalized" || observation.state === "reverted") &&
+    !Object.hasOwn(observation, "partialNoteRandomness")
+  ) {
+    return { ...observation, partialNoteRandomness: null };
+  }
+  return observation;
 }
 
 /** True when a journal file exists at `path`; used to tell first boot apart. */
