@@ -497,11 +497,74 @@ describe("authoritative readiness predicate", () => {
     expect(result.reasons).toContain("writer_fence_lost");
   });
 
-  it("reserves the nested address key for the checker account alias", () => {
-    const result = projection(healthyFacts()) as unknown as Record<string, unknown>;
-    for (const [key, value] of Object.entries(result)) {
-      if (key === "account" || typeof value !== "object" || value === null) continue;
-      expect(value).not.toHaveProperty("address");
+  describe("xochimilco testnet readiness gate (#68)", () => {
+    // Line-for-line port of validate_spending_readiness' identity comparison in
+    // xochimilco roles/aztec_testnet/files/aztec_testnet_ready.py (origin/main
+    // e3be829). The gate fails closed, so a /ready shape it cannot read keeps a
+    // ready bridge out of service. Re-port when that file changes.
+    const READINESS_FIELDS: Record<string, readonly string[]> = {
+      version: ["version", "nodeVersion"],
+      l1_chain_id: ["l1ChainId", "chainId"],
+      rollup_version: ["rollupVersion"],
+      account: ["account", "address", "accountAddress"],
+      token: ["token", "tokenAddress"],
+      max_amount: ["maxAmount", "maxAmountPerTx"],
+      daily_limit: ["dailyLimit"],
+    };
+
+    /** Python `str()` closely enough that no non-scalar ever equals a pin. */
+    function pyStr(value: unknown): string {
+      if (value === null) return "None";
+      if (typeof value === "boolean") return value ? "True" : "False";
+      if (typeof value === "object") return `<${Array.isArray(value) ? "list" : "dict"}>`;
+      return String(value);
     }
+
+    /** Aliases whose value differs from the pin, as the gate reports them. */
+    function gateMismatches(body: Record<string, unknown>, expected: Record<string, string>): string[] {
+      expect(body["ready"]).toBe(true);
+      const scopes = [body, ...Object.values(body).filter(
+        (v): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v),
+      )];
+      const wrong: string[] = [];
+      for (const [key, aliases] of Object.entries(READINESS_FIELDS)) {
+        const want = expected[key];
+        if (want === undefined) continue;
+        for (const scope of scopes) {
+          for (const alias of aliases) {
+            if (alias in scope && pyStr(scope[alias]).toLowerCase() !== want.toLowerCase()) {
+              wrong.push(alias);
+            }
+          }
+        }
+      }
+      return wrong;
+    }
+
+    const PINS: Record<string, string> = {
+      version: "6.0.0",
+      l1_chain_id: NETWORK.l1ChainId,
+      rollup_version: NETWORK.protocolVersion,
+      account: ACCOUNT.toUpperCase().replace("0X", "0x"),
+      token: TOKEN,
+      max_amount: "1000",
+      daily_limit: "10000",
+    };
+
+    /** The body as /ready sends it. */
+    function readyBody(): Record<string, unknown> {
+      const result = projection(healthyFacts());
+      expect(result.reasons).toEqual([]);
+      return JSON.parse(JSON.stringify(result)) as Record<string, unknown>;
+    }
+
+    it("passes a ready projection with correct pins", () => {
+      expect(gateMismatches(readyBody(), PINS)).toEqual([]);
+    });
+
+    it.each(Object.keys(PINS))("fails when the %s pin differs", (key) => {
+      const body = readyBody();
+      expect(gateMismatches(body, { ...PINS, [key]: "0x" + "9".repeat(64) })).not.toEqual([]);
+    });
   });
 });

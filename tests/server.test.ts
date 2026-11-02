@@ -366,7 +366,8 @@ describe("HTTP server with auth", () => {
     expect(await res.json()).toMatchObject({
       ready: true,
       nodeVersion: "6.0.0",
-      account: { address: expect.any(String), classId: expect.any(String) },
+      accountAddress: expect.any(String),
+      accountClassId: expect.any(String),
     });
   });
 
