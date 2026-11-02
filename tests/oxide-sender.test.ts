@@ -2,11 +2,20 @@ import { describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
 import { DAI, type OxideCapsConfig } from "../src/oxide/caps.js";
 import { OxideJournal } from "../src/oxide/journal.js";
-import { OxideSender, payoutNoteIndex, UnexpectedTokenOperation, type OxideSendOutcome } from "../src/oxide/sender.js";
+import {
+  OxideSender,
+  oxideFeeRunwayReasons,
+  payoutNoteIndex,
+  UnexpectedTokenOperation,
+  type OxideSendOutcome,
+} from "../src/oxide/sender.js";
 import { OxidePinMismatch } from "../src/oxide/pins.js";
 import { EnclaveTrustRefused } from "../src/oxide/enclave.js";
 import {
   CAPS,
+  FEE_FLOOR,
+  FEE_LIMIT,
+  MAX_SEND_FEE_LIMIT,
   clock,
   FakeBackend,
   fakeGate,
@@ -57,7 +66,7 @@ describe("OxideSender", () => {
     const { sender, backend } = boot(tempJournalPath(), node);
     const out = observed(await sender.send(request()));
     expect(out.observation.state).toBe("finalized");
-    expect(backend.calls).toEqual(["simulate", "sign", "prove", "send"]);
+    expect(backend.calls).toEqual(["simulate", "sign", "size", "prove", "send"]);
     expect(node.sent).toHaveLength(1);
     expect(out.payout).toMatchObject({ txHash: node.sent[0], noteIndex: 1 });
     expect(out.payout?.noteRandomness).toMatch(/^0x[0-9a-f]{64}$/);
@@ -68,7 +77,7 @@ describe("OxideSender", () => {
     expect(again.observation.state).toBe("finalized");
     expect(again.payout).toEqual(out.payout);
     expect(node.sent).toHaveLength(1);
-    expect(backend.calls).toHaveLength(4);
+    expect(backend.calls).toHaveLength(5);
   });
 
   it("refuses the same operation id with other terms", async () => {
@@ -79,7 +88,7 @@ describe("OxideSender", () => {
   });
 
   describe("a crash at each step never pays twice", () => {
-    for (const step of ["simulate", "sign", "prove"] as Step[]) {
+    for (const step of ["simulate", "sign", "size", "prove"] as Step[]) {
       it(`before the journal: crash at ${step} re-runs the pipeline and sends once`, async () => {
         const path = tempJournalPath();
         const node = new FakeNode();
@@ -94,7 +103,7 @@ describe("OxideSender", () => {
         const second = boot(path, node);
         const out = observed(await second.sender.send(request()));
         expect(out.observation.state).toBe("finalized");
-        expect(second.backend.calls).toEqual(["simulate", "sign", "prove", "send"]);
+        expect(second.backend.calls).toEqual(["simulate", "sign", "size", "prove", "send"]);
         expect(node.sent).toHaveLength(1);
       });
     }
@@ -224,7 +233,7 @@ describe("OxideSender", () => {
     expect(node.sent).toEqual([]);
     refusal = undefined;
     expect(observed(await sender.send(request())).observation.state).toBe("finalized");
-    expect(backend.calls).toEqual(["simulate", "sign", "prove", "send"]);
+    expect(backend.calls).toEqual(["simulate", "sign", "size", "prove", "send"]);
   });
 
   it("a pipeline failure before the journal is not_submitted and retryable", async () => {
@@ -247,7 +256,7 @@ describe("OxideSender", () => {
     expect(observed(await sender.send(request())).observation).toMatchObject({ state: "prepared", hold: "may_broadcast_unknown" });
     gate.state.decision = "allow";
     expect(observed(await sender.send(request())).observation.state).toBe("finalized");
-    expect(backend.calls).toEqual(["simulate", "sign", "prove", "send"]);
+    expect(backend.calls).toEqual(["simulate", "sign", "size", "prove", "send"]);
     expect(new Set(gate.queries.map((q) => q.txHash)).size).toBe(1);
     expect(journal.attempts("op-1")).toHaveLength(1);
   });
@@ -411,6 +420,114 @@ describe("one account, one set of notes", () => {
     expect(states.filter((s) => s.state === "finalized").length).toBeGreaterThan(0);
     expect(node.rejected).toEqual([]);
     expect(states.some((s) => s.state === "submitted_unknown")).toBe(false);
+  });
+});
+
+describe("fee runway (the account pays its own fee)", () => {
+  it("refuses before the enclave is asked when the balance is below the transfer's fee floor, and retries once funded", async () => {
+    const node = new FakeNode();
+    node.feeJuice = FEE_FLOOR - 1n;
+    const { sender, backend, journal } = boot(tempJournalPath(), node);
+    expect(observed(await sender.send(request())).observation).toEqual({
+      state: "not_submitted",
+      reason: "fee_runway_low",
+      retryable: true,
+    });
+    expect(backend.calls).toEqual(["simulate"]); // never signed, sized or proven
+    expect(journal.attempts("op-1")).toEqual([]);
+    expect(node.sent).toEqual([]);
+
+    node.feeJuice = FEE_LIMIT;
+    expect(observed(await sender.send(request())).observation.state).toBe("finalized");
+    expect(node.sent).toHaveLength(1);
+  });
+
+  it("refuses before proving when the balance covers the floor but not the signed batch's fee limit", async () => {
+    const node = new FakeNode();
+    node.feeJuice = FEE_LIMIT - 1n;
+    const { sender, backend, journal } = boot(tempJournalPath(), node);
+    expect(observed(await sender.send(request())).observation).toEqual({
+      state: "not_submitted",
+      reason: "fee_runway_low",
+      retryable: true,
+    });
+    expect(backend.calls).toEqual(["simulate", "sign", "size"]);
+    expect(journal.attempts("op-1")).toEqual([]);
+    expect(node.sent).toEqual([]);
+  });
+
+  it("refuses as unknown, retryable, when the balance cannot be read", async () => {
+    const node = new FakeNode();
+    node.feeJuiceUnreadable = true;
+    const { sender, backend } = boot(tempJournalPath(), node);
+    expect(observed(await sender.send(request())).observation).toEqual({
+      state: "not_submitted",
+      reason: "fee_runway_unknown",
+      retryable: true,
+    });
+    expect(backend.calls).toEqual(["simulate"]);
+  });
+
+  it("counts the fee limit of a held attempt that may still be sent", async () => {
+    const node = new FakeNode();
+    const gate = fakeGate("deny");
+    const { sender, backend } = boot(tempJournalPath(), node, { gate });
+    expect(observed(await sender.send(request({ operationId: "op-1" }))).observation).toMatchObject({ state: "prepared" });
+    gate.state.decision = "allow";
+    backend.forceNote = 1; // another note, so only the fee is shared
+    node.feeJuice = 2n * FEE_LIMIT - 1n;
+    backend.calls.length = 0;
+    expect(observed(await sender.send(request({ operationId: "op-2" }))).observation).toMatchObject({ reason: "fee_runway_low" });
+    expect(backend.calls).toEqual(["simulate", "sign", "size"]);
+    node.feeJuice = 2n * FEE_LIMIT;
+    expect(observed(await sender.send(request({ operationId: "op-2" }))).observation.state).toBe("finalized");
+  });
+
+  it("counts a marked attempt the node has not mined until its protocol expiry", async () => {
+    const path = tempJournalPath();
+    const node = new FakeNode();
+    const c = clock();
+    const first = boot(path, node, { c });
+    first.backend.crashAt = "send";
+    first.backend.crashBeforeNode = true;
+    void first.sender.send(request({ operationId: "op-1" }));
+    await settle();
+    first.journal.close();
+
+    const second = boot(path, node, { c });
+    second.backend.forceNote = 1;
+    node.feeJuice = 2n * FEE_LIMIT - 1n;
+    const late = Math.floor(T0 / 1000) + 86_400 + 600;
+    expect(observed(await second.sender.send(request({ operationId: "op-2", validUntil: late }))).observation).toMatchObject({
+      reason: "fee_runway_low",
+    });
+    c.t = T0 + 86_400_000; // op-1's expiry: it can no longer land or be charged
+    second.backend.expiration = BigInt(Math.floor(c.t / 1000) + 86_400);
+    expect(observed(await second.sender.send(request({ operationId: "op-2", validUntil: late }))).observation.state).toBe(
+      "finalized",
+    );
+  });
+
+  it("reports the runway for readiness: balance, committed sends and the per-send limit", async () => {
+    const node = new FakeNode();
+    const gate = fakeGate("deny");
+    const { sender } = boot(tempJournalPath(), node, { gate });
+    await sender.send(request({ operationId: "op-1" })); // held, prepared
+    node.feeJuice = FEE_LIMIT + MAX_SEND_FEE_LIMIT;
+    const fact = await sender.feeRunway();
+    expect(fact).toEqual({
+      state: "known",
+      value: { observed: FEE_LIMIT + MAX_SEND_FEE_LIMIT, committed: FEE_LIMIT, committedSends: 1, perSendFeeLimit: MAX_SEND_FEE_LIMIT },
+    });
+    expect(oxideFeeRunwayReasons(fact)).toEqual([]);
+
+    node.feeJuice -= 1n;
+    expect(oxideFeeRunwayReasons(await sender.feeRunway())).toEqual(["fee_runway_insufficient"]);
+
+    node.feeJuiceUnreadable = true;
+    const unread = await sender.feeRunway();
+    expect(unread).toEqual({ state: "unknown", reason: "fee_runway_unknown" });
+    expect(oxideFeeRunwayReasons(unread)).toEqual(["fee_runway_unknown"]);
   });
 });
 

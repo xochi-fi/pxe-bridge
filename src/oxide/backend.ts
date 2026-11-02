@@ -7,9 +7,12 @@ import { Tx, TxHash } from "@aztec-labs/aztec.js/tx";
 import type { Wallet } from "@aztec-labs/aztec.js/wallet";
 import { sha256ToField } from "@aztec-labs/foundation/crypto/sha256";
 import { loadContractArtifact, type ContractArtifact } from "@aztec-labs/stdlib/abi";
-import { EthAddress } from "@aztec-labs/stdlib/block";
+import { EthAddress, type BlockHash } from "@aztec-labs/stdlib/block";
 import { getContractClassFromArtifact } from "@aztec-labs/stdlib/contract";
 import { Gas, GasFees, ManaUsageEstimate } from "@aztec-labs/stdlib/gas";
+import { deriveStorageSlotInMap } from "@aztec-labs/stdlib/hash";
+import { FEE_JUICE_BALANCES_SLOT } from "@aztec-labs/constants";
+import { ProtocolContractAddress } from "@aztec-labs/protocol-contracts";
 import { deriveAccountKeys } from "../aztec-client.js";
 import type { NodeObservation } from "../settlement.js";
 import {
@@ -35,9 +38,9 @@ import { computeSiloedNoteHash } from "./vendor/oxide-lib-tee/hash.js";
 import { ethAddressFromSecpPublicKey } from "./vendor/oxide-lib/attestation/user_data.js";
 import type { OxideTokenImmutables } from "./vendor/oxide-lib/token_immutables.js";
 import type { TokenOperation } from "./vendor/oxide-lib/types.js";
-import type { BlockHeader, Capsule } from "@aztec-labs/stdlib/tx";
+import type { BlockHeader, Capsule, ExecutionPayload } from "@aztec-labs/stdlib/tx";
 import { OxideFleetRegistry, type OxideL1Reader } from "./enclave.js";
-import type { OxideSendEvidence } from "./operation.js";
+import { oxideFeeLimit, type OxideSendEvidence } from "./operation.js";
 import { OXIDE_V6_MAINNET, type OxidePins } from "./pins.js";
 import {
   JournaledBytesInvalid,
@@ -46,6 +49,7 @@ import {
   type OxideProvenTx,
   type OxideSigned,
   type OxideSimulation,
+  type OxideSized,
   type OxideTxIdentity,
   type TokenOperationSummary,
 } from "./sender.js";
@@ -72,6 +76,13 @@ export const DEFAULT_GAS_MARGIN_BPS = 2_000n;
 /** Multiplier on the worst predicted min fee per gas. A ceiling, not a charge. */
 export const DEFAULT_FEE_MULTIPLIER = 2n;
 
+/** Explicit gas settings for one send. */
+export interface OxideGasSettings {
+  gasLimits: { daGas: number; l2Gas: number };
+  teardownGasLimits: { daGas: number; l2Gas: number };
+  maxFeesPerGas: { feePerDaGas: bigint; feePerL2Gas: bigint };
+}
+
 /**
  * Explicit gas settings from the simulation. The node admits a tx only if its
  * fee payer holds `gasLimits x maxFeesPerGas`, so both are sized: limits from
@@ -82,11 +93,7 @@ export function oxideGasSettings(
   teardown: { daGas: number; l2Gas: number },
   worstFees: { feePerDaGas: bigint; feePerL2Gas: bigint },
   options: { gasMarginBps?: bigint; feeMultiplier?: bigint } = {},
-): {
-  gasLimits: { daGas: number; l2Gas: number };
-  teardownGasLimits: { daGas: number; l2Gas: number };
-  maxFeesPerGas: { feePerDaGas: bigint; feePerL2Gas: bigint };
-} {
+): OxideGasSettings {
   const margin = options.gasMarginBps ?? DEFAULT_GAS_MARGIN_BPS;
   const multiplier = options.feeMultiplier ?? DEFAULT_FEE_MULTIPLIER;
   if (margin < 0n || multiplier < 1n) throw new Error("gas margin must be >= 0 and fee multiplier >= 1");
@@ -200,6 +207,12 @@ interface Signed extends Simulated {
   signOutput: RegisteredSignTokenOperationOutput;
 }
 
+interface Sized extends Signed {
+  payload: ExecutionPayload;
+  anchorBlockHash: BlockHash;
+  gas: OxideGasSettings;
+}
+
 /** The BaseWallet internals proving goes through; checked at construction so an SDK change fails closed. */
 interface ProvingInternals {
   completeFeeOptions(config: { from: AztecAddress; feePayer: AztecAddress | undefined; gasSettings: unknown }): Promise<unknown>;
@@ -297,7 +310,10 @@ export class PxeOxideBackend implements OxideBackend {
       withdrawals: tokenOperation.withdrawals.length,
     };
     const handle: Simulated = { call, seed, collected, tokenOperation, anchor };
-    return { summary, handle };
+    // The transfer alone, sized as `size` sizes the final batch: a floor under
+    // that batch's fee limit (it adds `publish_da`), known before the enclave.
+    const floor = this.gasSettings(result.gasUsed, await this.worstPredictedFees());
+    return { summary, feeLimitFloor: oxideFeeLimit(floor), handle };
   }
 
   async sign(simulation: OxideSimulation): Promise<OxideSigned> {
@@ -316,8 +332,8 @@ export class PxeOxideBackend implements OxideBackend {
     return { handle: { ...simulated, signOutput } satisfies Signed };
   }
 
-  async prove(signed: OxideSigned): Promise<OxideProvenTx> {
-    const { wallet, account, token, node } = this.options;
+  async size(signed: OxideSigned): Promise<OxideSized> {
+    const { wallet, account, token } = this.options;
     const s = signed.handle as Signed;
     const capsules = [
       s.seed,
@@ -333,18 +349,15 @@ export class PxeOxideBackend implements OxideBackend {
 
     // Size the gas from the batch that will be proven.
     const final = await wallet.simulateTx(payload, toSimulateOptions({ from: account }));
-    const predicted = await node.getPredictedMinFees(ManaUsageEstimate.Limit);
-    const worst = predicted.reduce(
-      (acc, f) => ({
-        feePerDaGas: f.feePerDaGas > acc.feePerDaGas ? f.feePerDaGas : acc.feePerDaGas,
-        feePerL2Gas: f.feePerL2Gas > acc.feePerL2Gas ? f.feePerL2Gas : acc.feePerL2Gas,
-      }),
-      { feePerDaGas: 0n, feePerL2Gas: 0n },
-    );
-    const gas = oxideGasSettings(final.gasUsed.totalGas, final.gasUsed.teardownGas, worst, {
-      ...(this.options.gasMarginBps !== undefined ? { gasMarginBps: this.options.gasMarginBps } : {}),
-      ...(this.options.feeMultiplier !== undefined ? { feeMultiplier: this.options.feeMultiplier } : {}),
-    });
+    const gas = this.gasSettings(final.gasUsed, await this.worstPredictedFees());
+    const handle: Sized = { ...s, payload, anchorBlockHash, gas };
+    return { feeLimit: oxideFeeLimit(gas), handle };
+  }
+
+  async prove(sized: OxideSized): Promise<OxideProvenTx> {
+    const { account } = this.options;
+    const s = sized.handle as Sized;
+    const { payload, anchorBlockHash, gas } = s;
 
     const feeOptions = await this.proving.completeFeeOptions({
       from: account,
@@ -410,6 +423,44 @@ export class PxeOxideBackend implements OxideBackend {
 
   observe(txHash: string): Promise<NodeObservation> {
     return this.options.observeTx(txHash);
+  }
+
+  async feeJuiceBalance(): Promise<bigint> {
+    // Standard mode's read (aztec-client.ts feeRunway), at the latest state the node admits against.
+    const slot = await deriveStorageSlotInMap(new Fr(FEE_JUICE_BALANCES_SLOT), this.options.account);
+    return (await this.options.node.getPublicStorageAt("latest", ProtocolContractAddress.FeeJuice, slot)).toBigInt();
+  }
+
+  async maxSendFeeLimit(): Promise<bigint> {
+    const [{ txsLimits }, worst] = await Promise.all([this.options.node.getNodeInfo(), this.worstPredictedFees()]);
+    const multiplier = this.options.feeMultiplier ?? DEFAULT_FEE_MULTIPLIER;
+    return oxideFeeLimit({
+      gasLimits: txsLimits.gas,
+      maxFeesPerGas: { feePerDaGas: worst.feePerDaGas * multiplier, feePerL2Gas: worst.feePerL2Gas * multiplier },
+    });
+  }
+
+  /** The worst predicted min fee per gas over the node's samples. No samples is refused: it would price the send at zero. */
+  private async worstPredictedFees(): Promise<{ feePerDaGas: bigint; feePerL2Gas: bigint }> {
+    const predicted = await this.options.node.getPredictedMinFees(ManaUsageEstimate.Limit);
+    if (predicted.length === 0) throw new Error("node returned no predicted fee samples");
+    return predicted.reduce(
+      (acc, f) => ({
+        feePerDaGas: f.feePerDaGas > acc.feePerDaGas ? f.feePerDaGas : acc.feePerDaGas,
+        feePerL2Gas: f.feePerL2Gas > acc.feePerL2Gas ? f.feePerL2Gas : acc.feePerL2Gas,
+      }),
+      { feePerDaGas: 0n, feePerL2Gas: 0n },
+    );
+  }
+
+  private gasSettings(
+    used: { totalGas: { daGas: number; l2Gas: number }; teardownGas: { daGas: number; l2Gas: number } },
+    worst: { feePerDaGas: bigint; feePerL2Gas: bigint },
+  ): OxideGasSettings {
+    return oxideGasSettings(used.totalGas, used.teardownGas, worst, {
+      ...(this.options.gasMarginBps !== undefined ? { gasMarginBps: this.options.gasMarginBps } : {}),
+      ...(this.options.feeMultiplier !== undefined ? { feeMultiplier: this.options.feeMultiplier } : {}),
+    });
   }
 }
 

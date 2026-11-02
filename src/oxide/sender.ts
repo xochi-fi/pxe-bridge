@@ -1,5 +1,6 @@
 import { JournalUnreadableError, JournalWriteError } from "../journal.js";
 import type { MayBroadcastClient } from "../may-broadcast.js";
+import { known, unknown, type ReadinessFact, type ReadinessReason } from "../readiness.js";
 import type { NodeObservation } from "../settlement.js";
 import { CapExceeded, OxideCaps, type OxideCapsConfig } from "./caps.js";
 import { EnclaveTrustRefused } from "./enclave.js";
@@ -8,6 +9,7 @@ import {
   fingerprintOxideTerms,
   OxideSendRequestSchema,
   oxideTerms,
+  oxideFeeLimit,
   type OxideHold,
   type OxideObservation,
   type OxideSendEvidence,
@@ -22,7 +24,8 @@ import { MAX_TX_LIFETIME } from "@aztec-labs/constants";
  * bridge's standard Schnorr account, with the createNote journal's rules
  * (src/oxide/journal.ts) so a restart at any step never pays twice.
  *
- *   admission -> simulate -> check the TokenOperation -> enclave sign -> prove
+ *   admission -> simulate -> check the TokenOperation -> fee runway floor
+ *   -> enclave sign -> size gas -> fee runway -> prove
  *   -> journal the proven tx -> may-broadcast -> mark (+ cap re-check) -> send
  *
  * `OxideSender.send` is the internal API the settlement layer will call. It
@@ -53,11 +56,25 @@ export interface TokenOperationSummary {
 
 export interface OxideSimulation {
   summary: TokenOperationSummary;
+  /**
+   * The fee limit (`gasLimits x maxFeesPerGas`, sized as `size` sizes it) of
+   * the simulated `transfer` alone, at the fees predicted now. The proven
+   * batch adds `publish_da`, so this is a floor under what the send will
+   * declare: an account below it can never pay, and the enclave is not asked.
+   */
+  feeLimitFloor: bigint;
   /** Backend-private state carried to `sign`. */
   handle: unknown;
 }
 
 export interface OxideSigned {
+  handle: unknown;
+}
+
+/** The signed batch with its explicit gas settings, before proving. */
+export interface OxideSized {
+  /** `gasLimits x maxFeesPerGas`: the most the node may charge the account for this send. */
+  feeLimit: bigint;
   handle: unknown;
 }
 
@@ -79,7 +96,9 @@ export interface OxideBackend {
   readonly account: string;
   simulate(payout: OxidePayout): Promise<OxideSimulation>;
   sign(simulation: OxideSimulation): Promise<OxideSigned>;
-  prove(signed: OxideSigned): Promise<OxideProvenTx>;
+  /** Simulates the signed batch and sizes its gas: what `prove` will declare. */
+  size(signed: OxideSigned): Promise<OxideSized>;
+  prove(sized: OxideSized): Promise<OxideProvenTx>;
   /**
    * The hash and protocol expiry a node gives `txBytes`, recomputed from the
    * transaction's data (never the stored hash prefix alone). Throws
@@ -88,6 +107,14 @@ export interface OxideBackend {
   identify(txBytes: Buffer): Promise<OxideTxIdentity>;
   send(txBytes: Buffer): Promise<void>;
   observe(txHash: string): Promise<NodeObservation>;
+  /** The account's public fee juice balance at the node's latest state: what pays every send (`PREEXISTING_FEE_JUICE`). */
+  feeJuiceBalance(): Promise<bigint>;
+  /**
+   * The most one send can be charged at the fees predicted now: the node's
+   * per-tx gas limit (`txsLimits.gas`) at the fees a send declares. Standard
+   * mode's `perTransferFeeLimit`, for the readiness surface.
+   */
+  maxSendFeeLimit(): Promise<bigint>;
 }
 
 /** Re-verified before every fresh attempt: the Oxide manifest/profile pins, the L1 deployment. */
@@ -178,6 +205,37 @@ class InputsPending extends Error {
     super("the simulation spends notes a live attempt already spends");
     this.name = "InputsPending";
   }
+}
+
+/**
+ * The account cannot pay this send's fee on top of what other attempts may
+ * still be charged (`fee_runway_low`), or its balance could not be read
+ * (`fee_runway_unknown`). Nothing was proven; both clear on their own once
+ * fee juice arrives or an attempt resolves, so both are retryable.
+ */
+class FeeRunwayRefused extends Error {
+  constructor(readonly reason: "fee_runway_low" | "fee_runway_unknown", detail: string) {
+    super(`Oxide fee runway: ${detail}`);
+    this.name = "FeeRunwayRefused";
+  }
+}
+
+/** The Oxide sender's fee position, for the readiness surface (standard mode's `feeRunway` fact). */
+export interface OxideFeeRunway {
+  /** Public fee juice balance of the sending account, latest state. */
+  observed: bigint;
+  /** Fee limits of attempts that may still land and be charged (`OxideJournal.committedFees`). */
+  committed: bigint;
+  committedSends: number;
+  /** The most one more send can be charged at the fees predicted now (`OxideBackend.maxSendFeeLimit`). */
+  perSendFeeLimit: bigint;
+}
+
+/** Readiness reasons for an Oxide fee runway fact: unread, or short of one more send on top of the committed ones. */
+export function oxideFeeRunwayReasons(fact: ReadinessFact<OxideFeeRunway>): ReadinessReason[] {
+  if (fact.state === "unknown") return [fact.reason];
+  const { observed, committed, perSendFeeLimit } = fact.value;
+  return observed < committed + perSendFeeLimit ? ["fee_runway_insufficient"] : [];
 }
 
 export interface OxideSenderOptions {
@@ -395,7 +453,13 @@ export class OxideSender {
     }
   }
 
-  /** simulate -> check -> sign -> prove. Any failure here provably sent nothing. */
+  /**
+   * simulate -> check -> runway floor -> sign -> size -> runway -> prove. Any
+   * failure here provably sent nothing. The fee runway is checked twice: the
+   * exact fee limit exists only once the signed batch is simulated, so before
+   * the enclave is asked the account must cover the floor the unsigned
+   * `transfer` gives, and before proving the limit the proof will declare.
+   */
   private async prepare(op: OxideStoredOperation, payout: OxidePayout): Promise<OxideProvenTx> {
     let step = "simulate";
     try {
@@ -408,10 +472,19 @@ export class OxideSender {
         op.operationId,
       );
       if (simulation.summary.nullifiers.some((n) => live.has(n.toLowerCase()))) throw new InputsPending();
+      step = "fee_runway";
+      await this.assertFeeRunway(op, simulation.feeLimitFloor);
       step = "sign";
       const signed = await this.backend.sign(simulation);
+      step = "size";
+      const sized = await this.backend.size(signed);
+      step = "fee_runway";
+      await this.assertFeeRunway(op, sized.feeLimit);
       step = "prove";
-      const proven = await this.backend.prove(signed);
+      const proven = await this.backend.prove(sized);
+      if (oxideFeeLimit(proven.evidence) !== sized.feeLimit) {
+        throw new Error("the proven gas settings are not the ones the fee runway was checked against");
+      }
       const recipientNote = proven.evidence.createdNotes[proven.evidence.recipientNoteIndex];
       if (
         recipientNote?.owner.toLowerCase() !== payout.recipient.toLowerCase() ||
@@ -424,9 +497,52 @@ export class OxideSender {
       if (cause instanceof JournalWriteError || cause instanceof JournalUnreadableError) throw cause;
       console.error(`[oxide] ${step} failed: ${(cause as Error).message ?? String(cause)}`);
       if (cause instanceof InputsPending) throw new Answer(this.refuse(op, "inputs_pending", true));
+      if (cause instanceof FeeRunwayRefused) throw new Answer(this.refuse(op, cause.reason, true));
       if (cause instanceof UnexpectedTokenOperation) throw new Answer(this.refuse(op, "token_operation_unexpected", false));
       if (cause instanceof EnclaveTrustRefused) throw new Answer(this.refuse(op, `enclave_refused:${cause.reason}`, true));
       throw new Answer(this.refuse(op, `${step}_failed`, true));
+    }
+  }
+
+  /**
+   * Refuses unless the account's fee juice covers `feeLimit` on top of the fee
+   * limits of every other attempt that may still land: the node reads the
+   * balance without them until they are mined, so it would admit this send
+   * and leave one of them unable to pay.
+   */
+  private async assertFeeRunway(op: OxideStoredOperation, feeLimit: bigint): Promise<void> {
+    let observed: bigint;
+    try {
+      observed = await this.backend.feeJuiceBalance();
+    } catch (cause) {
+      throw new FeeRunwayRefused("fee_runway_unknown", `balance unread: ${(cause as Error).message ?? String(cause)}`);
+    }
+    const committed = this.journal.committedFees(this.nowSeconds(), op.operationId);
+    if (observed < committed.total + feeLimit) {
+      throw new FeeRunwayRefused(
+        "fee_runway_low",
+        `balance ${observed} below ${feeLimit} for this send plus ${committed.total} committed to ${committed.sends} other attempt(s)`,
+      );
+    }
+  }
+
+  /**
+   * The fee runway read for the readiness surface: the balance, what other
+   * attempts may still be charged, and the most one more send can cost.
+   * Unknown when the node or the journal cannot be read.
+   */
+  async feeRunway(): Promise<ReadinessFact<OxideFeeRunway>> {
+    try {
+      const [observed, perSendFeeLimit] = await Promise.all([
+        this.backend.feeJuiceBalance(),
+        this.backend.maxSendFeeLimit(),
+      ]);
+      if (perSendFeeLimit <= 0n) throw new Error("non-positive per-send fee limit");
+      const committed = this.journal.committedFees(this.nowSeconds(), "");
+      return known({ observed, committed: committed.total, committedSends: committed.sends, perSendFeeLimit });
+    } catch (cause) {
+      console.error(`[oxide] Fee runway read failed: ${(cause as Error).message ?? String(cause)}`);
+      return unknown("fee_runway_unknown");
     }
   }
 

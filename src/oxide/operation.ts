@@ -106,6 +106,21 @@ export interface OxideSendEvidence {
   maxFeesPerGas: { feePerDaGas: string; feePerL2Gas: string };
 }
 
+/**
+ * `gasLimits x maxFeesPerGas` summed over both dimensions: the most the node
+ * may charge the fee payer (stdlib `GasSettings.getFeeLimit`). The node admits
+ * a tx only if its fee payer holds at least this.
+ */
+export function oxideFeeLimit(gas: {
+  gasLimits: { daGas: number; l2Gas: number };
+  maxFeesPerGas: { feePerDaGas: bigint | string; feePerL2Gas: bigint | string };
+}): bigint {
+  return (
+    BigInt(gas.gasLimits.daGas) * BigInt(gas.maxFeesPerGas.feePerDaGas) +
+    BigInt(gas.gasLimits.l2Gas) * BigInt(gas.maxFeesPerGas.feePerL2Gas)
+  );
+}
+
 /** Rejects stored evidence this code did not write. */
 export function isOxideSendEvidence(value: unknown): value is OxideSendEvidence {
   if (typeof value !== "object" || value === null) return false;

@@ -15,6 +15,7 @@ import { capRefusal, CapExceeded, WINDOW_MS, type OxideCapsConfig } from "./caps
 import {
   fingerprintOxideTerms,
   isOxideSendEvidence,
+  oxideFeeLimit,
   type OxideHold,
   type OxideObservation,
   type OxideSendEvidence,
@@ -626,6 +627,37 @@ export class OxideJournal {
       .filter((r) => BigInt(nowSeconds) < BigInt(r.expiration_timestamp))
       .filter((r) => !r.observation_json || !("blockNumber" in (JSON.parse(r.observation_json) as object)))
       .map((r) => r.operation_id);
+  }
+
+  /**
+   * Fee juice other attempts may still be charged: the fee limit of every
+   * current attempt that can still land without a fresh proof, i.e. a
+   * prepared one with its bounds open (it can be allowed and resent) and a
+   * marked one not yet observed mined, before its protocol expiry. The
+   * balance the node reads does not reflect them until they are mined.
+   */
+  committedFees(nowSeconds: number, exclude: string): { total: bigint; sends: number } {
+    const rows = this.read((db) =>
+      db
+        .prepare(
+          `SELECT o.state, o.terms_json, a.expiration_timestamp, a.evidence_json
+           FROM operations o JOIN attempts a ON a.operation_id = o.operation_id AND a.attempt = o.current_attempt
+           WHERE o.operation_id != ? AND (
+             o.state = 'prepared'
+             OR (o.state = 'may_broadcast' AND json_extract(o.observation_json, '$.blockNumber') IS NULL)
+           )`,
+        )
+        .all(exclude),
+    ) as { state: OxideOperationState; terms_json: string; expiration_timestamp: string; evidence_json: string }[];
+    let total = 0n;
+    let sends = 0;
+    for (const row of rows) {
+      if (BigInt(nowSeconds) >= BigInt(row.expiration_timestamp)) continue;
+      if (row.state === "prepared" && nowSeconds >= (JSON.parse(row.terms_json) as OxideTerms).validUntil) continue;
+      total += oxideFeeLimit(JSON.parse(row.evidence_json) as OxideSendEvidence);
+      sends += 1;
+    }
+    return { total, sends };
   }
 
   /** Total of durable spends at or after `sinceMs`. */

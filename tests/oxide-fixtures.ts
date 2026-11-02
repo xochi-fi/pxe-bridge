@@ -11,8 +11,16 @@ import {
   type OxideProvenTx,
   type OxideSigned,
   type OxideSimulation,
+  type OxideSized,
   type OxideTxIdentity,
 } from "../src/oxide/sender.js";
+
+/** The fee limit every fake proof declares: `evidenceFor`'s gas (606,480 L2 gas x 2 gwei, no DA fee). */
+export const FEE_LIMIT = 606_480n * 2_000_000_000n;
+/** The fee limit of the simulated transfer alone (505,400 L2 gas): the floor checked before the enclave. */
+export const FEE_FLOOR = 505_400n * 2_000_000_000n;
+/** The node's per-tx gas limit at the same fee: the most one send can be charged. */
+export const MAX_SEND_FEE_LIMIT = 6_540_000n * 2_000_000_000n;
 
 export { tempJournalPath } from "./settlement-fixtures.js";
 
@@ -85,6 +93,15 @@ export class FakeNode {
   minedStatus: "finalized" | "proposed" = "finalized";
   block = 0;
   pxeLag = 0;
+  /** The sending account's public fee juice balance. Ample unless a test sets it. */
+  feeJuice = 10n ** 24n;
+  /** True: the balance read fails (node unreachable). */
+  feeJuiceUnreadable = false;
+
+  readFeeJuice(): bigint {
+    if (this.feeJuiceUnreadable) throw new Error("fee juice read failed");
+    return this.feeJuice;
+  }
 
   pxeBlock(): number {
     return this.block - this.pxeLag;
@@ -127,7 +144,7 @@ export class FakeNode {
   }
 }
 
-export type Step = "simulate" | "sign" | "prove" | "send";
+export type Step = "simulate" | "sign" | "size" | "prove" | "send";
 
 /**
  * The PXE / enclave / node boundary, faked. `crashAt` makes that step never
@@ -174,6 +191,7 @@ export class FakeBackend implements OxideBackend {
           depositRecipients: [],
           withdrawals: 0,
         },
+        feeLimitFloor: FEE_FLOOR,
         handle: { payout, nullifiers },
       };
     });
@@ -183,9 +201,13 @@ export class FakeBackend implements OxideBackend {
     return this.step("sign", () => ({ handle: simulation.handle }));
   }
 
-  prove(signed: OxideSigned): Promise<OxideProvenTx> {
+  size(signed: OxideSigned): Promise<OxideSized> {
+    return this.step("size", () => ({ feeLimit: FEE_LIMIT, handle: signed.handle }));
+  }
+
+  prove(sized: OxideSized): Promise<OxideProvenTx> {
     return this.step("prove", () => {
-      const { payout, nullifiers } = signed.handle as { payout: OxidePayout; nullifiers: string[] };
+      const { payout, nullifiers } = sized.handle as { payout: OxidePayout; nullifiers: string[] };
       const txBytes = txBytesFor(nullifiers, this.expiration);
       return {
         txHash: hashOfBytes(txBytes),
@@ -218,6 +240,18 @@ export class FakeBackend implements OxideBackend {
 
   observe(txHash: string): Promise<NodeObservation> {
     return Promise.resolve(this.node.observe(txHash));
+  }
+
+  feeJuiceBalance(): Promise<bigint> {
+    try {
+      return Promise.resolve(this.node.readFeeJuice());
+    } catch (cause) {
+      return Promise.reject(cause);
+    }
+  }
+
+  maxSendFeeLimit(): Promise<bigint> {
+    return Promise.resolve(MAX_SEND_FEE_LIMIT);
   }
 }
 
