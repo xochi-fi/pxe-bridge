@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { Fr } from "@aztec-labs/aztec.js/fields";
-import { orderFingerprintMeta, oxideGasSettings, pinnedTokenImmutables } from "../src/oxide/backend.js";
+import { identifyTxBytes, orderFingerprintMeta, oxideGasSettings, pinnedTokenImmutables } from "../src/oxide/backend.js";
+import { JournaledBytesInvalid } from "../src/oxide/sender.js";
+import { mockTx } from "@aztec-labs/stdlib/testing";
 import { computeTokenImmutablesHash } from "../src/oxide/vendor/oxide-lib/token_immutables.js";
 
 describe("Oxide backend policy", () => {
@@ -36,5 +38,20 @@ describe("Oxide backend policy", () => {
     // A full-width fingerprint (above the field modulus) still encodes.
     expect(() => orderFingerprintMeta("0x" + "ff".repeat(32), 3)).not.toThrow();
     expect(() => orderFingerprintMeta(fp, 2)).toThrow(/needs 3/);
+  });
+});
+
+describe("identifyTxBytes (real stdlib Tx codec)", () => {
+  it("answers the hash recomputed from the data and the expiry inside it", async () => {
+    const tx = await mockTx(1);
+    const id = await identifyTxBytes(tx.toBuffer());
+    expect(id.txHash).toBe(tx.getTxHash().toString().toLowerCase());
+    expect(id.expirationTimestamp).toBe(tx.data.expirationTimestamp);
+  });
+
+  it("refuses bytes changed after the stored hash prefix, which getTxHash() alone would accept", async () => {
+    const bytes = Buffer.from((await mockTx(2)).toBuffer());
+    bytes[200] = bytes[200]! ^ 0xff;
+    await expect(identifyTxBytes(bytes)).rejects.toBeInstanceOf(JournaledBytesInvalid);
   });
 });

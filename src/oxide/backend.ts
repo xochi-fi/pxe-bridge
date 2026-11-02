@@ -39,13 +39,15 @@ import type { BlockHeader, Capsule } from "@aztec-labs/stdlib/tx";
 import { OxideFleetRegistry, type OxideL1Reader } from "./enclave.js";
 import type { OxideSendEvidence } from "./operation.js";
 import { OXIDE_V6_MAINNET, type OxidePins } from "./pins.js";
-import type {
-  OxideBackend,
-  OxidePayout,
-  OxideProvenTx,
-  OxideSigned,
-  OxideSimulation,
-  TokenOperationSummary,
+import {
+  JournaledBytesInvalid,
+  type OxideBackend,
+  type OxidePayout,
+  type OxideProvenTx,
+  type OxideSigned,
+  type OxideSimulation,
+  type OxideTxIdentity,
+  type TokenOperationSummary,
 } from "./sender.js";
 
 /**
@@ -213,7 +215,7 @@ export interface PxeOxideBackendOptions {
   token: Contract;
   artifact: ContractArtifact;
   l1: OxideL1Reader;
-  /** The bridge secret, derived exactly as standard mode does (`deriveAccountKeys`). Not retained. */
+  /** The bridge secret, derived exactly as standard mode does (`deriveAccountKeys`). Used in `create` only, never stored. */
   secretKey: string;
   gasMarginBps?: bigint;
   feeMultiplier?: bigint;
@@ -224,7 +226,7 @@ export class PxeOxideBackend implements OxideBackend {
   readonly account: string;
 
   private constructor(
-    private readonly options: PxeOxideBackendOptions,
+    private readonly options: Omit<PxeOxideBackendOptions, "secretKey">,
     private readonly fleet: FleetSigner,
     private readonly spend: SpendMetadata,
     private readonly proving: ProvingInternals,
@@ -244,13 +246,14 @@ export class PxeOxideBackend implements OxideBackend {
     // its address preimage and master nullifier hiding key. Derived from the
     // one bridge secret exactly as `standard` mode derives the account, and
     // refused unless it reproduces the connected account.
-    const keys = await deriveAccountKeys(options.secretKey);
+    const { secretKey, ...retained } = options;
+    const keys = await deriveAccountKeys(secretKey);
     const spend = await buildSpendMetadata({ ...keys, creationTxHash: TxHash.zero() });
     if (!spend.ownerAddressPreimage.address.equals(options.account)) {
       throw new Error("Oxide spend metadata does not derive the connected standard account");
     }
     const fleet = await FleetSigner.connect(pins.enclaveUrl, new OxideFleetRegistry(options.l1, pins));
-    return new PxeOxideBackend({ ...options, pins }, fleet, spend, proving as ProvingInternals);
+    return new PxeOxideBackend({ ...retained, pins }, fleet, spend, proving as ProvingInternals);
   }
 
   private get pins(): OxidePins {
@@ -393,8 +396,8 @@ export class PxeOxideBackend implements OxideBackend {
     };
   }
 
-  hashOf(txBytes: Buffer): string {
-    return Tx.fromBuffer(txBytes).getTxHash().toString().toLowerCase();
+  identify(txBytes: Buffer): Promise<OxideTxIdentity> {
+    return identifyTxBytes(txBytes);
   }
 
   /** Exact journaled bytes to the ungated node, with nothing awaited before the call. */
@@ -405,5 +408,19 @@ export class PxeOxideBackend implements OxideBackend {
   observe(txHash: string): Promise<NodeObservation> {
     return this.options.observeTx(txHash);
   }
+}
+
+/**
+ * The identity a node gives `txBytes`, recomputed from the transaction's data.
+ * `Tx.fromBuffer` reads the hash stored at the front of the bytes and
+ * `getTxHash()` returns it as is, so a hash read that way vouches for nothing
+ * after the prefix (the expiry included). Refuses bytes whose stored hash is
+ * not the hash of their data: the node would reject them.
+ */
+export async function identifyTxBytes(txBytes: Buffer): Promise<OxideTxIdentity> {
+  const tx = Tx.fromBuffer(txBytes);
+  const computed = await Tx.computeTxHash(tx);
+  if (!computed.equals(tx.getTxHash())) throw new JournaledBytesInvalid("stored tx hash is not the hash of the tx data");
+  return { txHash: computed.toString().toLowerCase(), expirationTimestamp: tx.data.expirationTimestamp };
 }
 

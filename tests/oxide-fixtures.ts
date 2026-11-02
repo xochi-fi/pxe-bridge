@@ -4,12 +4,14 @@ import type { NodeObservation } from "../src/settlement.js";
 import { DAI, type OxideCapsConfig } from "../src/oxide/caps.js";
 import type { OxideSendEvidence } from "../src/oxide/operation.js";
 import { OXIDE_V6_MAINNET } from "../src/oxide/pins.js";
-import type {
-  OxideBackend,
-  OxidePayout,
-  OxideProvenTx,
-  OxideSigned,
-  OxideSimulation,
+import {
+  JournaledBytesInvalid,
+  type OxideBackend,
+  type OxidePayout,
+  type OxideProvenTx,
+  type OxideSigned,
+  type OxideSimulation,
+  type OxideTxIdentity,
 } from "../src/oxide/sender.js";
 
 export { tempJournalPath } from "./settlement-fixtures.js";
@@ -60,9 +62,9 @@ export function evidenceFor(
 /** The nullifier of the sending account's `k`-th note. */
 export const noteNullifier = (k: number) => "0x" + (k + 1).toString(16).padStart(64, "0");
 
-/** A fake tx: its bytes name its nullifiers, so the node can refuse a second spend of one. */
-export function txBytesFor(nullifiers: string[]): Buffer {
-  return Buffer.from(JSON.stringify({ salt: randomBytes(16).toString("hex"), nullifiers }));
+/** A fake tx: its bytes name its nullifiers (so the node can refuse a second spend of one) and its protocol expiry. */
+export function txBytesFor(nullifiers: string[], expiration?: bigint): Buffer {
+  return Buffer.from(JSON.stringify({ salt: randomBytes(16).toString("hex"), nullifiers, expiration: expiration?.toString() }));
 }
 
 export const hashOfBytes = (bytes: Buffer) => "0x" + createHash("sha256").update(bytes).digest("hex");
@@ -142,6 +144,8 @@ export class FakeBackend implements OxideBackend {
   recipientAmountOverride: bigint | undefined;
   /** Spend this note instead of the one the PXE would select (an account holding several). */
   forceNote: number | undefined;
+  /** Replaces what `identify` answers for journaled bytes (bytes whose stored hash survives but whose data changed). */
+  identityOverride: ((txBytes: Buffer) => OxideTxIdentity) | undefined;
   /** True: a `crashAt: "send"` dies after the mark but before the node saw the bytes. */
   crashBeforeNode = false;
 
@@ -182,7 +186,7 @@ export class FakeBackend implements OxideBackend {
   prove(signed: OxideSigned): Promise<OxideProvenTx> {
     return this.step("prove", () => {
       const { payout, nullifiers } = signed.handle as { payout: OxidePayout; nullifiers: string[] };
-      const txBytes = txBytesFor(nullifiers);
+      const txBytes = txBytesFor(nullifiers, this.expiration);
       return {
         txHash: hashOfBytes(txBytes),
         txBytes,
@@ -192,8 +196,11 @@ export class FakeBackend implements OxideBackend {
     });
   }
 
-  hashOf(txBytes: Buffer): string {
-    return hashOfBytes(txBytes);
+  identify(txBytes: Buffer): Promise<OxideTxIdentity> {
+    if (this.identityOverride) return Promise.resolve(this.identityOverride(txBytes));
+    const { expiration } = JSON.parse(txBytes.toString()) as { expiration?: string };
+    if (expiration === undefined) return Promise.reject(new JournaledBytesInvalid("no expiration in the fake tx"));
+    return Promise.resolve({ txHash: hashOfBytes(txBytes), expirationTimestamp: BigInt(expiration) });
   }
 
   send(txBytes: Buffer): Promise<void> {

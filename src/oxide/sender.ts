@@ -14,6 +14,7 @@ import {
   type OxideTerms,
 } from "./operation.js";
 import { OxidePinMismatch, OXIDE_V6_MAINNET } from "./pins.js";
+import { MAX_TX_LIFETIME } from "@aztec-labs/constants";
 
 /**
  * The Oxide sender (xochi-fi/pxe-bridge#84, phase 1): pays OXDAI to an Aztec
@@ -79,8 +80,12 @@ export interface OxideBackend {
   simulate(payout: OxidePayout): Promise<OxideSimulation>;
   sign(simulation: OxideSimulation): Promise<OxideSigned>;
   prove(signed: OxideSigned): Promise<OxideProvenTx>;
-  /** The hash the node will assign `txBytes` (0x, lowercase). Synchronous. */
-  hashOf(txBytes: Buffer): string;
+  /**
+   * The hash and protocol expiry a node gives `txBytes`, recomputed from the
+   * transaction's data (never the stored hash prefix alone). Throws
+   * `JournaledBytesInvalid` when the bytes do not hash to their own data.
+   */
+  identify(txBytes: Buffer): Promise<OxideTxIdentity>;
   send(txBytes: Buffer): Promise<void>;
   observe(txHash: string): Promise<NodeObservation>;
 }
@@ -109,6 +114,20 @@ export interface OxidePayoutIdentity {
   noteIndex: number;
   /** The siloed note hash the enclave signed for it. */
   siloedNoteHash: string;
+}
+
+export interface OxideTxIdentity {
+  /** 0x, lowercase. */
+  txHash: string;
+  expirationTimestamp: bigint;
+}
+
+/** Journaled bytes that are not a transaction the node would accept as the journaled one. */
+export class JournaledBytesInvalid extends Error {
+  constructor(detail: string) {
+    super(`Journaled Oxide tx bytes refused: ${detail}`);
+    this.name = "JournaledBytesInvalid";
+  }
 }
 
 export type OxideSendOutcome =
@@ -341,11 +360,15 @@ export class OxideSender {
     try {
       await this.reconcileMarked();
       const proven = await this.prepare(op, payout);
+      // Riddler#1428 option 2 admits `validUntil <= expiry < validUntil + MAX_TX_LIFETIME`.
+      // Below it the consumer could read "expired" while its own deadline is
+      // still open; at or above it Riddler refuses admission, and the prepared
+      // attempt's nullifiers would hold the account until validUntil.
       if (proven.expirationTimestamp < BigInt(terms.validUntil)) {
-        // Decided on #84 / Riddler#1428: the protocol expiry is its own bound and
-        // must not fall before validUntil, or the consumer could read "expired"
-        // while its own deadline is still open.
         return this.refuse(op, "expiration_before_valid_until", false);
+      }
+      if (proven.expirationTimestamp >= BigInt(terms.validUntil) + BigInt(MAX_TX_LIFETIME)) {
+        return this.refuse(op, "expiration_outside_window", false);
       }
       const attempt = this.journal.recordPrepared(id, proven);
       recorded = this.journal.attempts(id).find((a) => a.attempt === attempt)!;
@@ -416,9 +439,21 @@ export class OxideSender {
     const id = op.operationId;
     const bytes = this.journal.attemptBytes(id, attempt.attempt);
     // The bytes must still be the transaction the journal (and so the gate)
-    // names: a hash the gate allowed is the only thing it vouches for.
-    if (this.backend.hashOf(bytes).toLowerCase() !== attempt.txHash.toLowerCase()) {
-      console.error(`[oxide] Journaled bytes of ${id} attempt ${attempt.attempt} no longer hash to the journaled txHash`);
+    // names: hash recomputed from the data, and the expiry inside them equal
+    // to the journaled one the bound checks below read.
+    let identity: OxideTxIdentity | null = null;
+    try {
+      identity = await this.backend.identify(bytes);
+    } catch (cause) {
+      if (!(cause instanceof JournaledBytesInvalid)) throw cause;
+      console.error(`[oxide] Journaled bytes of ${id} attempt ${attempt.attempt}: ${cause.message}`);
+    }
+    if (
+      identity === null ||
+      identity.txHash !== attempt.txHash.toLowerCase() ||
+      identity.expirationTimestamp.toString() !== attempt.expirationTimestamp
+    ) {
+      console.error(`[oxide] Journaled bytes of ${id} attempt ${attempt.attempt} are not the journaled transaction`);
       return this.answer(op, { state: "unknown", reason: "journaled_bytes_mismatch" });
     }
     const answer = await this.mayBroadcast({ operationId: id, fingerprint: op.fingerprint, txHash: attempt.txHash });

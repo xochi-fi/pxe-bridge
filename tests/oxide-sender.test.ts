@@ -187,6 +187,29 @@ describe("OxideSender", () => {
     expect(node.sent).toEqual([]);
   });
 
+  it("never resends journaled bytes whose expiry is not the journaled expiry, though the hash still matches", async () => {
+    const path = tempJournalPath();
+    const node = new FakeNode();
+    const first = boot(path, node, { gate: fakeGate("unknown") });
+    const held = observed(await first.sender.send(request()));
+    expect(held.observation).toMatchObject({ state: "prepared" });
+    first.journal.close();
+
+    // A stored hash prefix survives while the data behind it (the expiry) changed.
+    const second = boot(path, node);
+    second.backend.identityOverride = () => ({
+      txHash: held.payout!.txHash,
+      expirationTimestamp: BigInt(held.payout!.expirationTimestamp) + 3600n,
+    });
+    expect(observed(await second.sender.send(request())).observation).toEqual({
+      state: "unknown",
+      reason: "journaled_bytes_mismatch",
+    });
+    expect(second.gate.queries).toEqual([]);
+    expect(second.journal.get("op-1")?.state).toBe("prepared");
+    expect(node.sent).toEqual([]);
+  });
+
   it("re-runs the preflight before resending a held attempt", async () => {
     const node = new FakeNode();
     const gate = fakeGate("unknown");
@@ -256,6 +279,27 @@ describe("OxideSender", () => {
     const out = observed(await sender.send(request({ validUntil: Math.floor(T0 / 1000) + 600 })));
     expect(out.observation).toEqual({ state: "not_submitted", reason: "expiration_before_valid_until", retryable: false });
     expect(node.sent).toHaveLength(0);
+  });
+
+  // Riddler#1428 option 2 admits `validUntil <= expiry < validUntil + MAX_TX_LIFETIME` (86400).
+  it("refuses a proof whose protocol expiry is at or past validUntil + MAX_TX_LIFETIME", async () => {
+    const validUntil = Math.floor(T0 / 1000) + 600;
+    const node = new FakeNode();
+    const { sender, backend, journal } = boot(tempJournalPath(), node);
+    backend.expiration = BigInt(validUntil + 86_400);
+    const out = observed(await sender.send(request({ validUntil })));
+    expect(out.observation).toEqual({ state: "not_submitted", reason: "expiration_outside_window", retryable: false });
+    expect(journal.attempts("op-1")).toEqual([]); // nothing journaled, so no nullifiers held
+    expect(node.sent).toHaveLength(0);
+  });
+
+  it("sends a proof whose protocol expiry is one second inside the window", async () => {
+    const validUntil = Math.floor(T0 / 1000) + 600;
+    const node = new FakeNode();
+    const { sender, backend } = boot(tempJournalPath(), node);
+    backend.expiration = BigInt(validUntil + 86_399);
+    expect(observed(await sender.send(request({ validUntil }))).observation.state).toBe("finalized");
+    expect(node.sent).toHaveLength(1);
   });
 
   it("never sends at or after validUntil", async () => {
@@ -346,7 +390,7 @@ describe("one account, one set of notes", () => {
       reason: "inputs_pending",
     });
     c.t = T0 + 86_400_000; // op-1's expiry: it can no longer land
-    second.backend.expiration = BigInt(late + 86_400);
+    second.backend.expiration = BigInt(Math.floor(c.t / 1000) + 86_400); // anchor ~ now + MAX_TX_LIFETIME, inside the window
     expect(observed(await second.sender.send(request({ operationId: "op-2", validUntil: late }))).observation.state).toBe(
       "finalized",
     );

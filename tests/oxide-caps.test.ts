@@ -23,7 +23,7 @@ function observation(outcome: OxideSendOutcome) {
 function boot(path: string, c: ReturnType<typeof clock>, node = new FakeNode(), caps = CAPS) {
   const journal = OxideJournal.open(path, { now: c.now });
   const backend = new FakeBackend(node);
-  backend.expiration = BigInt(Math.floor(T0 / 1000) + 10 * 86_400);
+  backend.expiration = EXPIRATION;
   const sender = new OxideSender({
     journal,
     backend,
@@ -36,8 +36,11 @@ function boot(path: string, c: ReturnType<typeof clock>, node = new FakeNode(), 
 }
 
 /** validUntil two days out, so a request (and its retry) stays inside its bound as the clock moves. */
+const VALID_UNTIL = Math.floor(T0 / 1000) + 2 * 86_400;
+/** The latest expiry Riddler#1428's window admits for that validUntil. */
+const EXPIRATION = BigInt(VALID_UNTIL + 86_399);
 const req = (_c: ReturnType<typeof clock>, operationId: string, amount: bigint) =>
-  request({ operationId, amount: amount.toString(), validUntil: Math.floor(T0 / 1000) + 2 * 86_400 });
+  request({ operationId, amount: amount.toString(), validUntil: VALID_UNTIL });
 
 // Each send round-trips a real SQLite journal with synchronous=FULL; the
 // window tests do 10-12 of them, so they get headroom over the 5s default
@@ -150,7 +153,7 @@ describe("Oxide caps", { timeout: 30_000 }, () => {
     const gate = fakeGate("unknown");
     const journal = OxideJournal.open(path, { now: c.now });
     const backend = new FakeBackend(node);
-    backend.expiration = BigInt(Math.floor(T0 / 1000) + 10 * 86_400);
+    backend.expiration = EXPIRATION;
     const sender = new OxideSender({
       journal,
       backend,
