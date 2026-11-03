@@ -513,6 +513,10 @@ export class OxideSender {
       return this.refuse(op, `cap:${cause.reason}`, cause.reason === "daily_cap_exhausted");
     }
 
+    // The deployment must be the pinned one before anything is simulated or
+    // sealed. A moved manifest/profile (#744) or a structural enclave/L1
+    // mismatch is permanent: no retry of this process clears it, only a
+    // reviewed re-pin (OX-6). An unread pin is transient.
     try {
       await this.preflight.assertPinned();
     } catch (cause) {

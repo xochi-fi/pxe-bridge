@@ -489,7 +489,17 @@ enclave) is not asserted at startup: an outage there must not stop
 `aztec_getSettlement` or the recovery of journaled payouts. It is checked
 before every fresh attempt and every resend (a fresh attempt is refused
 `not_submitted`, a held attempt stays `prepared`), the enclave is connected on
-first sign, and `/ready` reports it. `/ready` reports `initializing` until the
+first sign, and `/ready` reports it. The refusal's class follows what was
+found (xochi#748 OX-6): a deployment that is no longer the pinned one --
+manifest or profile moved (`oxide_pin_mismatch`), L1 not the pinned
+chain/registry/portal (`enclave_refused:l1_not_pinned`), the fleet's PCR0
+not the pinned image or not hashing to `TeeRegistry.PCR0_HASH()`
+(`enclave_refused:pcr0_not_pinned` / `pcr0_hash_mismatch`) -- is PERMANENT:
+nothing this process retries clears it, an operator re-pins after review and
+ships a new release, and Riddler refunds the order. An unread pin
+(`oxide_pin_unverified`), a frozen portal and an attestation document that
+does not verify are transient. The same split applies at admission
+(`OxideReadiness.admit`, docs/settlement-operations.md "Oxide readiness"). `/ready` reports `initializing` until the
 sender is built.
 
 **Oxide journal schema 2.** Each row holds the operation's v2 terms
