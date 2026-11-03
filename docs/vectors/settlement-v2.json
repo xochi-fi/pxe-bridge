@@ -823,7 +823,7 @@
       ]
     },
     "payoutProof": {
-      "note": "Recompute the payout note from the signed recipient, token and amount and observation.partialNoteRandomness; require uniqueNoteHash(observation.payoutNoteHashIndex) == effects.noteHashes[payoutNoteHashIndex] (effects.nullifiers[0] is the nonce's first nullifier). Values are the @aztec-labs 6.0.0 hashes and Oxide's computeSiloedNoteHash.",
+      "note": "Recompute a successful payout note from the signed recipient, token and amount and observation.partialNoteRandomness; require uniqueNoteHash(observation.payoutNoteHashIndex) == effects.noteHashes[payoutNoteHashIndex] (effects.nullifiers[0] is the nonce's first nullifier). Values are the @aztec-labs 6.0.0 hashes and Oxide's computeSiloedNoteHash. The raw reverted observation is a consumer-refusal vector: the bridge holds it because prepared bytes do not commit this proof.",
       "formula": {
         "randomness": "P2([seed, index]) (OxideToken randomness.nr next_randomness)",
         "noteHash": "P2WithSeparator([amount, recipient, BALANCES_STORAGE_SLOT, randomness], DOM_SEP__NOTE_HASH)",
@@ -869,6 +869,12 @@
         "partialNoteRandomness": "0x0f9369230bca88ad6d009e611ad2ff316738d044e7855e1b9e206b6275b0824b",
         "receiptStatus": "finalized",
         "payoutNoteHashIndex": null
+      },
+      "revertHold": {
+        "observation": {
+          "state": "unknown",
+          "reason": "payout_proof_uncommitted"
+        }
       },
       "refusals": [
         {

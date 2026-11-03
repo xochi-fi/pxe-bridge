@@ -11,18 +11,20 @@ import type { OxidePayoutIdentity } from "./sender.js";
  *   (`cap_window_full`, `preflight_refused`) are `interrupted` on the wire,
  *   which means the same thing to a consumer: journaled, never marked,
  *   provably not broadcast, and resent only as these exact bytes.
- * - A mined observation carries the payout note's randomness as
+ * - A successful mined observation carries the payout note's randomness as
  *   `partialNoteRandomness` and `payoutNoteHashIndex`: the payout's position
  *   in the mined transaction's `effects.noteHashes`, found by recomputing the
  *   note from the signed terms and that randomness (src/oxide/payout-proof.ts).
- *   `reverted` carries `payoutNoteHashIndex: null`, and only when the effects
- *   show the payout note absent (a revert drops it). When the position is not
- *   exactly one (effects unavailable or malformed, the hash absent or present
- *   twice), or the recomputed note is not the one the enclave signed, the
- *   answer is `unknown` / `payout_note_hash_unresolved`: never a mined
- *   observation a consumer could not prove, and never a refund signal.
+ *   When the position is not exactly one (effects unavailable or malformed,
+ *   the hash absent or present twice), or the recomputed note is not the one
+ *   the enclave signed, the answer is `unknown` /
+ *   `payout_note_hash_unresolved`.
+ * - A reverted transaction is always `unknown` / `payout_proof_uncommitted`.
+ *   Its prepared bytes do not commit the later payout randomness or index, so
+ *   a post-hoc absent opening is never negative delivery evidence.
  */
 export const PAYOUT_NOTE_HASH_UNRESOLVED = "payout_note_hash_unresolved";
+export const PAYOUT_PROOF_UNCOMMITTED = "payout_proof_uncommitted";
 
 const MINED_STATUSES: readonly string[] = ["proposed", "checkpointed", "proven", "finalized"];
 
@@ -77,6 +79,10 @@ export async function oxideSettlementObservation(
     effects: observation.effects,
     partialNoteRandomness: payout.noteRandomness,
   };
+  if (observation.state === "reverted") {
+    console.error(`[oxide] Reverted ${observation.txHash} has no prepared payout-proof commitment`);
+    return { state: "unknown", reason: PAYOUT_PROOF_UNCOMMITTED };
+  }
   const siloed = await oxideSiloedNoteHash({
     recipient: terms.recipient,
     token: terms.token,
@@ -88,18 +94,6 @@ export async function oxideSettlementObservation(
     return { state: "unknown", reason: PAYOUT_NOTE_HASH_UNRESOLVED };
   }
   const location = await locatePayoutNoteHash(observation.effects, siloed);
-  if (observation.state === "reverted") {
-    // A revert drops the payout note. If the effects still carry it (or
-    // cannot show its absence) the outcome contradicts itself: never a
-    // clean revert a consumer could refund on.
-    if (location.kind === "unresolved" && location.reason === "payout_note_hash_absent") {
-      return { ...mined, payoutNoteHashIndex: null };
-    }
-    console.error(
-      `[oxide] Reverted ${observation.txHash} does not show the payout note absent: ${location.kind === "found" ? "present" : location.reason}`,
-    );
-    return { state: "unknown", reason: PAYOUT_NOTE_HASH_UNRESOLVED };
-  }
   if (location.kind !== "found") {
     console.error(`[oxide] Payout note hash unresolved in ${observation.txHash}: ${location.reason}`);
     return { state: "unknown", reason: PAYOUT_NOTE_HASH_UNRESOLVED };

@@ -57,7 +57,7 @@ function bridge(options: BridgeOptions = {}) {
   const path = options.path ?? tempJournalPath();
   const node = options.node ?? new FakeNode();
   const c = clock();
-  const journal = OxideJournal.open(path, { now: c.now });
+  const journal = OxideJournal.open(path, { allowCreate: true, now: c.now });
   const backend = new FakeBackend(node);
   const gate = options.gate ?? fakeGate();
   const admission = options.admission ?? fakeAdmission();
@@ -168,27 +168,15 @@ describe("aztec_createNote with sendMode oxide", () => {
     });
   });
 
-  it("carries payoutNoteHashIndex null on a reverted payout whose note the effects do not carry", async () => {
-    const node = new FakeNode();
-    node.executionResult = "reverted";
-    node.payoutNoteHash = "absent";
-    const b = bridge({ node });
-    const out = result(await b.createNote(oxideParams()));
-    expect(out.observation).toMatchObject({ state: "reverted", payoutNoteHashIndex: null });
-    expect(out.observation.partialNoteRandomness).toMatch(/^0x[0-9a-f]{64}$/);
-  });
-
-  // Fund safety (review M1): a "revert" whose effects still carry the payout
-  // note is a contradiction, never a clean revert a consumer could refund on.
-  for (const shown of ["published", "duplicated", "unavailable"] as const) {
-    it(`answers unknown for a reverted payout whose note is ${shown} in the effects`, async () => {
+  for (const shown of ["absent", "published", "duplicated", "unavailable"] as const) {
+    it(`holds a reverted payout whose note is ${shown} because the prepared answer does not commit the proof`, async () => {
       const node = new FakeNode();
       node.executionResult = "reverted";
       node.payoutNoteHash = shown;
       const b = bridge({ node });
       expect(error(await b.createNote(oxideParams())).data["observation"]).toEqual({
         state: "unknown",
-        reason: "payout_note_hash_unresolved",
+        reason: "payout_proof_uncommitted",
       });
       expect(b.node.sent).toHaveLength(1);
     });

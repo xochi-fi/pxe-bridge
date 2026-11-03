@@ -388,8 +388,8 @@ async function oxideCase(spendingLimitFinalized: Observation): Promise<Record<st
   const withAnotherOrder = noteHashes.filter((_, i) => i !== OXIDE_PAYOUT_FIXTURE.payoutNoteHashIndex);
   const absent = await locatePayoutNoteHash({ ...effects, noteHashes: withAnotherOrder }, siloed);
   if (absent.kind !== "unresolved") throw new Error("a payout note hash at another position must not be located");
-  // A reverted transaction drops its revertible note hashes: the payout note
-  // is not among the effects (a consumer treats it there as a contradiction).
+  // Raw reverted wire shape retained as a consumer refusal vector. The bridge
+  // does not emit it until prepared bytes commit the payout proof.
   const reverted: Observation = {
     state: "reverted",
     ...mined,
@@ -434,10 +434,11 @@ async function oxideCase(spendingLimitFinalized: Observation): Promise<Record<st
     },
     payoutProof: {
       note:
-        "Recompute the payout note from the signed recipient, token and amount and " +
+        "Recompute a successful payout note from the signed recipient, token and amount and " +
         "observation.partialNoteRandomness; require uniqueNoteHash(observation.payoutNoteHashIndex) == " +
         "effects.noteHashes[payoutNoteHashIndex] (effects.nullifiers[0] is the nonce's first nullifier). " +
-        "Values are the @aztec-labs 6.0.0 hashes and Oxide's computeSiloedNoteHash.",
+        "Values are the @aztec-labs 6.0.0 hashes and Oxide's computeSiloedNoteHash. " +
+        "The raw reverted observation is a consumer-refusal vector: the bridge holds it because prepared bytes do not commit this proof.",
       formula: {
         randomness: "P2([seed, index]) (OxideToken randomness.nr next_randomness)",
         noteHash: "P2WithSeparator([amount, recipient, BALANCES_STORAGE_SLOT, randomness], DOM_SEP__NOTE_HASH)",
@@ -460,6 +461,9 @@ async function oxideCase(spendingLimitFinalized: Observation): Promise<Record<st
       siloedNoteHash: siloed.toString(),
       uniqueNoteHash: unique.toString(),
       revertedObservation: reverted,
+      revertHold: {
+        observation: { state: "unknown", reason: "payout_proof_uncommitted" },
+      },
       refusals: [
         {
           name: "payoutNoteHashIndex names another note hash",
