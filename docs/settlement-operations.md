@@ -1081,3 +1081,13 @@ State moves:
 Neither the allowlist, its root nor its size appears in the projection, and
 readiness failures are logged by error class only (an RPC error message can
 carry its URL and API key).
+
+## sendMode and the Oxide payout proof (0.4.0, pxe-bridge#84)
+
+Every `aztec_createNote` names `sendMode`: `"spending_limit"` (design A) or `"oxide"` (the Oxide OXDAI sender). Missing, unknown, or `oxide` with `accountMode` other than `"standard"` is refused at the schema (`-32602`, permanent). A bridge serves one mode (`PXE_BRIDGE_SEND_MODE`); the other is refused before anything is claimed (`-32602`, `send_mode_unsupported`), as is an oxide request for a token other than the pinned OXDAI (`token_mismatch`).
+
+- **Fingerprint:** `oxide` adds the line `sendMode=oxide` right after `accountMode=...`; `spending_limit` adds no line, so its fingerprint is byte-identical to 0.3.0's and journaled operations keep theirs. Rows journaled before 0.4.0 carry no `sendMode`; `aztec_getSettlement` answers them as stored.
+- **Oxide operations** live in the Oxide journal (`PXE_BRIDGE_OXIDE_JOURNAL`) under their v2 terms and fingerprint; may-broadcast is asked for that fingerprint, and the transfer's private `meta` carries it as the order fingerprint (`[sha256ToField("pxe-bridge/oxide-order-fingerprint/v1"), hi128, lo128, 0...]`). One operation id names one operation across both journals (a reuse is `-32003`).
+- **Mined oxide observations** carry `partialNoteRandomness` = the payout note's randomness and `payoutNoteHashIndex` = the index in `effects.noteHashes` of its unique note hash, found from the mined effects (`src/oxide/payout-proof.ts`); `null` on `reverted`; absent on spending_limit. If the hash is not found exactly once (or effects are unavailable) the answer is `unknown` / `payout_note_hash_unresolved`. Unavailable effects are not recorded, so a later read retries.
+- Oxide `prepared` holds use the v2 vocabulary (`cap_window_full`, `preflight_refused` surface as `interrupted`). The request deadline closes the Oxide gate as it does the spending-limit one.
+- Vectors: `docs/vectors/settlement-v2.json` `oxide` (fingerprint, order-fingerprint meta, payout proof, refusals).

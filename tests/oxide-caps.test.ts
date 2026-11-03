@@ -11,7 +11,18 @@ import {
 } from "../src/oxide/caps.js";
 import { OxideJournal } from "../src/oxide/journal.js";
 import { OxideSender, type OxideSendOutcome } from "../src/oxide/sender.js";
-import { CAPS, clock, FakeBackend, fakeGate, FakeNode, noPreflight, request, T0, tempJournalPath } from "./oxide-fixtures.js";
+import {
+  CAPS,
+  clock,
+  fakeAdmission,
+  FakeBackend,
+  fakeGate,
+  FakeNode,
+  noPreflight,
+  request,
+  T0,
+  tempJournalPath,
+} from "./oxide-fixtures.js";
 
 const NOTE_MAX = 5_166n * DAI;
 
@@ -29,6 +40,7 @@ function boot(path: string, c: ReturnType<typeof clock>, node = new FakeNode(), 
     backend,
     caps,
     preflight: noPreflight,
+    admission: fakeAdmission().admission,
     mayBroadcast: fakeGate().client,
     now: c.now,
   });
@@ -160,6 +172,7 @@ describe("Oxide caps", { timeout: 30_000 }, () => {
       backend,
       caps: CAPS,
       preflight: noPreflight,
+      admission: fakeAdmission().admission,
       mayBroadcast: gate.client,
       now: c.now,
     });

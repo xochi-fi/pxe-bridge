@@ -32,7 +32,6 @@ import { OxideAttestationProbe, type StandardAccountChainProbe } from "../src/ox
 import { DAI } from "../src/oxide/caps.js";
 import { EnclaveTrustRefused, type EnclaveRefusal } from "../src/oxide/enclave.js";
 import { OxideJournal } from "../src/oxide/journal.js";
-import { oxideTerms, OxideSendRequestSchema } from "../src/oxide/operation.js";
 import { OxidePinMismatch, OxidePinUnverified, OXIDE_V6_MAINNET } from "../src/oxide/pins.js";
 import { OxideReadiness, type OxideReadinessOptions } from "../src/oxide/readiness.js";
 import type { OxideFeeRunway } from "../src/oxide/sender.js";
@@ -417,10 +416,7 @@ async function readinessSetup(
 describe("Oxide readiness", { timeout: 60_000 }, () => {
   it("is ready on known facts and reports the private balance net of in-flight principal", async () => {
     const { readiness, journal } = await readinessSetup();
-    const terms = oxideTerms(
-      OxideSendRequestSchema.parse(request({ recipient, amount: (120n * DAI).toString(), validUntil: NOW + 600 })),
-      OXIDE_V6_MAINNET.bridge.l2Token,
-    );
+    const { terms } = request({ recipient, amount: (120n * DAI).toString(), validUntil: NOW + 600 });
     journal.claim("op-1", terms);
     journal.recordPrepared("op-1", {
       txHash: "0x" + "01".padStart(64, "0"),
@@ -501,10 +497,7 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
 
   it("counts a mined attempt only while the balance read has not seen its block", async () => {
     const journal = OxideJournal.open(tempJournalPath(), { allowCreate: true });
-    const terms = oxideTerms(
-      OxideSendRequestSchema.parse(request({ recipient, amount: (50n * DAI).toString(), validUntil: NOW + 600 })),
-      OXIDE_V6_MAINNET.bridge.l2Token,
-    );
+    const { terms } = request({ recipient, amount: (50n * DAI).toString(), validUntil: NOW + 600 });
     journal.claim("op-1", terms);
     const attempt = journal.recordPrepared("op-1", {
       txHash: "0x" + "01".padStart(64, "0"),

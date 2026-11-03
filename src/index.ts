@@ -49,6 +49,9 @@ import {
 import { resolveAttestationSecret } from "./attestation-secret.js";
 import { oxideAllowlistFromEnv, type OxideAllowlist } from "./oxide/allowlist.js";
 import { OxideAttestationProbe } from "./oxide/attestation.js";
+import { resolveSendModeConfig, type SendModeConfig } from "./oxide/config.js";
+import { createOxideSender, type OxideRuntime } from "./oxide/index.js";
+import type { SettlementContext } from "./rpc.js";
 
 // Must match WINDOW_MS in limits.ts: it bounds the same rolling window.
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -567,6 +570,15 @@ try {
   console.error(`[pxe-bridge] ${err instanceof Error ? err.message : String(err)}`);
   process.exit(1);
 }
+// --- Send mode (pxe-bridge#84) ---
+let sendMode: SendModeConfig;
+try {
+  sendMode = resolveSendModeConfig(process.env);
+} catch (err) {
+  console.error(`[pxe-bridge] ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+}
+// --- end Send mode ---
 // --- Oxide readiness (pxe-bridge#84, xochi#775 option a) ---
 // The private recipient allowlist. Oxide mode's sender wiring and its
 // attestation producer both read this one value.
@@ -720,7 +732,7 @@ async function main(): Promise<void> {
       attestationAudit,
     );
   }
-  const settlement = journal
+  const settlement: SettlementContext | undefined = journal
     ? {
         journal,
         mayBroadcast,
@@ -729,13 +741,21 @@ async function main(): Promise<void> {
         timeoutMs: SETTLEMENT_DEADLINE_MS,
       }
     : undefined;
-  const readiness = createReadinessObserver(client, {
-    journal,
-    limits,
-    mayBroadcastConfigured: mayBroadcast !== undefined,
-    corridor,
-    ...(settlement ? { reconcile: createLandedReconciler(settlement, client) } : {}),
-  });
+  // Oxide mode serves /ready from the Oxide readiness (src/oxide/readiness.ts);
+  // the spending-limit projection describes an account this mode never uses.
+  const readiness =
+    sendMode.mode === "spending_limit"
+      ? createReadinessObserver(client, {
+          journal,
+          limits,
+          mayBroadcastConfigured: mayBroadcast !== undefined,
+          corridor,
+          ...(settlement ? { reconcile: createLandedReconciler(settlement, client) } : {}),
+        })
+      : undefined;
+  if (settlement && readiness) settlement.readiness = readiness;
+  // Built once the wallet is connected (below); `initialized` stays false until then.
+  let oxideRuntime: OxideRuntime | undefined;
   let initialized = false;
   application = createApp(client, {
     apiKey: API_KEY,
@@ -744,10 +764,20 @@ async function main(): Promise<void> {
     limits,
     audit,
     readiness,
+    ...(sendMode.mode === "oxide"
+      ? {
+          oxideReadiness: {
+            observe: () =>
+              oxideRuntime
+                ? oxideRuntime.readiness.observe()
+                : Promise.reject(new Error("the Oxide sender is not constructed yet")),
+          },
+        }
+      : {}),
     initialized: () => initialized,
     attestationApiKey: attestationEnvironment?.apiKey,
     attestation,
-    ...(settlement ? { settlement: { ...settlement, readiness } } : {}),
+    ...(settlement ? { settlement } : {}),
   });
 
   server.requestTimeout = application.requestTimeout;
@@ -765,6 +795,11 @@ async function main(): Promise<void> {
   }
   console.log(`[pxe-bridge] Audit (output only): ${AUDIT_LOG_PATH ?? "stdout"}`);
   console.log(`[pxe-bridge] Journal: ${JOURNAL_PATH ?? "NOT SET"}`);
+  console.log(
+    sendMode.mode === "oxide"
+      ? `[pxe-bridge] Send mode: oxide (Oxide journal ${sendMode.journalPath}; spending_limit refused)`
+      : "[pxe-bridge] Send mode: spending_limit (oxide refused)",
+  );
   console.log(`[pxe-bridge] Endpoints:`);
   console.log(
     `  POST /           -- JSON-RPC (aztec_createNote, aztec_getSettlement, aztec_getVersion)`,
@@ -812,6 +847,28 @@ async function main(): Promise<void> {
     if (!corridor) {
       console.warn("[pxe-bridge] WARNING: PXE_BRIDGE_SETTLEMENT_CORRIDOR not set; createNote refused");
     }
+  }
+  if (sendMode.mode === "oxide") {
+    // Refuses (and the process exits) unless L1, the Oxide manifest and the
+    // zk.money profile are the pinned v6 deployment and the artifact is the
+    // deployed OXDAI class: nothing is served before that holds.
+    oxideRuntime = await createOxideSender({
+      client,
+      secretKey,
+      journalPath: sendMode.journalPath,
+      l1RpcUrl: sendMode.l1RpcUrl,
+      tokenArtifactPath: sendMode.tokenArtifactPath,
+      mayBroadcast: mayBroadcast!,
+      allowlist: oxideAllowlist!,
+      caps: sendMode.caps,
+    });
+    settlement!.oxide = oxideRuntime.sender;
+    const oxideHealth = oxideRuntime.sender.journalHealth();
+    console.log(
+      oxideHealth.writable
+        ? `[pxe-bridge] Oxide sender ready to admit; Oxide journal ${sendMode.journalPath} writable`
+        : `[pxe-bridge] OXIDE JOURNAL WRITES DISABLED (${oxideHealth.reason}): ${oxideHealth.detail}`,
+    );
   }
   rootUpdatePublisher?.start();
   initialized = true;

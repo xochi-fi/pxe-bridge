@@ -123,6 +123,6 @@ export async function createOxideSender(config: OxideSenderConfig): Promise<Oxid
     corridor: config.corridor,
     attestationConfigured: config.attestationConfigured,
   });
-  sender = new OxideSender({ journal, backend, caps, mayBroadcast: config.mayBroadcast, preflight });
+  sender = new OxideSender({ journal, backend, caps, mayBroadcast: config.mayBroadcast, preflight, admission: readiness });
   return { sender, readiness };
 }

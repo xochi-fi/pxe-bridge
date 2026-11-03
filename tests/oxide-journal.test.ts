@@ -3,11 +3,10 @@ import { describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
 import { JournalLockedError } from "../src/journal.js";
 import { OxideJournal } from "../src/oxide/journal.js";
-import { oxideTerms, OxideSendRequestSchema } from "../src/oxide/operation.js";
-import { OXIDE_V6_MAINNET } from "../src/oxide/pins.js";
+import { fingerprintTerms } from "../src/settlement.js";
 import { CAPS, evidenceFor, RECIPIENT, request, tempJournalPath } from "./oxide-fixtures.js";
 
-const terms = oxideTerms(OxideSendRequestSchema.parse(request()), OXIDE_V6_MAINNET.bridge.l2Token);
+const { terms } = request();
 const tx = (n: number) => ({
   txHash: "0x" + n.toString(16).padStart(64, "0"),
   txBytes: Buffer.from(`tx-${n}`),
@@ -131,5 +130,55 @@ describe("OxideJournal", () => {
     OxideJournal.open(path, { allowCreate: true, identity }).close();
     const refused = OxideJournal.open(path, { identity: { ...identity, account: "0x03" } });
     expect(refused.health()).toMatchObject({ writable: false, reason: "account_mismatch" });
+  });
+
+  // pxe-bridge#84: the row is keyed by the v2 request fingerprint, 1:1.
+  it("keys an operation by its v2 fingerprint, and the same id with other v2 terms is a conflict", () => {
+    const journal = OxideJournal.open(tempJournalPath(), { allowCreate: true });
+    const first = journal.claim("op-1", terms);
+    expect(first).toMatchObject({ kind: "new", operation: { fingerprint: fingerprintTerms(terms), terms } });
+    expect(journal.claim("op-1", request().terms).kind).toBe("existing");
+    for (const other of [
+      request({ amount: (101n * 10n ** 18n).toString() }).terms,
+      request({ validUntil: terms.validUntil + 1 }).terms,
+      { ...terms, recipientDescriptorDigest: "0x" + "ee".repeat(32) },
+      { ...terms, corridor: { ...terms.corridor, corridorRevision: 2 } },
+    ]) {
+      const claim = journal.claim("op-1", other);
+      expect(claim.kind).toBe("conflict");
+      expect(claim.operation.fingerprint).toBe(fingerprintTerms(terms));
+    }
+  });
+
+  it("refuses to journal terms that are not an oxide send", () => {
+    const journal = OxideJournal.open(tempJournalPath(), { allowCreate: true });
+    expect(() => journal.claim("op-1", { ...terms, sendMode: "spending_limit" })).toThrow(/not journaled here/);
+    expect(journal.get("op-1")).toBeUndefined();
+  });
+
+  it("refuses a phase-1 (schema 1) journal rather than read its terms as v2", () => {
+    const path = tempJournalPath();
+    OxideJournal.open(path, { allowCreate: true }).close();
+    const db = new Database(path);
+    db.prepare("UPDATE meta SET value = '1' WHERE key = 'schema_version'").run();
+    db.close();
+    expect(OxideJournal.open(path).health()).toMatchObject({ writable: false, reason: "unknown_schema_version" });
+  });
+
+  it("disables writes on a stored row whose terms no longer hash to its fingerprint", () => {
+    const path = tempJournalPath();
+    const journal = OxideJournal.open(path, { allowCreate: true });
+    marked(journal);
+    journal.close();
+    const db = new Database(path);
+    db.prepare("UPDATE operations SET terms_json = ? WHERE operation_id = 'op-1'").run(
+      JSON.stringify({ ...terms, recipientDescriptorDigest: "0x" + "ee".repeat(32) }),
+    );
+    db.close();
+    expect(OxideJournal.open(path).health()).toMatchObject({
+      writable: false,
+      reason: "journal_inconsistent",
+      detail: expect.stringContaining("not the fingerprint of the stored terms"),
+    });
   });
 });

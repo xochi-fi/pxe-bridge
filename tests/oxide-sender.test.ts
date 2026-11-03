@@ -20,6 +20,7 @@ import {
   FakeBackend,
   fakeGate,
   FakeNode,
+  fakeAdmission,
   noPreflight,
   RECIPIENT,
   request,
@@ -35,21 +36,29 @@ import {
 function boot(
   path: string,
   node: FakeNode,
-  options: { gate?: ReturnType<typeof fakeGate>; caps?: OxideCapsConfig; c?: ReturnType<typeof clock>; preflight?: { assertPinned(): Promise<void> } } = {},
+  options: {
+    gate?: ReturnType<typeof fakeGate>;
+    caps?: OxideCapsConfig;
+    c?: ReturnType<typeof clock>;
+    preflight?: { assertPinned(): Promise<void> };
+    admission?: ReturnType<typeof fakeAdmission>;
+  } = {},
 ) {
   const c = options.c ?? clock();
   const journal = OxideJournal.open(path, { now: c.now, allowCreate: true });
   const backend = new FakeBackend(node);
   const gate = options.gate ?? fakeGate();
+  const admission = options.admission ?? fakeAdmission();
   const sender = new OxideSender({
     journal,
     backend,
     caps: options.caps ?? CAPS,
     preflight: options.preflight ?? noPreflight,
+    admission: admission.admission,
     mayBroadcast: gate.client,
     now: c.now,
   });
-  return { journal, backend, sender, gate, c };
+  return { journal, backend, sender, gate, c, admission };
 }
 
 function observed(outcome: OxideSendOutcome) {
@@ -57,8 +66,16 @@ function observed(outcome: OxideSendOutcome) {
   return outcome;
 }
 
-/** Lets a step that will never settle get there. */
-const settle = () => new Promise((resolve) => setImmediate(resolve));
+/**
+ * Lets a step that will never settle get there: event-loop turns, no timers.
+ * The fake proof computes real note hashes, whose async hashing takes more
+ * than one turn to reach the journal.
+ */
+const settle = async () => {
+  for (let i = 0; i < 1_000; i += 1) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+};
 
 describe("OxideSender", () => {
   it("pays once and answers the payout identity the v2 rail needs", async () => {
