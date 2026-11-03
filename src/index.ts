@@ -862,6 +862,8 @@ async function main(): Promise<void> {
       mayBroadcast: mayBroadcast!,
       allowlist: oxideAllowlist!,
       caps: sendMode.caps,
+      corridor,
+      attestationConfigured: attestation !== undefined,
     });
     settlement!.oxide = oxideRuntime.sender;
     if (!attestation) {

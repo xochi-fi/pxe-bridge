@@ -882,10 +882,7 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
       kind: "admitted",
     });
 
-    const terms = oxideTerms(
-      OxideSendRequestSchema.parse(request({ recipient, amount: balance.toString(), validUntil: NOW + 600 })),
-      OXIDE_V6_MAINNET.bridge.l2Token,
-    );
+    const { terms } = request({ recipient, amount: balance.toString(), validUntil: NOW + 600 });
     journal.claim("op-1", terms);
     journal.recordPrepared("op-1", {
       txHash: "0x" + "01".padStart(64, "0"),
@@ -928,10 +925,7 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
     });
 
     at += 120_000;
-    const terms = oxideTerms(
-      OxideSendRequestSchema.parse(request({ recipient, amount: (70n * DAI).toString(), validUntil: NOW + 600 })),
-      OXIDE_V6_MAINNET.bridge.l2Token,
-    );
+    const { terms } = request({ recipient, amount: (70n * DAI).toString(), validUntil: NOW + 600 });
     journal.claim("op-1", terms);
     journal.recordPrepared("op-1", {
       txHash: "0x" + "01".padStart(64, "0"),
@@ -986,10 +980,7 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
       now: Date.now,
       balance: { privateBalance: async () => ({ observed: 2_000n * DAI, syncedBlock: 100 }) },
     });
-    const terms = oxideTerms(
-      OxideSendRequestSchema.parse(request({ recipient, amount: (600n * DAI).toString(), validUntil: NOW + 600 })),
-      OXIDE_V6_MAINNET.bridge.l2Token,
-    );
+    const { terms } = request({ recipient, amount: (600n * DAI).toString(), validUntil: NOW + 600 });
     journal.claim("op-1", terms);
     const attempt = journal.recordPrepared("op-1", {
       txHash: "0x" + "01".padStart(64, "0"),
