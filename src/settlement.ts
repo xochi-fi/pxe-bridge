@@ -376,7 +376,7 @@ export type Observation =
        *
        * `oxide`: the payout note's randomness (`poseidon2([seed, index])`),
        * never null; with the recipient, token and amount it opens the Oxide
-       * note hash (docs/settlement-operations.md "Oxide payout proof").
+       * note hash (docs/settlement-operations.md "sendMode and the Oxide payout proof").
        */
       partialNoteRandomness: string | null;
       /**

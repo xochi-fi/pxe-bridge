@@ -49,6 +49,7 @@ interface BridgeOptions {
   gate?: { client: MayBroadcastClient };
   admission?: ReturnType<typeof fakeAdmission>;
   timeoutMs?: number;
+  preflight?: { assertPinned(): Promise<void> };
 }
 
 /** One Oxide-mode bridge process: Oxide journal, sender, settlement context and a node client. */
@@ -64,7 +65,7 @@ function bridge(options: BridgeOptions = {}) {
     journal,
     backend,
     caps: CAPS,
-    preflight: noPreflight,
+    preflight: options.preflight ?? noPreflight,
     admission: admission.admission,
     mayBroadcast: gate.client,
     now: c.now,
@@ -167,13 +168,59 @@ describe("aztec_createNote with sendMode oxide", () => {
     });
   });
 
-  it("carries payoutNoteHashIndex null on a reverted payout", async () => {
+  it("carries payoutNoteHashIndex null on a reverted payout whose note the effects do not carry", async () => {
     const node = new FakeNode();
     node.executionResult = "reverted";
+    node.payoutNoteHash = "absent";
     const b = bridge({ node });
     const out = result(await b.createNote(oxideParams()));
     expect(out.observation).toMatchObject({ state: "reverted", payoutNoteHashIndex: null });
     expect(out.observation.partialNoteRandomness).toMatch(/^0x[0-9a-f]{64}$/);
+  });
+
+  // Fund safety (review M1): a "revert" whose effects still carry the payout
+  // note is a contradiction, never a clean revert a consumer could refund on.
+  for (const shown of ["published", "duplicated", "unavailable"] as const) {
+    it(`answers unknown for a reverted payout whose note is ${shown} in the effects`, async () => {
+      const node = new FakeNode();
+      node.executionResult = "reverted";
+      node.payoutNoteHash = shown;
+      const b = bridge({ node });
+      expect(error(await b.createNote(oxideParams())).data["observation"]).toEqual({
+        state: "unknown",
+        reason: "payout_note_hash_unresolved",
+      });
+      expect(b.node.sent).toHaveLength(1);
+    });
+  }
+
+  // Review F6: a deployment check that cannot pass (zk.money CDN, L1 or portal
+  // down) refuses new sends but never recovery reads or held resends.
+  it("serves recovery while the Oxide pins cannot be verified", async () => {
+    const path = tempJournalPath();
+    const node = new FakeNode();
+    const first = bridge({ path, node, gate: fakeGate("unknown") });
+    expect(error(await first.createNote(oxideParams())).data["observation"]).toMatchObject({
+      state: "prepared",
+      hold: "may_broadcast_unknown",
+    });
+    first.journal.close();
+
+    const down = { assertPinned: () => Promise.reject(new Error("profile CDN unreachable")) };
+    const second = bridge({ path, node, preflight: down });
+    const read = await second.getSettlement("op-1");
+    if (!("result" in read)) throw new Error(JSON.stringify(read));
+    expect(read.result).toMatchObject({ found: true, state: "prepared", observation: { state: "prepared" } });
+    expect(error(await second.createNote(oxideParams())).data["observation"]).toMatchObject({
+      state: "prepared",
+      hold: "interrupted",
+    });
+    expect(error(await second.createNote(oxideParams({ operationId: "op-2" }))).data["observation"]).toMatchObject({
+      state: "not_submitted",
+      reason: "oxide_pin_unverified",
+      retryableAfterRevalidation: true,
+    });
+    expect(node.sent).toEqual([]);
   });
 
   // Fund safety: a mined observation the consumer could not prove is never

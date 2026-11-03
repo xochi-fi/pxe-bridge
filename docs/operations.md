@@ -465,6 +465,7 @@ design-A bridge, unchanged) or `oxide`; any other value refuses to start.
 | `PXE_BRIDGE_OXIDE_MAX_PER_TX` | no, 1,000 DAI | Off-chain per-transaction cap, base units; never above the token's 5,166 DAI note cap |
 | `PXE_BRIDGE_OXIDE_DAILY_LIMIT` | no, 10,000 DAI | Rolling-24h cap, base units, re-checked inside the may-broadcast mark |
 | `PXE_BRIDGE_ACCOUNT_ADDRESS` | production | The Oxide sender's recorded address, as for any standard account |
+| `PXE_BRIDGE_ATTESTATION_API_KEY`, `_SECRET_ARN` (dev: `_SECRET_KEY`), `_SOURCE_CHAIN_ID`, `_ENVIRONMENT`, `_RELAY_URL` / `_RELAY_TOKEN` | for OX-11 | The readiness attestation producer ([settlement-operations.md](settlement-operations.md#recipient-readiness-attestations)): without it no Membership or RootUpdate is signed over the private allowlist and no recipient binding becomes ready. Optional to start; startup logs a warning when Oxide mode runs without it |
 
 **Startup refuses**, before a key is fetched or a node is touched
 (`src/oxide/config.ts`):
@@ -480,10 +481,16 @@ design-A bridge, unchanged) or `oxide`; any other value refuses to start.
 - a missing required variable, one file for both journals, a non-http(s) L1
   RPC, or caps that exceed the note cap or each other.
 
-After the wallet connects, `createOxideSender` also refuses (and the process
-exits) unless L1, the Oxide manifest and the zk.money profile describe the
-pinned v6 deployment and the artifact is the OXDAI class. `/ready` reports
-`initializing` until then.
+After the wallet connects, `createOxideSender` refuses (and the process exits)
+only on a local defect: an artifact that is not the OXDAI class, an OXDAI
+instance not locked to it, or spend keys that do not derive the account. The
+live deployment (L1, the Oxide manifest, the zk.money profile, the portal, the
+enclave) is not asserted at startup: an outage there must not stop
+`aztec_getSettlement` or the recovery of journaled payouts. It is checked
+before every fresh attempt and every resend (a fresh attempt is refused
+`not_submitted`, a held attempt stays `prepared`), the enclave is connected on
+first sign, and `/ready` reports it. `/ready` reports `initializing` until the
+sender is built.
 
 **Oxide journal schema 2.** Each row holds the operation's v2 terms
 (`sendMode: "oxide"`) and their v2 request fingerprint. A phase-1 (schema 1)

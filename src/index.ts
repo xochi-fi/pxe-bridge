@@ -849,9 +849,10 @@ async function main(): Promise<void> {
     }
   }
   if (sendMode.mode === "oxide") {
-    // Refuses (and the process exits) unless L1, the Oxide manifest and the
-    // zk.money profile are the pinned v6 deployment and the artifact is the
-    // deployed OXDAI class: nothing is served before that holds.
+    // Refuses (and the process exits) only on a local defect: an artifact that
+    // is not the OXDAI class, or keys that do not derive this account. An
+    // outage of L1, the Oxide manifest/profile or the enclave is reported by
+    // readiness and refuses new sends, never recovery reads.
     oxideRuntime = await createOxideSender({
       client,
       secretKey,
@@ -863,6 +864,12 @@ async function main(): Promise<void> {
       caps: sendMode.caps,
     });
     settlement!.oxide = oxideRuntime.sender;
+    if (!attestation) {
+      console.warn(
+        "[pxe-bridge] WARNING: Oxide mode without readiness attestations (PXE_BRIDGE_ATTESTATION_*): " +
+          "no Membership or RootUpdate is signed, so no recipient binding can become ready (xochi#748 OX-11)",
+      );
+    }
     const oxideHealth = oxideRuntime.sender.journalHealth();
     console.log(
       oxideHealth.writable

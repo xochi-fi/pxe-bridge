@@ -15,7 +15,8 @@ import type { OxidePayoutIdentity } from "./sender.js";
  *   `partialNoteRandomness` and `payoutNoteHashIndex`: the payout's position
  *   in the mined transaction's `effects.noteHashes`, found by recomputing the
  *   note from the signed terms and that randomness (src/oxide/payout-proof.ts).
- *   `reverted` carries `payoutNoteHashIndex: null`. When the position is not
+ *   `reverted` carries `payoutNoteHashIndex: null`, and only when the effects
+ *   show the payout note absent (a revert drops it). When the position is not
  *   exactly one (effects unavailable or malformed, the hash absent or present
  *   twice), or the recomputed note is not the one the enclave signed, the
  *   answer is `unknown` / `payout_note_hash_unresolved`: never a mined
@@ -76,8 +77,6 @@ export async function oxideSettlementObservation(
     effects: observation.effects,
     partialNoteRandomness: payout.noteRandomness,
   };
-  if (observation.state === "reverted") return { ...mined, payoutNoteHashIndex: null };
-
   const siloed = await oxideSiloedNoteHash({
     recipient: terms.recipient,
     token: terms.token,
@@ -89,6 +88,18 @@ export async function oxideSettlementObservation(
     return { state: "unknown", reason: PAYOUT_NOTE_HASH_UNRESOLVED };
   }
   const location = await locatePayoutNoteHash(observation.effects, siloed);
+  if (observation.state === "reverted") {
+    // A revert drops the payout note. If the effects still carry it (or
+    // cannot show its absence) the outcome contradicts itself: never a
+    // clean revert a consumer could refund on.
+    if (location.kind === "unresolved" && location.reason === "payout_note_hash_absent") {
+      return { ...mined, payoutNoteHashIndex: null };
+    }
+    console.error(
+      `[oxide] Reverted ${observation.txHash} does not show the payout note absent: ${location.kind === "found" ? "present" : location.reason}`,
+    );
+    return { state: "unknown", reason: PAYOUT_NOTE_HASH_UNRESOLVED };
+  }
   if (location.kind !== "found") {
     console.error(`[oxide] Payout note hash unresolved in ${observation.txHash}: ${location.reason}`);
     return { state: "unknown", reason: PAYOUT_NOTE_HASH_UNRESOLVED };

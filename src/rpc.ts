@@ -795,6 +795,8 @@ async function oxideTermsCheck(
   if (
     terms.network.genesisOrNetworkDigest !== corridor.genesisOrNetworkDigest.toLowerCase() ||
     terms.network.l1ChainId !== pinned.l1ChainId.toString() ||
+    // Aztec's protocol chain id IS the L1 chain id (the tx context sets it
+    // from L1; aztec-client.ts networkIdentity), so both compare to it.
     terms.network.aztecChainId !== pinned.l1ChainId.toString() ||
     terms.network.protocolVersion !== pinned.rollupVersion.toString() ||
     terms.network.rollupAddress !== pinned.rollupAddress
