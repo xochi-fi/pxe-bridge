@@ -93,6 +93,7 @@ export type PayoutNoteHashLocation =
  */
 export async function locatePayoutNoteHash(effects: Effects, siloed: Fr): Promise<PayoutNoteHashLocation> {
   if (effects.state !== "available") return { kind: "unresolved", reason: "effects_unavailable" };
+  if (effects.noteHashes.length === 0) return { kind: "unresolved", reason: "payout_note_hash_absent" };
   const first = effects.nullifiers[0];
   if (first === undefined) return { kind: "unresolved", reason: "effects_malformed" };
   let firstNullifier: Fr;

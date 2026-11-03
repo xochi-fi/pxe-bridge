@@ -1,4 +1,4 @@
-import type { MinedStatus, Observation, SettlementTerms } from "../settlement.js";
+import type { MinedStatus, Observation, OxidePayoutNoteCommitment, SettlementTerms } from "../settlement.js";
 import type { OxideObservation } from "./operation.js";
 import { locatePayoutNoteHash, oxideSiloedNoteHash } from "./payout-proof.js";
 import type { OxidePayoutIdentity } from "./sender.js";
@@ -11,20 +11,20 @@ import type { OxidePayoutIdentity } from "./sender.js";
  *   (`cap_window_full`, `preflight_refused`) are `interrupted` on the wire,
  *   which means the same thing to a consumer: journaled, never marked,
  *   provably not broadcast, and resent only as these exact bytes.
- * - A successful mined observation carries the payout note's randomness as
+ * - Every `prepared` answer carries `payoutNoteCommitment`: the payout note's
+ *   randomness and enclave-signed siloed hash, recomputed from the signed
+ *   terms. A consumer must durably bind it with the prepared transaction
+ *   before authorizing broadcast or moving source funds.
+ * - A successful mined observation carries the same randomness as
  *   `partialNoteRandomness` and `payoutNoteHashIndex`: the payout's position
- *   in the mined transaction's `effects.noteHashes`, found by recomputing the
- *   note from the signed terms and that randomness (src/oxide/payout-proof.ts).
- *   When the position is not exactly one (effects unavailable or malformed,
- *   the hash absent or present twice), or the recomputed note is not the one
- *   the enclave signed, the answer is `unknown` /
- *   `payout_note_hash_unresolved`.
- * - A reverted transaction is always `unknown` / `payout_proof_uncommitted`.
- *   Its prepared bytes do not commit the later payout randomness or index, so
- *   a post-hoc absent opening is never negative delivery evidence.
+ *   in the mined transaction's `effects.noteHashes`. When the position is not
+ *   exactly one (effects unavailable or malformed, the hash absent or present
+ *   twice), the answer is `unknown` / `payout_note_hash_unresolved`.
+ * - A reverted transaction is negative delivery evidence only when effects
+ *   are available and contain no unique note hash opened by the prepared
+ *   commitment. Present, duplicate, malformed, or unavailable evidence holds.
  */
 export const PAYOUT_NOTE_HASH_UNRESOLVED = "payout_note_hash_unresolved";
-export const PAYOUT_PROOF_UNCOMMITTED = "payout_proof_uncommitted";
 
 const MINED_STATUSES: readonly string[] = ["proposed", "checkpointed", "proven", "finalized"];
 
@@ -34,7 +34,9 @@ export async function oxideSettlementObservation(
   terms: SettlementTerms,
 ): Promise<Observation> {
   switch (observation.state) {
-    case "prepared":
+    case "prepared": {
+      const commitment = await payoutNoteCommitment(payout, observation.txHash, terms);
+      if (!commitment) return { state: "unknown", reason: "missing_transaction_identity" };
       return {
         state: "prepared",
         txHash: observation.txHash,
@@ -43,7 +45,9 @@ export async function oxideSettlementObservation(
           observation.hold === "may_broadcast_denied" || observation.hold === "may_broadcast_unknown"
             ? observation.hold
             : "interrupted",
+        payoutNoteCommitment: commitment,
       };
+    }
     case "not_submitted":
       return {
         state: "not_submitted",
@@ -64,7 +68,8 @@ export async function oxideSettlementObservation(
     console.error(`[oxide] Mined observation with receipt status ${observation.receiptStatus}`);
     return { state: "unknown", reason: "receipt_status_unknown" };
   }
-  if (!payout || payout.txHash !== observation.txHash) {
+  const commitment = await payoutNoteCommitment(payout, observation.txHash, terms);
+  if (!commitment) {
     return { state: "unknown", reason: "missing_transaction_identity" };
   }
   const mined = {
@@ -77,26 +82,50 @@ export async function oxideSettlementObservation(
     receiptStatus: observation.receiptStatus as MinedStatus,
     observedAt: observation.observedAt,
     effects: observation.effects,
-    partialNoteRandomness: payout.noteRandomness,
+    partialNoteRandomness: commitment.partialNoteRandomness,
   };
+  const siloed = await oxideSiloedNoteHash({
+    recipient: terms.recipient,
+    token: terms.token,
+    amount: BigInt(terms.amount),
+    randomness: commitment.partialNoteRandomness,
+  });
+  const location = await locatePayoutNoteHash(observation.effects, siloed);
   if (observation.state === "reverted") {
-    console.error(`[oxide] Reverted ${observation.txHash} has no prepared payout-proof commitment`);
-    return { state: "unknown", reason: PAYOUT_PROOF_UNCOMMITTED };
+    if (location.kind === "unresolved" && location.reason === "payout_note_hash_absent") {
+      return { ...mined, payoutNoteHashIndex: null };
+    }
+    const reason = location.kind === "found" ? "payout_note_hash_present" : location.reason;
+    console.error(`[oxide] Reverted payout evidence unresolved in ${observation.txHash}: ${reason}`);
+    return { state: "unknown", reason: PAYOUT_NOTE_HASH_UNRESOLVED };
   }
+  if (location.kind !== "found") {
+    console.error(`[oxide] Payout note hash unresolved in ${observation.txHash}: ${location.reason}`);
+    return { state: "unknown", reason: PAYOUT_NOTE_HASH_UNRESOLVED };
+  }
+  return { ...mined, payoutNoteHashIndex: location.index };
+}
+
+async function payoutNoteCommitment(
+  payout: OxidePayoutIdentity | undefined,
+  txHash: string,
+  terms: SettlementTerms,
+): Promise<OxidePayoutNoteCommitment | undefined> {
+  if (!payout || payout.txHash !== txHash) return undefined;
   const siloed = await oxideSiloedNoteHash({
     recipient: terms.recipient,
     token: terms.token,
     amount: BigInt(terms.amount),
     randomness: payout.noteRandomness,
   });
-  if (siloed.toString().toLowerCase() !== payout.siloedNoteHash.toLowerCase()) {
+  const siloedNoteHash = siloed.toString().toLowerCase();
+  if (siloedNoteHash !== payout.siloedNoteHash.toLowerCase()) {
     console.error("[oxide] The signed payout note is not the note the terms and randomness open");
-    return { state: "unknown", reason: PAYOUT_NOTE_HASH_UNRESOLVED };
+    return undefined;
   }
-  const location = await locatePayoutNoteHash(observation.effects, siloed);
-  if (location.kind !== "found") {
-    console.error(`[oxide] Payout note hash unresolved in ${observation.txHash}: ${location.reason}`);
-    return { state: "unknown", reason: PAYOUT_NOTE_HASH_UNRESOLVED };
-  }
-  return { ...mined, payoutNoteHashIndex: location.index };
+  return {
+    scheme: "oxide-payout-note-v1",
+    partialNoteRandomness: payout.noteRandomness.toLowerCase(),
+    siloedNoteHash,
+  };
 }
