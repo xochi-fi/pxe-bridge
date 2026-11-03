@@ -50,6 +50,7 @@ export interface OxideSenderConfig {
 export interface OxideRuntime {
   sender: OxideSender;
   readiness: OxideReadiness;
+  journal: OxideJournal;
 }
 
 /**
@@ -125,5 +126,5 @@ export async function createOxideSender(config: OxideSenderConfig): Promise<Oxid
     attestationConfigured: config.attestationConfigured,
   });
   sender = new OxideSender({ journal, backend, caps, mayBroadcast: config.mayBroadcast, preflight, admission: readiness });
-  return { sender, readiness };
+  return { sender, readiness, journal };
 }

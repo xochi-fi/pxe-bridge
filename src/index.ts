@@ -48,6 +48,11 @@ import {
 } from "./attestation.js";
 import { resolveAttestationSecret } from "./attestation-secret.js";
 import { oxideAllowlistFromEnv, type OxideAllowlist } from "./oxide/allowlist.js";
+import {
+  OxideAllowlistController,
+  readAllowlistControlConfig,
+  type AllowlistControlConfig,
+} from "./oxide/allowlist-control.js";
 import { OxideAttestationProbe } from "./oxide/attestation.js";
 import { resolveSendModeConfig, type SendModeConfig } from "./oxide/config.js";
 import { createOxideSender, type OxideRuntime } from "./oxide/index.js";
@@ -631,6 +636,15 @@ async function main(): Promise<void> {
 
   const { key: secretKey, source: keySource } = await resolveSecretKey();
   console.log(`[pxe-bridge] Secret key loaded from ${keySource}`);
+  const controlConfig: AllowlistControlConfig | undefined = readAllowlistControlConfig(process.env, [
+    secretKey,
+    API_KEY,
+    RECOVERY_API_KEY,
+    ADMIN_KEY,
+    MAY_BROADCAST_TOKEN,
+    attestationEnvironment?.apiKey,
+    attestationEnvironment?.relay.token,
+  ]);
 
   // Opened before the wallet, so a second bridge on the same journal stops
   // here, before it has derived a key or touched the node. Any other defect
@@ -704,6 +718,7 @@ async function main(): Promise<void> {
         attestationEnvironment.apiKey,
         attestationEnvironment.relay.token,
         process.env["SPENDING_LIMIT_ADMIN_KEY"],
+        process.env["PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_TOKEN"],
       ].filter((value): value is string => value !== undefined),
       oxideAllowlist ? [oxideAllowlist.seedSecretDigest] : [],
     );
@@ -712,7 +727,7 @@ async function main(): Promise<void> {
     attestation = new AttestationProducer({
       probe: attestationProbe,
       journal,
-      allowlistTree: attestationSet.tree,
+      allowlistTree: oxideAllowlist ? () => oxideAllowlist.tree : attestationSet.tree,
       signer: resolved.signer,
       domain: {
         sourceChainId: attestationEnvironment.domain.sourceChainId,
@@ -756,6 +771,7 @@ async function main(): Promise<void> {
   if (settlement && readiness) settlement.readiness = readiness;
   // Built once the wallet is connected (below); `initialized` stays false until then.
   let oxideRuntime: OxideRuntime | undefined;
+  let allowlistController: OxideAllowlistController | undefined;
   let initialized = false;
   application = createApp(client, {
     apiKey: API_KEY,
@@ -879,8 +895,23 @@ async function main(): Promise<void> {
         ? `[pxe-bridge] Oxide sender ready to admit; Oxide journal ${sendMode.journalPath} writable`
         : `[pxe-bridge] OXIDE JOURNAL WRITES DISABLED (${oxideHealth.reason}): ${oxideHealth.detail}`,
     );
+    if (controlConfig) {
+      if (!rootUpdatePublisher || !journal || !corridor || !oxideAllowlist) {
+        throw new Error("Oxide allowlist control requires readiness attestations, corridor, and both journals");
+      }
+      allowlistController = new OxideAllowlistController(
+        controlConfig,
+        corridor,
+        oxideRuntime.journal,
+        journal,
+        oxideAllowlist,
+        rootUpdatePublisher,
+      );
+      await allowlistController.initialize();
+    }
   }
   rootUpdatePublisher?.start();
+  allowlistController?.start();
   initialized = true;
 
   // Printed on every unrecorded start, not just the first, so a missed first
@@ -898,6 +929,7 @@ async function main(): Promise<void> {
 
   function shutdown(): void {
     rootUpdatePublisher?.stop();
+    allowlistController?.stop();
     console.log("[pxe-bridge] Shutting down...");
     const timer = setTimeout(() => process.exit(1), 5000);
     server.close(() => {

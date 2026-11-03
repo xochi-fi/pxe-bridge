@@ -181,4 +181,108 @@ describe("OxideJournal", () => {
       detail: expect.stringContaining("not the fingerprint of the stored terms"),
     });
   });
+  it("migrates schema 2 to the durable allowlist control schema", () => {
+    const path = tempJournalPath();
+    OxideJournal.open(path, { allowCreate: true }).close();
+    const db = new Database(path);
+    db.exec(`
+      DROP TABLE allowlist_control_audit;
+      DROP TABLE allowlist_control_operations;
+      DROP TABLE allowlist_control_state;
+      UPDATE meta SET value = '2' WHERE key = 'schema_version';
+    `);
+    db.close();
+    const journal = OxideJournal.open(path);
+    expect(journal.health()).toEqual({ writable: true });
+    expect(journal.initializeAllowlistControl(`0x${"01".repeat(32)}`, [])).toMatchObject({
+      sequence: "0",
+    });
+  });
+
+  it("durably applies one monotonic allowlist replacement and reconciles an exact replay", () => {
+    const path = tempJournalPath();
+    const journal = OxideJournal.open(path, { allowCreate: true });
+    const firstRoot = `0x${"11".repeat(32)}`;
+    const nextRoot = `0x${"12".repeat(32)}`;
+    const digest = `0x${"13".repeat(32)}`;
+    const recipient = `0x${"14".repeat(32)}`;
+    expect(journal.initializeAllowlistControl(firstRoot, [])).toEqual({
+      sequence: "0",
+      root: firstRoot,
+      recipients: [],
+    });
+    const prepared = journal.prepareAllowlistControlOperation({
+      operationId: "allow-1",
+      action: "approve",
+      recipient,
+      sequence: "1",
+      previousRoot: firstRoot,
+      root: nextRoot,
+      digest,
+      recipients: [{ address: recipient, index: 17 }],
+    });
+    expect(prepared.state).toBe("prepared");
+    expect(
+      journal.authorizeAllowlistControlOperation("allow-1", "1", digest, `0x${"15".repeat(65)}`).state,
+    ).toBe("authorized");
+    expect(journal.applyAllowlistControlOperation("allow-1").state).toBe("applied");
+    expect(journal.applyAllowlistControlOperation("allow-1").state).toBe("applied");
+    journal.close();
+
+    const reopened = OxideJournal.open(path);
+    expect(reopened.allowlistControlState()).toEqual({
+      sequence: "1",
+      root: nextRoot,
+      recipients: [{ address: recipient, index: 17 }],
+    });
+    expect(reopened.allowlistControlOperation("allow-1")).toMatchObject({
+      state: "applied",
+      sequence: "1",
+      digest,
+    });
+  });
+
+  it("refuses stale sequence, conflicting replay, and unsigned application", () => {
+    const journal = OxideJournal.open(tempJournalPath(), { allowCreate: true });
+    const firstRoot = `0x${"21".repeat(32)}`;
+    const nextRoot = `0x${"22".repeat(32)}`;
+    const digest = `0x${"23".repeat(32)}`;
+    const recipient = `0x${"24".repeat(32)}`;
+    journal.initializeAllowlistControl(firstRoot, []);
+    expect(() =>
+      journal.prepareAllowlistControlOperation({
+        operationId: "stale",
+        action: "approve",
+        recipient,
+        sequence: "2",
+        previousRoot: firstRoot,
+        root: nextRoot,
+        digest,
+        recipients: [{ address: recipient, index: 1 }],
+      }),
+    ).toThrow(/monotonic/);
+    journal.prepareAllowlistControlOperation({
+      operationId: "allow-1",
+      action: "approve",
+      recipient,
+      sequence: "1",
+      previousRoot: firstRoot,
+      root: nextRoot,
+      digest,
+      recipients: [{ address: recipient, index: 1 }],
+    });
+    expect(() => journal.applyAllowlistControlOperation("allow-1")).toThrow(/not authorized/);
+    expect(() =>
+      journal.prepareAllowlistControlOperation({
+        operationId: "allow-1",
+        action: "revoke",
+        recipient,
+        sequence: "1",
+        previousRoot: firstRoot,
+        root: nextRoot,
+        digest,
+        recipients: [],
+      }),
+    ).toThrow(/replayed/);
+  });
 });

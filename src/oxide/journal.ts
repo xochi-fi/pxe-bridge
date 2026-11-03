@@ -46,8 +46,8 @@ import { fingerprintTerms, type SettlementTerms } from "../settlement.js";
  * - An unmarked prepared attempt is resent only as its journaled bytes.
  */
 
-/** 2 (0.4.0): rows hold v2 `SettlementTerms`; 1 held the unreleased phase-1 Oxide terms and is refused. */
-export const OXIDE_JOURNAL_SCHEMA_VERSION = 2;
+/** 3 (0.4.4): durable, admin-authorized private allowlist replacement control. */
+export const OXIDE_JOURNAL_SCHEMA_VERSION = 3;
 
 export type OxideOperationState =
   | "claimed"
@@ -98,6 +98,35 @@ interface OperationRow {
   updated_at: number;
 }
 
+export interface AllowlistControlState {
+  sequence: string;
+  root: string;
+  recipients: readonly { address: string; index: number }[];
+}
+
+export interface AllowlistControlOperation extends AllowlistControlState {
+  operationId: string;
+  action: "approve" | "revoke";
+  recipient: string;
+  previousRoot: string;
+  digest: string;
+  signature: string | null;
+  state: "prepared" | "authorized" | "applied";
+}
+
+interface AllowlistControlRow {
+  operation_id: string;
+  action: "approve" | "revoke";
+  recipient: string;
+  sequence: string;
+  previous_root: string;
+  next_root: string;
+  digest: string;
+  recipients_json: string;
+  signature: string | null;
+  state: "prepared" | "authorized" | "applied";
+}
+
 const SCHEMA = `
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE operations (
@@ -128,6 +157,35 @@ CREATE TABLE spends (
   operation_id TEXT PRIMARY KEY,
   amount TEXT NOT NULL,
   at INTEGER NOT NULL
+);
+CREATE TABLE allowlist_control_state (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  sequence TEXT NOT NULL,
+  root TEXT NOT NULL,
+  recipients_json TEXT NOT NULL
+);
+CREATE TABLE allowlist_control_operations (
+  operation_id TEXT PRIMARY KEY,
+  action TEXT NOT NULL CHECK (action IN ('approve', 'revoke')),
+  recipient TEXT NOT NULL,
+  sequence TEXT NOT NULL,
+  previous_root TEXT NOT NULL,
+  next_root TEXT NOT NULL,
+  digest TEXT NOT NULL,
+  recipients_json TEXT NOT NULL,
+  signature TEXT,
+  state TEXT NOT NULL CHECK (state IN ('prepared', 'authorized', 'applied')),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX allowlist_control_sequence_unique
+  ON allowlist_control_operations(sequence);
+CREATE TABLE allowlist_control_audit (
+  audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  operation_id TEXT NOT NULL,
+  action TEXT NOT NULL,
+  event TEXT NOT NULL,
+  created_at INTEGER NOT NULL
 );
 `;
 
@@ -264,7 +322,44 @@ export class OxideJournal {
       this.disable("corrupt", "not an Oxide sender journal");
       return;
     }
-    if (Number(meta.get("schema_version")) !== OXIDE_JOURNAL_SCHEMA_VERSION) {
+    const schemaVersion = Number(meta.get("schema_version"));
+    if (schemaVersion === 2) {
+      db.transaction(() => {
+        db.exec(`
+          CREATE TABLE allowlist_control_state (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            sequence TEXT NOT NULL,
+            root TEXT NOT NULL,
+            recipients_json TEXT NOT NULL
+          );
+          CREATE TABLE allowlist_control_operations (
+            operation_id TEXT PRIMARY KEY,
+            action TEXT NOT NULL CHECK (action IN ('approve', 'revoke')),
+            recipient TEXT NOT NULL,
+            sequence TEXT NOT NULL,
+            previous_root TEXT NOT NULL,
+            next_root TEXT NOT NULL,
+            digest TEXT NOT NULL,
+            recipients_json TEXT NOT NULL,
+            signature TEXT,
+            state TEXT NOT NULL CHECK (state IN ('prepared', 'authorized', 'applied')),
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+          );
+          CREATE UNIQUE INDEX allowlist_control_sequence_unique
+            ON allowlist_control_operations(sequence);
+          CREATE TABLE allowlist_control_audit (
+            audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            operation_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            event TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+          );
+        `);
+        db.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'")
+          .run(String(OXIDE_JOURNAL_SCHEMA_VERSION));
+      })();
+    } else if (schemaVersion !== OXIDE_JOURNAL_SCHEMA_VERSION) {
       this.disable("unknown_schema_version", `journal schema ${meta.get("schema_version")} is not supported`);
       return;
     }
@@ -785,6 +880,175 @@ export class OxideJournal {
     return { total, sends };
   }
 
+  /** Establishes the private control authority once, then restores it on every restart. */
+  initializeAllowlistControl(
+    root: string,
+    recipients: readonly { address: string; index: number }[],
+  ): AllowlistControlState {
+    const existing = this.allowlistControlState();
+    if (existing) return existing;
+    this.write("initialize allowlist control", (db) => {
+      const result = db
+        .prepare(
+          `INSERT OR IGNORE INTO allowlist_control_state
+             (singleton, sequence, root, recipients_json) VALUES (1, '0', ?, ?)`,
+        )
+        .run(root, JSON.stringify(recipients));
+      if (result.changes === 0) return false;
+      db.prepare(
+        `INSERT INTO allowlist_control_audit
+           (operation_id, action, event, created_at) VALUES ('bootstrap', 'bootstrap', 'initialized', ?)`,
+      ).run(this.now());
+      return true;
+    });
+    const initialized = this.allowlistControlState();
+    if (!initialized) throw new Error("allowlist control state was not initialized");
+    return initialized;
+  }
+
+  allowlistControlState(): AllowlistControlState | undefined {
+    const row = this.read((db) =>
+      db
+        .prepare("SELECT sequence, root, recipients_json FROM allowlist_control_state WHERE singleton = 1")
+        .get(),
+    ) as { sequence: string; root: string; recipients_json: string } | undefined;
+    return row
+      ? {
+          sequence: row.sequence,
+          root: row.root,
+          recipients: JSON.parse(row.recipients_json) as { address: string; index: number }[],
+        }
+      : undefined;
+  }
+
+  allowlistControlOperation(operationId: string): AllowlistControlOperation | undefined {
+    const row = this.read((db) =>
+      db.prepare("SELECT * FROM allowlist_control_operations WHERE operation_id = ?").get(operationId),
+    ) as AllowlistControlRow | undefined;
+    return row ? toAllowlistControlOperation(row) : undefined;
+  }
+
+  prepareAllowlistControlOperation(input: Omit<AllowlistControlOperation, "signature" | "state">): AllowlistControlOperation {
+    const existing = this.allowlistControlOperation(input.operationId);
+    if (existing) {
+      if (
+        existing.action !== input.action ||
+        existing.recipient !== input.recipient ||
+        existing.sequence !== input.sequence ||
+        existing.previousRoot !== input.previousRoot ||
+        existing.root !== input.root ||
+        existing.digest !== input.digest ||
+        JSON.stringify(existing.recipients) !== JSON.stringify(input.recipients)
+      ) {
+        throw new JournalWriteError(this.healthState, "allowlist operation id was replayed with different content");
+      }
+      return existing;
+    }
+    this.write("prepare allowlist control operation", (db) => {
+      const current = db
+        .prepare("SELECT sequence, root FROM allowlist_control_state WHERE singleton = 1")
+        .get() as { sequence: string; root: string } | undefined;
+      if (
+        !current ||
+        current.root !== input.previousRoot ||
+        BigInt(input.sequence) !== BigInt(current.sequence) + 1n
+      ) {
+        throw new StateError("allowlist operation does not extend the current monotonic state");
+      }
+      db.prepare(
+        `INSERT INTO allowlist_control_operations
+           (operation_id, action, recipient, sequence, previous_root, next_root,
+            digest, recipients_json, state, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)`,
+      ).run(
+        input.operationId,
+        input.action,
+        input.recipient,
+        input.sequence,
+        input.previousRoot,
+        input.root,
+        input.digest,
+        JSON.stringify(input.recipients),
+        this.now(),
+        this.now(),
+      );
+      db.prepare(
+        `INSERT INTO allowlist_control_audit
+           (operation_id, action, event, created_at) VALUES (?, ?, 'prepared', ?)`,
+      ).run(input.operationId, input.action, this.now());
+      return true;
+    });
+    return this.allowlistControlOperation(input.operationId)!;
+  }
+
+  authorizeAllowlistControlOperation(
+    operationId: string,
+    sequence: string,
+    digest: string,
+    signature: string,
+  ): AllowlistControlOperation {
+    const existing = this.allowlistControlOperation(operationId);
+    if (
+      !existing ||
+      existing.sequence !== sequence ||
+      existing.digest !== digest ||
+      (existing.signature !== null && existing.signature !== signature)
+    ) {
+      throw new JournalWriteError(this.healthState, "allowlist authorization does not match its prepared operation");
+    }
+    if (existing.state === "authorized" || existing.state === "applied") return existing;
+    this.write("authorize allowlist control operation", (db) => {
+      const result = db
+        .prepare(
+          `UPDATE allowlist_control_operations
+           SET signature = ?, state = 'authorized', updated_at = ?
+           WHERE operation_id = ? AND state = 'prepared'`,
+        )
+        .run(signature, this.now(), operationId);
+      if (result.changes !== 1) throw new StateError("allowlist operation is no longer prepared");
+      db.prepare(
+        `INSERT INTO allowlist_control_audit
+           (operation_id, action, event, created_at) VALUES (?, ?, 'authorized', ?)`,
+      ).run(operationId, existing.action, this.now());
+      return true;
+    });
+    return this.allowlistControlOperation(operationId)!;
+  }
+
+  applyAllowlistControlOperation(operationId: string): AllowlistControlOperation {
+    const existing = this.allowlistControlOperation(operationId);
+    if (!existing) throw new JournalWriteError(this.healthState, "allowlist operation is absent");
+    if (existing.state === "applied") return existing;
+    if (existing.state !== "authorized") {
+      throw new JournalWriteError(this.healthState, "allowlist operation is not authorized");
+    }
+    this.write("apply allowlist control operation", (db) => {
+      const state = db
+        .prepare("SELECT sequence, root FROM allowlist_control_state WHERE singleton = 1")
+        .get() as { sequence: string; root: string };
+      if (
+        state.root !== existing.previousRoot ||
+        BigInt(existing.sequence) !== BigInt(state.sequence) + 1n
+      ) {
+        throw new StateError("allowlist operation is stale");
+      }
+      db.prepare(
+        `UPDATE allowlist_control_state
+         SET sequence = ?, root = ?, recipients_json = ? WHERE singleton = 1`,
+      ).run(existing.sequence, existing.root, JSON.stringify(existing.recipients));
+      db.prepare(
+        `UPDATE allowlist_control_operations SET state = 'applied', updated_at = ?
+         WHERE operation_id = ? AND state = 'authorized'`,
+      ).run(this.now(), operationId);
+      db.prepare(
+        `INSERT INTO allowlist_control_audit
+           (operation_id, action, event, created_at) VALUES (?, ?, 'applied', ?)`,
+      ).run(operationId, existing.action, this.now());
+      return true;
+    });
+    return this.allowlistControlOperation(operationId)!;
+  }
+
   close(): void {
     this.db?.close();
     this.db = null;
@@ -862,6 +1126,21 @@ export class OxideJournal {
     this.healthState = { writable: false, reason, detail };
     console.error(`[pxe-bridge] OXIDE JOURNAL WRITES DISABLED (${reason}): ${detail}`);
   }
+}
+
+function toAllowlistControlOperation(row: AllowlistControlRow): AllowlistControlOperation {
+  return {
+    operationId: row.operation_id,
+    action: row.action,
+    recipient: row.recipient,
+    sequence: row.sequence,
+    previousRoot: row.previous_root,
+    root: row.next_root,
+    digest: row.digest,
+    recipients: JSON.parse(row.recipients_json) as { address: string; index: number }[],
+    signature: row.signature,
+    state: row.state,
+  };
 }
 
 /** A stored row's terms this code did not write: unreadable, not oxide, or not hashing to the stored fingerprint. */
