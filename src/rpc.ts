@@ -22,6 +22,8 @@ import {
   type CreateNoteParams,
   type NodeObservation,
   type Observation,
+  type JournaledTerms,
+  type SendMode,
   type SettlementTerms,
 } from "./settlement.js";
 import {
@@ -207,7 +209,7 @@ class GateClosed extends Error {}
 interface DriveState {
   op: StoredOperation;
   fingerprint: string;
-  terms: SettlementTerms;
+  terms: JournaledTerms;
 }
 
 /**
@@ -657,12 +659,28 @@ async function handleCreateNote(
       detail: "PXE_BRIDGE_JOURNAL is not set",
     });
   }
+  if (parsed.data.sendMode !== "spending_limit") {
+    return sendModeUnsupported(id, parsed.data.sendMode, "spending_limit");
+  }
   const deadline = new RequestDeadline(s.timeoutMs, ctx.signal);
   try {
     return await createNoteWithin(id, parsed.data, client, ctx, s, deadline);
   } finally {
     deadline.dispose();
   }
+}
+
+/**
+ * A send mode this bridge does not serve (pxe-bridge#84). Permanent, and
+ * refused before anything is claimed: the same request can never succeed
+ * here, and journaling it would make its operation id a conflict elsewhere.
+ */
+function sendModeUnsupported(id: number | string, requested: SendMode, served: SendMode): JsonRpcResponse {
+  return rpcError(id, RPC_ERRORS.INVALID_PARAMS, `This bridge serves sendMode ${served} only`, {
+    reason: "send_mode_unsupported",
+    requested,
+    served,
+  });
 }
 
 async function createNoteWithin(
@@ -1016,7 +1034,7 @@ async function admissionRefusal(
 async function preparedHoldReasons(
   ctx: RpcContext,
   s: SettlementContext,
-  terms: SettlementTerms,
+  terms: JournaledTerms,
   deadline: RequestDeadline,
 ): Promise<{ reasons: ReadinessReason[]; readiness: OperationalReadiness | null }> {
   const reasons: ReadinessReason[] = [];

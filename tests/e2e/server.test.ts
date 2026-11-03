@@ -155,6 +155,7 @@ describe("HTTP server (e2e)", () => {
           manifestDigest: CORRIDOR.manifestDigest,
         },
         accountMode: "standard",
+        sendMode: "spending_limit",
         recipient: client.getAddress()!,
         recipientDescriptorDigest: "0x" + "ab".repeat(32),
         token: requireTestToken(),

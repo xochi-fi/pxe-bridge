@@ -4,7 +4,9 @@ import {
   MAX_AMOUNT,
   fingerprintTerms,
   isLegacyCreateNoteParams,
+  journaledSendMode,
   termsFrom,
+  type JournaledTerms,
 } from "../src/settlement.js";
 import { settlementParams } from "./settlement-fixtures.js";
 
@@ -44,6 +46,43 @@ describe("fingerprintTerms", () => {
 
   it("is a 32-byte hex digest", () => {
     expect(fp()).toMatch(/^0x[0-9a-f]{64}$/);
+  });
+});
+
+describe("sendMode (pxe-bridge#84)", () => {
+  const oxide = { accountMode: "standard", sendMode: "oxide" };
+
+  it("hashes oxide apart from spending_limit, and spending_limit as 0.3.0 did (no sendMode line)", () => {
+    const spending = termsFrom(CreateNoteSchema.parse(settlementParams({ validUntil: 2_000_000_000 })));
+    const { sendMode: _s, ...legacy } = spending;
+    const journaledBefore040: JournaledTerms = legacy;
+    expect(fingerprintTerms(journaledBefore040)).toBe(fingerprintTerms(spending));
+    expect(fp(oxide)).not.toBe(fp({ accountMode: "standard" }));
+  });
+
+  it.each([
+    ["missing", { sendMode: undefined }],
+    ["unknown", { sendMode: "design_a" }],
+    ["null", { sendMode: null }],
+    ["upper case", { sendMode: "OXIDE" }],
+    ["oxide on the spending-limit account", { sendMode: "oxide", accountMode: "spending_limit" }],
+  ])("refuses sendMode %s at the schema", (_name, override) => {
+    const params = settlementParams(override);
+    if (override.sendMode === undefined) delete params["sendMode"];
+    expect(CreateNoteSchema.safeParse(params).success).toBe(false);
+  });
+
+  it("accepts oxide on the standard account and canonicalizes sendMode after accountMode", () => {
+    const terms = termsFrom(CreateNoteSchema.parse(settlementParams(oxide)));
+    expect(Object.keys(terms).slice(2, 4)).toEqual(["accountMode", "sendMode"]);
+    expect(terms.sendMode).toBe("oxide");
+  });
+
+  it("reads a journaled row without sendMode as spending_limit and refuses a value it never wrote", () => {
+    const { sendMode: _s, ...legacy } = termsFrom(CreateNoteSchema.parse(settlementParams()));
+    expect(journaledSendMode(legacy)).toBe("spending_limit");
+    expect(() => journaledSendMode({ ...legacy, sendMode: "other" as "oxide" })).toThrow(/unknown sendMode/);
+    expect(() => fingerprintTerms({ ...legacy, sendMode: "other" as "oxide" })).toThrow(/unknown sendMode/);
   });
 });
 

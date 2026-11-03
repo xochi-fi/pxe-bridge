@@ -124,11 +124,38 @@ export type CorridorConfig = z.infer<typeof CorridorConfigSchema>;
 export const AccountModeSchema = z.enum(["spending_limit", "standard"]);
 export type AccountMode = z.infer<typeof AccountModeSchema>;
 
-export const SettlementTermsSchema = z
+/**
+ * Which send path pays (pxe-bridge#84, decided 2026-11-03): `spending_limit`
+ * is design A's `transfer_to_private` from the bridge account; `oxide` is the
+ * Oxide OXDAI sender (`src/oxide/`), an enclave-signed `transfer` from the
+ * standard Schnorr account. Required: a request without it, or naming any
+ * other value, is refused at the schema (permanent), never defaulted. Hashed
+ * into the fingerprint (see `fingerprintTerms`).
+ */
+export const SendModeSchema = z.enum(["spending_limit", "oxide"]);
+export type SendMode = z.infer<typeof SendModeSchema>;
+
+/**
+ * `oxide` needs the standard account: the spending-limit entrypoint admits
+ * exactly one `transfer_to_private` call. Refused at the schema, so the
+ * pairing is never journaled.
+ */
+function sendModeServed(terms: { accountMode: AccountMode; sendMode: SendMode }, ctx: z.RefinementCtx): void {
+  if (terms.sendMode === "oxide" && terms.accountMode !== "standard") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["sendMode"],
+      message: 'sendMode "oxide" requires accountMode "standard"',
+    });
+  }
+}
+
+const SettlementTermsObject = z
   .object({
     network: NetworkIdentitySchema,
     corridor: CorridorSchema,
     accountMode: AccountModeSchema,
+    sendMode: SendModeSchema,
     recipient: field("recipient"),
     /**
      * `ShieldedDestination.descriptorDigest` / `RecipientBinding.descriptorDigest`
@@ -150,20 +177,32 @@ export const SettlementTermsSchema = z
   })
   .strict();
 
+export const SettlementTermsSchema = SettlementTermsObject.superRefine(sendModeServed);
+
 export type SettlementTerms = z.infer<typeof SettlementTermsSchema>;
 
+/**
+ * Terms as a settlement journal row holds them. Rows written before 0.4.0
+ * carry no `sendMode`: every one is `spending_limit`, and its fingerprint is
+ * unchanged (`fingerprintTerms`). A row is never rewritten, so
+ * `aztec_getSettlement` answers such a row's terms without the member.
+ */
+export type JournaledTerms = Omit<SettlementTerms, "sendMode"> & { sendMode?: SendMode };
+
 /** Same charset and length the server enforces on the `Idempotency-Key` header. */
-const OperationIdSchema = z
+export const OperationIdSchema = z
   .string()
   .min(1)
   .max(128)
   .regex(/^[\x20-\x7e]+$/, "operationId must be printable ASCII")
   .refine((s) => s.trim() === s, "operationId must not carry surrounding whitespace");
 
-export const CreateNoteSchema = SettlementTermsSchema.extend({
+export const CreateNoteSchema = SettlementTermsObject.extend({
   version: z.literal(SETTLEMENT_VERSION),
   operationId: OperationIdSchema,
-}).strict();
+})
+  .strict()
+  .superRefine(sendModeServed);
 
 export type CreateNoteParams = z.infer<typeof CreateNoteSchema>;
 
@@ -199,6 +238,11 @@ export function namesRetiredVersion(value: unknown): boolean {
 
 /** Lowercase hex, so case never changes a fingerprint or a comparison. */
 export function canonicalTerms(terms: SettlementTerms): SettlementTerms {
+  // `sendMode` keeps its place right after `accountMode`, as in the fingerprint.
+  return { ...canonicalJournaledTerms(terms), sendMode: terms.sendMode };
+}
+
+function canonicalJournaledTerms(terms: JournaledTerms): JournaledTerms {
   return {
     network: {
       aztecChainId: terms.network.aztecChainId,
@@ -213,12 +257,25 @@ export function canonicalTerms(terms: SettlementTerms): SettlementTerms {
       manifestDigest: terms.corridor.manifestDigest.toLowerCase(),
     },
     accountMode: terms.accountMode,
+    ...(terms.sendMode !== undefined ? { sendMode: terms.sendMode } : {}),
     recipient: terms.recipient.toLowerCase(),
     recipientDescriptorDigest: terms.recipientDescriptorDigest.toLowerCase(),
     token: terms.token.toLowerCase(),
     amount: terms.amount,
     validUntil: terms.validUntil,
   };
+}
+
+/**
+ * The send mode a journaled row names: a row written before 0.4.0 has none
+ * and is `spending_limit`. Any other stored value is not a row this code
+ * wrote, and throws.
+ */
+export function journaledSendMode(terms: JournaledTerms): SendMode {
+  const mode: unknown = terms.sendMode;
+  if (mode === undefined || mode === "spending_limit") return "spending_limit";
+  if (mode === "oxide") return "oxide";
+  throw new Error(`stored terms name an unknown sendMode ${JSON.stringify(mode)}`);
 }
 
 // Not the contract version: the terms it covers did not change in v2, and a
@@ -231,12 +288,25 @@ const FINGERPRINT_DOMAIN = "pxe-bridge/settlement-fingerprint/v1";
  * SHA-256 over the domain, then one `name=value` line per term in this fixed
  * order, values canonical (lowercase hex, decimal strings). No field can
  * contain `\n` or `=` after schema validation, so the encoding is injective.
- * Callers compare fingerprints for equality and terms field by field; nobody
- * recomputes this outside the bridge.
+ * Callers compare fingerprints for equality and terms field by field.
+ *
+ * `sendMode` (0.4.0, pxe-bridge#84): `oxide` adds the line `sendMode=oxide`
+ * right after `accountMode`; `spending_limit` adds no line, so its
+ * fingerprint is byte-identical to 0.3.0's and every operation journaled
+ * before the member existed keeps its fingerprint (no conflict, no new
+ * domain). The two modes still never collide: only `oxide` has the line, and
+ * the line cannot occur in the other's encoding. Riddler recomputes this
+ * (axol-io/Riddler#1413).
  */
-export function fingerprintTerms(terms: SettlementTerms): string {
-  const t = canonicalTerms(terms);
-  const lines = [
+export function fingerprintTerms(terms: JournaledTerms): string {
+  return "0x" + createHash("sha256").update(fingerprintLines(terms).join("\n"), "utf8").digest("hex");
+}
+
+/** The fingerprint's preimage, one line per element, joined with `\n` before hashing. */
+export function fingerprintLines(terms: JournaledTerms): string[] {
+  const t = canonicalJournaledTerms(terms);
+  const sendMode = journaledSendMode(t);
+  return [
     FINGERPRINT_DOMAIN,
     `network.aztecChainId=${t.network.aztecChainId}`,
     `network.protocolVersion=${t.network.protocolVersion}`,
@@ -247,13 +317,13 @@ export function fingerprintTerms(terms: SettlementTerms): string {
     `corridor.corridorRevision=${t.corridor.corridorRevision}`,
     `corridor.manifestDigest=${t.corridor.manifestDigest}`,
     `accountMode=${t.accountMode}`,
+    ...(sendMode === "oxide" ? ["sendMode=oxide"] : []),
     `recipient=${t.recipient}`,
     `recipientDescriptorDigest=${t.recipientDescriptorDigest}`,
     `token=${t.token}`,
     `amount=${t.amount}`,
     `validUntil=${t.validUntil}`,
   ];
-  return "0x" + createHash("sha256").update(lines.join("\n"), "utf8").digest("hex");
 }
 
 export function termsFrom(params: CreateNoteParams): SettlementTerms {
@@ -297,14 +367,26 @@ export type Observation =
       observedAt: number;
       effects: Effects;
       /**
-       * The `transfer_to_private` partial-note randomness, `0x` + 64
-       * lowercase hex: with the signed recipient, token and amount it
-       * recomputes the payout's unique note hash and validity nullifier
+       * `spending_limit`: the `transfer_to_private` partial-note randomness,
+       * `0x` + 64 lowercase hex: with the signed recipient, token and amount
+       * it recomputes the payout's unique note hash and validity nullifier
        * (docs/settlement-operations.md "Partial-note randomness"). `null` only
        * for an attempt journaled before the bridge captured it; such a payout
        * cannot be proven and must be held.
+       *
+       * `oxide`: the payout note's randomness (`poseidon2([seed, index])`),
+       * never null; with the recipient, token and amount it opens the Oxide
+       * note hash (docs/settlement-operations.md "Oxide payout proof").
        */
       partialNoteRandomness: string | null;
+      /**
+       * `oxide` only, and present on every oxide mined observation: the index
+       * in `effects.noteHashes` of the payout note's unique note hash (read
+       * from the mined transaction's effects, never the TokenOperation
+       * position); `null` on `reverted`. Absent on every `spending_limit`
+       * observation.
+       */
+      payoutNoteHashIndex?: number | null;
     }
   | { state: "unknown"; reason: string };
 

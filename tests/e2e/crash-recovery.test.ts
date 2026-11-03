@@ -248,6 +248,7 @@ describe("hard crash mid-broadcast (e2e)", () => {
         manifestDigest: CORRIDOR.manifestDigest,
       },
       accountMode: "spending_limit",
+      sendMode: "spending_limit",
       recipient: RECIPIENT,
       recipientDescriptorDigest: "0x" + "ab".repeat(32),
       token,
