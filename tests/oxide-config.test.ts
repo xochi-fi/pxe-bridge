@@ -28,6 +28,12 @@ describe("resolveSendModeConfig (PXE_BRIDGE_SEND_MODE)", () => {
       /PXE_BRIDGE_OXIDE_JOURNAL set without PXE_BRIDGE_SEND_MODE=oxide/,
     );
     expect(() => resolveSendModeConfig({ PXE_BRIDGE_OXIDE_ALLOWLIST_SEED: "0x01" })).toThrow(/ALLOWLIST_SEED/);
+    expect(() => resolveSendModeConfig({ PXE_BRIDGE_OXIDE_ALLOWLIST_SEED_FILE: "/run/secrets/seed" })).toThrow(
+      /ALLOWLIST_SEED_FILE/,
+    );
+    expect(() =>
+      resolveSendModeConfig({ PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS_FILE: "/run/secrets/recipients" }),
+    ).toThrow(/ALLOWLIST_RECIPIENTS_FILE/);
   });
 
   it("resolves a complete Oxide environment with the default caps", () => {

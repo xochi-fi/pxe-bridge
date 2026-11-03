@@ -282,6 +282,32 @@ describe("OxideSender", () => {
     expect(journal.get("op-1")?.state).toBe("prepared");
     expect(node.sent).toEqual([]);
   });
+  it("does not mark or send when the deadline aborts during the post-allow preflight", async () => {
+    const node = new FakeNode();
+    let checks = 0;
+    let release!: () => void;
+    let entered!: () => void;
+    const enteredSecond = new Promise<void>((resolve) => (entered = resolve));
+    const blocked = new Promise<void>((resolve) => (release = resolve));
+    const preflight = {
+      assertPinned: () => {
+        checks += 1;
+        if (checks === 1) return Promise.resolve();
+        entered();
+        return blocked;
+      },
+    };
+    const { sender, journal } = boot(tempJournalPath(), node, { gate: fakeGate("allow"), preflight });
+    const controller = new AbortController();
+    const sending = sender.send({ ...request(), signal: controller.signal });
+    await enteredSecond;
+    controller.abort();
+    release();
+
+    expect(observed(await sending).observation).toMatchObject({ state: "prepared", hold: "interrupted" });
+    expect(journal.get("op-1")?.state).toBe("prepared");
+    expect(node.sent).toEqual([]);
+  });
 
   it("a pipeline failure before the journal is not_submitted and retryable", async () => {
     const node = new FakeNode();

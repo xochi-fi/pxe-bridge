@@ -711,6 +711,7 @@ export class OxideSender {
       if (!refusal.retryable) return this.refuse(op, refusal.reason, false);
       return this.hold(id, attempt, "preflight_refused");
     }
+    if (signal?.aborted) return this.hold(id, attempt, "interrupted");
     if (this.nowSeconds() >= op.terms.validUntil) return this.refuse(op, "validity_bound_passed", false);
     if (BigInt(this.nowSeconds()) >= BigInt(attempt.expirationTimestamp)) {
       // The gate bound this hash; a fresh proof would carry another. Requote under a new operation id.
