@@ -227,6 +227,20 @@ re-proves. Before a resend the client re-derives `C` from the journaled bytes
 and refuses (`partial_note_randomness_unresolved`, nothing sent) unless the
 journaled `r` opens it for the journaled recipient.
 
+**Journaled identity before a resend.** The hash stored at the front of the
+bytes is only a prefix: decoding returns it as is, and it vouches for nothing
+after it, the expiry included. So before the randomness check and before
+Riddler is asked, the client recomputes the hash from the bytes' data
+(`src/tx-identity.ts`) and requires it to equal both the stored prefix and the
+journaled `txHash`, and the expiry inside the bytes to equal the journaled
+`expirationTimestamp`; the gate repeats the comparison on what the client
+hands it. Bytes that fail any of these (or do not decode) are never sent and
+Riddler is not asked: the answer is `-32002` with `observation {state:
+"unknown", reason: "journaled_bytes_mismatch"}`, the attempt stays `prepared`
+with its hold unchanged, and every retry answers the same. It is permanent
+for that attempt: hold, never refund, and have an operator compare the
+journal row with the bytes.
+
 **Attempts journaled before v2** have no `r` (`NULL` after the schema 3
 migration), and none is ever inferred for them:
 

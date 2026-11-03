@@ -63,6 +63,7 @@ import {
   type SpendingLimitConfig,
 } from "./spending-limit-account.js";
 import type { AttestationObservation } from "./attestation.js";
+import { assertJournaledIdentity, decodeTxBytes, identifyTx, type TxIdentity } from "./tx-identity.js";
 
 const MAX_TOKEN_CACHE_SIZE = 100;
 export const NODE_RPC_TIMEOUT_MS = 10_000;
@@ -647,12 +648,19 @@ async function provenCommitment(tx: Tx, payout: PayoutTerms): Promise<Fr> {
   return finalizeCommitment(calls, await finalizeTransferSelector(), payout);
 }
 
-/** The proven transaction as the gate and journal see it. */
-async function preparedTransaction(tx: Tx, partialNoteRandomness: string): Promise<PreparedTransaction> {
+/**
+ * The proven transaction as the gate and journal see it: the hash is the one
+ * recomputed from the data (`identity`), never the stored prefix alone.
+ */
+function preparedTransaction(
+  txBytes: Buffer,
+  identity: TxIdentity,
+  partialNoteRandomness: string,
+): PreparedTransaction {
   return {
-    txHash: (await tx.getTxHash()).toString(),
-    txBytes: tx.toBuffer(),
-    expirationTimestamp: tx.data.expirationTimestamp,
+    txHash: identity.txHash,
+    txBytes,
+    expirationTimestamp: identity.expirationTimestamp,
     partialNoteRandomness,
   };
 }
@@ -678,7 +686,7 @@ function gatedNode(node: AztecNode): AztecNode {
               payout.recipient.toField(),
               await provenCommitment(tx, payout),
             );
-            const prepared = await preparedTransaction(tx, randomnessHex(randomness));
+            const prepared = preparedTransaction(tx.toBuffer(), await identifyTx(tx), randomnessHex(randomness));
             await gate.beforeBroadcast(prepared);
             // No await from here to the call: the final bound check and the
             // send happen in one synchronous run.
@@ -1438,7 +1446,10 @@ export class AztecClient implements IAztecClient {
   }
 
   /**
-   * Sends journaled bytes as they are. First the journaled randomness must
+   * Sends journaled bytes as they are. First they must be the journaled
+   * transaction: their hash, recomputed from their data, must equal the
+   * stored prefix and the journaled hash, and their expiry the journaled
+   * expiry (`JournaledBytesMismatch`). Then the journaled randomness must
    * still open the bytes' partial-note commitment for the journaled
    * recipient; then the gate runs, exactly as for a fresh send; then the node
    * gets the identical transaction, which carries the identical hash and
@@ -1446,9 +1457,10 @@ export class AztecClient implements IAztecClient {
    */
   async broadcastPrepared(journaled: JournaledTransfer, gate: BroadcastGate): Promise<TransferOutcome> {
     if (!this.node || !this.solverAddress) throw new Error("Client not connected");
-    const { Tx, TxStatus } = await import("@aztec-labs/aztec.js/tx");
+    const { TxStatus } = await import("@aztec-labs/aztec.js/tx");
     const { waitForTx } = await import("@aztec-labs/aztec.js/node");
-    const tx = Tx.fromBuffer(journaled.txBytes);
+    const { tx, identity } = await decodeTxBytes(journaled.txBytes);
+    assertJournaledIdentity(identity, journaled);
     const recipient = AztecAddress.fromStringUnsafe(journaled.recipient);
     const commitment = await provenCommitment(tx, {
       token: AztecAddress.fromStringUnsafe(journaled.token),
@@ -1464,7 +1476,7 @@ export class AztecClient implements IAztecClient {
     ) {
       throw new PartialNoteUnresolved("mismatch");
     }
-    const prepared = await preparedTransaction(tx, journaled.partialNoteRandomness);
+    const prepared = preparedTransaction(journaled.txBytes, identity, journaled.partialNoteRandomness);
     await gate.beforeBroadcast(prepared);
     // Synchronous from the final check to the call (see BroadcastGate).
     gate.beforeSend(prepared);
