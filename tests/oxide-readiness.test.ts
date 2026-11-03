@@ -527,18 +527,31 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
     expect(await readiness.admit({ recipient, amount: "1" })).toEqual({ kind: "not_ready", reasons: [reason] });
   });
 
+  // The admission verdict for each health reason: a STRUCTURAL one (the live
+  // deployment is not the pinned one: manifest/profile moved, L1 not pinned,
+  // enclave PCR0 not the pinned image hashing to TeeRegistry.PCR0_HASH()) is
+  // refused permanently (OX-6); everything else is not_ready, transient.
   it.each([
     [
       "the manifest moved",
       { manifestPins: { assertPinned: () => Promise.reject(new OxidePinMismatch("manifest", ["gitSha"])) } },
       "oxide_pin_mismatch",
       { pins: { manifest: { state: "known", pinned: false } } },
+      "permanent",
+    ],
+    [
+      "the profile moved",
+      { manifestPins: { assertPinned: () => Promise.reject(new OxidePinMismatch("profile", ["oxide.expectedGitSha"])) } },
+      "oxide_pin_mismatch",
+      { pins: { manifest: { state: "known", pinned: false } } },
+      "permanent",
     ],
     [
       "the manifest is unreadable",
       { manifestPins: { assertPinned: () => Promise.reject(new OxidePinUnverified("timeout")) } },
       "oxide_pins_unknown",
       { pins: { manifest: { state: "unknown", reason: "oxide_pins_unknown" } } },
+      "transient",
     ],
     [
       "the portal is frozen",
@@ -550,6 +563,7 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
       },
       "oxide_portal_frozen",
       { pins: { l1: { state: "known", pinned: true, portalFrozen: true } } },
+      "transient",
     ],
     [
       "L1 is not the pinned deployment",
@@ -561,44 +575,65 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
       },
       "oxide_l1_not_pinned",
       { pins: { l1: { state: "known", pinned: false, portalFrozen: false } } },
+      "permanent",
     ],
     [
       "the enclave is unreachable",
       { enclave: { attestEnclave: () => Promise.reject(new Error("ECONNREFUSED")) } },
       "enclave_unreachable",
       { enclave: { state: "unknown", reason: "enclave_unreachable" } },
+      "transient",
     ],
     [
-      "the enclave attestation is refused",
+      "the enclave's PCR0 is not the pinned image",
       { enclave: { attestEnclave: () => Promise.reject(new EnclaveTrustRefused("pcr0_not_pinned", "image")) } },
       "enclave_attestation_refused",
       { enclave: { state: "known", attested: false } },
+      "permanent",
+    ],
+    [
+      "keccak(PCR0) is not TeeRegistry.PCR0_HASH()",
+      { enclave: { attestEnclave: () => Promise.reject(new EnclaveTrustRefused("pcr0_hash_mismatch", "registry")) } },
+      "enclave_attestation_refused",
+      { enclave: { state: "known", attested: false } },
+      "permanent",
+    ],
+    [
+      "the enclave's attestation document does not verify",
+      { enclave: { attestEnclave: () => Promise.reject(new EnclaveTrustRefused("attestation_invalid", "COSE")) } },
+      "enclave_attestation_refused",
+      { enclave: { state: "known", attested: false } },
+      "transient",
     ],
     [
       "the node is not accepting transactions",
       { node: { isReady: async () => false } },
       "node_not_ready",
       { node: { state: "known", acceptingTransactions: false } },
+      "transient",
     ],
     [
       "the network identity is unread",
       { network: { networkIdentity: () => Promise.reject(new Error("node down")) } },
       "network_identity_unknown",
       { network: { state: "unknown", reason: "network_identity_unknown" } },
+      "transient",
     ],
     [
       "no corridor is configured",
       { corridor: undefined },
       "corridor_unconfigured",
       { corridor: { state: "unknown", reason: "corridor_unconfigured" } },
+      "transient",
     ],
     [
       "attestations are not configured",
       { attestationConfigured: false },
       "attestation_unconfigured",
       { attestation: { configured: false } },
+      "transient",
     ],
-  ] as const)("is not ready when %s", async (_name, override, reason, fact) => {
+  ] as const)("is not ready when %s", async (_name, override, reason, fact, verdict) => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const { readiness } = await readinessSetup(override as Partial<OxideReadinessOptions>);
     const projection = await readiness.observe();
@@ -606,7 +641,30 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
     expect(projection.reasons).toEqual([reason]);
     expect(projection.admission).toEqual({ freshSend: false, reasons: [] });
     expect(projection.oxide).toMatchObject(fact);
-    expect(await readiness.admit({ recipient, amount: "1" })).toEqual({ kind: "not_ready", reasons: [reason] });
+    expect(await readiness.admit({ recipient, amount: "1" })).toEqual(
+      verdict === "permanent" ? { kind: "refused", reason, retryable: false } : { kind: "not_ready", reasons: [reason] },
+    );
+  });
+
+  it("a structural enclave refusal recovers to admitted once the fleet attests again", async () => {
+    // The reason is read fresh on every admission (a failed check is never
+    // cached): a fleet that re-attests is admitted, a fleet that still runs
+    // another image is refused for good.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const state = { refuse: true };
+    const { readiness } = await readinessSetup({
+      enclave: {
+        attestEnclave: () =>
+          state.refuse ? Promise.reject(new EnclaveTrustRefused("pcr0_hash_mismatch", "registry")) : Promise.resolve(),
+      },
+    });
+    expect(await readiness.admit({ recipient, amount: "1" })).toEqual({
+      kind: "refused",
+      reason: "enclave_attestation_refused",
+      retryable: false,
+    });
+    state.refuse = false;
+    expect(await readiness.admit({ recipient, amount: "1" })).toEqual({ kind: "admitted" });
   });
 
   it("stays ready after one order prepares against exactly the whole balance and one send's fee", async () => {

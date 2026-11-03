@@ -4,7 +4,7 @@ import type { CorridorConfig } from "../settlement.js";
 import type { NodeNetwork } from "../types.js";
 import type { OxideAllowlist } from "./allowlist.js";
 import { WINDOW_MS, type OxideCapsConfig } from "./caps.js";
-import { EnclaveTrustRefused } from "./enclave.js";
+import { EnclaveTrustRefused, enclaveRefusalPermanent, type EnclaveRefusal } from "./enclave.js";
 import { OxidePinMismatch } from "./pins.js";
 import { oxideFeeRunwayReasons, type OxideFeeRunway } from "./sender.js";
 
@@ -210,6 +210,8 @@ export class OxideReadiness {
   private readonly manifestCache: SuccessCache<OxideFact<{ pinned: boolean }>>;
   private readonly l1Cache: SuccessCache<OxideFact<{ pinned: boolean; portalFrozen: boolean }>>;
   private readonly enclaveCache: SuccessCache<OxideFact<{ attested: boolean }>>;
+  /** Why the last enclave check refused, so admission can tell a structural refusal from a transient one. */
+  private lastEnclaveRefusal: EnclaveRefusal | undefined;
 
   constructor(private readonly options: OxideReadinessOptions) {
     this.now = options.now ?? Date.now;
@@ -223,6 +225,12 @@ export class OxideReadiness {
    * The admission verdict for one fresh send of `amount`:
    * - a recipient outside the private allowlist, a non-positive amount or one
    *   above `maxPerTx` is refused permanently (requote);
+   * - a bridge whose live deployment is no longer the pinned one -- the
+   *   manifest or profile moved (`oxide_pin_mismatch`, #744), L1 is not the
+   *   pinned chain/registry/portal (`oxide_l1_not_pinned`), or the enclave's
+   *   PCR0 is not the pinned image hashing to `TeeRegistry.PCR0_HASH()`
+   *   (`enclave_attestation_refused`) -- refuses permanently too (OX-6): no
+   *   retry of this process clears it, only a reviewed re-pin;
    * - otherwise it is admitted iff `ready`, `admission.freshSend`, and
    *   `amount <= privateBalance.available` and `amount <= caps.windowHeadroom`;
    *   anything else is `not_ready` (transient).
@@ -244,7 +252,11 @@ export class OxideReadiness {
       return { kind: "refused", reason: "amount_over_per_tx_cap", retryable: false };
     }
     const readiness = await this.observe({ freshL1: true });
-    if (!readiness.ready) return { kind: "not_ready", reasons: readiness.reasons };
+    if (!readiness.ready) {
+      const structural = readiness.reasons.find((reason) => this.structural(reason));
+      if (structural !== undefined) return { kind: "refused", reason: structural, retryable: false };
+      return { kind: "not_ready", reasons: readiness.reasons };
+    }
     if (!readiness.admission.freshSend) return { kind: "not_ready", reasons: readiness.admission.reasons };
     const { privateBalance, caps } = readiness.oxide;
     // freshSend implies both are known; narrowed for the compiler.
@@ -255,6 +267,16 @@ export class OxideReadiness {
     if (amount > BigInt(privateBalance.available)) reasons.push("private_balance_insufficient");
     if (amount > BigInt(caps.windowHeadroom)) reasons.push("spend_window_exhausted");
     return reasons.length === 0 ? { kind: "admitted" } : { kind: "not_ready", reasons };
+  }
+
+  /** A health reason no cycle of this process clears: the deployment is not the pinned one. */
+  private structural(reason: ReadinessReason): boolean {
+    if (reason === "oxide_pin_mismatch" || reason === "oxide_l1_not_pinned") return true;
+    return (
+      reason === "enclave_attestation_refused" &&
+      this.lastEnclaveRefusal !== undefined &&
+      enclaveRefusalPermanent(this.lastEnclaveRefusal)
+    );
   }
 
   /** The projection `/ready` serves. `freshL1` bypasses the L1/portal cache (admission). */
@@ -456,10 +478,13 @@ export class OxideReadiness {
   private async enclave(): Promise<OxideFact<{ attested: boolean }>> {
     try {
       await this.options.enclave.attestEnclave();
+      this.lastEnclaveRefusal = undefined;
       return known({ attested: true });
     } catch (cause) {
       console.error(`[oxide] Enclave attestation check: ${errorClass(cause)}`);
-      return cause instanceof EnclaveTrustRefused ? known({ attested: false }) : unknown("enclave_unreachable");
+      if (!(cause instanceof EnclaveTrustRefused)) return unknown("enclave_unreachable");
+      this.lastEnclaveRefusal = cause.reason;
+      return known({ attested: false });
     }
   }
 

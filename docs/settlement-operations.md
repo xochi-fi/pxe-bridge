@@ -911,7 +911,8 @@ It answers two separate questions (integration decision on pxe-bridge#88):
   Reasons: `oxide_pins_unknown`, `oxide_pin_mismatch`, `oxide_l1_unknown`,
   `oxide_l1_not_pinned`, `oxide_portal_frozen`, `enclave_unreachable`,
   `enclave_attestation_refused`, `node_readiness_unknown`, `node_not_ready`,
-  `journal_unwritable`, `attestation_unconfigured`.
+  `journal_unwritable`, `attestation_unconfigured`, `corridor_unconfigured`,
+  `network_identity_unknown`.
 - `admission.freshSend` / `admission.reasons`: **capacity for one more new
   order**. `freshSend` is `ready` and no capacity reason. Reasons:
   `private_balance_unknown`, `journal_unreadable`,
@@ -933,7 +934,12 @@ transient refusal.
   "sendMode": "oxide", "accountMode": "standard",
   "accountAddress": "0x<64 hex>", "token": "0x11d2bed2...e0a3",
   "oxide": {
-    "privateBalance": {"state":"known","observed":"<dec>","syncedBlock":"<dec>",
+    "corridor":       {"state":"known","corridorId":"0x<64 hex>","corridorRevision":<int>,
+                       "manifestDigest":"0x<64 hex>"},
+    "network":        {"state":"known","aztecChainId":"<dec>","protocolVersion":"<dec>",
+                       "rollupAddress":"0x<40 hex>","l1ChainId":"<dec>",
+                       "genesisOrNetworkDigest":"0x<64 hex>"},
+    "privateBalance": {"state":"known","observed":"<dec>","syncedBlock":"<dec>","readAt":<unix seconds>,
                        "committed":"<dec>","committedSends":<int>,"available":"<dec>"},
     "feeRunway":      {"state":"known","observed":"<dec>","committed":"<dec>",
                        "committedSends":<int>,"perSendFeeLimit":"<dec>"},
@@ -957,7 +963,9 @@ same place. Riddler refuses intake when a full `/ready` projection names no
 
 | Fact | Source | Unknown reason |
 | --- | --- | --- |
-| `privateBalance` | The sender's PRIVATE OXDAI balance from its own PXE (OxideToken `balance_of`: unspent notes plus stored deposits; OXDAI has no public balance), with the PXE's synced block read before the call. `committed` is the payout principal of current attempts that read has not seen: prepared with open bounds, marked and not yet observed mined before expiry, or observed mined above `syncedBlock` (`OxideJournal.committedPrincipal`, the rows `liveNullifiers` counts). `available = max(0, observed - committed)`. OXDAI base units | `private_balance_unknown`, `journal_unreadable` |
+| `corridor` | `PXE_BRIDGE_SETTLEMENT_CORRIDOR`, the settlement v2 member names: what this bridge serves, for Riddler's pre-pull recheck | `corridor_unconfigured` |
+| `network` | The node's identity (`AztecClient.networkIdentity`) plus the corridor's `genesisOrNetworkDigest`, the settlement v2 member names | `corridor_unconfigured`, `network_identity_unknown` |
+| `privateBalance` | The sender's PRIVATE OXDAI balance from its own PXE (OxideToken `balance_of`: unspent notes plus stored deposits; OXDAI has no public balance), with the PXE's synced block read before the call. `committed` is the payout principal of current attempts that read has not seen: prepared with open bounds, marked and not yet observed mined before expiry, or observed mined above `syncedBlock` (`OxideJournal.committedPrincipal`, the rows `liveNullifiers` counts). `available = max(0, observed - committed)`. `readAt` is when the balance was read: a snapshot at most 10 minutes old is served while the PXE is busy proving. OXDAI base units | `private_balance_unknown`, `journal_unreadable` |
 | `feeRunway` | `OxideSender.feeRunway`: fee juice balance, fee limits of attempts that may still land, the most one more send can cost. Fee-juice base units | `fee_runway_unknown` |
 | `caps` | `PXE_BRIDGE_OXIDE_MAX_PER_TX` / `_DAILY_LIMIT` and the journal's durable (marked) spends in the rolling 24h | `spend_window_unknown` |
 | `pins.manifest` | The published Oxide manifest and zk.money profile (`OxidePinChecker`) | `oxide_pins_unknown` |
@@ -981,6 +989,16 @@ Admission for one fresh send of `X` (`OxideReadiness.admit`):
 - **Refused (permanent):** a recipient outside the private set
   (`recipient_not_allowlisted`), `X <= 0` (`amount_invalid`) or
   `X > caps.maxPerTx` (`amount_over_per_tx_cap`).
+- **Refused (permanent), the deployment is not the pinned one** (OX-6,
+  xochi#744): the manifest or profile moved (`oxide_pin_mismatch`), L1 is not
+  the pinned chain/registry/portal (`oxide_l1_not_pinned`), or the enclave's
+  PCR0 is not the pinned image hashing to `TeeRegistry.PCR0_HASH()`
+  (`enclave_attestation_refused` from `pcr0_not_pinned` /
+  `pcr0_hash_mismatch`). No retry of this process clears any of these; an
+  operator re-pins after review and ships a new release. The same reasons keep
+  `ready` false, so Riddler also stops intake. An attestation document that
+  does not verify (`attestation_invalid`), a frozen portal and every unread
+  fact stay transient.
 - **Admitted** iff `ready` and `admission.freshSend` and
   `X <= privateBalance.available` and `X <= caps.windowHeadroom`. Anything
   else is `not_ready` with its reasons (transient).
