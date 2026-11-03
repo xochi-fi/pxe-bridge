@@ -457,6 +457,7 @@ design-A bridge, unchanged) or `oxide`; any other value refuses to start.
 | --- | --- | --- |
 | `PXE_BRIDGE_JOURNAL` | yes | The settlement journal, bound to the standard account as in any mode |
 | `PXE_BRIDGE_OXIDE_JOURNAL` | yes | The Oxide journal: its own SQLite file, never the settlement journal's path (compared after `path.resolve`); directory 0700, files 0600 |
+| `PXE_BRIDGE_WALLET_DATA_DIRECTORY` | recommended; required by `oxide-deposit store` | Absolute path to the persistent PXE/wallet LMDB directory. Set the same path on the bridge and mount the same volume into the operator command |
 | `PXE_BRIDGE_OXIDE_L1_RPC_URL` | yes | Ethereum mainnet RPC, `http(s)`, view calls only (TeeRegistry, CertManager, OxidePortal) |
 | `PXE_BRIDGE_OXIDE_TOKEN_ARTIFACT` | yes | The OxideToken artifact `npm run build:oxide-token` writes; refused unless it is the OXDAI class `0x27df40f9...3f949` |
 | `PXE_BRIDGE_SETTLEMENT_CORRIDOR` | yes | The corridor (manifest rev 2); a request naming another corridor or network digest is `not_submitted` `corridor_mismatch` / `network_mismatch` |
@@ -580,3 +581,93 @@ Oxide journal, written by the unreleased `createOxideSender` callers before
 wrote one. Start Oxide mode on a fresh file. Never reuse a phase-1 journal,
 and never delete a schema-2 journal that holds unresolved operations: it is
 the only record of what may have been broadcast.
+
+### Funding the sender's private OXDAI balance
+
+`oxide-deposit` is deliberately split from the L1 signer. It never accepts a
+private key, signs a transaction, or broadcasts. `prepare` reads the shared
+deposit salt only from an already-open file descriptor and prints canonical
+DAI `approve` and `OxidePortal.deposit` arguments/calldata:
+
+```bash
+exec 3</run/secrets/oxide-deposit-salt
+npm run oxide-deposit -- prepare --amount-dai 25 --salt-fd 3 \
+  > /tmp/oxide-deposit-plan.json
+exec 3<&-
+```
+
+The plan pins Ethereum chain 1, DAI
+`0x6B175474E89094C44Da98b954EedeAC495271d0F`, OXDAI
+`0x11d2bed21a36289fd6f6a6af93a546b5be7115caf957f0f700f42d56e25fe0a3`,
+rollup version `2070860440`, portal
+`0xCB99C58Fe81Ae6b2cB4835e46F7b703745879042`, and the approved private sender
+`0x15ff3aa2270843241b4405bfc8ba72ae59b68c85996cff9e5c03daf03109cb22`.
+It contains the recipient commitment, not the salt. Inspect the JSON, then use
+an operator-held L1 signer outside pxe-bridge to submit the approval and
+deposit. L1 signing and broadcasting are external operator actions; this tool
+cannot perform either one.
+
+After the deposit transaction is successful and finalized, stop the bridge so
+the tool can take the Oxide send-journal and wallet-store locks. Use the same
+salt and the confirmed **deposit** transaction hash:
+
+```bash
+export PXE_BRIDGE_OXIDE_DEPOSIT_JOURNAL=/var/lib/pxe-bridge/oxide-deposits.sqlite
+export PXE_BRIDGE_OXIDE_DEPOSIT_HWM=/var/lib/pxe-bridge-hwm/oxide-deposits.hwm
+export PXE_BRIDGE_WALLET_DATA_DIRECTORY=/var/lib/pxe-bridge/aztec-wallet-data
+# Existing bridge settings are also required:
+# AZTEC_NODE_URL, PXE_BRIDGE_OXIDE_L1_RPC_URL,
+# PXE_BRIDGE_OXIDE_JOURNAL, PXE_BRIDGE_OXIDE_TOKEN_ARTIFACT,
+# PXE_BRIDGE_ACCOUNT_ADDRESS, PXE_BRIDGE_SECRET_ARN
+exec 3</run/secrets/oxide-deposit-salt
+npm run oxide-deposit -- store \
+  --tx-hash 0xCONFIRMED_DEPOSIT_TRANSACTION_HASH \
+  --salt-fd 3 \
+  --initialize-journal
+exec 3<&-
+```
+
+`--initialize-journal` is the one-time acknowledgement for a new deposit
+journal; omit it on later calls. Put `PXE_BRIDGE_OXIDE_DEPOSIT_HWM` on an
+owner-only directory in a separate rollback/snapshot domain from the SQLite
+journal; the command refuses the journal's own directory. Restoring the
+database without its monotonic high-water mark is then detected before PXE is
+touched. Never replace or rewind either file.
+
+Run the command from the shipped image (the CLI is compiled at
+`dist/oxide/deposit-cli.js`) or a matching checkout, and mount the production
+wallet volume at the exact absolute `PXE_BRIDGE_WALLET_DATA_DIRECTORY` used by
+the bridge. The deposit journal binds itself to that path, the approved
+account/token/deployment, and the real Oxide send-journal ID; a different
+checkout cwd, wallet volume, or send journal is refused. The deposit-journal
+and HWM variables are operator-only: unset them before restarting the bridge.
+A raw `PXE_BRIDGE_SECRET_KEY` is refused; the store command uses the bridge's
+existing Secrets Manager reference and forbids account deployment.
+
+Before touching PXE, `store` fetches the receipt and transaction from the L1
+RPC and requires:
+
+- chain 1, a successful receipt at or below the finalized head, and the same
+  canonical block hash from receipt, transaction, and block;
+- exactly one `Deposit` event from the pinned portal, canonical `deposit`
+  calldata, the approved sender's salt-bound recipient commitment, matching
+  amount, message key, and inbox index;
+- the portal's DAI `UNDERLYING`, OXDAI `L2_TOKEN`, rollup version, and exact
+  1,000 DAI transaction cap at the receipt block;
+- no amount above 1,000 DAI and no locally admitted rolling 24-hour total
+  above 10,000 DAI (the monotonic local admission time prevents an L1 RPC from
+  choosing the cap window; the 5,166 DAI note maximum is also checked); and
+- the event's L1-to-L2 message present in the PXE's latest message tree.
+
+The owner-only SQLite journal is keyed by transaction hash and full event
+identity. It writes `submitting` before the one `store_deposit` utility call.
+An ordinary replay of a completed row returns `already_stored`. Any replay of
+`submitting` is intentionally fail-closed and refuses a second store, whether
+the interruption happened immediately before the PXE call, after it returned,
+or during an RPC failure. Preserve both journals and inspect the PXE state.
+Oxide currently exposes aggregate `balance_of`, not a deposit-identity query;
+an unrelated credit can produce the same balance delta, so balance is never
+accepted as reconciliation evidence. Automated reconciliation requires an
+additional PXE utility view keyed by the exact inbox index/message key that
+returns the stored amount, recipient, and deposit identity. Until that exists,
+the ambiguous row must remain `submitting`.
