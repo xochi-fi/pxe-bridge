@@ -341,6 +341,13 @@ export interface Effects {
 /** Aztec receipt finality vocabulary for a mined transaction. */
 export type MinedStatus = "proposed" | "checkpointed" | "proven" | "finalized";
 
+/** The Oxide payout note opening durably bound before source funds may move. */
+export interface OxidePayoutNoteCommitment {
+  scheme: "oxide-payout-note-v1";
+  partialNoteRandomness: string;
+  siloedNoteHash: string;
+}
+
 /**
  * The discriminated observation. Absence of an operation is `unknown`, never
  * "no payout"; only `not_submitted` and `prepared` say nothing was broadcast.
@@ -351,6 +358,8 @@ export type Observation =
       txHash: string;
       expirationTimestamp: string;
       hold: "may_broadcast_unknown" | "may_broadcast_denied" | "interrupted";
+      /** `oxide` only: the payout note opening and siloed hash fixed before broadcast. */
+      payoutNoteCommitment?: OxidePayoutNoteCommitment;
     }
   | { state: "not_submitted"; reason: string; retryableAfterRevalidation: boolean }
   | { state: "request_in_flight" }

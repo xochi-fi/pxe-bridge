@@ -823,7 +823,7 @@
       ]
     },
     "payoutProof": {
-      "note": "Recompute a successful payout note from the signed recipient, token and amount and observation.partialNoteRandomness; require uniqueNoteHash(observation.payoutNoteHashIndex) == effects.noteHashes[payoutNoteHashIndex] (effects.nullifiers[0] is the nonce's first nullifier). Values are the @aztec-labs 6.0.0 hashes and Oxide's computeSiloedNoteHash. The raw reverted observation is a consumer-refusal vector: the bridge holds it because prepared bytes do not commit this proof.",
+      "note": "Before source funds may move, persist preparedObservation.payoutNoteCommitment with the exact prepared transaction. Recompute siloedNoteHash from the signed recipient, token and amount and the committed partialNoteRandomness. A success requires uniqueNoteHash(payoutNoteHashIndex) == effects.noteHashes[payoutNoteHashIndex]. A finalized revert is negative delivery evidence only when every independently verified effect omits the committed note.",
       "formula": {
         "randomness": "P2([seed, index]) (OxideToken randomness.nr next_randomness)",
         "noteHash": "P2WithSeparator([amount, recipient, BALANCES_STORAGE_SLOT, randomness], DOM_SEP__NOTE_HASH)",
@@ -847,6 +847,17 @@
       "noteHash": "0x20ce0b063ed2b3ef3c56fbc517ccafba44aa9f5bf5913983cf4488d7c2d44c3f",
       "siloedNoteHash": "0x282a91ec3d99c89144f090afc0c8f873a922ff3eb8d961bce0dd2a3c3bfea337",
       "uniqueNoteHash": "0x225defdca34a4842764134ac7a1139acaf12406764e39cfa9ad3d0dc3623ccda",
+      "preparedObservation": {
+        "state": "prepared",
+        "txHash": "0x7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b",
+        "expirationTimestamp": "1900076355",
+        "hold": "may_broadcast_unknown",
+        "payoutNoteCommitment": {
+          "scheme": "oxide-payout-note-v1",
+          "partialNoteRandomness": "0x0f9369230bca88ad6d009e611ad2ff316738d044e7855e1b9e206b6275b0824b",
+          "siloedNoteHash": "0x282a91ec3d99c89144f090afc0c8f873a922ff3eb8d961bce0dd2a3c3bfea337"
+        }
+      },
       "revertedObservation": {
         "state": "reverted",
         "txHash": "0x7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b",
@@ -869,12 +880,6 @@
         "partialNoteRandomness": "0x0f9369230bca88ad6d009e611ad2ff316738d044e7855e1b9e206b6275b0824b",
         "receiptStatus": "finalized",
         "payoutNoteHashIndex": null
-      },
-      "revertHold": {
-        "observation": {
-          "state": "unknown",
-          "reason": "payout_proof_uncommitted"
-        }
       },
       "refusals": [
         {

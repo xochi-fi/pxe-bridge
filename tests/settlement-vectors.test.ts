@@ -175,8 +175,15 @@ interface OxideVector {
     inputs: { randomnessSeed: string; randomnessIndex: number; partialNoteRandomness: string; payoutNoteHashIndex: number };
     siloedNoteHash: string;
     uniqueNoteHash: string;
+    preparedObservation: {
+      state: string;
+      payoutNoteCommitment: {
+        scheme: string;
+        partialNoteRandomness: string;
+        siloedNoteHash: string;
+      };
+    };
     revertedObservation: MinedVectorObservation;
-    revertHold: { observation: { state: string; reason: string } };
     refusals: { name: string; sendMode?: string; observation: MinedVectorObservation }[];
     bridgeHolds: { observation: { state: string; reason: string } };
   };
@@ -263,9 +270,19 @@ describe("docs/vectors/settlement-v2.json oxide case (sendMode, pxe-bridge#84)",
     for (const refusal of oxide.payoutProof.refusals) {
       expect(await oxideObservationProves(refusal.observation, terms), refusal.name).toBe(false);
     }
+    expect(oxide.payoutProof.preparedObservation).toMatchObject({
+      state: "prepared",
+      payoutNoteCommitment: {
+        scheme: "oxide-payout-note-v1",
+        partialNoteRandomness: oxide.payoutProof.inputs.partialNoteRandomness,
+        siloedNoteHash: oxide.payoutProof.siloedNoteHash,
+      },
+    });
     expect(oxide.payoutProof.revertedObservation).toMatchObject({ state: "reverted", payoutNoteHashIndex: null });
     expect(await oxideObservationProves(oxide.payoutProof.revertedObservation, terms)).toBe(false);
-    expect(oxide.payoutProof.revertHold.observation).toEqual({ state: "unknown", reason: "payout_proof_uncommitted" });
+    expect(
+      await locatePayoutNoteHash({ ...oxide.payoutProof.revertedObservation.effects, state: "available" }, siloed),
+    ).toEqual({ kind: "unresolved", reason: "payout_note_hash_absent" });
     expect(oxide.payoutProof.bridgeHolds.observation).toEqual({ state: "unknown", reason: "payout_note_hash_unresolved" });
   });
 

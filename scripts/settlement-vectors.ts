@@ -387,9 +387,21 @@ async function oxideCase(spendingLimitFinalized: Observation): Promise<Record<st
   };
   const withAnotherOrder = noteHashes.filter((_, i) => i !== OXIDE_PAYOUT_FIXTURE.payoutNoteHashIndex);
   const absent = await locatePayoutNoteHash({ ...effects, noteHashes: withAnotherOrder }, siloed);
-  if (absent.kind !== "unresolved") throw new Error("a payout note hash at another position must not be located");
-  // Raw reverted wire shape retained as a consumer refusal vector. The bridge
-  // does not emit it until prepared bytes commit the payout proof.
+  if (absent.kind !== "unresolved" || absent.reason !== "payout_note_hash_absent") {
+    throw new Error("a payout note hash at another position must be absent");
+  }
+  const payoutNoteCommitment = {
+    scheme: "oxide-payout-note-v1" as const,
+    partialNoteRandomness: randomness,
+    siloedNoteHash: siloed.toString(),
+  };
+  const prepared: Observation = {
+    state: "prepared",
+    txHash: mined.txHash,
+    expirationTimestamp: mined.expirationTimestamp,
+    hold: "may_broadcast_unknown",
+    payoutNoteCommitment,
+  };
   const reverted: Observation = {
     state: "reverted",
     ...mined,
@@ -434,11 +446,11 @@ async function oxideCase(spendingLimitFinalized: Observation): Promise<Record<st
     },
     payoutProof: {
       note:
-        "Recompute a successful payout note from the signed recipient, token and amount and " +
-        "observation.partialNoteRandomness; require uniqueNoteHash(observation.payoutNoteHashIndex) == " +
-        "effects.noteHashes[payoutNoteHashIndex] (effects.nullifiers[0] is the nonce's first nullifier). " +
-        "Values are the @aztec-labs 6.0.0 hashes and Oxide's computeSiloedNoteHash. " +
-        "The raw reverted observation is a consumer-refusal vector: the bridge holds it because prepared bytes do not commit this proof.",
+        "Before source funds may move, persist preparedObservation.payoutNoteCommitment with the exact " +
+        "prepared transaction. Recompute siloedNoteHash from the signed recipient, token and amount and " +
+        "the committed partialNoteRandomness. A success requires uniqueNoteHash(payoutNoteHashIndex) == " +
+        "effects.noteHashes[payoutNoteHashIndex]. A finalized revert is negative delivery evidence only " +
+        "when every independently verified effect omits the committed note.",
       formula: {
         randomness: "P2([seed, index]) (OxideToken randomness.nr next_randomness)",
         noteHash: "P2WithSeparator([amount, recipient, BALANCES_STORAGE_SLOT, randomness], DOM_SEP__NOTE_HASH)",
@@ -460,10 +472,8 @@ async function oxideCase(spendingLimitFinalized: Observation): Promise<Record<st
       noteHash: (await oxideInnerNoteHash({ recipient: terms.recipient, token: terms.token, amount: BigInt(terms.amount), randomness })).toString(),
       siloedNoteHash: siloed.toString(),
       uniqueNoteHash: unique.toString(),
+      preparedObservation: prepared,
       revertedObservation: reverted,
-      revertHold: {
-        observation: { state: "unknown", reason: "payout_proof_uncommitted" },
-      },
       refusals: [
         {
           name: "payoutNoteHashIndex names another note hash",

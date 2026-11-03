@@ -98,6 +98,11 @@ type Mined = {
   partialNoteRandomness: string | null;
   payoutNoteHashIndex?: number | null;
   effects: { noteHashes: string[]; nullifiers: string[] };
+  payoutNoteCommitment?: {
+    scheme: string;
+    partialNoteRandomness: string;
+    siloedNoteHash: string;
+  };
 };
 
 function result(response: JsonRpcResponse): { fingerprint: string; observation: Mined } {
@@ -168,15 +173,31 @@ describe("aztec_createNote with sendMode oxide", () => {
     });
   });
 
-  for (const shown of ["absent", "published", "duplicated", "unavailable"] as const) {
-    it(`holds a reverted payout whose note is ${shown} because the prepared answer does not commit the proof`, async () => {
+  it("answers a finalized revert only when the committed payout note is absent", async () => {
+    const node = new FakeNode();
+    node.executionResult = "reverted";
+    node.payoutNoteHash = "absent";
+    const b = bridge({ node });
+    const reverted = result(await b.createNote(oxideParams())).observation;
+    const evidence = b.journal.attemptEvidence("op-1", 1);
+    expect(reverted).toMatchObject({
+      state: "reverted",
+      receiptStatus: "finalized",
+      payoutNoteHashIndex: null,
+      partialNoteRandomness: evidence.createdNotes[evidence.recipientNoteIndex]!.randomness,
+    });
+    expect(b.node.sent).toHaveLength(1);
+  });
+
+  for (const shown of ["published", "duplicated", "unavailable"] as const) {
+    it(`holds a reverted payout whose committed note is ${shown}`, async () => {
       const node = new FakeNode();
       node.executionResult = "reverted";
       node.payoutNoteHash = shown;
       const b = bridge({ node });
       expect(error(await b.createNote(oxideParams())).data["observation"]).toEqual({
         state: "unknown",
-        reason: "payout_proof_uncommitted",
+        reason: "payout_note_hash_unresolved",
       });
       expect(b.node.sent).toHaveLength(1);
     });
@@ -188,15 +209,27 @@ describe("aztec_createNote with sendMode oxide", () => {
     const path = tempJournalPath();
     const node = new FakeNode();
     const first = bridge({ path, node, gate: fakeGate("unknown") });
-    expect(error(await first.createNote(oxideParams())).data["observation"]).toMatchObject({
+    const held = error(await first.createNote(oxideParams())).data["observation"] as {
+      state: string;
+      hold: string;
+      payoutNoteCommitment: Mined["payoutNoteCommitment"];
+    };
+    expect(held).toMatchObject({
       state: "prepared",
       hold: "may_broadcast_unknown",
     });
+    const evidence = first.journal.attemptEvidence("op-1", 1);
     first.journal.close();
 
     const down = { assertPinned: () => Promise.reject(new Error("profile CDN unreachable")) };
     const second = bridge({ path, node, preflight: down });
     const read = await second.getSettlement("op-1");
+    const prepared = held;
+    expect(prepared.payoutNoteCommitment).toEqual({
+      scheme: "oxide-payout-note-v1",
+      partialNoteRandomness: evidence.createdNotes[evidence.recipientNoteIndex]!.randomness,
+      siloedNoteHash: evidence.teeNotes[evidence.recipientNoteIndex],
+    });
     if (!("result" in read)) throw new Error(JSON.stringify(read));
     expect(read.result).toMatchObject({ found: true, state: "prepared", observation: { state: "prepared" } });
     expect(error(await second.createNote(oxideParams())).data["observation"]).toMatchObject({
