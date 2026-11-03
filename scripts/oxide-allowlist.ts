@@ -38,9 +38,15 @@
  * value as PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS, and start the bridge. It
  * publishes the new root's RootUpdate from the first finalized block above
  * the previous one, and the Worker marks an approved binding ready on its
- * next refresh. A revocation closes only future admission: the bridge
- * refuses new sends to the address from that start, and Xochi's binding
- * drops to pending once the new root lands.
+ * next refresh.
+ *
+ * REVOKING: a fresh send to a revoked recipient is refused PERMANENTLY
+ * (`recipient_not_allowlisted`), including an order whose source funds
+ * Riddler already pulled. So before revoking, close Riddler intake for the
+ * recipient and drain every obligation to it that has not yet reached
+ * createNote (paid, or refunded on its own path); only then run --revoke and
+ * restart. A prepared attempt already journaled still resends; one whose
+ * bytes lapse and needs a fresh attempt is refused like any new send.
  */
 
 import { randomInt } from "node:crypto";
@@ -151,7 +157,10 @@ async function main(): Promise<number> {
   if (attested !== undefined && attested !== before.root) {
     fail(
       "the configured PXE_BRIDGE_OXIDE_ALLOWLIST_SEED and PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS do " +
-        "not build the root the bridge last attested. Use the set the bridge is running.",
+        "not build the root of the bridge's newest RootUpdate. Either this is not the set the bridge " +
+        "runs, or the bridge has not published a RootUpdate for its current set yet (after a " +
+        "restart it waits for the next finalized block: audit reason finalized_tip_not_advanced). " +
+        "Start the bridge on its current set, wait until it publishes, stop it, then retry.",
     );
   }
 

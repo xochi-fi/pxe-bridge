@@ -1,6 +1,7 @@
 import type { Wallet } from "@aztec-labs/aztec.js/wallet";
 import type { AztecClient } from "../aztec-client.js";
 import type { MayBroadcastClient } from "../may-broadcast.js";
+import type { CorridorConfig } from "../settlement.js";
 import { unknown } from "../readiness.js";
 import type { OxideAllowlist } from "./allowlist.js";
 import { capsFromEnv, type OxideCapsConfig } from "./caps.js";
@@ -32,6 +33,10 @@ export interface OxideSenderConfig {
   mayBroadcast: MayBroadcastClient;
   /** The private recipient allowlist (`oxideAllowlistFromEnv`): the only recipients a fresh send admits. */
   allowlist: OxideAllowlist;
+  /** Whether readiness attestations run (index.ts built an AttestationProducer); `/ready` is not ready without them. */
+  attestationConfigured: boolean;
+  /** `PXE_BRIDGE_SETTLEMENT_CORRIDOR`, published on `/ready` for Riddler's pre-pull recheck. */
+  corridor: CorridorConfig | undefined;
   caps?: OxideCapsConfig;
   l1?: OxideL1Reader;
 }
@@ -101,6 +106,9 @@ export async function createOxideSender(config: OxideSenderConfig): Promise<Oxid
     },
     enclave: backend,
     node,
+    network: config.client,
+    corridor: config.corridor,
+    attestationConfigured: config.attestationConfigured,
   });
   sender = new OxideSender({ journal, backend, caps, mayBroadcast: config.mayBroadcast, preflight });
   return { sender, readiness };

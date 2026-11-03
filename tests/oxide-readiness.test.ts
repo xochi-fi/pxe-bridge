@@ -35,8 +35,8 @@ import { OxidePinMismatch, OxidePinUnverified, OXIDE_V6_MAINNET } from "../src/o
 import { OxideReadiness, type OxideReadinessOptions } from "../src/oxide/readiness.js";
 import type { OxideFeeRunway } from "../src/oxide/sender.js";
 import { createApp } from "../src/server.js";
-import { CAPS, evidenceFor, request, SENDER, tempJournalPath } from "./oxide-fixtures.js";
-import { FakeAztecClient, openBoundJournal } from "./settlement-fixtures.js";
+import { CAPS, evidenceFor, FEE_LIMIT, request, SENDER, tempJournalPath } from "./oxide-fixtures.js";
+import { CORRIDOR, FakeAztecClient, NETWORK, openBoundJournal } from "./settlement-fixtures.js";
 
 // The conformance vectors Xochi's Worker and the SDK verify against: the real
 // stock-Schnorr descriptor and its binding signature, never hand-made values.
@@ -278,6 +278,22 @@ describe("Oxide private allowlist attestations", { timeout: 60_000 }, () => {
           minBlock: "8",
         }).signer,
       ).toBe(ctx.signer.address);
+
+      // Outbox ids are logged when an attempt cannot be recorded: never a root.
+      const ids = [ctx.journal.latestRootUpdate()?.id ?? "", ...ctx.journal.pendingRootUpdates().map((e) => e.id)];
+      for (const id of ids) {
+        expect(id).not.toContain(ctx.allowlist.root.slice(2));
+        expect(id).not.toContain(approved.root.slice(2));
+      }
+
+      // Startup pruning keeps the current set and the newest delivered one only.
+      ctx.journal.recordAllowlistSnapshot(approved.root, approved.snapshot());
+      const stale = await OxideAllowlist.build(SEED, [{ address: OTHER_MEMBER, index: 4 }]);
+      ctx.journal.recordAllowlistSnapshot(stale.root, stale.snapshot());
+      expect(ctx.journal.pruneAllowlistSnapshots(approved.root)).toBe(2);
+      expect(ctx.journal.allowlistSnapshot(approved.root)).toBeDefined();
+      expect(ctx.journal.allowlistSnapshot(ctx.allowlist.root)).toBeUndefined();
+      expect(ctx.journal.allowlistSnapshot(stale.root)).toBeUndefined();
     } finally {
       await new Promise<void>((resolve, reject) => relay.close((error) => (error ? reject(error) : resolve())));
       ctx.journal.close();
@@ -351,7 +367,9 @@ const RUNWAY: OxideFeeRunway = { observed: 10n ** 20n, committed: 0n, committedS
 
 let readinessAllowlist: Promise<OxideAllowlist> | undefined;
 
-async function readinessSetup(overrides: Partial<OxideReadinessOptions> = {}) {
+async function readinessSetup(
+  overrides: Partial<OxideReadinessOptions> | ((journal: OxideJournal) => Partial<OxideReadinessOptions>) = {},
+) {
   readinessAllowlist ??= OxideAllowlist.build(SEED, [{ address: recipient, index: 611 }]);
   const allowlist = await readinessAllowlist;
   const journal = OxideJournal.open(tempJournalPath());
@@ -367,8 +385,11 @@ async function readinessSetup(overrides: Partial<OxideReadinessOptions> = {}) {
     l1Pins: { assertPinned: async () => {}, portalFrozen: async () => false },
     enclave: { attestEnclave: async () => {} },
     node: { isReady: async () => true },
+    network: { networkIdentity: async () => NETWORK },
+    corridor: CORRIDOR,
+    attestationConfigured: true,
     now: () => NOW * 1_000,
-    ...overrides,
+    ...(typeof overrides === "function" ? overrides(journal) : overrides),
   };
   return { allowlist, journal, readiness: new OxideReadiness(options) };
 }
@@ -391,9 +412,25 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
     expect(projection).toMatchObject({
       ready: true,
       reasons: [],
+      admission: { freshSend: true, reasons: [] },
       sendMode: "oxide",
       accountMode: "standard",
       oxide: {
+        corridor: {
+          state: "known",
+          corridorId: CORRIDOR.corridorId.toLowerCase(),
+          corridorRevision: CORRIDOR.corridorRevision,
+          manifestDigest: CORRIDOR.manifestDigest.toLowerCase(),
+        },
+        network: {
+          state: "known",
+          aztecChainId: NETWORK.aztecChainId,
+          protocolVersion: NETWORK.protocolVersion,
+          rollupAddress: NETWORK.rollupAddress.toLowerCase(),
+          l1ChainId: NETWORK.l1ChainId,
+          genesisOrNetworkDigest: CORRIDOR.genesisOrNetworkDigest.toLowerCase(),
+        },
+        attestation: { configured: true },
         privateBalance: {
           state: "known",
           observed: (500n * DAI).toString(),
@@ -478,6 +515,19 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
       "fee_runway_insufficient",
       { feeRunway: { state: "known", observed: (10n ** 18n).toString(), committed: "1" } },
     ],
+  ] as const)("stays ready but refuses a fresh send when %s", async (_name, override, reason, fact) => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { readiness } = await readinessSetup(override as Partial<OxideReadinessOptions>);
+    const projection = await readiness.observe();
+    // Capacity never touches serving health: already-admitted orders keep paying.
+    expect(projection.ready).toBe(true);
+    expect(projection.reasons).toEqual([]);
+    expect(projection.admission).toEqual({ freshSend: false, reasons: [reason] });
+    expect(projection.oxide).toMatchObject(fact);
+    expect(await readiness.admit({ recipient, amount: "1" })).toEqual({ kind: "not_ready", reasons: [reason] });
+  });
+
+  it.each([
     [
       "the manifest moved",
       { manifestPins: { assertPinned: () => Promise.reject(new OxidePinMismatch("manifest", ["gitSha"])) } },
@@ -530,14 +580,187 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
       "node_not_ready",
       { node: { state: "known", acceptingTransactions: false } },
     ],
+    [
+      "the network identity is unread",
+      { network: { networkIdentity: () => Promise.reject(new Error("node down")) } },
+      "network_identity_unknown",
+      { network: { state: "unknown", reason: "network_identity_unknown" } },
+    ],
+    [
+      "no corridor is configured",
+      { corridor: undefined },
+      "corridor_unconfigured",
+      { corridor: { state: "unknown", reason: "corridor_unconfigured" } },
+    ],
+    [
+      "attestations are not configured",
+      { attestationConfigured: false },
+      "attestation_unconfigured",
+      { attestation: { configured: false } },
+    ],
   ] as const)("is not ready when %s", async (_name, override, reason, fact) => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const { readiness } = await readinessSetup(override as Partial<OxideReadinessOptions>);
     const projection = await readiness.observe();
     expect(projection.ready).toBe(false);
     expect(projection.reasons).toEqual([reason]);
+    expect(projection.admission).toEqual({ freshSend: false, reasons: [] });
     expect(projection.oxide).toMatchObject(fact);
     expect(await readiness.admit({ recipient, amount: "1" })).toEqual({ kind: "not_ready", reasons: [reason] });
+  });
+
+  it("stays ready after one order prepares against exactly the whole balance and one send's fee", async () => {
+    // F1: the ready/admission deadlock. The bridge holds B and the fee for one
+    // send; one order of exactly B is prepared. Serving health must stay true
+    // (Riddler pays already-admitted orders on it); only a NEW order is refused.
+    const balance = 100n * DAI;
+    const { readiness, journal } = await readinessSetup((journal) => ({
+      balance: { privateBalance: async () => ({ observed: balance, syncedBlock: 100 }) },
+      feeRunway: async () => {
+        const committed = journal.committedFees(NOW, "");
+        return knownFact({
+          observed: FEE_LIMIT,
+          committed: committed.total,
+          committedSends: committed.sends,
+          perSendFeeLimit: FEE_LIMIT,
+        });
+      },
+    }));
+    const before = await readiness.observe();
+    expect(before).toMatchObject({ ready: true, admission: { freshSend: true, reasons: [] } });
+    expect(await readiness.admit({ recipient, amount: balance.toString() })).toEqual({ kind: "admitted" });
+
+    const terms = oxideTerms(
+      OxideSendRequestSchema.parse(request({ recipient, amount: balance.toString(), validUntil: NOW + 600 })),
+      OXIDE_V6_MAINNET.bridge.l2Token,
+    );
+    journal.claim("op-1", terms);
+    journal.recordPrepared("op-1", {
+      txHash: "0x" + "01".padStart(64, "0"),
+      txBytes: Buffer.from("tx-1"),
+      expirationTimestamp: BigInt(NOW + 3_600),
+      evidence: evidenceFor({ recipient, amount: balance }),
+    });
+
+    const after = await readiness.observe();
+    expect(after.ready).toBe(true);
+    expect(after.reasons).toEqual([]);
+    expect(after.admission).toEqual({
+      freshSend: false,
+      reasons: ["private_balance_insufficient", "fee_runway_insufficient"],
+    });
+    expect(after.oxide.privateBalance).toMatchObject({ committed: balance.toString(), available: "0" });
+  });
+
+  it("serves the last balance snapshot while the PXE is busy, recomputing what is in flight", async () => {
+    // F2: balance_of queues behind proveTx in the PXE. Readiness must not.
+    let at = NOW * 1_000;
+    let reads = 0;
+    const { readiness, journal } = await readinessSetup({
+      now: () => at,
+      balanceWaitMs: 10,
+      balanceMaxAgeMs: 600_000,
+      balance: {
+        privateBalance: () => {
+          reads += 1;
+          return reads === 1
+            ? Promise.resolve({ observed: 500n * DAI, syncedBlock: 100 })
+            : new Promise<never>(() => {});
+        },
+      },
+    });
+    expect((await readiness.observe()).oxide.privateBalance).toMatchObject({
+      state: "known",
+      available: (500n * DAI).toString(),
+      readAt: NOW,
+    });
+
+    at += 120_000;
+    const terms = oxideTerms(
+      OxideSendRequestSchema.parse(request({ recipient, amount: (70n * DAI).toString(), validUntil: NOW + 600 })),
+      OXIDE_V6_MAINNET.bridge.l2Token,
+    );
+    journal.claim("op-1", terms);
+    journal.recordPrepared("op-1", {
+      txHash: "0x" + "01".padStart(64, "0"),
+      txBytes: Buffer.from("tx-1"),
+      expirationTimestamp: BigInt(NOW + 3_600),
+      evidence: evidenceFor({ recipient, amount: 70n * DAI }),
+    });
+    const busy = await readiness.observe();
+    expect(busy.ready).toBe(true);
+    expect(busy.oxide.privateBalance).toMatchObject({
+      state: "known",
+      readAt: NOW,
+      committed: (70n * DAI).toString(),
+      available: (430n * DAI).toString(),
+    });
+
+    at += 600_000;
+    const stale = await readiness.observe();
+    expect(stale.ready).toBe(true);
+    expect(stale.oxide.privateBalance).toEqual({ state: "unknown", reason: "private_balance_unknown" });
+    expect(stale.admission.reasons).toEqual(["private_balance_unknown"]);
+    expect(reads).toBe(2);
+  });
+
+  it("re-reads L1 and the portal for every admission, whatever /ready cached", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    let frozen = false;
+    const { readiness } = await readinessSetup({
+      l1Pins: {
+        assertPinned: async () => {
+          if (frozen) throw new EnclaveTrustRefused("portal_frozen", "frozen");
+        },
+        portalFrozen: async () => frozen,
+      },
+    });
+    expect((await readiness.observe()).ready).toBe(true);
+    frozen = true;
+    // Within the documented 60 s bound /ready may still serve the cached pin...
+    expect((await readiness.observe()).ready).toBe(true);
+    // ...but a fresh send never relies on it.
+    expect(await readiness.admit({ recipient, amount: "1" })).toEqual({
+      kind: "not_ready",
+      reasons: ["oxide_portal_frozen"],
+    });
+  });
+
+  it("applies the per-amount cap, window and balance checks to one admission", async () => {
+    const caps = { ...CAPS, maxPerTx: 1_000n * DAI, dailyLimit: 1_000n * DAI };
+    const { readiness, journal } = await readinessSetup({
+      caps,
+      // The journal stamps the spend with the real clock; the window reads it with this one.
+      now: Date.now,
+      balance: { privateBalance: async () => ({ observed: 2_000n * DAI, syncedBlock: 100 }) },
+    });
+    const terms = oxideTerms(
+      OxideSendRequestSchema.parse(request({ recipient, amount: (600n * DAI).toString(), validUntil: NOW + 600 })),
+      OXIDE_V6_MAINNET.bridge.l2Token,
+    );
+    journal.claim("op-1", terms);
+    const attempt = journal.recordPrepared("op-1", {
+      txHash: "0x" + "01".padStart(64, "0"),
+      txBytes: Buffer.from("tx-1"),
+      expirationTimestamp: BigInt(NOW + 3_600),
+      evidence: evidenceFor({ recipient, amount: 600n * DAI }),
+    });
+    journal.markMayBroadcast("op-1", attempt, terms.amount, caps);
+    expect(await readiness.admit({ recipient, amount: (1_000n * DAI + 1n).toString() })).toEqual({
+      kind: "refused",
+      reason: "amount_over_per_tx_cap",
+      retryable: false,
+    });
+    expect(await readiness.admit({ recipient, amount: "0" })).toEqual({
+      kind: "refused",
+      reason: "amount_invalid",
+      retryable: false,
+    });
+    expect(await readiness.admit({ recipient, amount: (401n * DAI).toString() })).toEqual({
+      kind: "not_ready",
+      reasons: ["spend_window_exhausted"],
+    });
+    expect(await readiness.admit({ recipient, amount: (400n * DAI).toString() })).toEqual({ kind: "admitted" });
   });
 
   it("never reports an unread balance or runway as zero", async () => {
@@ -614,8 +837,12 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
         headers: { authorization: "Bearer ready-key" },
       });
       const body = await response.text();
-      expect(response.status).toBe(503);
-      expect(JSON.parse(body)).toMatchObject({ ready: false, sendMode: "oxide", reasons: ["private_balance_unknown"] });
+      expect(response.status).toBe(200);
+      expect(JSON.parse(body)).toMatchObject({
+        ready: true,
+        sendMode: "oxide",
+        admission: { freshSend: false, reasons: ["private_balance_unknown"] },
+      });
       const surfaces = [JSON.stringify(projection), JSON.stringify(refusal), body, ...logged].join("\n").toLowerCase();
       expect(surfaces).not.toContain(recipient.toLowerCase().slice(2));
       expect(surfaces).not.toContain(allowlist.root.slice(2));

@@ -1183,6 +1183,27 @@ export class SettlementJournal {
     return { root: row.root, recipients, createdAt: row.created_at };
   }
 
+  /**
+   * Deletes every allowlist snapshot except `currentRoot`'s and the root of
+   * the newest DELIVERED RootUpdate (what the Worker holds now). Oxide mode
+   * calls it at startup: an old snapshot is a past private recipient set,
+   * kept for no reader. Returns how many were deleted.
+   */
+  pruneAllowlistSnapshots(currentRoot: string): number {
+    let deleted = 0;
+    this.write("prune allowlist snapshots", (db) => {
+      deleted = db
+        .prepare(
+          `DELETE FROM allowlist_snapshots
+           WHERE root != ?
+             AND root IS NOT (SELECT root FROM root_update_outbox
+                              WHERE delivered_at IS NOT NULL ORDER BY rowid DESC LIMIT 1)`,
+        )
+        .run(currentRoot.toLowerCase()).changes;
+    });
+    return deleted;
+  }
+
   enqueueRootUpdate(entry: {
     id: string;
     root: string;

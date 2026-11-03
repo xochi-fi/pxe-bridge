@@ -822,7 +822,9 @@ export class RootUpdatePublisher {
       record,
     });
     this.journal.enqueueRootUpdate({
-      id: `${this.runId}:${identity}:${record.rootBlock}:${record.attestedAt}`,
+      // Never the root: the id is logged when an attempt cannot be recorded,
+      // and an Oxide root is private. The digest is unique per signed record.
+      id: `${this.runId}:${digest}`,
       root: record.root,
       rootBlock: record.rootBlock,
       payload,

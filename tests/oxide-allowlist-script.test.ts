@@ -62,7 +62,7 @@ describe("oxide-allowlist", { timeout: 60_000 }, () => {
     const r = run(env(journalAttesting(other.root)), ["--add", NEWCOMER, "--index", "611"]);
     expect(r.status).toBe(1);
     expect(r.stdout).toBe("");
-    expect(r.stderr).toContain("not build the root the bridge last attested");
+    expect(r.stderr).toContain("not build the root of the bridge's newest RootUpdate");
   });
 
   it("needs --initial before the first RootUpdate, and refuses it after", async () => {

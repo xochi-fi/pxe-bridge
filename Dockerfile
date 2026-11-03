@@ -18,6 +18,22 @@ RUN npm ci && npm run build \
     && if [ -e contracts/oxide/oxide_token_contract/target/oxide_token_contract-OxideToken.json ]; then npm run check:oxide-token; fi \
     && rm -f dist/*.js.map dist/*.d.ts.map && npm prune --omit=dev
 
+# Operator tooling, never the runtime image: `oxide-allowlist`
+# (scripts/oxide-allowlist.ts) needs tsx, which the builder prunes from the
+# runtime image on purpose. Built only on request
+# (`docker build --target oxide-allowlist`); it holds no signing key, and the
+# default build (the last stage) is unchanged. Runbook: docs/settlement-operations.md
+# "G1: approving or revoking an Oxide recipient in production".
+FROM node:22-bookworm AS oxide-allowlist
+
+WORKDIR /app
+COPY package.json package-lock.json tsconfig.json ./
+RUN npm ci
+COPY src/ src/
+COPY scripts/oxide-allowlist.ts scripts/spending-limit-admin.ts scripts/
+USER node
+ENTRYPOINT ["node", "--import", "tsx", "scripts/oxide-allowlist.ts"]
+
 FROM node:22-bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

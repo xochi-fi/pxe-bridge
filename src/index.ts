@@ -578,6 +578,17 @@ if (process.env["PXE_BRIDGE_SEND_MODE"] === "oxide") {
     console.error(`[pxe-bridge] ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
   }
+  // Warned rather than refused, as PXE_BRIDGE_ALLOWLIST_SEED is: neither can
+  // move funds, but both are secrets that belong in the signing key's store.
+  if (process.env["NODE_ENV"] === "production") {
+    console.warn(
+      "[pxe-bridge] PXE_BRIDGE_OXIDE_ALLOWLIST_SEED and PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS " +
+        "are being read from the environment in production. Both are secrets: the recipients " +
+        "are the private allowlist itself, and the seed lets anyone holding a root test candidate " +
+        "addresses against it. Environment variables are visible in /proc/pid/environ, docker " +
+        "inspect and crash dumps.",
+    );
+  }
 }
 // --- end Oxide readiness ---
 if (
@@ -794,7 +805,10 @@ async function main(): Promise<void> {
         : undefined,
     });
     if (attestationSet && attestation && journal.health().writable) {
-      journal.recordAllowlistSnapshot(attestationSet.tree.root.toString(), attestationSet.recipients);
+      const root = attestationSet.tree.root.toString();
+      journal.recordAllowlistSnapshot(root, attestationSet.recipients);
+      // Past private sets have no reader; keep the current one and the Worker's.
+      if (oxideAllowlist) journal.pruneAllowlistSnapshots(root);
     }
     const health = journal.health();
     console.log(
