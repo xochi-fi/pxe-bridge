@@ -238,7 +238,12 @@ export function profileShaped(profile: unknown, pins: OxidePins = OXIDE_V6_MAINN
   ) return false;
   const current = profile["current"];
   const version = typeof current === "string" ? profile["versions"][current] : undefined;
-  if (!isObject(version) || !isObject(version["oxide"]) || !Array.isArray(version["assets"])) return false;
+  if (
+    !isObject(version) ||
+    !isObject(version["oxide"]) ||
+    !Array.isArray(version["assets"]) ||
+    version["assets"].length === 0
+  ) return false;
   const oxide = version["oxide"];
   if (
     !scalarShaped(oxide["manifestUrl"], pins.manifestUrl) ||

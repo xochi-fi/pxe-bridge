@@ -24,7 +24,14 @@ interface Profile {
   current: string;
   publishedAt: string;
   shared: { rollupVersion: string };
-  versions: Record<string, { gitSha: string; oxide: { expectedGitSha: string; manifestUrl: string; portal: string } }>;
+  versions: Record<
+    string,
+    {
+      gitSha: string;
+      oxide: { expectedGitSha: string; manifestUrl: string; portal: string };
+      assets: { symbol: string; portal: string; expectedGitSha: string }[];
+    }
+  >;
 }
 
 const read = (name: string): unknown =>
@@ -141,7 +148,9 @@ describe("Oxide pins", () => {
       halfPublished.current = "v999";
       const malformedProfile = profileFixture() as unknown as { current: string; shared: unknown; versions: Record<string, unknown> };
       malformedProfile.versions[malformedProfile.current] = { oxide: { portal: OXIDE_V6_MAINNET.bridge.portal } };
-      for (const profile of [{}, { shared: {}, versions: {} }, halfPublished, malformedProfile]) {
+      const emptyAssets = profileFixture();
+      cur(emptyAssets).assets = [];
+      for (const profile of [{}, { shared: {}, versions: {} }, halfPublished, malformedProfile, emptyAssets]) {
         const { fetch } = served({ profile });
         await expect(new OxidePinChecker({ fetch }).assertPinned()).rejects.toBeInstanceOf(OxidePinUnverified);
       }

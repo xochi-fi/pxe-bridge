@@ -537,13 +537,7 @@ export class OxideReadiness {
       console.error(`[oxide] L1 pin check: ${errorClass(cause)}`);
       if (!(cause instanceof EnclaveTrustRefused)) return unknown("oxide_l1_unknown");
       if (cause.reason === "portal_frozen") return known({ pinned: true, portalFrozen: true });
-      if (cause.reason !== "l1_not_pinned") return unknown("oxide_l1_unknown");
-    }
-    // Not pinned: the frozen flag is read on its own rather than assumed.
-    try {
-      return known({ pinned: false, portalFrozen: await this.options.l1Pins.portalFrozen() });
-    } catch (cause) {
-      console.error(`[oxide] Portal frozen read failed: ${errorClass(cause)}`);
+      if (cause.reason === "l1_not_pinned") return known({ pinned: false, portalFrozen: false });
       return unknown("oxide_l1_unknown");
     }
   }

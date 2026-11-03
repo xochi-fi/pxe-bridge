@@ -694,6 +694,26 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
     );
   });
 
+  it("keeps a proven L1 mismatch structural when the separate portal read would fail", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    let portalReads = 0;
+    const { readiness } = await readinessSetup({
+      l1Pins: {
+        assertPinned: () => Promise.reject(new EnclaveTrustRefused("l1_not_pinned", "PCR0_HASH")),
+        portalFrozen: () => {
+          portalReads += 1;
+          return Promise.reject(new Error("timeout"));
+        },
+      },
+    });
+    expect(await readiness.admit({ operationId: "l1-moved", recipient, amount: "1" })).toEqual({
+      kind: "refused",
+      reason: "enclave_refused:l1_not_pinned",
+      retryable: false,
+    });
+    expect(portalReads).toBe(0);
+  });
+
   it("a structural enclave refusal is permanent for the send it refused, and the next send is read fresh", async () => {
     // Permanent for the OPERATION (Riddler refunds it); the bridge latches
     // nothing: a failed check is never cached, so the next fresh send reads
