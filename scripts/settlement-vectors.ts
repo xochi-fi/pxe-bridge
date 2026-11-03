@@ -28,13 +28,18 @@
  * are this request's. Its effects are derived with the 6.0.0 hashes
  * (src/partial-note.ts), so `Shielded.PaymentProof.recipient_paid?/2` holds
  * over them for the request's terms.
+ *
+ * Every `expirationTimestamp` is the transaction's Aztec protocol expiry
+ * (`tx.data.expirationTimestamp`), deliberately NOT `validUntil`: the bridge
+ * enforces the two separately, and a consumer that equates them admits
+ * nothing (axol-io/Riddler#1428). See `transactionExpiry` in the output.
  */
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Fr } from "@aztec-labs/foundation/curves/bn254";
 import { AztecAddress } from "@aztec-labs/stdlib/aztec-address";
-import { DomainSeparator } from "@aztec-labs/constants";
+import { DomainSeparator, MAX_TX_LIFETIME } from "@aztec-labs/constants";
 import { encodeAbiParameters, keccak256, stringToHex, type Hex } from "viem";
 import { MAY_BROADCAST_VERSION } from "../src/may-broadcast.js";
 import {
@@ -103,6 +108,16 @@ export const SPEC_FIXTURE_A = {
 
 const OPERATION_ID = "riddler-shielded-00000000-0000-4000-8000-000000000001";
 const TX_HASH = "0x" + "7a".repeat(32);
+
+/**
+ * The prepared transaction's anchor block timestamp. The spending-limit
+ * entrypoint sets no expiry, so the PXE's tail output is the maximum,
+ * anchor + MAX_TX_LIFETIME: whole hours past the anchor, the shape
+ * `computeTxExpirationTimestamp` (@aztec-labs/pxe 6.0.0) rounds a lowered
+ * expiry to as well. Anchored 10,045 s before `validUntil`, mined 45 s later.
+ */
+export const ANCHOR_BLOCK_TIMESTAMP = 1899989955n;
+export const EXPIRATION_TIMESTAMP = (ANCHOR_BLOCK_TIMESTAMP + BigInt(MAX_TX_LIFETIME)).toString();
 const NETWORK: NetworkIdentity = { ...SPEC_FIXTURE_A.network };
 
 const PARAMS = {
@@ -207,7 +222,7 @@ async function finalizedPayout(): Promise<{ observation: Observation; partialNot
   const observation: Observation = {
     state: "finalized",
     txHash: TX_HASH,
-    expirationTimestamp: "1900000000",
+    expirationTimestamp: EXPIRATION_TIMESTAMP,
     executionResult: "success",
     blockHash: "0x" + "b1".repeat(32),
     blockNumber: "4242",
@@ -260,6 +275,44 @@ async function finalizedPayout(): Promise<{ observation: Observation; partialNot
       siloedValidityNullifier: evidence.siloedValidityNullifier.toString(),
       completionLogTag: evidence.completionLogTag.toString(),
     },
+  };
+}
+
+/**
+ * What a consumer must know about `expirationTimestamp`: the Aztec protocol
+ * expiry of the journaled transaction, the last block timestamp it can be
+ * included at. It is fixed when the transaction is proven, at most
+ * MAX_TX_LIFETIME past its anchor block, and independent of `validUntil`.
+ */
+function transactionExpiry(): Record<string, unknown> {
+  const expiry = BigInt(EXPIRATION_TIMESTAMP);
+  const validUntil = BigInt(PARAMS.validUntil);
+  const lifetime = BigInt(MAX_TX_LIFETIME);
+  if (expiry === validUntil || expiry < validUntil || expiry >= validUntil + lifetime) {
+    throw new Error("vector expiry must lie in (validUntil, validUntil + MAX_TX_LIFETIME)");
+  }
+  if ((expiry - ANCHOR_BLOCK_TIMESTAMP) % 3600n !== 0n) {
+    throw new Error("vector expiry must be whole hours past its anchor, as the PXE produces");
+  }
+  const prepared: Observation = {
+    state: "prepared",
+    txHash: TX_HASH,
+    expirationTimestamp: EXPIRATION_TIMESTAMP,
+    hold: "may_broadcast_unknown",
+  };
+  return {
+    note:
+      "expirationTimestamp is the transaction's Aztec protocol expiry (tx.data.expirationTimestamp), " +
+      "NOT validUntil. The PXE sets it to min(anchor + MAX_TX_LIFETIME, any lower expiry a call set, " +
+      "rounded down to whole hours, then 30 minutes, then seconds past the anchor). The bridge refuses " +
+      "to send past either bound, but a transaction sent before validUntil can be included until " +
+      "expirationTimestamp. A consumer admits validUntil <= expirationTimestamp < validUntil + " +
+      "maxTxLifetime and must not refund before expirationTimestamp has passed.",
+    maxTxLifetime: MAX_TX_LIFETIME,
+    anchorBlockTimestamp: ANCHOR_BLOCK_TIMESTAMP.toString(),
+    validUntil: PARAMS.validUntil,
+    expirationTimestamp: EXPIRATION_TIMESTAMP,
+    preparedObservation: prepared,
   };
 }
 
@@ -332,6 +385,7 @@ export async function buildSettlementVectors(): Promise<Record<string, unknown>>
       },
       partialNote: payout.partialNote,
     },
+    transactionExpiry: transactionExpiry(),
     getSettlement: {
       body: {
         jsonrpc: "2.0",

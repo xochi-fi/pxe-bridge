@@ -43,6 +43,7 @@ import {
   type ReadinessObserver,
   type ReadinessReason,
 } from "./readiness.js";
+import { assertJournaledIdentity, JournaledBytesMismatch } from "./tx-identity.js";
 
 export interface SettlementContext {
   journal: SettlementJournal;
@@ -264,9 +265,9 @@ class OperationGate implements BroadcastGate {
     const operationId = this.state.op.operationId;
 
     if (this.mode.kind !== "fresh") {
-      if (tx.txHash.toLowerCase() !== this.mode.attempt.txHash) {
-        throw new Error("journaled bytes no longer produce the journaled hash");
-      }
+      // The client re-identified the bytes; the hash and expiry it hands the
+      // gate must still be the journaled ones before Riddler is asked.
+      assertJournaledIdentity(tx, this.mode.attempt);
       if (tx.partialNoteRandomness !== this.mode.attempt.partialNoteRandomness) {
         throw new PartialNoteUnresolved("mismatch");
       }
@@ -1189,6 +1190,8 @@ async function runAttempt(
         amount: terms.amount,
         txBytes: s.journal.attemptBytes(op.operationId, mode.attempt.attempt),
         partialNoteRandomness: mode.attempt.partialNoteRandomness,
+        txHash: mode.attempt.txHash,
+        expirationTimestamp: mode.attempt.expirationTimestamp,
       };
     } catch (cause) {
       return journalFault(id, s, op.operationId, cause);
@@ -1309,6 +1312,19 @@ async function runAttempt(
     // fail the same check. Requote under a new operation id.
     console.error(`[rpc] Settlement not broadcast: partial-note randomness unresolved (${failure.detail})`);
     return notSubmitted(id, ctx, s, op, fingerprint, "partial_note_randomness_unresolved", false);
+  }
+  if (failure instanceof JournaledBytesMismatch && mode.kind === "resume") {
+    // Never sent and never asked about: the journaled bytes are not the
+    // journaled transaction. Sending them could land a transaction Riddler
+    // never bound; re-proving under this operation would carry a new hash.
+    // The attempt stays prepared, as held, for an operator; every retry
+    // answers the same.
+    console.error(
+      `[rpc] Journaled bytes of attempt ${mode.attempt.attempt} are not the journaled transaction (${failure.detail}); nothing sent`,
+    );
+    const observation: Observation = { state: "unknown", reason: "journaled_bytes_mismatch" };
+    await audit(ctx, observation);
+    return answer(id, { operationId: op.operationId, fingerprint }, observation);
   }
   if (failure instanceof JournalWriteError || failure instanceof JournalUnreadableError) {
     return journalFault(id, s, op.operationId, failure);

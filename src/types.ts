@@ -51,6 +51,10 @@ export interface PreparedTransaction {
 export interface JournaledTransfer extends TransferParams {
   txBytes: Buffer;
   partialNoteRandomness: string;
+  /** The journaled transaction hash (lowercase hex) the bytes must hash to. */
+  txHash: string;
+  /** The journaled protocol expiry (decimal unix seconds) the bytes must carry. */
+  expirationTimestamp: string;
 }
 
 /**
@@ -193,8 +197,11 @@ export interface IAztecClient {
    * Broadcasts journaled bytes exactly as prepared, through `gate`. Never
    * rebuilds or re-proves: the same bytes carry the same transaction hash and
    * nullifiers, so they can be included at most once. Refuses, before the
-   * gate, bytes whose partial-note commitment the journaled randomness does
-   * not open for the journaled recipient (`PartialNoteUnresolved`).
+   * gate, bytes that are not the journaled transaction (`JournaledBytesMismatch`:
+   * their hash recomputed from their data must equal both the stored prefix
+   * and the journaled hash, and their expiry the journaled expiry), and bytes
+   * whose partial-note commitment the journaled randomness does not open for
+   * the journaled recipient (`PartialNoteUnresolved`).
    */
   broadcastPrepared(prepared: JournaledTransfer, gate: BroadcastGate): Promise<TransferOutcome>;
   /**
