@@ -77,7 +77,7 @@ const gate: MayBroadcastClient = async (query) => {
   return { decision: "allow", detail: "harness" };
 };
 
-const journal = OxideJournal.open(journalPath);
+const journal = OxideJournal.open(journalPath, { allowCreate: run === "1" });
 const before = journal.get("op-1");
 log("journal opened", {
   state: before?.state ?? "absent",
