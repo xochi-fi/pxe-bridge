@@ -16,6 +16,7 @@ import {
   type Address,
   type Hex,
 } from "viem";
+import { OXIDE_V6_MAINNET } from "./pins.js";
 
 export const OXIDE_DEPOSIT_CHAIN_ID = 1;
 export const OXIDE_DEPOSIT_PORTAL = getAddress(
@@ -31,7 +32,8 @@ export const OXIDE_DEPOSIT_SENDER =
 export const OXIDE_DEPOSIT_ROLLUP_VERSION = 2_070_860_440n;
 export const OXIDE_DEPOSIT_PER_TX_CAP = 1_000n * 10n ** 18n;
 export const OXIDE_DEPOSIT_ROLLING_CAP = 10_000n * 10n ** 18n;
-export const OXIDE_DEPOSIT_NOTE_MAX = 5_166n * 10n ** 18n;
+export const OXIDE_DEPOSIT_NOTE_MAX =
+  OXIDE_V6_MAINNET.bridge.l2TokenImmutables.maxNoteAmount;
 export const OXIDE_DEPOSIT_WINDOW_MS = 24 * 60 * 60 * 1_000;
 
 export const OXIDE_PORTAL_ABI = parseAbi([
@@ -381,9 +383,9 @@ export async function verifyOxideDeposit(
       `wrong portal rollup version: expected ${OXIDE_DEPOSIT_ROLLUP_VERSION}, got ${state.rollupVersion}`,
     );
   }
-  if (state.txAmountCap !== OXIDE_DEPOSIT_PER_TX_CAP) {
+  if (state.txAmountCap !== OXIDE_DEPOSIT_NOTE_MAX) {
     throw new Error(
-      `wrong portal transaction cap: expected ${OXIDE_DEPOSIT_PER_TX_CAP}, got ${state.txAmountCap}`,
+      `wrong portal transaction cap: expected ${OXIDE_DEPOSIT_NOTE_MAX}, got ${state.txAmountCap}`,
     );
   }
   if (state.depositMessageIndex !== event.index + 1n) {
