@@ -437,3 +437,58 @@ a public-data witness, so the node is trusted: point it at a node you run, over
 https, independent of the one the bridge uses.
 
 See `SECURITY.md` for the incident runbook.
+
+## Oxide mode (`PXE_BRIDGE_SEND_MODE=oxide`)
+
+Oxide mode pays OXDAI through the Oxide sender (`src/oxide/`). It uses the
+standard Schnorr account (the approved Oxide sender `0x15ff...cb22`), not the
+spending-limit account. It serves only `aztec_createNote` with
+`sendMode: "oxide"`; a `spending_limit` request is refused with `-32602`
+`send_mode_unsupported`, and a spending-limit bridge refuses `oxide` the same
+way. The wire contract is in
+[settlement-operations.md](settlement-operations.md#sendmode-and-the-oxide-payout-proof-040-pxe-bridge84).
+
+`PXE_BRIDGE_SEND_MODE` takes `spending_limit` (also the value when unset: the
+design-A bridge, unchanged) or `oxide`; any other value refuses to start.
+
+**Variables (Oxide mode):**
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `PXE_BRIDGE_JOURNAL` | yes | The settlement journal, bound to the standard account as in any mode |
+| `PXE_BRIDGE_OXIDE_JOURNAL` | yes | The Oxide journal: its own SQLite file, never the settlement journal's path (compared after `path.resolve`); directory 0700, files 0600 |
+| `PXE_BRIDGE_OXIDE_L1_RPC_URL` | yes | Ethereum mainnet RPC, `http(s)`, view calls only (TeeRegistry, CertManager, OxidePortal) |
+| `PXE_BRIDGE_OXIDE_TOKEN_ARTIFACT` | yes | The OxideToken artifact `npm run build:oxide-token` writes; refused unless it is the OXDAI class `0x27df40f9...3f949` |
+| `PXE_BRIDGE_SETTLEMENT_CORRIDOR` | yes | The corridor (manifest rev 2); a request naming another corridor or network digest is `not_submitted` `corridor_mismatch` / `network_mismatch` |
+| `PXE_BRIDGE_MAY_BROADCAST_URL` / `_TOKEN` | yes | Riddler's may-broadcast endpoint, asked for each operation's v2 fingerprint |
+| `PXE_BRIDGE_OXIDE_ALLOWLIST_SEED` / `_RECIPIENTS` | yes | The private recipient allowlist ([settlement-operations.md](settlement-operations.md#oxide-mode-the-private-allowlist-xochi751-xochi775-option-a)) |
+| `PXE_BRIDGE_OXIDE_MAX_PER_TX` | no, 1,000 DAI | Off-chain per-transaction cap, base units; never above the token's 5,166 DAI note cap |
+| `PXE_BRIDGE_OXIDE_DAILY_LIMIT` | no, 10,000 DAI | Rolling-24h cap, base units, re-checked inside the may-broadcast mark |
+| `PXE_BRIDGE_ACCOUNT_ADDRESS` | production | The Oxide sender's recorded address, as for any standard account |
+
+**Startup refuses**, before a key is fetched or a node is touched
+(`src/oxide/config.ts`):
+- an unknown `PXE_BRIDGE_SEND_MODE`;
+- any `PXE_BRIDGE_OXIDE_*` variable without `PXE_BRIDGE_SEND_MODE=oxide`,
+  because a spending-limit bridge would silently ignore it;
+- in Oxide mode, any spending-limit or generic-limit variable
+  (`PXE_BRIDGE_SPENDING_LIMIT_ADMIN`, `_SPENDING_LIMIT_TOKEN`,
+  `PXE_BRIDGE_ACCOUNT_DEPLOYMENT`, `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM`,
+  `PXE_BRIDGE_ALLOWLIST_RECIPIENTS`, `PXE_BRIDGE_MAX_AMOUNT`,
+  `PXE_BRIDGE_DAILY_LIMIT`, `PXE_BRIDGE_COOLDOWN_*`). Oxide caps are
+  `PXE_BRIDGE_OXIDE_MAX_PER_TX` and `_DAILY_LIMIT`;
+- a missing required variable, one file for both journals, a non-http(s) L1
+  RPC, or caps that exceed the note cap or each other.
+
+After the wallet connects, `createOxideSender` also refuses (and the process
+exits) unless L1, the Oxide manifest and the zk.money profile describe the
+pinned v6 deployment and the artifact is the OXDAI class. `/ready` reports
+`initializing` until then.
+
+**Oxide journal schema 2.** Each row holds the operation's v2 terms
+(`sendMode: "oxide"`) and their v2 request fingerprint. A phase-1 (schema 1)
+Oxide journal, written by the unreleased `createOxideSender` callers before
+0.4.0, opens with writes disabled (`unknown_schema_version`); no release
+wrote one. Start Oxide mode on a fresh file. Never reuse a phase-1 journal,
+and never delete a schema-2 journal that holds unresolved operations: it is
+the only record of what may have been broadcast.
