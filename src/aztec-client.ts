@@ -371,6 +371,8 @@ export const DEPLOYER_CLAIM_WITHOUT_SPENDING_LIMIT_ERROR =
  * out so a single-wallet deployment keeps reading the stores it already has.
  */
 export const DEFAULT_WALLET_DATA_DIRECTORY = "aztec-wallet-data";
+/** Absolute wallet directory shared by the bridge and offline maintenance tools. */
+export const WALLET_DATA_DIRECTORY_ENV = "PXE_BRIDGE_WALLET_DATA_DIRECTORY";
 
 /** Canonical data directories held by a wallet created in this process. */
 const claimedWalletDirectories = new Set<string>();
@@ -864,7 +866,10 @@ export class AztecClient implements IAztecClient {
       this.sponsoredFpcReason = setting.reason;
     }
     this.secretKey = secretKey;
-    this.dataDirectory = options.dataDirectory ?? DEFAULT_WALLET_DATA_DIRECTORY;
+    const configuredDataDirectory = process.env[WALLET_DATA_DIRECTORY_ENV]?.trim();
+    this.dataDirectory =
+      options.dataDirectory ??
+      (configuredDataDirectory ? configuredDataDirectory : DEFAULT_WALLET_DATA_DIRECTORY);
     this.expectedAccountAddress = options.expectedAccountAddress;
     this.requireExistingAccount = options.requireExistingAccount ?? false;
   }
