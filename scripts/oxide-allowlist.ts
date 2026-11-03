@@ -6,10 +6,10 @@
  * lives only in the bridge's secret environment, and the bridge signs
  * Membership and RootUpdate readiness records over its root. So this script
  * changes nothing by itself. It checks the change, then prints the next
- * PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS value, and ONLY that value, on
- * stdout, so it can be piped straight into the secret store. Every other line
- * goes to stderr, and none of them names a recipient, a position, the set's
- * size or its root: keep stdout out of shell history, logs and tickets.
+ * owner-only recipients-file content, and ONLY that JSON, on stdout, so it
+ * can be piped straight into the secret store. Every other line goes to
+ * stderr, and none of them names a recipient, a position, the set's size or
+ * its root: keep stdout out of shell history, logs and tickets.
  *
  * Two ways to supply the secrets and the change:
  *
@@ -48,8 +48,8 @@
  * as an addition to anyone who ever held an earlier set.
  *
  * Applying: run this with the bridge STOPPED (its journal holds an exclusive
- * lock while it runs, so the check below cannot read it), store the printed
- * value as PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS, and start the bridge. It
+ * lock while it runs), store the printed JSON in the secret that is mounted
+ * at `PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS_FILE`, and start the bridge. It
  * publishes the new root's RootUpdate from the first finalized block above
  * the previous one, and the Worker marks an approved binding ready on its
  * next refresh.
@@ -271,8 +271,8 @@ async function main(): Promise<number> {
   console.error(`${TAG} ${change.mode}: checked against the bridge's newest RootUpdate`);
   console.error(`${TAG} root changes: ${after.root !== before.root ? "yes" : "NO"}`);
   console.error(
-    `${TAG} stdout is the next ${RECIPIENTS_ENV}. It is SECRET: store it only in ` +
-      "the bridge's secret store, then restart the bridge.",
+    `${TAG} stdout is the next owner-only recipients-file content. It is SECRET: ` +
+      "store it only in the bridge's secret store, then restart the bridge.",
   );
   process.stdout.write(`${JSON.stringify(next)}\n`);
   return 0;

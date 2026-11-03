@@ -161,16 +161,97 @@ export function profileMismatches(profile: unknown, pins: OxidePins = OXIDE_V6_M
   return out;
 }
 
-/** The manifest's shape: an object with a `deployments` array. Which deployment it holds is a pin question. */
-export function manifestShaped(manifest: unknown): boolean {
-  return isObject(manifest) && Array.isArray(manifest["deployments"]);
+/** A scalar with the same wire shape as a pinned value, before its value is compared. */
+function scalarShaped(actual: unknown, expected: string | number | bigint): boolean {
+  if (typeof expected === "bigint" || typeof expected === "number") {
+    return (typeof actual === "string" && /^(?:0|[1-9]\d*)$/.test(actual)) ||
+      (typeof actual === "number" && Number.isSafeInteger(actual) && actual >= 0);
+  }
+  if (/^0x[0-9a-f]+$/i.test(expected)) {
+    return typeof actual === "string" && new RegExp(`^0x[0-9a-f]{${expected.length - 2}}$`, "i").test(actual);
+  }
+  if (/^[0-9a-f]+$/i.test(expected)) {
+    return typeof actual === "string" && new RegExp(`^[0-9a-f]{${expected.length}}$`, "i").test(actual);
+  }
+  if (expected.startsWith("https://")) {
+    return typeof actual === "string" && actual.startsWith("https://");
+  }
+  return typeof actual === "string" && actual.length > 0;
 }
 
-/** The profile's shape: `shared`, `versions`, and a `current` that names one of them. */
-export function profileShaped(profile: unknown): boolean {
+function bridgeShaped(bridge: unknown, pins: OxidePins): bridge is Json {
+  if (!isObject(bridge) || typeof bridge["key"] !== "string") return false;
+  for (const [actual, expected] of [
+    [bridge["token"], pins.bridge.underlying],
+    [bridge["underlying"], pins.bridge.underlying],
+    [bridge["portal"], pins.bridge.portal],
+    [bridge["l2Token"], pins.bridge.l2Token],
+  ] as const) {
+    if (!scalarShaped(actual, expected)) return false;
+  }
+  const im = bridge["l2TokenImmutables"];
+  if (!isObject(im)) return false;
+  const expected = pins.bridge.l2TokenImmutables;
+  return (
+    scalarShaped(im["portal"], expected.portal) &&
+    scalarShaped(im["teeRegistry"], expected.teeRegistry) &&
+    scalarShaped(im["name"], expected.name) &&
+    scalarShaped(im["symbol"], expected.symbol) &&
+    scalarShaped(im["decimals"], expected.decimals) &&
+    scalarShaped(im["maxNoteAmount"], expected.maxNoteAmount)
+  );
+}
+
+function deploymentShaped(deployment: unknown, pins: OxidePins): deployment is Json {
+  if (!isObject(deployment) || typeof deployment["deploymentId"] !== "string") return false;
+  for (const [actual, expected] of [
+    [deployment["gitSha"], pins.gitSha],
+    [deployment["chainId"], pins.l1ChainId],
+    [deployment["rollupVersion"], pins.rollupVersion],
+    [deployment["teeRegistry"], pins.teeRegistry],
+    [deployment["certManager"], pins.certManager],
+    [deployment["pcr0"], pins.pcr0],
+    [deployment["enclaveUrl"], pins.enclaveUrl],
+  ] as const) {
+    if (!scalarShaped(actual, expected)) return false;
+  }
+  return Array.isArray(deployment["bridges"]) && deployment["bridges"].length > 0 &&
+    deployment["bridges"].every((bridge) => bridgeShaped(bridge, pins));
+}
+
+/** A complete releases manifest. Missing or malformed nested fields are unverified, never "moved". */
+export function manifestShaped(manifest: unknown, pins: OxidePins = OXIDE_V6_MAINNET): boolean {
+  return (
+    isObject(manifest) &&
+    Array.isArray(manifest["deployments"]) &&
+    manifest["deployments"].length > 0 &&
+    manifest["deployments"].every((deployment) => deploymentShaped(deployment, pins))
+  );
+}
+
+/** A complete current wallet profile. Missing nested pin fields are unverified, never "moved". */
+export function profileShaped(profile: unknown, pins: OxidePins = OXIDE_V6_MAINNET): boolean {
   if (!isObject(profile) || !isObject(profile["shared"]) || !isObject(profile["versions"])) return false;
+  if (
+    !scalarShaped(profile["shared"]["l1ChainId"], pins.l1ChainId) ||
+    !scalarShaped(profile["shared"]["rollupVersion"], pins.rollupVersion)
+  ) return false;
   const current = profile["current"];
-  return typeof current === "string" && isObject(profile["versions"][current]);
+  const version = typeof current === "string" ? profile["versions"][current] : undefined;
+  if (!isObject(version) || !isObject(version["oxide"]) || !Array.isArray(version["assets"])) return false;
+  const oxide = version["oxide"];
+  if (
+    !scalarShaped(oxide["manifestUrl"], pins.manifestUrl) ||
+    !scalarShaped(oxide["portal"], pins.bridge.portal) ||
+    !scalarShaped(oxide["expectedGitSha"], pins.gitSha)
+  ) return false;
+  return version["assets"].every(
+    (asset) =>
+      isObject(asset) &&
+      typeof asset["symbol"] === "string" &&
+      scalarShaped(asset["portal"], pins.bridge.portal) &&
+      scalarShaped(asset["expectedGitSha"], pins.gitSha),
+  );
 }
 
 export interface PinCheckerOptions {
@@ -197,6 +278,8 @@ export class OxidePinChecker {
   private readonly ttlMs: number;
   private readonly timeoutMs: number;
   private readonly pins: OxidePins;
+  /** Only the newest-started read may populate the success cache. */
+  private generation = 0;
 
   constructor(options: PinCheckerOptions = {}) {
     this.fetchImpl = options.fetch ?? ((url, init) => fetch(url, { signal: init.signal, redirect: "error" }));
@@ -217,17 +300,22 @@ export class OxidePinChecker {
     const at = this.now();
     if (this.verifiedAt !== undefined && at - this.verifiedAt < this.ttlMs) return;
     this.verifiedAt = undefined;
+    const generation = ++this.generation;
     const [manifest, profile] = await Promise.all([
       this.read(this.pins.manifestUrl),
       this.read(this.pins.profileUrl),
     ]);
-    if (!manifestShaped(manifest)) throw new OxidePinUnverified(`${this.pins.manifestUrl}: not a releases manifest`);
-    if (!profileShaped(profile)) throw new OxidePinUnverified(`${this.pins.profileUrl}: not a wallet profile`);
+    if (!manifestShaped(manifest, this.pins)) {
+      throw new OxidePinUnverified(`${this.pins.manifestUrl}: not a complete releases manifest`);
+    }
+    if (!profileShaped(profile, this.pins)) {
+      throw new OxidePinUnverified(`${this.pins.profileUrl}: not a complete wallet profile`);
+    }
     const manifestOff = manifestMismatches(manifest, this.pins);
     if (manifestOff.length > 0) throw new OxidePinMismatch("manifest", manifestOff);
     const profileOff = profileMismatches(profile, this.pins);
     if (profileOff.length > 0) throw new OxidePinMismatch("profile", profileOff);
-    this.verifiedAt = at;
+    if (generation === this.generation) this.verifiedAt = at;
   }
 
   private async read(url: string): Promise<unknown> {

@@ -1,5 +1,5 @@
 import { createServer, request as httpRequest } from "node:http";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -23,6 +23,8 @@ import { known as knownFact, unknown as unknownFact, type ReadinessFact } from "
 import {
   OxideAllowlist,
   OxideAllowlistConfigError,
+  OXIDE_ALLOWLIST_RECIPIENTS_FILE_ENV,
+  OXIDE_ALLOWLIST_SEED_FILE_ENV,
   oxideAllowlistFromEnv,
   planOxideAllowlistChange,
 } from "../src/oxide/allowlist.js";
@@ -324,11 +326,9 @@ describe("Oxide allowlist configuration", { timeout: 60_000 }, () => {
     }
   });
 
-  it("requires both variables and refuses the spending-limit seed", async () => {
-    await expect(oxideAllowlistFromEnv({})).rejects.toThrow(/PXE_BRIDGE_OXIDE_ALLOWLIST_SEED is required/);
-    await expect(oxideAllowlistFromEnv({ PXE_BRIDGE_OXIDE_ALLOWLIST_SEED: SEED })).rejects.toThrow(
-      /PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS is required/,
-    );
+  it("requires both secrets and refuses the spending-limit seed", async () => {
+    await expect(oxideAllowlistFromEnv({})).rejects.toThrow(/SEED_FILE/);
+    await expect(oxideAllowlistFromEnv({ PXE_BRIDGE_OXIDE_ALLOWLIST_SEED: SEED })).rejects.toThrow(/RECIPIENTS_FILE/);
     await expect(
       oxideAllowlistFromEnv({
         PXE_BRIDGE_OXIDE_ALLOWLIST_SEED: SEED,
@@ -343,6 +343,26 @@ describe("Oxide allowlist configuration", { timeout: 60_000 }, () => {
     expect(empty.admits(recipient)).toBe(false);
   });
 
+  it("requires owner-only secret files in production", async () => {
+    await expect(
+      oxideAllowlistFromEnv({
+        NODE_ENV: "production",
+        PXE_BRIDGE_OXIDE_ALLOWLIST_SEED: SEED,
+        PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS: "[]",
+      }),
+    ).rejects.toThrow(/not permitted in production/);
+    const seedFile = `${tempJournalPath()}.seed`;
+    const recipientsFile = `${tempJournalPath()}.recipients`;
+    writeFileSync(seedFile, SEED, { mode: 0o600 });
+    writeFileSync(recipientsFile, JSON.stringify([{ address: recipient, index: 611 }]), { mode: 0o600 });
+    const loaded = await oxideAllowlistFromEnv({
+      NODE_ENV: "production",
+      [OXIDE_ALLOWLIST_SEED_FILE_ENV]: seedFile,
+      [OXIDE_ALLOWLIST_RECIPIENTS_FILE_ENV]: recipientsFile,
+    });
+    expect(loaded.admits(recipient)).toBe(true);
+  });
+
   it("plans one add or revoke with update-allowlist's checks", () => {
     const current = [{ address: OTHER_MEMBER, index: 3 }];
     expect(planOxideAllowlistChange(current, { mode: "add", address: recipient, index: 611 })).toEqual([
@@ -350,7 +370,7 @@ describe("Oxide allowlist configuration", { timeout: 60_000 }, () => {
       { address: recipient.toLowerCase(), index: 611 },
     ]);
     expect(() => planOxideAllowlistChange(current, { mode: "add", address: recipient, index: 3 })).toThrow(
-      /position 3 is already occupied/,
+      /slot is already occupied/,
     );
     expect(() => planOxideAllowlistChange(current, { mode: "add", address: OTHER_MEMBER, index: 9 })).toThrow(
       /already in the set/,
@@ -372,7 +392,7 @@ async function readinessSetup(
 ) {
   readinessAllowlist ??= OxideAllowlist.build(SEED, [{ address: recipient, index: 611 }]);
   const allowlist = await readinessAllowlist;
-  const journal = OxideJournal.open(tempJournalPath());
+  const journal = OxideJournal.open(tempJournalPath(), { allowCreate: true });
   const options: OxideReadinessOptions = {
     allowlist,
     account: SENDER,
@@ -447,15 +467,40 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
         journal: { writable: true },
       },
     });
-    expect(await readiness.admit({ recipient, amount: (380n * DAI).toString() })).toEqual({ kind: "admitted" });
-    expect(await readiness.admit({ recipient, amount: (380n * DAI + 1n).toString() })).toEqual({
+    expect(await readiness.admit({ operationId: "admit-450", recipient, amount: (380n * DAI).toString() })).toEqual({
+      kind: "admitted",
+    });
+    expect(await readiness.admit({ operationId: "admit-451", recipient, amount: (380n * DAI + 1n).toString() })).toEqual({
       kind: "not_ready",
       reasons: ["private_balance_insufficient"],
     });
   });
 
+  it("excludes only the admitted operation's own durable claim from private-balance commitments", async () => {
+    const { readiness, journal } = await readinessSetup({
+      balance: { privateBalance: async () => ({ observed: 100n * DAI, syncedBlock: 100 }) },
+    });
+    const ownTerms = oxideTerms(
+      OxideSendRequestSchema.parse(request({ recipient, amount: (80n * DAI).toString(), validUntil: NOW + 600 })),
+      OXIDE_V6_MAINNET.bridge.l2Token,
+    );
+    journal.claim("own-operation", ownTerms);
+    expect(
+      await readiness.admit({ operationId: "own-operation", recipient, amount: (80n * DAI).toString() }),
+    ).toEqual({ kind: "admitted" });
+
+    const peerTerms = oxideTerms(
+      OxideSendRequestSchema.parse(request({ recipient, amount: (30n * DAI).toString(), validUntil: NOW + 600 })),
+      OXIDE_V6_MAINNET.bridge.l2Token,
+    );
+    journal.claim("peer-operation", peerTerms);
+    expect(
+      await readiness.admit({ operationId: "own-operation", recipient, amount: (80n * DAI).toString() }),
+    ).toEqual({ kind: "not_ready", reasons: ["private_balance_insufficient"] });
+  });
+
   it("counts a mined attempt only while the balance read has not seen its block", async () => {
-    const journal = OxideJournal.open(tempJournalPath());
+    const journal = OxideJournal.open(tempJournalPath(), { allowCreate: true });
     const terms = oxideTerms(
       OxideSendRequestSchema.parse(request({ recipient, amount: (50n * DAI).toString(), validUntil: NOW + 600 })),
       OXIDE_V6_MAINNET.bridge.l2Token,
@@ -524,7 +569,10 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
     expect(projection.reasons).toEqual([]);
     expect(projection.admission).toEqual({ freshSend: false, reasons: [reason] });
     expect(projection.oxide).toMatchObject(fact);
-    expect(await readiness.admit({ recipient, amount: "1" })).toEqual({ kind: "not_ready", reasons: [reason] });
+    expect(await readiness.admit({ operationId: "admit-527", recipient, amount: "1" })).toEqual({
+      kind: "not_ready",
+      reasons: [reason],
+    });
   });
 
   // The admission verdict for each health reason: a STRUCTURAL one (the live
@@ -641,7 +689,7 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
     expect(projection.reasons).toEqual([reason]);
     expect(projection.admission).toEqual({ freshSend: false, reasons: [] });
     expect(projection.oxide).toMatchObject(fact);
-    expect(await readiness.admit({ recipient, amount: "1" })).toEqual(
+    expect(await readiness.admit({ operationId: "admit-644", recipient, amount: "1" })).toEqual(
       verdict === "transient" ? { kind: "not_ready", reasons: [reason] } : { kind: "refused", reason: verdict, retryable: false },
     );
   });
@@ -658,13 +706,15 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
           state.refuse ? Promise.reject(new EnclaveTrustRefused("pcr0_hash_mismatch", "registry")) : Promise.resolve(),
       },
     });
-    expect(await readiness.admit({ recipient, amount: "1" })).toEqual({
+    expect(await readiness.admit({ operationId: "admit-661", recipient, amount: "1" })).toEqual({
       kind: "refused",
       reason: "enclave_refused:pcr0_hash_mismatch",
       retryable: false,
     });
     state.refuse = false;
-    expect(await readiness.admit({ recipient, amount: "1" })).toEqual({ kind: "admitted" });
+    expect(await readiness.admit({ operationId: "admit-667", recipient, amount: "1" })).toEqual({
+      kind: "admitted",
+    });
   });
 
   it("classifies an enclave refusal from its own read, not from a concurrent /ready's", async () => {
@@ -676,10 +726,16 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
     const { readiness } = await readinessSetup({
       enclave: { attestEnclave: () => Promise.reject(new EnclaveTrustRefused(answers.shift()!, "x")) },
     });
-    const [transient, ready1] = await Promise.all([readiness.admit({ recipient, amount: "1" }), readiness.observe()]);
+    const [transient, ready1] = await Promise.all([
+      readiness.admit({ operationId: "admit-679", recipient, amount: "1" }),
+      readiness.observe(),
+    ]);
     expect(transient).toEqual({ kind: "not_ready", reasons: ["enclave_attestation_refused"] });
     expect(ready1.ready).toBe(false);
-    const [permanent, ready2] = await Promise.all([readiness.admit({ recipient, amount: "1" }), readiness.observe()]);
+    const [permanent, ready2] = await Promise.all([
+      readiness.admit({ operationId: "admit-682", recipient, amount: "1" }),
+      readiness.observe(),
+    ]);
     expect(permanent).toEqual({ kind: "refused", reason: "enclave_refused:pcr0_not_pinned", retryable: false });
     expect(ready2.ready).toBe(false);
   });
@@ -711,6 +767,23 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
     const third = await readiness.observe();
     expect(third.reasons).toEqual(["enclave_attestation_refused"]);
     expect(calls).toBe(3);
+  });
+
+  it("aborts a hung observation without latching future observations", async () => {
+    const { readiness } = await readinessSetup({
+      balanceWaitMs: 1,
+      balance: { privateBalance: () => new Promise<never>(() => {}) },
+    });
+    const controller = new AbortController();
+    const hung = readiness.observe(controller.signal);
+    controller.abort();
+    await expect(hung).rejects.toThrow(/aborted/);
+    const recovered = await readiness.observe();
+    expect(recovered).toMatchObject({
+      ready: true,
+      admission: { freshSend: false, reasons: ["private_balance_unknown"] },
+      oxide: { privateBalance: { state: "unknown", reason: "private_balance_unknown" } },
+    });
   });
 
   it("counts a claimed operation as committed while its validity bound is open", async () => {
@@ -792,7 +865,9 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
     }));
     const before = await readiness.observe();
     expect(before).toMatchObject({ ready: true, admission: { freshSend: true, reasons: [] } });
-    expect(await readiness.admit({ recipient, amount: balance.toString() })).toEqual({ kind: "admitted" });
+    expect(await readiness.admit({ operationId: "admit-795", recipient, amount: balance.toString() })).toEqual({
+      kind: "admitted",
+    });
 
     const terms = oxideTerms(
       OxideSendRequestSchema.parse(request({ recipient, amount: balance.toString(), validUntil: NOW + 600 })),
@@ -884,7 +959,7 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
     // Within the documented 60 s bound /ready may still serve the cached pin...
     expect((await readiness.observe()).ready).toBe(true);
     // ...but a fresh send never relies on it.
-    expect(await readiness.admit({ recipient, amount: "1" })).toEqual({
+    expect(await readiness.admit({ operationId: "admit-887", recipient, amount: "1" })).toEqual({
       kind: "not_ready",
       reasons: ["oxide_portal_frozen"],
     });
@@ -910,21 +985,25 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
       evidence: evidenceFor({ recipient, amount: 600n * DAI }),
     });
     journal.markMayBroadcast("op-1", attempt, terms.amount, caps);
-    expect(await readiness.admit({ recipient, amount: (1_000n * DAI + 1n).toString() })).toEqual({
+    expect(
+      await readiness.admit({ operationId: "admit-913", recipient, amount: (1_000n * DAI + 1n).toString() }),
+    ).toEqual({
       kind: "refused",
       reason: "amount_over_per_tx_cap",
       retryable: false,
     });
-    expect(await readiness.admit({ recipient, amount: "0" })).toEqual({
+    expect(await readiness.admit({ operationId: "admit-918", recipient, amount: "0" })).toEqual({
       kind: "refused",
       reason: "amount_invalid",
       retryable: false,
     });
-    expect(await readiness.admit({ recipient, amount: (401n * DAI).toString() })).toEqual({
+    expect(await readiness.admit({ operationId: "admit-923", recipient, amount: (401n * DAI).toString() })).toEqual({
       kind: "not_ready",
       reasons: ["spend_window_exhausted"],
     });
-    expect(await readiness.admit({ recipient, amount: (400n * DAI).toString() })).toEqual({ kind: "admitted" });
+    expect(await readiness.admit({ operationId: "admit-927", recipient, amount: (400n * DAI).toString() })).toEqual({
+      kind: "admitted",
+    });
   });
 
   it("never reports an unread balance or runway as zero", async () => {
@@ -948,7 +1027,7 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
         },
       },
     });
-    expect(await readiness.admit({ recipient: OTHER_MEMBER, amount: "1" })).toEqual({
+    expect(await readiness.admit({ operationId: "admit-951", recipient: OTHER_MEMBER, amount: "1" })).toEqual({
       kind: "refused",
       reason: "recipient_not_allowlisted",
       retryable: false,
@@ -997,7 +1076,7 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
     });
     const projection = await readiness.observe();
     const outsider = "0x" + "0f".repeat(32);
-    const refusal = await readiness.admit({ recipient: outsider, amount: "1" });
+    const refusal = await readiness.admit({ operationId: "admit-1000", recipient: outsider, amount: "1" });
     const app = createApp(new FakeAztecClient(), { apiKey: "ready-key", oxideReadiness: readiness });
     await new Promise<void>((resolve) => app.listen(0, "127.0.0.1", resolve));
     const address = app.address();

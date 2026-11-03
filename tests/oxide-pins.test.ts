@@ -110,7 +110,7 @@ describe("Oxide pins", () => {
 
     it("refuses a mismatch and never caches a failure", async () => {
       const manifest = manifestFixture();
-      d0(manifest).gitSha = "00";
+      d0(manifest).gitSha = "0".repeat(40);
       const { fetch, calls } = served({ manifest });
       const checker = new OxidePinChecker({ fetch });
       await expect(checker.assertPinned()).rejects.toBeInstanceOf(OxidePinMismatch);
@@ -129,13 +129,19 @@ describe("Oxide pins", () => {
       // A mismatch refuses sends permanently, so only a file that describes
       // a deployment may say it moved: a CDN error object served as JSON, an
       // empty document, or a profile whose `current` names no version.
-      for (const manifest of [{}, { error: "upstream timeout" }, [], "ok"]) {
+      const malformedManifest = manifestFixture() as unknown as { deployments: unknown[] };
+      // The fixture is intentionally corrupted after its checked loader.
+      const malformedDeployment = malformedManifest.deployments[0] as { bridges: unknown[] };
+      malformedDeployment.bridges = [{ l2Token: OXIDE_V6_MAINNET.bridge.l2Token }];
+      for (const manifest of [{}, { error: "upstream timeout" }, [], "ok", malformedManifest]) {
         const { fetch } = served({ manifest });
         await expect(new OxidePinChecker({ fetch }).assertPinned()).rejects.toBeInstanceOf(OxidePinUnverified);
       }
       const halfPublished = profileFixture();
       halfPublished.current = "v999";
-      for (const profile of [{}, { shared: {}, versions: {} }, halfPublished]) {
+      const malformedProfile = profileFixture() as unknown as { current: string; shared: unknown; versions: Record<string, unknown> };
+      malformedProfile.versions[malformedProfile.current] = { oxide: { portal: OXIDE_V6_MAINNET.bridge.portal } };
+      for (const profile of [{}, { shared: {}, versions: {} }, halfPublished, malformedProfile]) {
         const { fetch } = served({ profile });
         await expect(new OxidePinChecker({ fetch }).assertPinned()).rejects.toBeInstanceOf(OxidePinUnverified);
       }
@@ -147,6 +153,38 @@ describe("Oxide pins", () => {
         source: "manifest",
         fields: ["deployments[dep-v6]"],
       });
+    });
+
+    it("an older success cannot cache over a newer mismatch", async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let hold = true;
+      let mismatch = false;
+      let calls = 0;
+      const fetch = async (url: string) => {
+        calls += 1;
+        const thisMismatch = mismatch;
+        if (hold) await gate;
+        const manifest = manifestFixture();
+        if (thisMismatch) d0(manifest).gitSha = "0".repeat(40);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => (url === OXIDE_V6_MAINNET.manifestUrl ? manifest : profileFixture()),
+        };
+      };
+      const checker = new OxidePinChecker({ fetch, ttlMs: 60_000 });
+      const older = checker.assertPinned();
+      await Promise.resolve();
+      hold = false;
+      mismatch = true;
+      await expect(checker.assertPinned()).rejects.toBeInstanceOf(OxidePinMismatch);
+      release();
+      await expect(older).resolves.toBeUndefined();
+      await expect(checker.assertPinned()).rejects.toBeInstanceOf(OxidePinMismatch);
+      expect(calls).toBeGreaterThanOrEqual(6);
     });
   });
 });

@@ -38,7 +38,7 @@ function boot(
   options: { gate?: ReturnType<typeof fakeGate>; caps?: OxideCapsConfig; c?: ReturnType<typeof clock>; preflight?: { assertPinned(): Promise<void> } } = {},
 ) {
   const c = options.c ?? clock();
-  const journal = OxideJournal.open(path, { now: c.now });
+  const journal = OxideJournal.open(path, { now: c.now, allowCreate: true });
   const backend = new FakeBackend(node);
   const gate = options.gate ?? fakeGate();
   const sender = new OxideSender({
@@ -236,6 +236,24 @@ describe("OxideSender", () => {
     expect(backend.calls).toEqual(["simulate", "sign", "size", "prove", "send"]);
   });
 
+  it("makes a structural pin refusal terminal for a held attempt", async () => {
+    const node = new FakeNode();
+    const gate = fakeGate("unknown");
+    let refusal: Error | undefined;
+    const preflight = { assertPinned: () => (refusal ? Promise.reject(refusal) : Promise.resolve()) };
+    const { sender, backend } = boot(tempJournalPath(), node, { gate, preflight });
+    expect(observed(await sender.send(request())).observation).toMatchObject({ state: "prepared" });
+    gate.state.decision = "allow";
+    refusal = new OxidePinMismatch("manifest", ["gitSha"]);
+    expect(observed(await sender.send(request())).observation).toEqual({
+      state: "not_submitted",
+      reason: "oxide_pin_mismatch",
+      retryable: false,
+    });
+    expect(backend.calls).toEqual(["simulate", "sign", "size", "prove"]);
+    expect(node.sent).toEqual([]);
+  });
+
   it("a pipeline failure before the journal is not_submitted and retryable", async () => {
     const node = new FakeNode();
     const { sender, backend } = boot(tempJournalPath(), node);
@@ -327,16 +345,21 @@ describe("OxideSender", () => {
     expect(backend.calls).toEqual(["simulate"]); // the enclave never saw it
   });
 
-  it("refuses to sign when the pins or the enclave do not verify", async () => {
-    for (const [error, reason] of [
-      [new OxidePinMismatch("manifest", ["gitSha"]), "oxide_pin_mismatch"],
-      [new EnclaveTrustRefused("portal_frozen", "frozen"), "enclave_refused:portal_frozen"],
-      [new Error("network"), "oxide_pin_unverified"],
+  it("classifies structural trust refusals as terminal and live-read failures as retryable", async () => {
+    for (const [error, reason, retryable] of [
+      [new OxidePinMismatch("manifest", ["gitSha"]), "oxide_pin_mismatch", false],
+      [new EnclaveTrustRefused("pcr0_hash_mismatch", "moved"), "enclave_refused:pcr0_hash_mismatch", false],
+      [new EnclaveTrustRefused("portal_frozen", "frozen"), "enclave_refused:portal_frozen", true],
+      [new Error("network"), "oxide_pin_unverified", true],
     ] as const) {
       const { sender, backend } = boot(tempJournalPath(), new FakeNode(), {
         preflight: { assertPinned: () => Promise.reject(error) },
       });
-      expect(observed(await sender.send(request())).observation).toEqual({ state: "not_submitted", reason, retryable: true });
+      expect(observed(await sender.send(request())).observation).toEqual({
+        state: "not_submitted",
+        reason,
+        retryable,
+      });
       expect(backend.calls).toEqual([]);
     }
   });

@@ -176,7 +176,7 @@ describe("oxide-allowlist", { timeout: 420_000 }, () => {
     const current = await OxideAllowlist.build(SEED, CURRENT);
     const journal = journalAttesting(current.root);
     expect(run(env(journal), ["--add", NEWCOMER]).stderr).toContain("an index of <n> or random");
-    expect(run(env(journal), ["--add", NEWCOMER, "--index", "3"]).stderr).toContain("position 3 is already occupied");
+    expect(run(env(journal), ["--add", NEWCOMER, "--index", "3"]).stderr).toContain("slot is already occupied");
     expect(run(env(journal), ["--add", MEMBER, "--index", "9"]).stderr).toContain("already in the set");
     expect(run(env(journal), ["--revoke", NEWCOMER]).stderr).toContain("not in the current set");
     expect(

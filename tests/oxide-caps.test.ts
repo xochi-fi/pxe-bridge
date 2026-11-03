@@ -21,7 +21,7 @@ function observation(outcome: OxideSendOutcome) {
 }
 
 function boot(path: string, c: ReturnType<typeof clock>, node = new FakeNode(), caps = CAPS) {
-  const journal = OxideJournal.open(path, { now: c.now });
+  const journal = OxideJournal.open(path, { now: c.now, allowCreate: true });
   const backend = new FakeBackend(node);
   backend.expiration = EXPIRATION;
   const sender = new OxideSender({
@@ -62,6 +62,7 @@ describe("Oxide caps", { timeout: 30_000 }, () => {
     expect(() => capsFromEnv({ PXE_BRIDGE_OXIDE_MAX_PER_TX: "0" })).toThrow(/positive decimal/);
     expect(() => capsFromEnv({ PXE_BRIDGE_OXIDE_MAX_PER_TX: "11", PXE_BRIDGE_OXIDE_DAILY_LIMIT: "10" })).toThrow(/cannot exceed/);
     expect(() => validateCaps({ ...CAPS, maxNoteAmount: NOTE_MAX + 1n })).toThrow(/maxNoteAmount/);
+    expect(() => validateCaps({ ...CAPS, maxPerTx: NOTE_MAX + 1n })).toThrow(/cannot exceed the token's maxNoteAmount/);
   });
 
   it("per-tx boundary: the cap itself passes, one wei more is refused", () => {
@@ -70,8 +71,8 @@ describe("Oxide caps", { timeout: 30_000 }, () => {
     expect(capRefusal(CAPS, 0n, 0n)?.reason).toBe("amount_not_positive");
   });
 
-  it("the note max binds even when the per-tx cap is raised past it", () => {
-    const loose = { maxPerTx: 10_000n * DAI, dailyLimit: 10_000n * DAI, maxNoteAmount: NOTE_MAX };
+  it("the 5166 DAI note max passes exactly and refuses one wei more", () => {
+    const loose = { maxPerTx: NOTE_MAX, dailyLimit: 10_000n * DAI, maxNoteAmount: NOTE_MAX };
     expect(capRefusal(loose, NOTE_MAX, 0n)).toBeUndefined();
     expect(capRefusal(loose, NOTE_MAX + 1n, 0n)?.reason).toBe("amount_over_note_max");
   });
@@ -101,7 +102,7 @@ describe("Oxide caps", { timeout: 30_000 }, () => {
       reason: "cap:amount_over_per_tx_cap",
       retryable: false,
     });
-    const loose = { maxPerTx: 10_000n * DAI, dailyLimit: 10_000n * DAI, maxNoteAmount: NOTE_MAX };
+    const loose = { maxPerTx: NOTE_MAX, dailyLimit: 10_000n * DAI, maxNoteAmount: NOTE_MAX };
     const other = boot(tempJournalPath(), c, node, loose);
     expect(observation(await other.sender.send(req(c, "huge", NOTE_MAX + 1n)))).toMatchObject({
       reason: "cap:amount_over_note_max",
@@ -151,7 +152,7 @@ describe("Oxide caps", { timeout: 30_000 }, () => {
     const c = clock();
     const node = new FakeNode();
     const gate = fakeGate("unknown");
-    const journal = OxideJournal.open(path, { now: c.now });
+    const journal = OxideJournal.open(path, { now: c.now, allowCreate: true });
     const backend = new FakeBackend(node);
     backend.expiration = EXPIRATION;
     const sender = new OxideSender({

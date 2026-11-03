@@ -204,6 +204,19 @@ export function verifyEnclaveAttestation(
   onChainPcr0Hash: string,
   pins: OxidePins = OXIDE_V6_MAINNET,
 ): void {
+  // Authenticate the COSE signature, certificate chain and committed user
+  // data before any field controlled by the document can become a structural
+  // refusal. A parseable forgery with another PCR0 is only
+  // `attestation_invalid`, never evidence that the deployment moved.
+  try {
+    verifyTeeAttestation({
+      attestationDocument: attestation.attestation,
+      trustedRootCertificates: [awsNitroRootDer()],
+      userData: attestation.userData,
+    });
+  } catch (cause) {
+    throw new EnclaveTrustRefused("attestation_invalid", (cause as Error).message ?? String(cause), { cause });
+  }
   let pcr0: Buffer;
   try {
     pcr0 = getPcr0(attestation.attestation);
@@ -219,15 +232,6 @@ export function verifyEnclaveAttestation(
       "pcr0_hash_mismatch",
       `keccak(PCR0) ${hash} is not TeeRegistry.PCR0_HASH() ${onChainPcr0Hash}`,
     );
-  }
-  try {
-    verifyTeeAttestation({
-      attestationDocument: attestation.attestation,
-      trustedRootCertificates: [awsNitroRootDer()],
-      userData: attestation.userData,
-    });
-  } catch (cause) {
-    throw new EnclaveTrustRefused("attestation_invalid", (cause as Error).message ?? String(cause), { cause });
   }
 }
 

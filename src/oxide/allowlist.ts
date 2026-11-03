@@ -1,3 +1,4 @@
+import { readFileSync, statSync } from "node:fs";
 import { AllowlistTree, ALLOWLIST_CAPACITY, type AllowlistRecipient } from "../allowlist-tree.js";
 import { AllowlistRecipientsSchema } from "../types.js";
 
@@ -5,23 +6,26 @@ import { AllowlistRecipientsSchema } from "../types.js";
  * The Oxide fresh-send recipient allowlist (xochi-fi/xochi#751, decided as
  * xochi#775 option a): an operator-held set of Aztec recipients, committed to
  * as the same seed-salted height-10 tree the spending-limit account uses
- * (`src/allowlist-tree.ts`), whose root is NEVER written on chain, put in the
- * corridor manifest, served by an endpoint or logged. The bridge signs
- * Membership and RootUpdate readiness records over that root with the corridor
- * readiness signer (src/oxide/attestation.ts), in the exact formats the Xochi
- * Worker already verifies. `OxideReadiness.admit` supplies the membership
- * refusal; the settlement layer wired in #89 must invoke it before a fresh
- * send.
+ * (`src/allowlist-tree.ts`). The root is never written on chain, put in the
+ * corridor manifest, served by a public endpoint or logged. The authenticated
+ * Membership response and RootUpdate relay necessarily disclose it to Xochi;
+ * neither ever discloses the seed or recipient set. The bridge signs those
+ * readiness records with the corridor readiness signer
+ * (`src/oxide/attestation.ts`), in the exact formats the Xochi Worker already
+ * verifies. `OxideReadiness.admit` supplies the membership refusal; its caller
+ * must invoke it before a fresh send.
  *
- * Salted leaves are what keep the root private in practice: without the seed
- * a root cannot be tested against candidate addresses. The set and the seed
- * live in the bridge's environment (secret store) and its journal snapshot,
- * nowhere else. Every message this module produces names positions and
- * variables, never an address.
+ * Salted leaves are what keep the root private in practice: without the seed a
+ * root cannot be tested against candidate addresses. Production reads the set
+ * and seed only from owner-only secret files; neither appears in environment
+ * metadata. Every message this module produces names configuration fields,
+ * never an address, member position, seed, set or root.
  */
 
 export const OXIDE_ALLOWLIST_SEED_ENV = "PXE_BRIDGE_OXIDE_ALLOWLIST_SEED";
 export const OXIDE_ALLOWLIST_RECIPIENTS_ENV = "PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS";
+export const OXIDE_ALLOWLIST_SEED_FILE_ENV = "PXE_BRIDGE_OXIDE_ALLOWLIST_SEED_FILE";
+export const OXIDE_ALLOWLIST_RECIPIENTS_FILE_ENV = "PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS_FILE";
 
 const HEX32 = /^0x[0-9a-fA-F]{64}$/;
 const ZERO32 = /^0x0{64}$/;
@@ -45,9 +49,7 @@ export function validateOxideRecipients(input: unknown): AllowlistRecipient[] {
   const parsed = AllowlistRecipientsSchema.safeParse(input);
   if (!parsed.success) {
     throw new OxideAllowlistConfigError(
-      `${OXIDE_ALLOWLIST_RECIPIENTS_ENV} must be a JSON array of {address: 32-byte hex, index: ` +
-        `integer in [0, ${ALLOWLIST_CAPACITY})}: ` +
-        parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
+      `${OXIDE_ALLOWLIST_RECIPIENTS_ENV} must be a JSON array of valid address and index records`,
     );
   }
   const positions = new Set<number>();
@@ -55,20 +57,14 @@ export function validateOxideRecipients(input: unknown): AllowlistRecipient[] {
   return parsed.data.map(({ address, index }, entry) => {
     const normalized = address.toLowerCase();
     if (ZERO32.test(normalized) || BigInt(normalized) >= FR_MODULUS) {
-      throw new OxideAllowlistConfigError(
-        `${OXIDE_ALLOWLIST_RECIPIENTS_ENV}[${entry}] is not a nonzero Aztec field element`,
-      );
+      throw new OxideAllowlistConfigError(`${OXIDE_ALLOWLIST_RECIPIENTS_ENV} has a non-field address`);
     }
     if (positions.has(index)) {
-      throw new OxideAllowlistConfigError(
-        `${OXIDE_ALLOWLIST_RECIPIENTS_ENV}[${entry}] reuses position ${index}`,
-      );
+      throw new OxideAllowlistConfigError(`${OXIDE_ALLOWLIST_RECIPIENTS_ENV} reuses a member position`);
     }
     const previous = addresses.get(normalized);
     if (previous !== undefined) {
-      throw new OxideAllowlistConfigError(
-        `${OXIDE_ALLOWLIST_RECIPIENTS_ENV}[${entry}] repeats the address of entry ${previous}`,
-      );
+      throw new OxideAllowlistConfigError(`${OXIDE_ALLOWLIST_RECIPIENTS_ENV} repeats a member address`);
     }
     positions.add(index);
     addresses.set(normalized, entry);
@@ -117,34 +113,55 @@ export class OxideAllowlist {
   }
 }
 
+function secretValue(env: NodeJS.ProcessEnv, valueName: string, fileName: string): string | undefined {
+  const direct = env[valueName]?.trim();
+  const file = env[fileName]?.trim();
+  if (direct && file) throw new OxideAllowlistConfigError(`${valueName} and ${fileName} are mutually exclusive`);
+  if (direct) {
+    if (env["NODE_ENV"] === "production") {
+      throw new OxideAllowlistConfigError(`${valueName} is not permitted in production; use ${fileName}`);
+    }
+    return direct;
+  }
+  if (!file) return undefined;
+  try {
+    const stat = statSync(file);
+    if (!stat.isFile() || (stat.mode & 0o077) !== 0) {
+      throw new Error("not an owner-only regular file");
+    }
+    return readFileSync(file, "utf8").trim();
+  } catch {
+    throw new OxideAllowlistConfigError(`${fileName} must name a readable owner-only regular file`);
+  }
+}
+
 /**
- * The allowlist from `PXE_BRIDGE_OXIDE_ALLOWLIST_SEED` and
- * `PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS`, both required. The seed must
- * differ from the spending-limit account's `PXE_BRIDGE_ALLOWLIST_SEED`: two
- * modes sharing salts would let one set's leaves be tested against the
- * other's. An empty set is valid: the bridge then admits nobody until the
- * operator approves a recipient (`npm run oxide-allowlist`).
+ * Loads the private set and seed from owner-only files in production. Direct
+ * values remain available only in development and tests. Both values are
+ * required; an empty recipient set is represented by `[]`.
  */
 export async function oxideAllowlistFromEnv(env: NodeJS.ProcessEnv): Promise<OxideAllowlist> {
-  const seed = env[OXIDE_ALLOWLIST_SEED_ENV]?.trim();
-  const raw = env[OXIDE_ALLOWLIST_RECIPIENTS_ENV];
-  if (!seed) throw new OxideAllowlistConfigError(`${OXIDE_ALLOWLIST_SEED_ENV} is required in Oxide mode`);
-  if (raw === undefined || raw.trim() === "") {
+  const seed = secretValue(env, OXIDE_ALLOWLIST_SEED_ENV, OXIDE_ALLOWLIST_SEED_FILE_ENV);
+  const raw = secretValue(env, OXIDE_ALLOWLIST_RECIPIENTS_ENV, OXIDE_ALLOWLIST_RECIPIENTS_FILE_ENV);
+  if (!seed) {
     throw new OxideAllowlistConfigError(
-      `${OXIDE_ALLOWLIST_RECIPIENTS_ENV} is required in Oxide mode ("[]" for an empty set)`,
+      `${OXIDE_ALLOWLIST_SEED_FILE_ENV} (or direct value outside production) is required in Oxide mode`,
+    );
+  }
+  if (!raw) {
+    throw new OxideAllowlistConfigError(
+      `${OXIDE_ALLOWLIST_RECIPIENTS_FILE_ENV} (or direct value outside production) is required in Oxide mode`,
     );
   }
   const spendingLimitSeed = env["PXE_BRIDGE_ALLOWLIST_SEED"]?.trim();
   if (spendingLimitSeed && spendingLimitSeed.toLowerCase() === seed.toLowerCase()) {
-    throw new OxideAllowlistConfigError(
-      `${OXIDE_ALLOWLIST_SEED_ENV} must differ from PXE_BRIDGE_ALLOWLIST_SEED`,
-    );
+    throw new OxideAllowlistConfigError("the Oxide allowlist seed must differ from the spending-limit seed");
   }
   let json: unknown;
   try {
     json = JSON.parse(raw);
   } catch {
-    throw new OxideAllowlistConfigError(`${OXIDE_ALLOWLIST_RECIPIENTS_ENV} is not valid JSON`);
+    throw new OxideAllowlistConfigError("the Oxide allowlist recipients file is not valid JSON");
   }
   return OxideAllowlist.build(seed, json);
 }
@@ -165,7 +182,7 @@ export function freeOxidePositions(current: readonly AllowlistRecipient[]): numb
  * makes for the on-chain allowlist: an addition needs a free position and an
  * address not already listed (revoke first to move one), a revocation needs a
  * listed address. `sender` (the Oxide sending account) can never be added.
- * Messages name positions, never addresses.
+ * Messages never echo an address or occupied member position.
  */
 export function planOxideAllowlistChange(
   current: readonly AllowlistRecipient[],
@@ -187,10 +204,10 @@ export function planOxideAllowlistChange(
     throw new OxideAllowlistConfigError("the Oxide sending account cannot be its own recipient");
   }
   if (!Number.isInteger(change.index) || change.index < 0 || change.index >= ALLOWLIST_CAPACITY) {
-    throw new OxideAllowlistConfigError(`position ${change.index} is outside [0, ${ALLOWLIST_CAPACITY})`);
+    throw new OxideAllowlistConfigError("the requested allowlist slot is outside the tree");
   }
   if (members.some((member) => member.index === change.index)) {
-    throw new OxideAllowlistConfigError(`position ${change.index} is already occupied`);
+    throw new OxideAllowlistConfigError("the requested allowlist slot is already occupied");
   }
   if (members.some((member) => member.address === address)) {
     throw new OxideAllowlistConfigError("the address is already in the set; revoke it first to move it");

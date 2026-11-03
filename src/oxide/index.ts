@@ -26,6 +26,11 @@ export interface OxideSenderConfig {
   secretKey: string;
   /** `PXE_BRIDGE_OXIDE_JOURNAL`: its own SQLite file, beside (never the same as) the settlement journal. */
   journalPath: string;
+  /**
+   * One-shot `PXE_BRIDGE_OXIDE_JOURNAL_INITIALIZE=true` acknowledgement for
+   * first creation. Remove it after the first successful start.
+   */
+  initializeJournal: boolean;
   /** `PXE_BRIDGE_OXIDE_L1_RPC_URL`: Ethereum mainnet, read-only. */
   l1RpcUrl: string;
   /** `PXE_BRIDGE_OXIDE_TOKEN_ARTIFACT`: compiled OxideToken JSON at the pinned class. */
@@ -51,8 +56,8 @@ export interface OxideRuntime {
  * Builds the Oxide sender and the fresh-send admission predicate on a
  * connected standard-mode client. Refuses, before anything can be sent,
  * unless L1, the Oxide manifest and the zk.money profile all describe the
- * pinned v6 deployment and the artifact is the deployed class. The settlement
- * layer (wired in #89) asks `readiness.admit` before a fresh send, then calls
+ * pinned v6 deployment and the artifact is the deployed class. The integration
+ * layer must ask `readiness.admit` before a fresh send, then call
  * `OxideSender.send`; nothing here serves HTTP or invokes admission itself.
  */
 export async function createOxideSender(config: OxideSenderConfig): Promise<OxideRuntime> {
@@ -79,7 +84,14 @@ export async function createOxideSender(config: OxideSenderConfig): Promise<Oxid
     secretKey: config.secretKey,
   });
 
-  const journal = OxideJournal.open(config.journalPath);
+  const journal = OxideJournal.open(config.journalPath, {
+    allowCreate: config.initializeJournal,
+    identity: {
+      account: backend.account,
+      token: OXIDE_V6_MAINNET.bridge.l2Token,
+      deployment: `${OXIDE_V6_MAINNET.deploymentId}:${OXIDE_V6_MAINNET.gitSha}`,
+    },
+  });
   const caps = config.caps ?? capsFromEnv(process.env);
   const preflight = {
     // Per fresh attempt: the published pins (cached 5 min) and L1, which

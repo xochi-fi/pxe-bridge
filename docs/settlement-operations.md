@@ -773,19 +773,23 @@ URL itself in addition to the bridge's own check.
 The Oxide sender is a stock SchnorrAccount 6.0.0 with no on-chain allowlist.
 Its recipient policy is an operator-held set that must stay private: no
 on-chain root, no root or list in the corridor manifest or any public repo,
-no endpoint that serves either, no log line naming a member. The bridge holds
-it as the same seed-salted height-10 tree (`src/allowlist-tree.ts`) and signs
-Membership and RootUpdate over its root with the corridor readiness signer,
-in exactly the record formats above, so the Xochi Worker verifies them
-unchanged:
+no **public** endpoint that serves either, no log line naming a member. The
+authenticated Membership response and RootUpdate relay necessarily disclose
+the root to Xochi; neither discloses the seed or recipient set. The bridge
+holds the set as the same seed-salted height-10 tree
+(`src/allowlist-tree.ts`) and signs Membership and RootUpdate over its root
+with the corridor readiness signer, in exactly the record formats above, so
+the Xochi Worker verifies them unchanged:
 
-- `PXE_BRIDGE_OXIDE_ALLOWLIST_SEED`: nonzero 32-byte hex below the BN254
-  modulus, the secret every leaf salt derives from. It must differ from
+- `PXE_BRIDGE_OXIDE_ALLOWLIST_SEED_FILE`: owner-only regular file containing
+  the nonzero 32-byte hex seed below the BN254 modulus. It must differ from
   `PXE_BRIDGE_ALLOWLIST_SEED`, and the attestation key may not equal it.
-- `PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS`: JSON `[{address, index}]`
-  (`"[]"` for an empty set; the bridge then admits nobody). Both are required
-  when `PXE_BRIDGE_SEND_MODE=oxide` and belong in the secret store, never in
-  inventory files. Configuration errors name positions, never addresses.
+- `PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS_FILE`: owner-only regular file
+  containing JSON `[{address, index}]` (`"[]"` admits nobody). Both files are
+  required in production when `PXE_BRIDGE_SEND_MODE=oxide`; direct
+  `..._SEED` / `..._RECIPIENTS` values are development-only and refused in
+  production so Docker metadata cannot retain the secrets. Configuration
+  errors disclose no address, member position, seed, set or root.
 - Attestation in Oxide mode requires `PXE_BRIDGE_ACCOUNT_ADDRESS` (the
   recorded sender) instead of `PXE_BRIDGE_ACCOUNT_DEPLOYMENT`. The finalized
   observation (`AztecClient.observeStandardAccountChain`) requires the
@@ -809,8 +813,19 @@ unchanged:
   RootUpdate (`pruneAllowlistSnapshots`). Outbox ids are
   `<run>:<idempotency digest>`, never the root, because an id is logged when
   an attempt cannot be recorded.
-- In production the bridge warns at startup that both variables are read from
-  the environment, as it does for `PXE_BRIDGE_ALLOWLIST_SEED`.
+- The production bridge reads both secrets from owner-only mounted files, not
+  container environment values. The operator tool still accepts them on stdin.
+
+**Initialize the Oxide send journal exactly once, before funding or opening
+intake.** On the first start only, mount its owner-only durable directory and
+set `PXE_BRIDGE_OXIDE_JOURNAL_INITIALIZE=true`. Confirm `/ready` reports the
+journal writable, stop the bridge, remove that variable, and start it again.
+A brand-new journal without that acknowledgement refuses writes. An existing
+high-water mark with a missing database is rollback detection and is never
+overwritten, even with the variable set. The journal is bound at creation to
+the sending account, OXDAI token and pinned Oxide deployment; a mismatch
+refuses writes. Never use initialization to recover a lost journal: restore
+the matched database and high-water mark, then reconcile every ambiguous send.
 
 **Approving a recipient** (`scripts/oxide-allowlist.ts`; production procedure
 in G1 below):
@@ -854,16 +869,18 @@ one-off container that mounts the journal read-only and has no network.
   or path, use that.
 - **Secrets:** 1Password vault `Xochi Shielded Tracer`, item
   `<OXIDE_ALLOWLIST_ITEM>` (PROPOSED name: `pxe-bridge oxide allowlist
-  (mainnet)`), fields `seed` and `recipients`, the references the deploy role
-  reads for `PXE_BRIDGE_OXIDE_ALLOWLIST_SEED` / `_RECIPIENTS`. `op read` runs
-  on the control machine. The seed, the current set and the change travel to
-  the container on **stdin only** (`--stdin`, KEY=VALUE lines): never as a
-  container environment variable (`docker inspect` and the daemon's saved
-  `config.v2.json` would hold them) and never as a command-line argument
-  (`ps`, shell history, auditd and endpoint agents record argv). The next set
-  comes back on stdout into a 0600 file on the control machine's `/dev/shm`
-  (macOS: a `mktemp` under `$TMPDIR`), goes into 1Password through a piped
-  item template, never an assignment argument, and the file is shredded.
+  (mainnet)`), fields `seed` and `recipients`. The deploy role materializes
+  them as 0600 mounted files and sets `PXE_BRIDGE_OXIDE_ALLOWLIST_SEED_FILE`
+  / `_RECIPIENTS_FILE`; it never places their contents in the container
+  environment. `op read` runs on the control machine. The seed, current set
+  and change travel to the one-shot operator container on **stdin only**
+  (`--stdin`, KEY=VALUE lines): never as a container environment variable
+  (`docker inspect` and the daemon's saved `config.v2.json` would hold them)
+  and never as a command-line argument (`ps`, shell history, auditd and
+  endpoint agents record argv). The next set comes back on stdout into a 0600
+  file on the control machine's `/dev/shm` (macOS: a `mktemp` under
+  `$TMPDIR`), goes into 1Password through a piped item template, never an
+  assignment argument, and the file is shredded.
 
 ```sh
 # On ovh-solver, once per bridge release, from a checkout of the running image's
@@ -922,8 +939,9 @@ instead. Then redeploy the bridge through the role (it reads the new
 
 With `PXE_BRIDGE_SEND_MODE=oxide`, `GET /ready` (same auth, limiter, 20-second
 deadline and single flight) answers the Oxide projection
-(`src/oxide/readiness.ts`), and the Oxide settlement path asks the same
-predicate before a fresh send (`OxideReadiness.admit`). Riddler reads it
+(`src/oxide/readiness.ts`). The Oxide settlement integration must ask the
+same predicate before each fresh send and pass the operation id so its own
+durable claim is excluded while every peer claim remains committed
 (axol-io/Riddler#1437).
 
 It answers two separate questions (integration decision on pxe-bridge#88):
@@ -1015,11 +1033,14 @@ for up to 60 seconds; a failure is never reused.
   minutes old, with `committed` recomputed on every call against that
   snapshot's synced block AND its read time (an attempt whose bounds passed
   after the snapshot still counts: the snapshot cannot have seen it mined).
+  A hung PXE balance call is never duplicated; once its snapshot ages out,
+  capacity stays unknown until that call settles or the process restarts.
 
 Admission for one fresh send of `X` (`OxideReadiness.admit`):
 - **Refused (permanent):** a recipient outside the private set
-  (`recipient_not_allowlisted`), `X <= 0` (`amount_invalid`) or
-  `X > caps.maxPerTx` (`amount_over_per_tx_cap`).
+  (`recipient_not_allowlisted`), `X <= 0` (`amount_invalid`),
+  `X > 5,166 DAI` (`amount_over_note_max`), or
+  `X > caps.maxPerTx` (`amount_over_per_tx_cap`; default 1,000 DAI).
 - **Refused (permanent), the deployment is not the pinned one** (OX-6,
   xochi#744): the manifest or profile moved (`oxide_pin_mismatch`), L1 is not
   the pinned chain/registry/portal (`enclave_refused:l1_not_pinned`), or the

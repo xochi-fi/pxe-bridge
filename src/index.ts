@@ -578,17 +578,6 @@ if (process.env["PXE_BRIDGE_SEND_MODE"] === "oxide") {
     console.error(`[pxe-bridge] ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
   }
-  // Warned rather than refused, as PXE_BRIDGE_ALLOWLIST_SEED is: neither can
-  // move funds, but both are secrets that belong in the signing key's store.
-  if (process.env["NODE_ENV"] === "production") {
-    console.warn(
-      "[pxe-bridge] PXE_BRIDGE_OXIDE_ALLOWLIST_SEED and PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS " +
-        "are being read from the environment in production. Both are secrets: the recipients " +
-        "are the private allowlist itself, and the seed lets anyone holding a root test candidate " +
-        "addresses against it. Environment variables are visible in /proc/pid/environ, docker " +
-        "inspect and crash dumps.",
-    );
-  }
 }
 // --- end Oxide readiness ---
 if (

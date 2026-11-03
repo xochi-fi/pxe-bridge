@@ -75,7 +75,7 @@ export interface ServerOptions {
    * Oxide mode's readiness (src/oxide/readiness.ts), served on `/ready` in
    * place of the spending-limit projection. Exclusive with `readiness`.
    */
-  oxideReadiness?: { observe(): Promise<OxideReadinessProjection> } | undefined;
+  oxideReadiness?: { observe(signal?: AbortSignal): Promise<OxideReadinessProjection> } | undefined;
   /** The HTTP response deadline; RESPONSE_TIMEOUT_MS unless a test shortens it. */
   responseTimeoutMs?: number | undefined;
   /** Readiness observation deadline; READINESS_TIMEOUT_MS unless a test shortens it. */
