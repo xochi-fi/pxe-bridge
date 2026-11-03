@@ -568,15 +568,27 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
         }
         try {
           const readiness = await observeServedReadiness();
-          const projected =
-            backendInFlight >= MAX_RPC_IN_FLIGHT ||
-            ordinaryBodyInFlight >= MAX_RPC_BODY_IN_FLIGHT
+          const saturated =
+            backendInFlight >= MAX_RPC_IN_FLIGHT || ordinaryBodyInFlight >= MAX_RPC_BODY_IN_FLIGHT;
+          // A saturated backend is CAPACITY: on the Oxide projection it closes
+          // `admission.freshSend` and leaves `ready` (serving health, which
+          // gates Riddler's payouts of already-pulled orders) alone; the
+          // design-A projection has no such split and turns not ready.
+          const projected = !saturated
+            ? readiness
+            : "admission" in readiness
               ? {
+                  ...readiness,
+                  admission: {
+                    freshSend: false,
+                    reasons: [...readiness.admission.reasons, "backend_capacity_exhausted" as const],
+                  },
+                }
+              : {
                   ...readiness,
                   ready: false,
                   reasons: [...readiness.reasons, "backend_capacity_exhausted" as const],
-                }
-              : readiness;
+                };
           sendJson(res, projected.ready ? 200 : 503, projected);
         } catch {
           console.error("[pxe-bridge] Readiness observation failed");

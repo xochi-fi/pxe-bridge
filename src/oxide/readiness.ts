@@ -184,9 +184,15 @@ function errorClass(cause: unknown): string {
   return cause instanceof Error ? cause.name : typeof cause;
 }
 
-/** A cached successful check; a failure is never cached, so the next call reads again. */
+/**
+ * A cached successful check; a failure is never cached, so the next call reads
+ * again. A read that started before a later one may not store its success:
+ * the later read's failure (never cached) would otherwise be overwritten by
+ * an older success and served for the rest of the TTL.
+ */
 class SuccessCache<T> {
   private value: { at: number; result: T } | undefined;
+  private generation = 0;
 
   constructor(
     private readonly ttlMs: number,
@@ -197,21 +203,24 @@ class SuccessCache<T> {
     const at = this.now();
     if (!fresh && this.value !== undefined && at - this.value.at < this.ttlMs) return this.value.result;
     this.value = undefined;
+    const generation = ++this.generation;
     const result = await read();
-    if (keep(result)) this.value = { at, result };
+    if (keep(result) && generation === this.generation) this.value = { at, result };
     return result;
   }
 }
 
+/** An enclave fact with, privately, why it refused: never serialized, classified by the call that read it. */
+type EnclaveRead = { fact: OxideFact<{ attested: boolean }>; refusal: EnclaveRefusal | undefined };
+
 export class OxideReadiness {
   private readonly now: () => number;
+  /** `atMs` is when the read STARTED (before the synced header), never later than the state it reflects. */
   private balanceSnapshot: { observed: bigint; syncedBlock: number; atMs: number } | undefined;
-  private balanceRefresh: Promise<void> | undefined;
+  private balanceRefresh: { promise: Promise<void>; startedAt: number } | undefined;
   private readonly manifestCache: SuccessCache<OxideFact<{ pinned: boolean }>>;
   private readonly l1Cache: SuccessCache<OxideFact<{ pinned: boolean; portalFrozen: boolean }>>;
-  private readonly enclaveCache: SuccessCache<OxideFact<{ attested: boolean }>>;
-  /** Why the last enclave check refused, so admission can tell a structural refusal from a transient one. */
-  private lastEnclaveRefusal: EnclaveRefusal | undefined;
+  private readonly enclaveCache: SuccessCache<EnclaveRead>;
 
   constructor(private readonly options: OxideReadinessOptions) {
     this.now = options.now ?? Date.now;
@@ -227,10 +236,12 @@ export class OxideReadiness {
    *   above `maxPerTx` is refused permanently (requote);
    * - a bridge whose live deployment is no longer the pinned one -- the
    *   manifest or profile moved (`oxide_pin_mismatch`, #744), L1 is not the
-   *   pinned chain/registry/portal (`oxide_l1_not_pinned`), or the enclave's
-   *   PCR0 is not the pinned image hashing to `TeeRegistry.PCR0_HASH()`
-   *   (`enclave_attestation_refused`) -- refuses permanently too (OX-6): no
-   *   retry of this process clears it, only a reviewed re-pin;
+   *   pinned chain/registry/portal (`enclave_refused:l1_not_pinned`), or the
+   *   enclave's PCR0 is not the pinned image hashing to
+   *   `TeeRegistry.PCR0_HASH()` (`enclave_refused:pcr0_not_pinned` /
+   *   `pcr0_hash_mismatch`) -- refuses permanently too (OX-6): no retry of
+   *   this process clears it, only a reviewed re-pin. The reasons are the
+   *   sender's own preflight strings, so one condition has one name;
    * - otherwise it is admitted iff `ready`, `admission.freshSend`, and
    *   `amount <= privateBalance.available` and `amount <= caps.windowHeadroom`;
    *   anything else is `not_ready` (transient).
@@ -251,9 +262,9 @@ export class OxideReadiness {
     if (amount > this.options.caps.maxPerTx) {
       return { kind: "refused", reason: "amount_over_per_tx_cap", retryable: false };
     }
-    const readiness = await this.observe({ freshL1: true });
+    const { projection: readiness, enclaveRefusal } = await this.read({ freshL1: true });
     if (!readiness.ready) {
-      const structural = readiness.reasons.find((reason) => this.structural(reason));
+      const structural = this.structural(readiness, enclaveRefusal);
       if (structural !== undefined) return { kind: "refused", reason: structural, retryable: false };
       return { kind: "not_ready", reasons: readiness.reasons };
     }
@@ -269,21 +280,31 @@ export class OxideReadiness {
     return reasons.length === 0 ? { kind: "admitted" } : { kind: "not_ready", reasons };
   }
 
-  /** A health reason no cycle of this process clears: the deployment is not the pinned one. */
-  private structural(reason: ReadinessReason): boolean {
-    if (reason === "oxide_pin_mismatch" || reason === "oxide_l1_not_pinned") return true;
-    return (
-      reason === "enclave_attestation_refused" &&
-      this.lastEnclaveRefusal !== undefined &&
-      enclaveRefusalPermanent(this.lastEnclaveRefusal)
-    );
+  /**
+   * The permanent refusal a not-ready projection carries, if any: the
+   * deployment is not the pinned one. Classified from THIS call's enclave
+   * read, never from another call's.
+   */
+  private structural(projection: OxideReadinessProjection, enclaveRefusal: EnclaveRefusal | undefined): string | undefined {
+    if (projection.reasons.includes("oxide_pin_mismatch")) return "oxide_pin_mismatch";
+    if (projection.reasons.includes("oxide_l1_not_pinned")) return "enclave_refused:l1_not_pinned";
+    if (enclaveRefusal !== undefined && enclaveRefusalPermanent(enclaveRefusal)) return `enclave_refused:${enclaveRefusal}`;
+    return undefined;
   }
 
   /** The projection `/ready` serves. `freshL1` bypasses the L1/portal cache (admission). */
   async observe(options: { freshL1?: boolean } = {}): Promise<OxideReadinessProjection> {
+    return (await this.read(options)).projection;
+  }
+
+  /** One observation: the projection plus, privately, why this call's enclave read refused. */
+  private async read(options: { freshL1?: boolean }): Promise<{
+    projection: OxideReadinessProjection;
+    enclaveRefusal: EnclaveRefusal | undefined;
+  }> {
     const nowMs = this.now();
     const nowSeconds = Math.floor(nowMs / 1_000);
-    const [privateBalance, runway, manifest, l1, enclave, node, network] = await Promise.all([
+    const [privateBalance, runway, manifest, l1, enclaveRead, node, network] = await Promise.all([
       this.privateBalance(nowMs),
       this.feeRunway(),
       this.manifestCache.get(() => this.manifestPins(), (fact) => fact.state === "known" && fact.pinned),
@@ -292,10 +313,11 @@ export class OxideReadiness {
         (fact) => fact.state === "known" && fact.pinned && !fact.portalFrozen,
         options.freshL1 === true,
       ),
-      this.enclaveCache.get(() => this.enclave(), (fact) => fact.state === "known" && fact.attested),
+      this.enclaveCache.get(() => this.enclave(), (read) => read.fact.state === "known" && read.fact.attested),
       this.node(),
       this.network(),
     ]);
+    const enclave = enclaveRead.fact;
     const caps = this.caps(nowMs);
     const corridor = this.corridor();
     const journal = this.options.journal.health();
@@ -328,7 +350,7 @@ export class OxideReadiness {
     const health = [...reasons].filter((reason) => CAPACITY_REASONS[reason] !== true);
     const capacity = [...reasons].filter((reason) => CAPACITY_REASONS[reason] === true);
     const ready = health.length === 0;
-    return {
+    const projection: OxideReadinessProjection = {
       ready,
       reasons: health,
       admission: { freshSend: ready && capacity.length === 0, reasons: capacity },
@@ -350,26 +372,42 @@ export class OxideReadiness {
         attestation: { configured: this.options.attestationConfigured },
       },
     };
+    return { projection, enclaveRefusal: enclaveRead.refusal };
   }
 
   /**
    * The private balance, net of in-flight principal. The PXE read runs in the
    * background (one at a time); a call waits `balanceWaitMs` for it, then
    * serves the newest snapshot no older than `balanceMaxAgeMs`, with the
-   * committed principal recomputed against that snapshot's synced block.
+   * committed principal recomputed against that snapshot: its synced block,
+   * and its START time rather than now, so an attempt whose protocol expiry
+   * or validity bound passed after the snapshot was taken is still counted
+   * (the snapshot cannot have seen it mined, and nobody may have observed it).
+   * A refresh older than `balanceMaxAgeMs` is abandoned: a PXE call that
+   * never settles must not pin the balance at `unknown` until a restart.
    */
   private async privateBalance(nowMs: number): Promise<OxideReadinessProjection["oxide"]["privateBalance"]> {
+    const maxAgeMs = this.options.balanceMaxAgeMs ?? OXIDE_BALANCE_MAX_AGE_MS;
+    if (this.balanceRefresh !== undefined && nowMs - this.balanceRefresh.startedAt > maxAgeMs) {
+      console.error("[oxide] Private balance read abandoned: no answer within the snapshot age bound");
+      this.balanceRefresh = undefined;
+    }
     if (this.balanceRefresh === undefined) {
-      const refresh = this.options.balance.privateBalance().then(
+      // Stamped before the synced header is read: never later than the state the balance reflects.
+      const startedAt = this.now();
+      const promise = this.options.balance.privateBalance().then(
         (read) => {
-          this.balanceSnapshot = { ...read, atMs: this.now() };
+          if (this.balanceSnapshot === undefined || this.balanceSnapshot.atMs <= startedAt) {
+            this.balanceSnapshot = { ...read, atMs: startedAt };
+          }
         },
         (cause: unknown) => {
           console.error(`[oxide] Private balance read failed: ${errorClass(cause)}`);
         },
       );
+      const refresh = { promise, startedAt };
       this.balanceRefresh = refresh;
-      void refresh.finally(() => {
+      void promise.finally(() => {
         if (this.balanceRefresh === refresh) this.balanceRefresh = undefined;
       });
     }
@@ -379,17 +417,17 @@ export class OxideReadiness {
       timer = setTimeout(resolve, this.options.balanceWaitMs ?? OXIDE_BALANCE_WAIT_MS);
     });
     try {
-      await Promise.race([this.balanceRefresh, waited]);
+      await Promise.race([this.balanceRefresh.promise, waited]);
     } finally {
       clearTimeout(timer);
     }
     const snapshot = this.balanceSnapshot;
-    if (snapshot === undefined || nowMs - snapshot.atMs > (this.options.balanceMaxAgeMs ?? OXIDE_BALANCE_MAX_AGE_MS)) {
+    if (snapshot === undefined || nowMs - snapshot.atMs > maxAgeMs) {
       return unknown("private_balance_unknown");
     }
     let committed: { total: bigint; sends: number };
     try {
-      committed = this.options.journal.committedPrincipal(Math.floor(nowMs / 1_000), snapshot.syncedBlock);
+      committed = this.options.journal.committedPrincipal(Math.floor(snapshot.atMs / 1_000), snapshot.syncedBlock);
     } catch (cause) {
       console.error(`[oxide] Committed principal read failed: ${errorClass(cause)}`);
       return unknown("journal_unreadable");
@@ -475,16 +513,14 @@ export class OxideReadiness {
     }
   }
 
-  private async enclave(): Promise<OxideFact<{ attested: boolean }>> {
+  private async enclave(): Promise<EnclaveRead> {
     try {
       await this.options.enclave.attestEnclave();
-      this.lastEnclaveRefusal = undefined;
-      return known({ attested: true });
+      return { fact: known({ attested: true }), refusal: undefined };
     } catch (cause) {
       console.error(`[oxide] Enclave attestation check: ${errorClass(cause)}`);
-      if (!(cause instanceof EnclaveTrustRefused)) return unknown("enclave_unreachable");
-      this.lastEnclaveRefusal = cause.reason;
-      return known({ attested: false });
+      if (!(cause instanceof EnclaveTrustRefused)) return { fact: unknown("enclave_unreachable"), refusal: undefined };
+      return { fact: known({ attested: false }), refusal: cause.reason };
     }
   }
 

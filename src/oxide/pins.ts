@@ -161,6 +161,18 @@ export function profileMismatches(profile: unknown, pins: OxidePins = OXIDE_V6_M
   return out;
 }
 
+/** The manifest's shape: an object with a `deployments` array. Which deployment it holds is a pin question. */
+export function manifestShaped(manifest: unknown): boolean {
+  return isObject(manifest) && Array.isArray(manifest["deployments"]);
+}
+
+/** The profile's shape: `shared`, `versions`, and a `current` that names one of them. */
+export function profileShaped(profile: unknown): boolean {
+  if (!isObject(profile) || !isObject(profile["shared"]) || !isObject(profile["versions"])) return false;
+  const current = profile["current"];
+  return typeof current === "string" && isObject(profile["versions"][current]);
+}
+
 export interface PinCheckerOptions {
   fetch?: (url: string, init: { signal: AbortSignal }) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
   now?: () => number;
@@ -194,7 +206,13 @@ export class OxidePinChecker {
     this.pins = options.pins ?? OXIDE_V6_MAINNET;
   }
 
-  /** Throws `OxidePinMismatch` or `OxidePinUnverified`; returns once both match. */
+  /**
+   * Throws `OxidePinMismatch` or `OxidePinUnverified`; returns once both match.
+   * A body that is not even the file's shape (a CDN error page served as JSON,
+   * a half-published profile whose `current` names no version) is UNVERIFIED,
+   * never a mismatch: a mismatch is permanent for the sends it refuses, and
+   * only a file that describes a deployment can say the deployment moved.
+   */
   async assertPinned(): Promise<void> {
     const at = this.now();
     if (this.verifiedAt !== undefined && at - this.verifiedAt < this.ttlMs) return;
@@ -203,6 +221,8 @@ export class OxidePinChecker {
       this.read(this.pins.manifestUrl),
       this.read(this.pins.profileUrl),
     ]);
+    if (!manifestShaped(manifest)) throw new OxidePinUnverified(`${this.pins.manifestUrl}: not a releases manifest`);
+    if (!profileShaped(profile)) throw new OxidePinUnverified(`${this.pins.profileUrl}: not a wallet profile`);
     const manifestOff = manifestMismatches(manifest, this.pins);
     if (manifestOff.length > 0) throw new OxidePinMismatch("manifest", manifestOff);
     const profileOff = profileMismatches(profile, this.pins);

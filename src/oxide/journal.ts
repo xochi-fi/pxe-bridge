@@ -670,19 +670,25 @@ export class OxideJournal {
    * not yet reflect: every current attempt that may still land on state that
    * read has not seen (a prepared one with its bounds open, a marked one not
    * yet observed mined before its protocol expiry) plus any observed mined
-   * ABOVE `syncedBlock`. The same rows `liveNullifiers` counts, so the
-   * readiness surface and the sender's own note selection agree on what is
-   * still in flight. The amount is the proven recipient note's.
+   * ABOVE `syncedBlock`, and every CLAIMED operation whose validity bound is
+   * still open: it is being simulated, signed or proven right now -- minutes,
+   * exactly the window a balance snapshot is served through -- and will be
+   * prepared against the same notes. The same rows `liveNullifiers` counts
+   * (claimed ones aside, which hold no nullifiers yet), so the readiness
+   * surface and the sender's own note selection agree on what is still in
+   * flight. The amount is the proven recipient note's, or the claimed terms'.
    */
   committedPrincipal(nowSeconds: number, syncedBlock: number): { total: bigint; sends: number } {
     const rows = this.read((db) =>
       db
         .prepare(
           `SELECT o.state, json_extract(o.terms_json, '$.validUntil') AS valid_until,
+                  json_extract(o.terms_json, '$.amount') AS terms_amount,
                   a.expiration_timestamp, a.evidence_json,
                   CAST(json_extract(o.observation_json, '$.blockNumber') AS INTEGER) AS mined_block
-           FROM operations o JOIN attempts a ON a.operation_id = o.operation_id AND a.attempt = o.current_attempt
-           WHERE o.state = 'prepared'
+           FROM operations o LEFT JOIN attempts a ON a.operation_id = o.operation_id AND a.attempt = o.current_attempt
+           WHERE o.state = 'claimed'
+              OR o.state = 'prepared'
               OR (o.state = 'may_broadcast' AND json_extract(o.observation_json, '$.blockNumber') IS NULL)
               OR (o.state IN ('may_broadcast', 'finalized', 'reverted')
                   AND CAST(json_extract(o.observation_json, '$.blockNumber') AS INTEGER) > ?)`,
@@ -691,13 +697,24 @@ export class OxideJournal {
     ) as {
       state: OxideOperationState;
       valid_until: number | null;
-      expiration_timestamp: string;
-      evidence_json: string;
+      terms_amount: string | null;
+      expiration_timestamp: string | null;
+      evidence_json: string | null;
       mined_block: number | null;
     }[];
     let total = 0n;
     let sends = 0;
     for (const row of rows) {
+      if (row.state === "claimed") {
+        if (row.valid_until !== null && nowSeconds >= row.valid_until) continue;
+        if (row.terms_amount === null) throw new Error("claimed operation names no amount");
+        total += BigInt(row.terms_amount);
+        sends += 1;
+        continue;
+      }
+      if (row.expiration_timestamp === null || row.evidence_json === null) {
+        throw new Error(`operation in state ${row.state} has no current attempt`);
+      }
       const unexpired = BigInt(nowSeconds) < BigInt(row.expiration_timestamp);
       const counts =
         row.mined_block !== null

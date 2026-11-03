@@ -1,4 +1,4 @@
-import { createServer } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -28,7 +28,7 @@ import {
 } from "../src/oxide/allowlist.js";
 import { OxideAttestationProbe, type StandardAccountChainProbe } from "../src/oxide/attestation.js";
 import { DAI } from "../src/oxide/caps.js";
-import { EnclaveTrustRefused } from "../src/oxide/enclave.js";
+import { EnclaveTrustRefused, type EnclaveRefusal } from "../src/oxide/enclave.js";
 import { OxideJournal } from "../src/oxide/journal.js";
 import { oxideTerms, OxideSendRequestSchema } from "../src/oxide/operation.js";
 import { OxidePinMismatch, OxidePinUnverified, OXIDE_V6_MAINNET } from "../src/oxide/pins.js";
@@ -537,14 +537,14 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
       { manifestPins: { assertPinned: () => Promise.reject(new OxidePinMismatch("manifest", ["gitSha"])) } },
       "oxide_pin_mismatch",
       { pins: { manifest: { state: "known", pinned: false } } },
-      "permanent",
+      "oxide_pin_mismatch",
     ],
     [
       "the profile moved",
       { manifestPins: { assertPinned: () => Promise.reject(new OxidePinMismatch("profile", ["oxide.expectedGitSha"])) } },
       "oxide_pin_mismatch",
       { pins: { manifest: { state: "known", pinned: false } } },
-      "permanent",
+      "oxide_pin_mismatch",
     ],
     [
       "the manifest is unreadable",
@@ -575,7 +575,7 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
       },
       "oxide_l1_not_pinned",
       { pins: { l1: { state: "known", pinned: false, portalFrozen: false } } },
-      "permanent",
+      "enclave_refused:l1_not_pinned",
     ],
     [
       "the enclave is unreachable",
@@ -589,14 +589,14 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
       { enclave: { attestEnclave: () => Promise.reject(new EnclaveTrustRefused("pcr0_not_pinned", "image")) } },
       "enclave_attestation_refused",
       { enclave: { state: "known", attested: false } },
-      "permanent",
+      "enclave_refused:pcr0_not_pinned",
     ],
     [
       "keccak(PCR0) is not TeeRegistry.PCR0_HASH()",
       { enclave: { attestEnclave: () => Promise.reject(new EnclaveTrustRefused("pcr0_hash_mismatch", "registry")) } },
       "enclave_attestation_refused",
       { enclave: { state: "known", attested: false } },
-      "permanent",
+      "enclave_refused:pcr0_hash_mismatch",
     ],
     [
       "the enclave's attestation document does not verify",
@@ -642,14 +642,14 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
     expect(projection.admission).toEqual({ freshSend: false, reasons: [] });
     expect(projection.oxide).toMatchObject(fact);
     expect(await readiness.admit({ recipient, amount: "1" })).toEqual(
-      verdict === "permanent" ? { kind: "refused", reason, retryable: false } : { kind: "not_ready", reasons: [reason] },
+      verdict === "transient" ? { kind: "not_ready", reasons: [reason] } : { kind: "refused", reason: verdict, retryable: false },
     );
   });
 
-  it("a structural enclave refusal recovers to admitted once the fleet attests again", async () => {
-    // The reason is read fresh on every admission (a failed check is never
-    // cached): a fleet that re-attests is admitted, a fleet that still runs
-    // another image is refused for good.
+  it("a structural enclave refusal is permanent for the send it refused, and the next send is read fresh", async () => {
+    // Permanent for the OPERATION (Riddler refunds it); the bridge latches
+    // nothing: a failed check is never cached, so the next fresh send reads
+    // the fleet again and is admitted once it attests the pinned image.
     vi.spyOn(console, "error").mockImplementation(() => {});
     const state = { refuse: true };
     const { readiness } = await readinessSetup({
@@ -660,11 +660,117 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
     });
     expect(await readiness.admit({ recipient, amount: "1" })).toEqual({
       kind: "refused",
-      reason: "enclave_attestation_refused",
+      reason: "enclave_refused:pcr0_hash_mismatch",
       retryable: false,
     });
     state.refuse = false;
     expect(await readiness.admit({ recipient, amount: "1" })).toEqual({ kind: "admitted" });
+  });
+
+  it("classifies an enclave refusal from its own read, not from a concurrent /ready's", async () => {
+    // admit() reads attestation_invalid (transient) while a concurrent
+    // observe() reads pcr0_not_pinned (structural), and the reverse: each
+    // call answers from what IT read.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const answers: EnclaveRefusal[] = ["attestation_invalid", "pcr0_not_pinned", "pcr0_not_pinned", "attestation_invalid"];
+    const { readiness } = await readinessSetup({
+      enclave: { attestEnclave: () => Promise.reject(new EnclaveTrustRefused(answers.shift()!, "x")) },
+    });
+    const [transient, ready1] = await Promise.all([readiness.admit({ recipient, amount: "1" }), readiness.observe()]);
+    expect(transient).toEqual({ kind: "not_ready", reasons: ["enclave_attestation_refused"] });
+    expect(ready1.ready).toBe(false);
+    const [permanent, ready2] = await Promise.all([readiness.admit({ recipient, amount: "1" }), readiness.observe()]);
+    expect(permanent).toEqual({ kind: "refused", reason: "enclave_refused:pcr0_not_pinned", retryable: false });
+    expect(ready2.ready).toBe(false);
+  });
+
+  it("never caches an older success over a newer refusal", async () => {
+    // Read A (slow) succeeds after read B (fast) refused: A's success must
+    // not be stored, or admission would pass through a refusal /ready saw.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    let release!: () => void;
+    const slow = new Promise<void>((resolve) => (release = resolve));
+    let calls = 0;
+    const { readiness } = await readinessSetup({
+      enclave: {
+        attestEnclave: () => {
+          calls += 1;
+          if (calls === 1) return slow;
+          if (calls === 2) return Promise.reject(new EnclaveTrustRefused("attestation_invalid", "x"));
+          return Promise.reject(new EnclaveTrustRefused("attestation_invalid", "x"));
+        },
+      },
+      balanceWaitMs: 1,
+    });
+    const first = readiness.observe();
+    const second = await readiness.observe();
+    expect(second.reasons).toEqual(["enclave_attestation_refused"]);
+    release();
+    expect((await first).reasons).toEqual([]);
+    // A third call re-reads (nothing cached): the refusal, not A's success.
+    const third = await readiness.observe();
+    expect(third.reasons).toEqual(["enclave_attestation_refused"]);
+    expect(calls).toBe(3);
+  });
+
+  it("counts a claimed operation as committed while its validity bound is open", async () => {
+    // Between the journal claim and recordPrepared the send is being
+    // simulated, signed and proven -- minutes -- and will spend the same
+    // notes; a /ready served meanwhile must not show that principal free.
+    const { readiness, journal } = await readinessSetup();
+    const terms = oxideTerms(
+      OxideSendRequestSchema.parse(request({ recipient, amount: (120n * DAI).toString(), validUntil: NOW + 600 })),
+      OXIDE_V6_MAINNET.bridge.l2Token,
+    );
+    journal.claim("op-1", terms);
+    const projection = await readiness.observe();
+    expect(projection.oxide.privateBalance).toMatchObject({
+      state: "known",
+      committed: (120n * DAI).toString(),
+      committedSends: 1,
+      available: (380n * DAI).toString(),
+    });
+    expect(journal.committedPrincipal(NOW + 600, 100)).toEqual({ total: 0n, sends: 0 });
+  });
+
+  it("nets commitments against the snapshot's read time, so an attempt that expired after it still counts", async () => {
+    // Snapshot at NOW; the PXE is then busy and the snapshot is served for
+    // minutes. A marked attempt whose protocol expiry passes meanwhile may
+    // have been mined above the snapshot's block without anyone observing
+    // it: it keeps counting until a newer snapshot is read.
+    let t = NOW;
+    let reads = 0;
+    const { readiness, journal } = await readinessSetup({
+      now: () => t * 1_000,
+      balanceWaitMs: 1,
+      balance: {
+        privateBalance: () => {
+          reads += 1;
+          // The first read answers; every later one hangs (the PXE is proving).
+          return reads === 1 ? Promise.resolve({ observed: 500n * DAI, syncedBlock: 100 }) : new Promise(() => {});
+        },
+      },
+    });
+    const terms = oxideTerms(
+      OxideSendRequestSchema.parse(request({ recipient, amount: (50n * DAI).toString(), validUntil: NOW + 60 })),
+      OXIDE_V6_MAINNET.bridge.l2Token,
+    );
+    journal.claim("op-1", terms);
+    const attempt = journal.recordPrepared("op-1", {
+      txHash: "0x" + "01".padStart(64, "0"),
+      txBytes: Buffer.from("tx-1"),
+      expirationTimestamp: BigInt(NOW + 90),
+      evidence: evidenceFor({ recipient, amount: 50n * DAI }),
+    });
+    journal.markMayBroadcast("op-1", attempt, terms.amount, CAPS);
+    expect((await readiness.observe()).oxide.privateBalance).toMatchObject({ committed: (50n * DAI).toString() });
+    t = NOW + 120; // past the expiry, inside the snapshot's age bound
+    expect(journal.committedPrincipal(t, 100)).toEqual({ total: 0n, sends: 0 });
+    expect((await readiness.observe()).oxide.privateBalance).toMatchObject({
+      readAt: NOW,
+      committed: (50n * DAI).toString(),
+      committedSends: 1,
+    });
   });
 
   it("stays ready after one order prepares against exactly the whole balance and one send's fee", async () => {
@@ -881,11 +987,17 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
         logged.push(args.map(String).join(" "));
       });
     }
-    const { readiness, allowlist } = await readinessSetup({
+    const allowlist = await OxideAllowlist.build(SEED, [
+      { address: recipient, index: 611 },
+      { address: OTHER_MEMBER, index: 23 },
+    ]);
+    const { readiness } = await readinessSetup({
+      allowlist,
       balance: { privateBalance: () => Promise.reject(new Error("pxe down")) },
     });
     const projection = await readiness.observe();
-    const refusal = await readiness.admit({ recipient: OTHER_MEMBER, amount: "1" });
+    const outsider = "0x" + "0f".repeat(32);
+    const refusal = await readiness.admit({ recipient: outsider, amount: "1" });
     const app = createApp(new FakeAztecClient(), { apiKey: "ready-key", oxideReadiness: readiness });
     await new Promise<void>((resolve) => app.listen(0, "127.0.0.1", resolve));
     const address = app.address();
@@ -902,9 +1014,56 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
         admission: { freshSend: false, reasons: ["private_balance_unknown"] },
       });
       const surfaces = [JSON.stringify(projection), JSON.stringify(refusal), body, ...logged].join("\n").toLowerCase();
-      expect(surfaces).not.toContain(recipient.toLowerCase().slice(2));
+      // Every member, the refused outsider, the root, and the set's size or positions.
+      for (const member of [recipient, OTHER_MEMBER, outsider]) expect(surfaces).not.toContain(member.toLowerCase().slice(2));
       expect(surfaces).not.toContain(allowlist.root.slice(2));
+      expect(surfaces).not.toMatch(/"size"|"members"|"recipients"|"index"|611/);
     } finally {
+      await new Promise<void>((resolve, reject) => app.close((error) => (error ? reject(error) : resolve())));
+    }
+  });
+
+  it("reports a saturated backend as capacity, never as serving health", async () => {
+    // 16 request bodies held open fill the body intake. On the Oxide
+    // projection that closes admission.freshSend and leaves `ready` true
+    // (HTTP 200): Riddler keeps paying already-pulled orders under load.
+    const { readiness } = await readinessSetup();
+    const app = createApp(new FakeAztecClient(), { apiKey: "ready-key", oxideReadiness: readiness });
+    await new Promise<void>((resolve) => app.listen(0, "127.0.0.1", resolve));
+    const address = app.address();
+    if (!address || typeof address === "string") throw new Error("server did not bind");
+    const url = `http://127.0.0.1:${address.port}`;
+    const held: ReturnType<typeof httpRequest>[] = [];
+    try {
+      for (let i = 0; i < 16; i++) {
+        const req = httpRequest(url, {
+          method: "POST",
+          headers: { Authorization: "Bearer ready-key", "Content-Type": "application/json" },
+        });
+        held.push(req);
+        await new Promise<void>((resolve, reject) => {
+          req.once("error", reject);
+          req.once("socket", (socket) => {
+            const sendPartialBody = (): void => {
+              req.flushHeaders();
+              req.write(Buffer.alloc(64 * 1024 + 1, "x"));
+              resolve();
+            };
+            if (socket.connecting) socket.once("connect", sendPartialBody);
+            else sendPartialBody();
+          });
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      const response = await fetch(`${url}/ready`, { headers: { authorization: "Bearer ready-key" } });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        ready: true,
+        reasons: [],
+        admission: { freshSend: false, reasons: ["backend_capacity_exhausted"] },
+      });
+    } finally {
+      for (const req of held) req.destroy();
       await new Promise<void>((resolve, reject) => app.close((error) => (error ? reject(error) : resolve())));
     }
   });

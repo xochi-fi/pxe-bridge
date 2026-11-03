@@ -31,7 +31,7 @@ export interface OxideSenderConfig {
   /** `PXE_BRIDGE_OXIDE_TOKEN_ARTIFACT`: compiled OxideToken JSON at the pinned class. */
   tokenArtifactPath: string;
   mayBroadcast: MayBroadcastClient;
-  /** The private recipient allowlist (`oxideAllowlistFromEnv`): the only recipients a fresh send admits. */
+  /** The private recipient allowlist (`oxideAllowlistFromEnv`) supplied to the fresh-send admission predicate. */
   allowlist: OxideAllowlist;
   /** Whether readiness attestations run (index.ts built an AttestationProducer); `/ready` is not ready without them. */
   attestationConfigured: boolean;
@@ -48,11 +48,12 @@ export interface OxideRuntime {
 }
 
 /**
- * Builds the Oxide sender on a connected standard-mode client. Refuses, before
- * anything can be sent, unless L1, the Oxide manifest and the zk.money profile
- * all describe the pinned v6 deployment and the artifact is the deployed class.
- * The settlement layer asks `readiness.admit` before a fresh send, then calls
- * `OxideSender.send`; nothing here serves HTTP.
+ * Builds the Oxide sender and the fresh-send admission predicate on a
+ * connected standard-mode client. Refuses, before anything can be sent,
+ * unless L1, the Oxide manifest and the zk.money profile all describe the
+ * pinned v6 deployment and the artifact is the deployed class. The settlement
+ * layer (wired in #89) asks `readiness.admit` before a fresh send, then calls
+ * `OxideSender.send`; nothing here serves HTTP or invokes admission itself.
  */
 export async function createOxideSender(config: OxideSenderConfig): Promise<OxideRuntime> {
   const l1 = config.l1 ?? viemL1Reader(config.l1RpcUrl);

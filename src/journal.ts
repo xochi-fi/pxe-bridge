@@ -1157,7 +1157,8 @@ export class SettlementJournal {
         .get(root.toLowerCase()) as { recipients_json: string } | undefined;
       if (existing) {
         if (existing.recipients_json !== encoded) {
-          throw new StateError(`allowlist root ${root} is already bound to another snapshot`);
+          // Never the root: in Oxide mode it is the private allowlist's, and this error reaches the startup log.
+          throw new StateError("allowlist root is already bound to another snapshot");
         }
         return false;
       }

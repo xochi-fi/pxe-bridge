@@ -314,11 +314,15 @@ describe("SettlementJournal", () => {
         { address: recipients[0]!.address, index: 9 },
       ],
     });
-    expect(() =>
-      reopened.recordAllowlistSnapshot(root, [
-        { address: recipients[0]!.address, index: 2 },
-      ]),
-    ).toThrow(/already bound/);
+    let conflict: unknown;
+    try {
+      reopened.recordAllowlistSnapshot(root, [{ address: recipients[0]!.address, index: 2 }]);
+    } catch (cause) {
+      conflict = cause;
+    }
+    expect(conflict).toBeInstanceOf(Error);
+    expect((conflict as Error).message).toContain("already bound");
+    expect((conflict as Error).message).not.toContain(root);
   });
 
   it("keeps a RootUpdate outbox entry and retry state across restart", () => {

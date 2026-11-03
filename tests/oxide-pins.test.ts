@@ -124,5 +124,29 @@ describe("Oxide pins", () => {
       const failing = new OxidePinChecker({ fetch: async () => Promise.reject(new Error("ECONNRESET")) });
       await expect(failing.assertPinned()).rejects.toBeInstanceOf(OxidePinUnverified);
     });
+
+    it("a body that is not the file's shape is unverified, never a mismatch", async () => {
+      // A mismatch refuses sends permanently, so only a file that describes
+      // a deployment may say it moved: a CDN error object served as JSON, an
+      // empty document, or a profile whose `current` names no version.
+      for (const manifest of [{}, { error: "upstream timeout" }, [], "ok"]) {
+        const { fetch } = served({ manifest });
+        await expect(new OxidePinChecker({ fetch }).assertPinned()).rejects.toBeInstanceOf(OxidePinUnverified);
+      }
+      const halfPublished = profileFixture();
+      halfPublished.current = "v999";
+      for (const profile of [{}, { shared: {}, versions: {} }, halfPublished]) {
+        const { fetch } = served({ profile });
+        await expect(new OxidePinChecker({ fetch }).assertPinned()).rejects.toBeInstanceOf(OxidePinUnverified);
+      }
+      // A well-formed manifest that no longer lists the pinned deployment IS a mismatch.
+      const removed = manifestFixture();
+      d0(removed).deploymentId = "dep-v7";
+      const { fetch } = served({ manifest: removed });
+      await expect(new OxidePinChecker({ fetch }).assertPinned()).rejects.toMatchObject({
+        source: "manifest",
+        fields: ["deployments[dep-v6]"],
+      });
+    });
   });
 });

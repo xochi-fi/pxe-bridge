@@ -8,20 +8,34 @@
  * changes nothing by itself. It checks the change, then prints the next
  * PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS value, and ONLY that value, on
  * stdout, so it can be piped straight into the secret store. Every other line
- * goes to stderr. Neither the set nor its root is ever printed elsewhere: keep
- * stdout out of shell history, logs and tickets.
+ * goes to stderr, and none of them names a recipient, a position, the set's
+ * size or its root: keep stdout out of shell history, logs and tickets.
  *
- * Usage:
+ * Two ways to supply the secrets and the change:
+ *
  *   npm run -s oxide-allowlist -- --add 0x<address> --index <n>|random [--initial]
  *   npm run -s oxide-allowlist -- --revoke 0x<address>
+ *     with PXE_BRIDGE_OXIDE_ALLOWLIST_SEED and _RECIPIENTS in the environment
+ *     (development: both reach any child process and `ps e`).
  *
- * Required env:
- *   PXE_BRIDGE_OXIDE_ALLOWLIST_SEED        -- the seed every leaf salt derives from
- *   PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS  -- the CURRENT set, as the bridge runs it
- *   PXE_BRIDGE_JOURNAL                     -- the bridge's settlement journal, opened read-only
+ *   npm run -s oxide-allowlist -- --stdin
+ *     everything on stdin as KEY=VALUE lines (production, docs "G1"): the two
+ *     secrets plus the change, so neither the set nor the address being
+ *     added or revoked is ever a command-line argument (visible to `ps`,
+ *     shell history, auditd and the Docker daemon's saved container config)
+ *     or a container environment variable (`docker inspect`,
+ *     /var/lib/docker/containers/<id>/config.v2.json):
+ *       PXE_BRIDGE_OXIDE_ALLOWLIST_SEED=0x<64 hex>
+ *       PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS=[{"address":"0x..","index":n},...]
+ *       OXIDE_ALLOWLIST_ADD=0x<address>      with OXIDE_ALLOWLIST_INDEX=<n>|random
+ *       OXIDE_ALLOWLIST_REVOKE=0x<address>
+ *       OXIDE_ALLOWLIST_INITIAL=1            (optional)
+ *     With --stdin the two secret variables must NOT be in the environment
+ *     and no other argument is accepted.
  *
- * Optional env:
- *   PXE_BRIDGE_ACCOUNT_ADDRESS  -- the Oxide sending account, which is never admitted
+ * Required env (not secret):
+ *   PXE_BRIDGE_JOURNAL           -- the bridge's settlement journal, opened read-only
+ *   PXE_BRIDGE_ACCOUNT_ADDRESS   -- the Oxide sending account, which is never admitted
  *
  * Refuses unless the configured set reproduces the root the bridge last
  * signed a RootUpdate for (the journal's newest outbox entry), the mirror of
@@ -29,9 +43,9 @@
  * would silently drop or restore recipients. `--initial` is accepted only
  * while the journal holds no RootUpdate yet (before the first attested start).
  *
- * Choose `--index random` (or a random free position): positions are part of
- * the commitment, and filling left to right would make a later root change
- * read as an addition to anyone who ever held an earlier set.
+ * Choose `random` (or a random free position): positions are part of the
+ * commitment, and filling left to right would make a later root change read
+ * as an addition to anyone who ever held an earlier set.
  *
  * Applying: run this with the bridge STOPPED (its journal holds an exclusive
  * lock while it runs, so the check below cannot read it), store the printed
@@ -50,6 +64,7 @@
  */
 
 import { randomInt } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import Database from "better-sqlite3";
 import type { AllowlistRecipient } from "../src/allowlist-tree.js";
@@ -63,48 +78,109 @@ import {
 import { requiredEnv, runScript, takeSecretEnv } from "./spending-limit-admin.js";
 
 const TAG = "[oxide-allowlist]";
+const SEED_ENV = "PXE_BRIDGE_OXIDE_ALLOWLIST_SEED";
+const RECIPIENTS_ENV = "PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS";
+const PAYLOAD_KEYS = [
+  SEED_ENV,
+  RECIPIENTS_ENV,
+  "OXIDE_ALLOWLIST_ADD",
+  "OXIDE_ALLOWLIST_REVOKE",
+  "OXIDE_ALLOWLIST_INDEX",
+  "OXIDE_ALLOWLIST_INITIAL",
+] as const;
+type PayloadKey = (typeof PAYLOAD_KEYS)[number];
 
 function fail(message: string): never {
   throw new Error(message);
 }
 
-function parseChange(argv: readonly string[], current: readonly AllowlistRecipient[]): {
-  change: OxideAllowlistChange;
+/** What the script was asked, before the secrets are read: the change, or `--stdin`. */
+interface Request {
+  add?: string | undefined;
+  revoke?: string | undefined;
+  index?: string | undefined;
   initial: boolean;
-} {
-  const { values } = parseArgs({
-    args: [...argv],
-    options: {
-      add: { type: "string" },
-      revoke: { type: "string" },
-      index: { type: "string" },
-      initial: { type: "boolean", default: false },
-    },
-    strict: true,
-    allowPositionals: false,
-  });
-  if (values.revoke !== undefined) {
-    if (values.add !== undefined) fail("pass exactly one of --add or --revoke");
-    if (values.index !== undefined) fail("--revoke takes no --index: the position is the listed one");
-    return { change: { mode: "revoke", address: values.revoke }, initial: values.initial };
+}
+
+/**
+ * The command line. A parse error is reported with a fixed message: node's
+ * own names the offending argument, which may be an address.
+ */
+function parseCommandLine(argv: readonly string[]): { stdin: boolean; request: Request } {
+  let values: { add?: string; revoke?: string; index?: string; initial?: boolean; stdin?: boolean };
+  try {
+    ({ values } = parseArgs({
+      args: [...argv],
+      options: {
+        add: { type: "string" },
+        revoke: { type: "string" },
+        index: { type: "string" },
+        initial: { type: "boolean", default: false },
+        stdin: { type: "boolean", default: false },
+      },
+      strict: true,
+      allowPositionals: false,
+    }));
+  } catch {
+    fail(
+      "unrecognised arguments. Usage: --add 0x<address> --index <n>|random [--initial] | --revoke 0x<address> | --stdin",
+    );
   }
-  if (values.add === undefined) {
-    fail("pass exactly one of --add <address> --index <n>|random or --revoke <address>");
+  if (values.stdin === true) {
+    if (values.add !== undefined || values.revoke !== undefined || values.index !== undefined || values.initial === true) {
+      fail("--stdin takes no other argument: the change travels in the payload");
+    }
+    return { stdin: true, request: { initial: false } };
   }
+  return {
+    stdin: false,
+    request: { add: values.add, revoke: values.revoke, index: values.index, initial: values.initial === true },
+  };
+}
+
+/** KEY=VALUE lines from stdin; unknown keys and repeated keys are refused by name, never by value. */
+function readPayload(): Partial<Record<PayloadKey, string>> {
+  let text: string;
+  try {
+    text = readFileSync(0, "utf8");
+  } catch {
+    fail("--stdin: the payload could not be read from stdin");
+  }
+  const payload: Partial<Record<PayloadKey, string>> = {};
+  for (const [n, raw] of text.split("\n").entries()) {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq <= 0) fail(`--stdin: line ${n + 1} is not KEY=VALUE`);
+    const key = line.slice(0, eq).trim();
+    if (!(PAYLOAD_KEYS as readonly string[]).includes(key)) fail(`--stdin: line ${n + 1} names an unknown key`);
+    if (payload[key as PayloadKey] !== undefined) fail(`--stdin: ${key} is given twice`);
+    payload[key as PayloadKey] = line.slice(eq + 1).trim();
+  }
+  return payload;
+}
+
+function parseChange(request: Request, current: readonly AllowlistRecipient[]): OxideAllowlistChange {
+  if (request.revoke !== undefined) {
+    if (request.add !== undefined) fail("pass exactly one of add or revoke");
+    if (request.index !== undefined) fail("revoke takes no index: the position is the listed one");
+    return { mode: "revoke", address: request.revoke };
+  }
+  if (request.add === undefined) fail("pass exactly one of add (with an index of <n> or random) or revoke");
   const free = freeOxidePositions(current);
   let index: number | undefined;
-  if (values.index === "random") {
+  if (request.index === "random") {
     index = free[randomInt(Math.max(free.length, 1))];
     if (index === undefined) fail("every position is occupied; revoke a recipient first");
-  } else if (values.index !== undefined && /^(?:0|[1-9]\d*)$/.test(values.index)) {
-    index = Number(values.index);
+  } else if (request.index !== undefined && /^(?:0|[1-9]\d*)$/.test(request.index)) {
+    index = Number(request.index);
   } else {
     fail(
-      "--add needs --index <n> or --index random. Choose a RANDOM free position, not the lowest: " +
+      "add needs an index of <n> or random. Choose a RANDOM free position, not the lowest: " +
         "filling left to right makes a later root change readable as an addition.",
     );
   }
-  return { change: { mode: "add", address: values.add, index }, initial: values.initial };
+  return { mode: "add", address: request.add, index };
 }
 
 /** The root of the newest RootUpdate the bridge enqueued, or undefined before the first. */
@@ -127,36 +203,61 @@ function lastAttestedRoot(journalPath: string): string | undefined {
 }
 
 async function main(): Promise<number> {
-  const seed = takeSecretEnv("PXE_BRIDGE_OXIDE_ALLOWLIST_SEED");
-  if (!seed) fail("PXE_BRIDGE_OXIDE_ALLOWLIST_SEED is required");
-  const raw = takeSecretEnv("PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS");
-  if (!raw) fail('PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS is required ("[]" for an empty set)');
+  const { stdin, request: argRequest } = parseCommandLine(process.argv.slice(2));
+  let seed: string | undefined;
+  let raw: string | undefined;
+  let request = argRequest;
+  if (stdin) {
+    // The secrets must not ALSO be in the environment: that is the leak the payload avoids.
+    if (process.env[SEED_ENV] !== undefined || process.env[RECIPIENTS_ENV] !== undefined) {
+      fail(`--stdin: ${SEED_ENV} and ${RECIPIENTS_ENV} must not be set in the environment`);
+    }
+    const payload = readPayload();
+    seed = payload[SEED_ENV];
+    raw = payload[RECIPIENTS_ENV];
+    const initial = payload.OXIDE_ALLOWLIST_INITIAL;
+    if (initial !== undefined && initial !== "1") fail("--stdin: OXIDE_ALLOWLIST_INITIAL must be 1 when given");
+    request = {
+      add: payload.OXIDE_ALLOWLIST_ADD,
+      revoke: payload.OXIDE_ALLOWLIST_REVOKE,
+      index: payload.OXIDE_ALLOWLIST_INDEX,
+      initial: initial === "1",
+    };
+  } else {
+    seed = takeSecretEnv(SEED_ENV);
+    raw = takeSecretEnv(RECIPIENTS_ENV);
+  }
+  seed = seed?.trim();
+  if (!seed) fail(`${SEED_ENV} is required`);
+  if (!raw) fail(`${RECIPIENTS_ENV} is required ("[]" for an empty set)`);
   const journalPath = requiredEnv("PXE_BRIDGE_JOURNAL");
-  const sender = process.env["PXE_BRIDGE_ACCOUNT_ADDRESS"];
+  // Required, not optional: without it the "never the sending account" check
+  // would be skipped silently.
+  const sender = requiredEnv("PXE_BRIDGE_ACCOUNT_ADDRESS");
 
   let json: unknown;
   try {
     json = JSON.parse(raw);
   } catch {
-    fail("PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS is not valid JSON");
+    fail(`${RECIPIENTS_ENV} is not valid JSON`);
   }
   const current = validateOxideRecipients(json);
-  const { change, initial } = parseChange(process.argv.slice(2), current);
+  const change = parseChange(request, current);
 
   const before = await OxideAllowlist.build(seed, current);
   const attested = lastAttestedRoot(journalPath);
-  if (attested === undefined && !initial) {
+  if (attested === undefined && !request.initial) {
     fail(
       "the journal holds no RootUpdate yet, so the running set cannot be confirmed. Pass --initial " +
-        "only before the bridge's first attested Oxide-mode start.",
+        "(OXIDE_ALLOWLIST_INITIAL=1) only before the bridge's first attested Oxide-mode start.",
     );
   }
-  if (attested !== undefined && initial) {
+  if (attested !== undefined && request.initial) {
     fail("--initial is refused: the bridge has already attested a root");
   }
   if (attested !== undefined && attested !== before.root) {
     fail(
-      "the configured PXE_BRIDGE_OXIDE_ALLOWLIST_SEED and PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS do " +
+      `the configured ${SEED_ENV} and ${RECIPIENTS_ENV} do ` +
         "not build the root of the bridge's newest RootUpdate. Either this is not the set the bridge " +
         "runs, or the bridge has not published a RootUpdate for its current set yet (after a " +
         "restart it waits for the next finalized block: audit reason finalized_tip_not_advanced). " +
@@ -166,12 +267,11 @@ async function main(): Promise<number> {
 
   const next = planOxideAllowlistChange(current, change, sender);
   const after = await OxideAllowlist.build(seed, next);
-  const position =
-    change.mode === "add" ? change.index : current.find((r) => !next.some((n) => n.index === r.index))?.index;
-  console.error(`${TAG} ${change.mode} at position ${position}: ${current.length} -> ${next.length} recipient(s)`);
+  // Neither the position nor the set's size: both describe the private set.
+  console.error(`${TAG} ${change.mode}: checked against the bridge's newest RootUpdate`);
   console.error(`${TAG} root changes: ${after.root !== before.root ? "yes" : "NO"}`);
   console.error(
-    `${TAG} stdout is the next PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS. It is SECRET: store it only in ` +
+    `${TAG} stdout is the next ${RECIPIENTS_ENV}. It is SECRET: store it only in ` +
       "the bridge's secret store, then restart the bridge.",
   );
   process.stdout.write(`${JSON.stringify(next)}\n`);

@@ -2,15 +2,16 @@ import { AllowlistTree, ALLOWLIST_CAPACITY, type AllowlistRecipient } from "../a
 import { AllowlistRecipientsSchema } from "../types.js";
 
 /**
- * The Oxide sender's recipient allowlist (xochi-fi/xochi#751, decided as
+ * The Oxide fresh-send recipient allowlist (xochi-fi/xochi#751, decided as
  * xochi#775 option a): an operator-held set of Aztec recipients, committed to
  * as the same seed-salted height-10 tree the spending-limit account uses
  * (`src/allowlist-tree.ts`), whose root is NEVER written on chain, put in the
  * corridor manifest, served by an endpoint or logged. The bridge signs
  * Membership and RootUpdate readiness records over that root with the corridor
  * readiness signer (src/oxide/attestation.ts), in the exact formats the Xochi
- * Worker already verifies, and the sender refuses any recipient outside it
- * (`OxideReadiness.admit`).
+ * Worker already verifies. `OxideReadiness.admit` supplies the membership
+ * refusal; the settlement layer wired in #89 must invoke it before a fresh
+ * send.
  *
  * Salted leaves are what keep the root private in practice: without the seed
  * a root cannot be tested against candidate addresses. The set and the seed
