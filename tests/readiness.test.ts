@@ -120,6 +120,12 @@ describe("authoritative readiness predicate", () => {
 
     expect(result.ready).toBe(true);
     expect(result.reasons).toEqual([]);
+    // Riddler refuses intake on a /ready that names no sendMode (a 0.3.0 bridge).
+    expect(result.sendMode).toBe("spending_limit");
+    expect(projection({ ...healthyFacts(), accountMode: "standard" })).toMatchObject({
+      ready: false,
+      sendMode: "spending_limit",
+    });
     expect(result.finalized).toEqual({
       blockNumber: "7",
       blockHash: "0x" + "b".repeat(64),

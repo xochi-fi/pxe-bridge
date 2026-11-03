@@ -3,7 +3,7 @@ import type { MayBroadcastClient } from "../may-broadcast.js";
 import { known, unknown, type ReadinessFact, type ReadinessReason } from "../readiness.js";
 import type { NodeObservation } from "../settlement.js";
 import { CapExceeded, OxideCaps, type OxideCapsConfig } from "./caps.js";
-import { EnclaveTrustRefused } from "./enclave.js";
+import { EnclaveTrustRefused, enclaveRefusalPermanent } from "./enclave.js";
 import type { OxideAttempt, OxideJournal, OxideStoredOperation } from "./journal.js";
 import {
   fingerprintOxideTerms,
@@ -121,6 +121,23 @@ export interface OxideBackend {
 /** Re-verified before every fresh attempt: the Oxide manifest/profile pins, the L1 deployment. */
 export interface OxidePreflight {
   assertPinned(): Promise<void>;
+}
+
+function boundedErrorClass(cause: unknown): string {
+  if (cause instanceof OxidePinMismatch) return "oxide_pin_mismatch";
+  if (cause instanceof EnclaveTrustRefused) return `enclave_refused:${cause.reason}`;
+  return cause instanceof Error && cause.name.length <= 64 ? cause.name : "unknown_error";
+}
+
+function preflightRefusal(cause: unknown): { reason: string; retryable: boolean } {
+  if (cause instanceof OxidePinMismatch) return { reason: "oxide_pin_mismatch", retryable: false };
+  if (cause instanceof EnclaveTrustRefused) {
+    return {
+      reason: `enclave_refused:${cause.reason}`,
+      retryable: !enclaveRefusalPermanent(cause.reason),
+    };
+  }
+  return { reason: "oxide_pin_unverified", retryable: true };
 }
 
 /** What a send answers: the observation, plus the payout's identity once an attempt exists. */
@@ -290,7 +307,7 @@ export class OxideSender {
     } catch (cause) {
       if (cause instanceof Answer) return cause.answer;
       if (cause instanceof JournalWriteError || cause instanceof JournalUnreadableError) {
-        return { kind: "journal_unavailable", operationId: id, detail: cause.message };
+        return { kind: "journal_unavailable", operationId: id, detail: "journal_unavailable" };
       }
       throw cause;
     } finally {
@@ -354,7 +371,9 @@ export class OxideSender {
         try {
           await this.preflight.assertPinned();
         } catch (cause) {
-          console.error(`[oxide] Preflight refused a held attempt: ${(cause as Error).message}`);
+          const refusal = preflightRefusal(cause);
+          console.error(`[oxide] Preflight refused a held attempt: ${boundedErrorClass(cause)}`);
+          if (!refusal.retryable) return this.refuse(op, refusal.reason, false);
           this.journal.recordHold(op.operationId, "preflight_refused");
           return this.answer(this.journal.get(op.operationId)!, this.preparedObservation(attempt, "preflight_refused"));
         }
@@ -382,14 +401,9 @@ export class OxideSender {
     try {
       await this.preflight.assertPinned();
     } catch (cause) {
-      const reason =
-        cause instanceof OxidePinMismatch
-          ? "oxide_pin_mismatch"
-          : cause instanceof EnclaveTrustRefused
-            ? `enclave_refused:${cause.reason}`
-            : "oxide_pin_unverified";
-      console.error(`[oxide] Preflight refused: ${(cause as Error).message}`);
-      return this.refuse(op, reason, true);
+      const refusal = preflightRefusal(cause);
+      console.error(`[oxide] Preflight refused: ${boundedErrorClass(cause)}`);
+      return this.refuse(op, refusal.reason, refusal.retryable);
     }
 
     // One account, one set of notes. The PXE selects notes from what it has
@@ -482,11 +496,13 @@ export class OxideSender {
       return proven;
     } catch (cause) {
       if (cause instanceof JournalWriteError || cause instanceof JournalUnreadableError) throw cause;
-      console.error(`[oxide] ${step} failed: ${(cause as Error).message ?? String(cause)}`);
+      console.error(`[oxide] ${step} failed: ${boundedErrorClass(cause)}`);
       if (cause instanceof InputsPending) throw new Answer(this.refuse(op, "inputs_pending", true));
       if (cause instanceof FeeRunwayRefused) throw new Answer(this.refuse(op, cause.reason, true));
       if (cause instanceof UnexpectedTokenOperation) throw new Answer(this.refuse(op, "token_operation_unexpected", false));
-      if (cause instanceof EnclaveTrustRefused) throw new Answer(this.refuse(op, `enclave_refused:${cause.reason}`, true));
+      if (cause instanceof EnclaveTrustRefused) {
+        throw new Answer(this.refuse(op, `enclave_refused:${cause.reason}`, !enclaveRefusalPermanent(cause.reason)));
+      }
       throw new Answer(this.refuse(op, `${step}_failed`, true));
     }
   }
@@ -528,7 +544,7 @@ export class OxideSender {
       const committed = this.journal.committedFees(this.nowSeconds(), "");
       return known({ observed, committed: committed.total, committedSends: committed.sends, perSendFeeLimit });
     } catch (cause) {
-      console.error(`[oxide] Fee runway read failed: ${(cause as Error).message ?? String(cause)}`);
+      console.error(`[oxide] Fee runway read failed: ${boundedErrorClass(cause)}`);
       return unknown("fee_runway_unknown");
     }
   }
@@ -548,7 +564,7 @@ export class OxideSender {
       assertJournaledIdentity(await this.backend.identify(bytes), attempt);
     } catch (cause) {
       if (!(cause instanceof JournaledBytesMismatch)) throw cause;
-      console.error(`[oxide] Journaled bytes of ${id} attempt ${attempt.attempt}: ${cause.message}`);
+      console.error(`[oxide] Journaled transaction identity mismatch: ${boundedErrorClass(cause)}`);
       return this.answer(op, { state: "unknown", reason: "journaled_bytes_mismatch" });
     }
     const answer = await this.mayBroadcast({ operationId: id, fingerprint: op.fingerprint, txHash: attempt.txHash });
@@ -556,6 +572,18 @@ export class OxideSender {
       const hold: OxideHold = answer.decision === "deny" ? "may_broadcast_denied" : "may_broadcast_unknown";
       this.journal.recordHold(id, hold);
       return this.answer(this.journal.get(id)!, this.preparedObservation(attempt, hold));
+    }
+    // The portal and deployment can move while the transaction is being
+    // proved or while the gate is deciding. Re-read after allow; once it
+    // returns, the bounds, mark and send below are one synchronous run.
+    try {
+      await this.preflight.assertPinned();
+    } catch (cause) {
+      const refusal = preflightRefusal(cause);
+      console.error(`[oxide] Preflight refused after allow: ${boundedErrorClass(cause)}`);
+      if (!refusal.retryable) return this.refuse(op, refusal.reason, false);
+      this.journal.recordHold(op.operationId, "preflight_refused");
+      return this.answer(this.journal.get(op.operationId)!, this.preparedObservation(attempt, "preflight_refused"));
     }
     // Synchronous from here to the mark.
     if (this.nowSeconds() >= op.terms.validUntil) return this.refuse(op, "validity_bound_passed", false);
@@ -591,7 +619,7 @@ export class OxideSender {
     try {
       await sending;
     } catch (cause) {
-      console.error(`[oxide] Send after mark failed: ${(cause as Error).message ?? String(cause)}`);
+      console.error(`[oxide] Send after mark failed: ${boundedErrorClass(cause)}`);
       return this.answer(marked, { state: "submitted_unknown", ...base, reason: "post_mark_failure" });
     }
     return this.answer(this.journal.get(id)!, await this.observe(marked));
@@ -636,7 +664,7 @@ export class OxideSender {
           this.journal.recordObservation(op.operationId, observation);
         } catch (cause) {
           // Best-effort: the mark is durable either way, and a read never fails on this write.
-          console.error(`[oxide] Observation not recorded: ${(cause as Error).message}`);
+          console.error(`[oxide] Observation not recorded: ${boundedErrorClass(cause)}`);
         }
         return observation;
       }

@@ -47,6 +47,8 @@ import {
   type AttestationEnvironmentConfig,
 } from "./attestation.js";
 import { resolveAttestationSecret } from "./attestation-secret.js";
+import { oxideAllowlistFromEnv, type OxideAllowlist } from "./oxide/allowlist.js";
+import { OxideAttestationProbe } from "./oxide/attestation.js";
 
 // Must match WINDOW_MS in limits.ts: it bounds the same rolling window.
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -565,17 +567,30 @@ try {
   console.error(`[pxe-bridge] ${err instanceof Error ? err.message : String(err)}`);
   process.exit(1);
 }
+// --- Oxide readiness (pxe-bridge#84, xochi#775 option a) ---
+// The private recipient allowlist. Oxide mode's sender wiring and its
+// attestation producer both read this one value.
+let oxideAllowlist: OxideAllowlist | undefined;
+if (process.env["PXE_BRIDGE_SEND_MODE"] === "oxide") {
+  try {
+    oxideAllowlist = await oxideAllowlistFromEnv(process.env);
+  } catch (err) {
+    console.error(`[pxe-bridge] ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+}
+// --- end Oxide readiness ---
 if (
   attestationEnvironment &&
   (!API_KEY ||
     !JOURNAL_PATH ||
-    !spendingLimitConfig?.deployment ||
+    !(spendingLimitConfig?.deployment || (oxideAllowlist && accountIdentity.expectedAddress)) ||
     !corridor)
 ) {
   console.error(
     "[pxe-bridge] Attestation requires PXE_BRIDGE_API_KEY, PXE_BRIDGE_JOURNAL, " +
-      "PXE_BRIDGE_ACCOUNT_DEPLOYMENT, the spending-limit account, and " +
-      "PXE_BRIDGE_SETTLEMENT_CORRIDOR",
+      "PXE_BRIDGE_SETTLEMENT_CORRIDOR, and either the spending-limit account with " +
+      "PXE_BRIDGE_ACCOUNT_DEPLOYMENT or Oxide mode with PXE_BRIDGE_ACCOUNT_ADDRESS",
   );
   process.exit(1);
 }
@@ -648,13 +663,28 @@ async function main(): Promise<void> {
   );
   let attestation: AttestationProducer | undefined;
   let rootUpdatePublisher: RootUpdatePublisher | undefined;
-  let attestationTree: AllowlistTree | undefined;
-  if (attestationEnvironment && journal && spendingLimitConfig && corridor) {
+  // The set readiness attestations sign over: Oxide mode's private off-chain
+  // allowlist, else the spending-limit account's (src/oxide/attestation.ts).
+  const attestationSet = !attestationEnvironment
+    ? undefined
+    : oxideAllowlist
+      ? { tree: oxideAllowlist.tree, recipients: oxideAllowlist.snapshot() }
+      : spendingLimitConfig
+        ? {
+            tree: await AllowlistTree.build(
+              spendingLimitConfig.allowlistSeed,
+              spendingLimitConfig.allowlistRecipients,
+            ),
+            recipients: spendingLimitConfig.allowlistRecipients,
+          }
+        : undefined;
+  if (attestationEnvironment && journal && attestationSet && corridor) {
     const resolved = await resolveAttestationSecret(
       process.env,
       [
         secretKey,
-        spendingLimitConfig.allowlistSeed,
+        spendingLimitConfig?.allowlistSeed,
+        process.env["PXE_BRIDGE_OXIDE_ALLOWLIST_SEED"],
         API_KEY,
         RECOVERY_API_KEY,
         ADMIN_KEY,
@@ -663,16 +693,14 @@ async function main(): Promise<void> {
         attestationEnvironment.relay.token,
         process.env["SPENDING_LIMIT_ADMIN_KEY"],
       ].filter((value): value is string => value !== undefined),
+      oxideAllowlist ? [oxideAllowlist.seedSecretDigest] : [],
     );
     console.log(`[pxe-bridge] Attestation key loaded from ${resolved.source}`);
-    attestationTree = await AllowlistTree.build(
-      spendingLimitConfig.allowlistSeed,
-      spendingLimitConfig.allowlistRecipients,
-    );
+    const attestationProbe = oxideAllowlist ? new OxideAttestationProbe(client, oxideAllowlist) : client;
     attestation = new AttestationProducer({
-      probe: client,
+      probe: attestationProbe,
       journal,
-      allowlistTree: attestationTree,
+      allowlistTree: attestationSet.tree,
       signer: resolved.signer,
       domain: {
         sourceChainId: attestationEnvironment.domain.sourceChainId,
@@ -686,7 +714,7 @@ async function main(): Promise<void> {
     });
     rootUpdatePublisher = new RootUpdatePublisher(
       attestation,
-      client,
+      attestationProbe,
       journal,
       attestationEnvironment.relay,
       attestationAudit,
@@ -766,11 +794,11 @@ async function main(): Promise<void> {
         ? () => legacyAuditRefusal(AUDIT_LOG_PATH, Date.now())
         : undefined,
     });
-    if (attestationTree && spendingLimitConfig && journal.health().writable) {
-      journal.recordAllowlistSnapshot(
-        attestationTree.root.toString(),
-        spendingLimitConfig.allowlistRecipients,
-      );
+    if (attestationSet && attestation && journal.health().writable) {
+      const root = attestationSet.tree.root.toString();
+      journal.recordAllowlistSnapshot(root, attestationSet.recipients);
+      // Past private sets have no reader; keep the current one and the Worker's.
+      if (oxideAllowlist) journal.pruneAllowlistSnapshots(root);
     }
     const health = journal.health();
     console.log(

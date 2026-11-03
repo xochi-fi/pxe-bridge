@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import Database from "better-sqlite3";
 import {
   enforceOwnerOnly,
@@ -131,8 +131,18 @@ CREATE TABLE spends (
 
 class StateError extends Error {}
 
+export interface OxideJournalIdentity {
+  account: string;
+  token: string;
+  deployment: string;
+}
+
 export interface OxideJournalOptions {
   now?: () => number;
+  /** One-shot acknowledgement for creating a brand-new durable journal. */
+  allowCreate?: boolean;
+  /** Binds an initialized journal to the account, token and deployment it protects. */
+  identity?: OxideJournalIdentity;
 }
 
 export class OxideJournal {
@@ -143,6 +153,9 @@ export class OxideJournal {
   private fresh = false;
   private readonly hwmPath: string;
   private readonly now: () => number;
+  private readonly allowCreate: boolean;
+  private readonly identity: OxideJournalIdentity | undefined;
+  private readonly highWaterMarkExisted: boolean;
 
   private constructor(
     readonly path: string,
@@ -150,6 +163,9 @@ export class OxideJournal {
   ) {
     this.hwmPath = `${path}.hwm`;
     this.now = options.now ?? Date.now;
+    this.allowCreate = options.allowCreate === true;
+    this.identity = options.identity;
+    this.highWaterMarkExisted = existsSync(this.hwmPath);
   }
 
   /** Opens (or creates) the journal and takes the writer lock; `JournalLockedError` if another process holds it. */
@@ -211,6 +227,14 @@ export class OxideJournal {
   }
 
   private createSchema(db: Database.Database): void {
+    if (this.highWaterMarkExisted) {
+      this.disable("rollback_detected", "an existing high-water mark has no matching journal");
+      return;
+    }
+    if (!this.allowCreate) {
+      this.disable("empty_journal_for_existing_account", "new Oxide journals require one-shot initialization");
+      return;
+    }
     const id = randomUUID();
     db.transaction(() => {
       db.exec(SCHEMA);
@@ -219,6 +243,11 @@ export class OxideJournal {
       put.run("schema_version", String(OXIDE_JOURNAL_SCHEMA_VERSION));
       put.run("generation", "0");
       put.run("kind", "oxide-send");
+      if (this.identity !== undefined) {
+        put.run("identity_account", this.identity.account.toLowerCase());
+        put.run("identity_token", this.identity.token.toLowerCase());
+        put.run("identity_deployment", this.identity.deployment);
+      }
     })();
     this.journalId = id;
     this.generation = 0;
@@ -241,6 +270,15 @@ export class OxideJournal {
     this.generation = Number(meta.get("generation") ?? "NaN");
     if (!this.journalId || !Number.isSafeInteger(this.generation)) {
       this.disable("corrupt", "journal meta is missing its id or generation");
+      return;
+    }
+    if (
+      this.identity !== undefined &&
+      (meta.get("identity_account") !== this.identity.account.toLowerCase() ||
+        meta.get("identity_token") !== this.identity.token.toLowerCase() ||
+        meta.get("identity_deployment") !== this.identity.deployment)
+    ) {
+      this.disable("account_mismatch", "Oxide journal identity does not match this account, token and deployment");
     }
   }
 
@@ -663,6 +701,80 @@ export class OxideJournal {
   /** Total of durable spends at or after `sinceMs`. */
   spentSince(sinceMs: number): bigint {
     return this.read((db) => sumSpends(db, sinceMs));
+  }
+
+  /**
+   * Payout principal a private balance read at PXE block `syncedBlock` does
+   * not yet reflect: every current attempt that may still land on state that
+   * read has not seen (a prepared one with its bounds open, a marked one not
+   * yet observed mined before its protocol expiry) plus any observed mined
+   * ABOVE `syncedBlock`, and every CLAIMED operation whose validity bound is
+   * still open: it is being simulated, signed or proven right now -- minutes,
+   * exactly the window a balance snapshot is served through -- and will be
+   * prepared against the same notes. The same rows `liveNullifiers` counts
+   * (claimed ones aside, which hold no nullifiers yet), so the readiness
+   * surface and the sender's own note selection agree on what is still in
+   * flight. The amount is the proven recipient note's, or the claimed terms'.
+   */
+  committedPrincipal(
+    nowSeconds: number,
+    syncedBlock: number,
+    excludeOperationId = "",
+  ): { total: bigint; sends: number } {
+    const rows = this.read((db) =>
+      db
+        .prepare(
+          `SELECT o.state, json_extract(o.terms_json, '$.validUntil') AS valid_until,
+                  json_extract(o.terms_json, '$.amount') AS terms_amount,
+                  a.expiration_timestamp, a.evidence_json,
+                  CAST(json_extract(o.observation_json, '$.blockNumber') AS INTEGER) AS mined_block
+           FROM operations o LEFT JOIN attempts a ON a.operation_id = o.operation_id AND a.attempt = o.current_attempt
+           WHERE o.operation_id != ?
+             AND (
+               o.state = 'claimed'
+               OR o.state = 'prepared'
+               OR (o.state = 'may_broadcast' AND json_extract(o.observation_json, '$.blockNumber') IS NULL)
+               OR (o.state IN ('may_broadcast', 'finalized', 'reverted')
+                   AND CAST(json_extract(o.observation_json, '$.blockNumber') AS INTEGER) > ?)
+             )`,
+        )
+        .all(excludeOperationId, syncedBlock),
+    ) as {
+      state: OxideOperationState;
+      valid_until: number | null;
+      terms_amount: string | null;
+      expiration_timestamp: string | null;
+      evidence_json: string | null;
+      mined_block: number | null;
+    }[];
+    let total = 0n;
+    let sends = 0;
+    for (const row of rows) {
+      if (row.state === "claimed") {
+        if (row.valid_until !== null && nowSeconds >= row.valid_until) continue;
+        if (row.terms_amount === null) throw new Error("claimed operation names no amount");
+        total += BigInt(row.terms_amount);
+        sends += 1;
+        continue;
+      }
+      if (row.expiration_timestamp === null || row.evidence_json === null) {
+        throw new Error(`operation in state ${row.state} has no current attempt`);
+      }
+      const unexpired = BigInt(nowSeconds) < BigInt(row.expiration_timestamp);
+      const counts =
+        row.mined_block !== null
+          ? row.mined_block > syncedBlock
+          : row.state === "prepared"
+            ? unexpired && (row.valid_until === null || nowSeconds < row.valid_until)
+            : unexpired;
+      if (!counts) continue;
+      const evidence = JSON.parse(row.evidence_json) as OxideSendEvidence;
+      const note = evidence.createdNotes[evidence.recipientNoteIndex];
+      if (note === undefined) throw new Error("journaled evidence names no recipient note");
+      total += BigInt(note.amount);
+      sends += 1;
+    }
+    return { total, sends };
   }
 
   close(): void {

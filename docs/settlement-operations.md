@@ -475,6 +475,7 @@ too. Legacy-route reconciliation uses ordinary capacity, so an ordinary RPC
 credential cannot consume the dedicated reconciliation budget.
 
 The readiness projection contains the flat checker fields `ready`,
+`sendMode` (`"spending_limit"`; Riddler refuses intake when it is absent),
 `nodeVersion`, `l1ChainId`, `rollupVersion`, `accountAddress`,
 `accountClassId`, `token`, `maxAmount` and `dailyLimit`, plus finalized
 reference, policy, inventory, rolling-window, fee-runway, node and journal
@@ -486,7 +487,8 @@ that comparison (#68).
 
 Point container restarts at `/status` and traffic/deploy gates at `/ready`.
 Never restart merely because readiness is false: recovery for already marked
-operations must stay online.
+operations must stay online. In Oxide mode (`PXE_BRIDGE_SEND_MODE=oxide`)
+`/ready` serves the Oxide projection instead; see "Oxide readiness" below.
 
 ## Configuration
 
@@ -662,7 +664,9 @@ credentials do not work there, and the attestation credential does not work on
 RPC/admin routes. The feature is hidden with 404 when every attestation setting
 is absent; any partial configuration fails startup. Enabling it also requires
 the separately authenticated main RPC, durable journal, settlement corridor,
-spending-limit account and its durable `PXE_BRIDGE_ACCOUNT_DEPLOYMENT` record.
+and either the spending-limit account with its durable
+`PXE_BRIDGE_ACCOUNT_DEPLOYMENT` record or Oxide mode with the recorded
+`PXE_BRIDGE_ACCOUNT_ADDRESS` (see "Oxide mode: the private allowlist").
 
 Only `aztec_attestRecipientMembership` and
 `aztec_attestRecipientDeployment` are accepted. Both take exactly:
@@ -744,6 +748,14 @@ loopback HTTP is accepted. Attestation audit output contains only method,
 outcome and typed reason—never recipient, descriptor/digest/signature, root
 association, witness/salt/index or L2 transaction data.
 
+The Worker keeps one RootUpdate per corridor and replaces it only from a
+strictly higher `rootBlock`; a different root at an equal block is
+acknowledged as superseded and dropped. So a CHANGED root is enqueued only
+from a finalized block above the latest envelope's for the same corridor;
+until the tip advances the tick records `retry` with
+`finalized_tip_not_advanced` and enqueues nothing. An on-chain root can only
+move in a later block, so this binds only the Oxide private root.
+
 
 **xochimilco.** The `aztec_testnet` role (`roles/aztec_testnet`, branch
 `feat/pxe-bridge-journal`) carries this: journal path and audit log on the
@@ -755,3 +767,317 @@ as `-e aztec_testnet_bridge_journal_adopt_account=<account>@<journal id>`, and
 a replacement check that the journal id is unchanged and its generation did
 not go back. Its `NODE_ENV` is `testnet`, so the role asserts the `https://`
 URL itself in addition to the bridge's own check.
+
+### Oxide mode: the private allowlist (xochi#751, xochi#775 option a)
+
+The Oxide sender is a stock SchnorrAccount 6.0.0 with no on-chain allowlist.
+Its recipient policy is an operator-held set that must stay private: no
+on-chain root, no root or list in the corridor manifest or any public repo,
+no **public** endpoint that serves either, no log line naming a member. The
+authenticated Membership response and RootUpdate relay necessarily disclose
+the root to Xochi; neither discloses the seed or recipient set. The bridge
+holds the set as the same seed-salted height-10 tree
+(`src/allowlist-tree.ts`) and signs Membership and RootUpdate over its root
+with the corridor readiness signer, in exactly the record formats above, so
+the Xochi Worker verifies them unchanged:
+
+- `PXE_BRIDGE_OXIDE_ALLOWLIST_SEED_FILE`: owner-only regular file containing
+  the nonzero 32-byte hex seed below the BN254 modulus. It must differ from
+  `PXE_BRIDGE_ALLOWLIST_SEED`, and the attestation key may not equal it.
+- `PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS_FILE`: owner-only regular file
+  containing JSON `[{address, index}]` (`"[]"` admits nobody). Both files are
+  required in production when `PXE_BRIDGE_SEND_MODE=oxide`; direct
+  `..._SEED` / `..._RECIPIENTS` values are development-only and refused in
+  production so Docker metadata cannot retain the secrets. Configuration
+  errors disclose no address, member position, seed, set or root.
+- Attestation in Oxide mode requires `PXE_BRIDGE_ACCOUNT_ADDRESS` (the
+  recorded sender) instead of `PXE_BRIDGE_ACCOUNT_DEPLOYMENT`. The finalized
+  observation (`AztecClient.observeStandardAccountChain`) requires the
+  sending account to be published at the stock SchnorrAccount 6.0.0 class
+  (`0x2f7d07db...9d15`) and initialized at the exact finalized reference;
+  otherwise every attestation is refused (`account_class_mismatch`,
+  `account_not_initialized`). Network, freshness and RecipientDeployment
+  checks are the spending-limit ones, unchanged.
+- The root is the private tree's (`OxideAttestationProbe`); `rootBlock` is the
+  finalized block at which the bridge held it. Membership is positive only
+  for a listed recipient whose witness reproduces that root, and a signed
+  negative otherwise, so an enrolled but unapproved binding stays `pending`.
+- A fresh Oxide send to a recipient outside the set is refused
+  `recipient_not_allowlisted` (permanent) before any read
+  (`OxideReadiness.admit`).
+- **The settlement journal is a secret in Oxide mode.** Its
+  `allowlist_snapshots` table holds the private set in clear, and its
+  `root_update_outbox` holds the roots. Keep it, its backups and any copy
+  under the same custody as the seed. At startup an Oxide bridge deletes every
+  snapshot except the current set's and the one behind the newest delivered
+  RootUpdate (`pruneAllowlistSnapshots`). Outbox ids are
+  `<run>:<idempotency digest>`, never the root, because an id is logged when
+  an attempt cannot be recorded.
+- The production bridge reads both secrets from owner-only mounted files, not
+  container environment values. The operator tool still accepts them on stdin.
+
+**Initialize the Oxide send journal exactly once, before funding or opening
+intake.** On the first start only, mount its owner-only durable directory and
+set `PXE_BRIDGE_OXIDE_JOURNAL_INITIALIZE=true`. Confirm `/ready` reports the
+journal writable, stop the bridge, remove that variable, and start it again.
+A brand-new journal without that acknowledgement refuses writes. An existing
+high-water mark with a missing database is rollback detection and is never
+overwritten, even with the variable set. The journal is bound at creation to
+the sending account, OXDAI token and pinned Oxide deployment; a mismatch
+refuses writes. Never use initialization to recover a lost journal: restore
+the matched database and high-water mark, then reconcile every ambiguous send.
+
+**Approving a recipient** (`scripts/oxide-allowlist.ts`; production procedure
+in G1 below):
+
+1. Stop the bridge. Its journal holds an exclusive lock while it runs.
+2. With the CURRENT seed and set in the environment and `PXE_BRIDGE_JOURNAL`
+   pointing at the bridge's settlement journal, run
+   `--add 0x<address> --index random`. The script refuses unless the set
+   builds the root of the newest RootUpdate the bridge enqueued (`--initial`
+   only while the journal holds none). A mismatch means either the set is not
+   the one the bridge runs, or the bridge has not yet published a RootUpdate
+   for its current set (after a restart it waits for a finalized block above
+   the last one, `finalized_tip_not_advanced`): start it, wait for the
+   publish, stop it, retry. It also refuses an occupied position, a listed
+   address and the sending account (`PXE_BRIDGE_ACCOUNT_ADDRESS`), and prints
+   the next set, and nothing else, on stdout. It is secret.
+3. Store the next set and start the bridge on it. It publishes the new root's
+   RootUpdate from the next finalized block, and the Worker marks the binding
+   `ready` on its next refresh.
+
+**Revoking a recipient** is not just closing future admission. A fresh send to
+a revoked recipient is refused PERMANENTLY, including an order whose source
+funds Riddler already pulled. So: (1) close Riddler intake for the recipient;
+(2) drain every obligation to it that has not yet reached createNote (paid, or
+refunded on its own path); (3) then run `--revoke 0x<address>` as above and
+restart. A prepared attempt already journaled still resends its exact bytes;
+one whose bytes lapse needs a fresh attempt and is refused like a new send.
+Xochi's binding drops to `pending` once the new root lands.
+
+### G1: approving or revoking an Oxide recipient in production
+
+The production image cannot run the script: it prunes `tsx` on purpose and
+does not ship `scripts/`, and the journal volume is uid 1000, mode 0700. Use
+the separate tool image, built from the same tag as the running bridge, as a
+one-off container that mounts the journal read-only and has no network.
+
+- **Host:** the host running the mainnet sidecar (`roles/xochi_aztec_sidecar`
+  in DROOdotFOO/xochimilco), `ovh-solver`, journal at
+  `/opt/xochi-aztec-sidecar/journal/settlement.sqlite`. [INFERENCE] The
+  Oxide-mode deployment is not in xochimilco yet; if it lands on another host
+  or path, use that.
+- **Secrets:** 1Password vault `Xochi Shielded Tracer`, item
+  `<OXIDE_ALLOWLIST_ITEM>` (PROPOSED name: `pxe-bridge oxide allowlist
+  (mainnet)`), fields `seed` and `recipients`. The deploy role materializes
+  them as 0600 mounted files and sets `PXE_BRIDGE_OXIDE_ALLOWLIST_SEED_FILE`
+  / `_RECIPIENTS_FILE`; it never places their contents in the container
+  environment. `op read` runs on the control machine. The seed, current set
+  and change travel to the one-shot operator container on **stdin only**
+  (`--stdin`, KEY=VALUE lines): never as a container environment variable
+  (`docker inspect` and the daemon's saved `config.v2.json` would hold them)
+  and never as a command-line argument (`ps`, shell history, auditd and
+  endpoint agents record argv). The next set comes back on stdout into a 0600
+  file on the control machine's `/dev/shm` (macOS: a `mktemp` under
+  `$TMPDIR`), goes into 1Password through a piped item template, never an
+  assignment argument, and the file is shredded.
+
+```sh
+# On ovh-solver, once per bridge release, from a checkout of the running image's
+# tag (PROPOSED path /opt/pxe-bridge-src; any checkout of <tag> works):
+git -C /opt/pxe-bridge-src fetch --tags && git -C /opt/pxe-bridge-src checkout <tag>
+docker build --target oxide-allowlist -t pxe-bridge-oxide-allowlist:<tag> /opt/pxe-bridge-src
+
+# Stop the bridge (the journal is locked while it runs).
+ssh ovh-solver 'docker stop xochi-aztec-sidecar'
+
+# From the control machine. Every line below is checked: a refusal stops here
+# with the script's message on stderr and NOTHING is written to 1Password.
+set -o pipefail
+ITEM='<OXIDE_ALLOWLIST_ITEM>'; VAULT='Xochi Shielded Tracer'
+umask 077; next=$(mktemp /dev/shm/oxide-next.XXXXXX) || exit 1
+trap 'shred -u "$next" 2>/dev/null || rm -f "$next"' EXIT
+{
+  printf 'PXE_BRIDGE_OXIDE_ALLOWLIST_SEED=%s\n' "$(op read "op://$VAULT/$ITEM/seed")"
+  printf 'PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS=%s\n' "$(op read "op://$VAULT/$ITEM/recipients")"
+  # The change: ADD with an INDEX (random, or a free position), or REVOKE.
+  printf 'OXIDE_ALLOWLIST_ADD=%s\n' "$(op read "op://$VAULT/$ITEM/next_recipient")"
+  printf 'OXIDE_ALLOWLIST_INDEX=random\n'
+} | ssh ovh-solver 'docker run --rm -i --network none --read-only --tmpfs /tmp --user 1000:1000 \
+    -e PXE_BRIDGE_JOURNAL=/journal/settlement.sqlite \
+    -e PXE_BRIDGE_ACCOUNT_ADDRESS=<OXIDE_SENDER_ADDRESS> \
+    -v /opt/xochi-aztec-sidecar/journal:/journal:ro \
+    pxe-bridge-oxide-allowlist:<tag> --stdin' > "$next" || exit 1
+[ -s "$next" ] && jq -e 'type == "array"' "$next" >/dev/null || { echo "no set produced; nothing stored" >&2; exit 1; }
+
+# Store it through a piped template (never `recipients[concealed]=...` as an
+# argument: that puts the whole set in argv). The value is read from the file.
+op item get "$ITEM" --vault "$VAULT" --format=json \
+  | jq --rawfile v "$next" '(.fields[] | select(.label == "recipients") | .value) = ($v | rtrimstr("\n"))' \
+  | op item edit "$ITEM" --vault "$VAULT" >/dev/null || exit 1
+# The trap shreds $next. Then redeploy/start the bridge through the role.
+```
+
+`<OXIDE_SENDER_ADDRESS>` is the Oxide sender the deploy role sets as
+`PXE_BRIDGE_ACCOUNT_ADDRESS` (xochi-fi/pxe-bridge#84, approved identity;
+the script refuses to add it). `next_recipient` is a field the operator sets
+on the item for this one change, so the address is not an argument either;
+delete it afterwards. The container command was exercised against a scratch
+journal (`--stdin`, `OXIDE_ALLOWLIST_INITIAL=1`, `--network none --read-only
+--tmpfs /tmp --user 1000:1000`, journal mounted `:ro`). A journal left with a
+hot rollback file after an unclean stop cannot be opened read-only: start and
+stop the bridge once first. The script's stderr names neither a recipient,
+a position, the set's size nor the root, so it can go into the #751 ticket.
+
+For a revocation, finish the drain above first and send
+`OXIDE_ALLOWLIST_REVOKE=<address>` (no `OXIDE_ALLOWLIST_INDEX`) in the payload
+instead. Then redeploy the bridge through the role (it reads the new
+`recipients` field) and confirm the RootUpdate published (`[attestation]`
+`{"method":"RootUpdate","outcome":"delivered"}`).
+
+## Oxide readiness
+
+With `PXE_BRIDGE_SEND_MODE=oxide`, `GET /ready` (same auth, limiter, 20-second
+deadline and single flight) answers the Oxide projection
+(`src/oxide/readiness.ts`). The Oxide settlement integration must ask the
+same predicate before each fresh send and pass the operation id so its own
+durable claim is excluded while every peer claim remains committed
+(axol-io/Riddler#1437).
+
+It answers two separate questions (integration decision on pxe-bridge#88):
+
+- `ready` / `reasons`: **serving health only**. HTTP 200 iff `ready`, else
+  503. Riddler gates the payout of already-admitted, already-pulled orders on
+  this alone, so a full balance, runway or window can never stall them.
+  Reasons: `oxide_pins_unknown`, `oxide_pin_mismatch`, `oxide_l1_unknown`,
+  `oxide_l1_not_pinned`, `oxide_portal_frozen`, `enclave_unreachable`,
+  `enclave_attestation_refused`, `node_readiness_unknown`, `node_not_ready`,
+  `journal_unwritable`, `attestation_unconfigured`, `corridor_unconfigured`,
+  `network_identity_unknown`.
+- `admission.freshSend` / `admission.reasons`: **capacity for one more new
+  order**. `freshSend` is `ready` and no capacity reason. Reasons:
+  `private_balance_unknown`, `journal_unreadable`,
+  `private_balance_insufficient` (available is 0), `fee_runway_unknown`,
+  `fee_runway_insufficient`, `spend_window_unknown`, `spend_window_exhausted`,
+  and `backend_capacity_exhausted` (the HTTP server's RPC or body intake is
+  full, added by the server: load is capacity, not health).
+  Riddler requires it for quotes, new reservations and the pre-pull check.
+  It never affects resends or already-prepared operations.
+
+Every Oxide fact that is READ is `{"state":"known", ...fields}` or
+`{"state":"unknown","reason":"<reason>"}`. An unread value is never reported
+as zero; a consumer treats anything not `known` (or missing or malformed) as a
+transient refusal. `journal` and `attestation` are local facts the process
+always knows and carry no `state`.
+
+```
+{
+  "ready": bool, "reasons": [string],
+  "admission": {"freshSend": bool, "reasons": [string]},
+  "observedAt": <unix seconds>,
+  "sendMode": "oxide", "accountMode": "standard",
+  "accountAddress": "0x<64 hex>", "token": "0x11d2bed2...e0a3",
+  "oxide": {
+    "corridor":       {"state":"known","corridorId":"0x<64 hex>","corridorRevision":<int>,
+                       "manifestDigest":"0x<64 hex>"},
+    "network":        {"state":"known","aztecChainId":"<dec>","protocolVersion":"<dec>",
+                       "rollupAddress":"0x<40 hex>","l1ChainId":"<dec>",
+                       "genesisOrNetworkDigest":"0x<64 hex>"},
+    "privateBalance": {"state":"known","observed":"<dec>","syncedBlock":"<dec>","readAt":<unix seconds>,
+                       "committed":"<dec>","committedSends":<int>,"available":"<dec>"},
+    "feeRunway":      {"state":"known","observed":"<dec>","committed":"<dec>",
+                       "committedSends":<int>,"perSendFeeLimit":"<dec>"},
+    "caps":           {"state":"known","maxPerTx":"<dec>","dailyLimit":"<dec>",
+                       "windowSpent":"<dec>","windowHeadroom":"<dec>"},
+    "pins": {"manifest": {"state":"known","pinned":bool},
+             "l1":       {"state":"known","pinned":bool,"portalFrozen":bool}},
+    "enclave":        {"state":"known","attested":bool},
+    "node":           {"state":"known","acceptingTransactions":bool},
+    "journal":        {"writable":bool,"reason"?:string},
+    "attestation":    {"configured":bool}
+  }
+}
+```
+
+A design-A bridge's projection carries `"sendMode": "spending_limit"` at the
+same place. Riddler refuses intake when a full `/ready` projection names no
+`sendMode` (a 0.3.0 bridge), before any source pull. The short-form 503s
+(`initializing`, `api_key_unconfigured`, `readiness_observer_unconfigured`,
+`readiness_observation_failed`) carry none and are not ready anyway.
+
+| Fact | Source | Unknown reason |
+| --- | --- | --- |
+| `corridor` | `PXE_BRIDGE_SETTLEMENT_CORRIDOR`, the settlement v2 member names: what this bridge serves, for Riddler's pre-pull recheck | `corridor_unconfigured` |
+| `network` | The node's identity (`AztecClient.networkIdentity`) plus the corridor's `genesisOrNetworkDigest`, the settlement v2 member names | `corridor_unconfigured`, `network_identity_unknown` |
+| `privateBalance` | The sender's PRIVATE OXDAI balance from its own PXE (OxideToken `balance_of`: unspent notes plus stored deposits; OXDAI has no public balance), with the PXE's synced block read before the call. `committed` is the payout principal of current attempts that read has not seen: prepared with open bounds, marked and not yet observed mined before expiry, or observed mined above `syncedBlock` (`OxideJournal.committedPrincipal`, the rows `liveNullifiers` counts). `available = max(0, observed - committed)`. `readAt` is when the balance was read: a snapshot at most 10 minutes old is served while the PXE is busy proving. OXDAI base units | `private_balance_unknown`, `journal_unreadable` |
+| `feeRunway` | `OxideSender.feeRunway`: fee juice balance, fee limits of attempts that may still land, the most one more send can cost. Fee-juice base units | `fee_runway_unknown` |
+| `caps` | `PXE_BRIDGE_OXIDE_MAX_PER_TX` / `_DAILY_LIMIT` and the journal's durable (marked) spends in the rolling 24h | `spend_window_unknown` |
+| `pins.manifest` | The published Oxide manifest and zk.money profile (`OxidePinChecker`) | `oxide_pins_unknown` |
+| `pins.l1` | `assertL1Pinned` (chain, TeeRegistry PCR0 hash, CertManager root, portal token/registry/rollup/cap) and `OxidePortal.$frozen` | `oxide_l1_unknown` |
+| `enclave` | The fleet's attestation, verified as a pin would (Nitro chain, pinned PCR0, registered keys), without moving the signer's pin | `enclave_unreachable` (the fleet OR the L1 reads the check needs) |
+| `node` | The node's `isReady` | `node_readiness_unknown` |
+| `journal` | The OXIDE journal's health (`PXE_BRIDGE_OXIDE_JOURNAL`, `OxideJournal.health`): `writable`, and the reason when not. Not the settlement journal the G1 section calls secret | -- (`journal_unwritable` on `reasons`) |
+| `attestation` | Whether the attestation producer and RootUpdate publisher run | -- |
+
+**How stale a cached check can be.** On `/ready` a successful check is reused
+for up to 60 seconds; a failure is never reused.
+- `pins.manifest` can lag a change by up to 6 minutes: `OxidePinChecker` keeps
+  its own 5-minute cache under the 60-second one.
+- `pins.l1` (including `portalFrozen`) and `enclave` can lag by 60 seconds on
+  `/ready`.
+- Admission (`admit`) never reuses the L1/portal result; it reads L1 fresh.
+  The sender's own preflight also re-reads L1 before every fresh attempt and
+  before a held attempt's bytes are resent.
+- Runway, caps and journal are read on every call. The balance is a snapshot:
+  a call waits up to 2 s for the PXE, then serves the newest read at most 10
+  minutes old, with `committed` recomputed on every call against that
+  snapshot's synced block AND its read time (an attempt whose bounds passed
+  after the snapshot still counts: the snapshot cannot have seen it mined).
+  A hung PXE balance call is never duplicated; once its snapshot ages out,
+  capacity stays unknown until that call settles or the process restarts.
+
+Admission for one fresh send of `X` (`OxideReadiness.admit`):
+- **Refused (permanent):** a recipient outside the private set
+  (`recipient_not_allowlisted`), `X <= 0` (`amount_invalid`),
+  `X > 5,166 DAI` (`amount_over_note_max`), or
+  `X > caps.maxPerTx` (`amount_over_per_tx_cap`; default 1,000 DAI).
+- **Refused (permanent), the deployment is not the pinned one** (OX-6,
+  xochi#744): the manifest or profile moved (`oxide_pin_mismatch`), L1 is not
+  the pinned chain/registry/portal (`enclave_refused:l1_not_pinned`), or the
+  enclave's PCR0 is not the pinned image hashing to `TeeRegistry.PCR0_HASH()`
+  (`enclave_refused:pcr0_not_pinned` / `enclave_refused:pcr0_hash_mismatch`).
+  The refusal names are the sender's own preflight strings, so one condition
+  has one name on the wire. Permanent for the OPERATION: Riddler refunds it
+  instead of polling it to its deadline. The bridge latches nothing -- a
+  failed check is never cached, the next fresh send reads again, and the
+  reason is classified from that call's own read -- but nothing this process
+  retries changes the live deployment: an operator re-pins after review and
+  ships a new release. The same conditions keep `ready` false, so Riddler also
+  stops intake. An attestation document that does not verify
+  (`attestation_invalid`), a frozen portal, a manifest or profile body that is
+  not even the file's shape (a CDN error served as JSON, a profile whose
+  `current` names no version: `oxide_pins_unknown`) and every unread fact stay
+  transient.
+- **Admitted** iff `ready` and `admission.freshSend` and
+  `X <= privateBalance.available` and `X <= caps.windowHeadroom`. Anything
+  else is `not_ready` with its reasons (transient).
+- The sender then applies its own checks: the 5,166 DAI note max, its
+  in-memory reservations in the window, and the exact fee limit.
+
+State moves:
+- `privateBalance.committed` grows at the journal CLAIM (by the terms'
+  `amount`, while `validUntil` is open): simulate, sign and prove take
+  minutes and the balance snapshot is served through them.
+  `feeRunway.committed` grows when the attempt is prepared (by its actual
+  fee limit).
+- `caps.windowSpent` grows only at the may-broadcast mark; the sender's
+  in-memory reservations between admission and the mark are not in
+  `windowHeadroom`. A send admitted into a window another send then fills is
+  held `cap_window_full` at its own mark and resent once spends age out --
+  never paid over the cap.
+- A Riddler reservation for an operation the bridge already journaled is also
+  inside `committed`, which only understates headroom.
+
+Neither the allowlist, its root nor its size appears in the projection, and
+readiness failures are logged by error class only (an RPC error message can
+carry its URL and API key).

@@ -133,6 +133,7 @@ export function readyObserver(
     nodeVersion: "6.0.0",
     l1ChainId: NETWORK.l1ChainId,
     rollupVersion: NETWORK.protocolVersion,
+    sendMode: "spending_limit",
     accountMode: "spending_limit",
     accountAddress: ACCOUNT,
     accountClassId: "0x" + "a".repeat(64),

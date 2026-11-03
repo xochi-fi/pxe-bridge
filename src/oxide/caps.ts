@@ -70,6 +70,9 @@ export function validateCaps(config: OxideCapsConfig): OxideCapsConfig {
   if (config.maxNoteAmount > OXIDE_V6_MAINNET.bridge.l2TokenImmutables.maxNoteAmount) {
     throw new Error("Oxide maxNoteAmount cannot exceed the token's pinned maxNoteAmount");
   }
+  if (config.maxPerTx > config.maxNoteAmount) {
+    throw new Error("PXE_BRIDGE_OXIDE_MAX_PER_TX cannot exceed the token's maxNoteAmount");
+  }
   if (config.maxPerTx > config.dailyLimit) {
     throw new Error("PXE_BRIDGE_OXIDE_MAX_PER_TX cannot exceed PXE_BRIDGE_OXIDE_DAILY_LIMIT");
   }

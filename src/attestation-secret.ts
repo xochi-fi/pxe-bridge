@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import type { Hex } from "@xochi/signer";
@@ -29,6 +30,13 @@ export class Secp256k1ReadinessSigner implements ReadinessSigner {
   async signDigest(digest: Hex): Promise<Hex> {
     return (await this.account.sign({ hash: digest })).toLowerCase() as Hex;
   }
+}
+
+/** Comparison-safe identifier for a canonical 32-byte secret; never the secret itself. */
+export function secretMaterialDigest(candidate: string): string | undefined {
+  const normalized = candidate.trim().replace(/^0x/i, "").toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(normalized)) return undefined;
+  return createHash("sha256").update(normalized).digest("hex");
 }
 
 export function validateAttestationKey(raw: string): string {
@@ -69,6 +77,7 @@ function parseSecret(raw: string): string {
 export async function resolveAttestationSecret(
   env: NodeJS.ProcessEnv = process.env,
   forbiddenKeyMaterial: readonly string[] = [],
+  forbiddenKeyDigests: readonly string[] = [],
 ): Promise<AttestationSecretResult> {
   const arn = env["PXE_BRIDGE_ATTESTATION_SECRET_ARN"];
   const rawEnvKey = env["PXE_BRIDGE_ATTESTATION_SECRET_KEY"];
@@ -104,10 +113,13 @@ export async function resolveAttestationSecret(
     source = "env";
   }
   const normalized = validateAttestationKey(raw);
-  const reused = forbiddenKeyMaterial.some((candidate) => {
-    const value = candidate.trim().replace(/^0x/i, "").toLowerCase();
-    return /^[0-9a-f]{64}$/.test(value) && value === normalized;
-  });
+  const digest = secretMaterialDigest(normalized);
+  const reused =
+    forbiddenKeyMaterial.some((candidate) => {
+      const value = candidate.trim().replace(/^0x/i, "").toLowerCase();
+      return /^[0-9a-f]{64}$/.test(value) && value === normalized;
+    }) ||
+    (digest !== undefined && forbiddenKeyDigests.includes(digest));
   if (reused) {
     throw new Error(
       "Attestation secret custody must not reuse any spend, admin, allowlist, or bearer secret",

@@ -1157,7 +1157,8 @@ export class SettlementJournal {
         .get(root.toLowerCase()) as { recipients_json: string } | undefined;
       if (existing) {
         if (existing.recipients_json !== encoded) {
-          throw new StateError(`allowlist root ${root} is already bound to another snapshot`);
+          // Never the root: in Oxide mode it is the private allowlist's, and this error reaches the startup log.
+          throw new StateError("allowlist root is already bound to another snapshot");
         }
         return false;
       }
@@ -1181,6 +1182,27 @@ export class SettlementJournal {
       index: number;
     }[];
     return { root: row.root, recipients, createdAt: row.created_at };
+  }
+
+  /**
+   * Deletes every allowlist snapshot except `currentRoot`'s and the root of
+   * the newest DELIVERED RootUpdate (what the Worker holds now). Oxide mode
+   * calls it at startup: an old snapshot is a past private recipient set,
+   * kept for no reader. Returns how many were deleted.
+   */
+  pruneAllowlistSnapshots(currentRoot: string): number {
+    let deleted = 0;
+    this.write("prune allowlist snapshots", (db) => {
+      deleted = db
+        .prepare(
+          `DELETE FROM allowlist_snapshots
+           WHERE root != ?
+             AND root IS NOT (SELECT root FROM root_update_outbox
+                              WHERE delivered_at IS NOT NULL ORDER BY rowid DESC LIMIT 1)`,
+        )
+        .run(currentRoot.toLowerCase()).changes;
+    });
+    return deleted;
   }
 
   enqueueRootUpdate(entry: {

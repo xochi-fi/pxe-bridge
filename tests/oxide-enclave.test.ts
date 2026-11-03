@@ -103,6 +103,15 @@ describe("enclave attestation", () => {
     );
   });
 
+  it("authenticates the Nitro document before classifying a PCR0 mismatch", () => {
+    const att = fixture();
+    const bytes = Buffer.from(att.attestation);
+    bytes[bytes.length - 10]! ^= 0xff;
+    expect(reason(() => verifyEnclaveAttestation({ ...att, attestation: bytes }, "0x" + "ee".repeat(32)))).toBe(
+      "attestation_invalid",
+    );
+  });
+
   it("OxideFleetRegistry reads PCR0_HASH live for every pin", async () => {
     const att = fixture();
     await expect(new OxideFleetRegistry(reader()).verifyAttestation(att)).resolves.toBeUndefined();

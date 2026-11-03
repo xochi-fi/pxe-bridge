@@ -1,7 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+const sendStub = vi.fn();
+vi.mock("@aws-sdk/client-secrets-manager", () => ({
+  SecretsManagerClient: class {
+    send = sendStub;
+  },
+  GetSecretValueCommand: class {
+    constructor(public input: unknown) {}
+  },
+}));
 import { recoverAddress } from "viem";
 import {
   resolveAttestationSecret,
+  secretMaterialDigest,
   Secp256k1ReadinessSigner,
   validateAttestationKey,
 } from "../src/attestation-secret.js";
@@ -53,6 +63,20 @@ describe("attestation signing key", () => {
       resolveAttestationSecret(env, [KEY.slice(2).toUpperCase()]),
     ).rejects.toThrow(/must not reuse/);
     expect(env["PXE_BRIDGE_ATTESTATION_SECRET_KEY"]).toBe(KEY);
+  });
+
+  it("rejects a production Secrets Manager key matching a file-backed seed digest", async () => {
+    sendStub.mockResolvedValueOnce({ SecretString: JSON.stringify({ key: KEY }) });
+    const digest = secretMaterialDigest(KEY);
+    if (digest === undefined) throw new Error("fixture key was not digestible");
+    expect(digest).toMatch(/^[0-9a-f]{64}$/);
+    await expect(
+      resolveAttestationSecret(
+        { NODE_ENV: "production", PXE_BRIDGE_ATTESTATION_SECRET_ARN: "arn:aws:secretsmanager:test" },
+        [],
+        [digest],
+      ),
+    ).rejects.toThrow(/must not reuse/);
   });
 
 

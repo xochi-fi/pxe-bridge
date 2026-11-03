@@ -79,7 +79,19 @@ export type ReadinessReason =
   | "finalized_tip_from_future"
   | "finalized_tip_stale"
   | "readiness_observation_failed"
-  | "backend_capacity_exhausted";
+  | "backend_capacity_exhausted"
+  // Oxide mode (src/oxide/readiness.ts).
+  | "private_balance_unknown"
+  | "private_balance_insufficient"
+  | "journal_unreadable"
+  | "oxide_pins_unknown"
+  | "oxide_pin_mismatch"
+  | "oxide_l1_unknown"
+  | "oxide_l1_not_pinned"
+  | "oxide_portal_frozen"
+  | "enclave_unreachable"
+  | "enclave_attestation_refused"
+  | "attestation_unconfigured";
 
 export type ReadinessFact<T> =
   | { state: "known"; value: T }
@@ -192,6 +204,12 @@ export interface OperationalReadiness {
   nodeVersion: string | null;
   l1ChainId: string | null;
   rollupVersion: string | null;
+  /**
+   * The createNote rail this projection serves (settlement v2 `sendMode`).
+   * Riddler refuses intake when `/ready` names none, which is how it tells a
+   * 0.3.0 bridge (no `sendMode`) from this one before any source pull.
+   */
+  sendMode: "spending_limit";
   accountMode: "spending_limit" | "standard" | null;
   accountAddress: string | null;
   accountClassId: string | null;
@@ -577,6 +595,7 @@ export function evaluateReadiness(
     nodeVersion: network?.nodeVersion ?? null,
     l1ChainId: network?.l1ChainId ?? null,
     rollupVersion: network?.rollupVersion ?? null,
+    sendMode: "spending_limit",
     accountMode: facts.accountMode,
     accountAddress: facts.derivedAccountAddress,
     accountClassId,

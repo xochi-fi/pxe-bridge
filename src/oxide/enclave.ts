@@ -50,21 +50,37 @@ export function awsNitroRootDer(): Buffer {
   return Buffer.from(new X509Certificate(AWS_NITRO_ROOT_G1_PEM).raw);
 }
 
+export type EnclaveRefusal =
+  | "pcr0_not_pinned"
+  | "pcr0_hash_mismatch"
+  | "attestation_invalid"
+  | "l1_not_pinned"
+  | "portal_frozen";
+
 /** The enclave image, its attestation or its L1 registration is not the pinned one. Never retried in place. */
 export class EnclaveTrustRefused extends Error {
   constructor(
-    readonly reason:
-      | "pcr0_not_pinned"
-      | "pcr0_hash_mismatch"
-      | "attestation_invalid"
-      | "l1_not_pinned"
-      | "portal_frozen",
+    readonly reason: EnclaveRefusal,
     detail: string,
     options?: { cause?: unknown },
   ) {
     super(`Oxide enclave refused (${reason}): ${detail}`, options);
     this.name = "EnclaveTrustRefused";
   }
+}
+
+/**
+ * Whether a refusal is STRUCTURAL: the live deployment is not the pinned one
+ * (another enclave image, a registry whose `PCR0_HASH()` is not keccak of the
+ * pinned PCR0, a chain/registry/portal other than the pins), which no retry of
+ * this process clears -- only a reviewed re-pin and a new release do. A send
+ * refused for one of these is `not_submitted` and NOT retryable (xochi#748
+ * OX-6). `attestation_invalid` is one document from one fleet member and the
+ * next connection may reach another; `portal_frozen` is Oxide's own pause,
+ * lifted by its admin. Both stay transient.
+ */
+export function enclaveRefusalPermanent(reason: EnclaveRefusal): boolean {
+  return reason === "pcr0_not_pinned" || reason === "pcr0_hash_mismatch" || reason === "l1_not_pinned";
 }
 
 /** What the sender reads from L1. Every method is a view call. */
@@ -188,6 +204,19 @@ export function verifyEnclaveAttestation(
   onChainPcr0Hash: string,
   pins: OxidePins = OXIDE_V6_MAINNET,
 ): void {
+  // Authenticate the COSE signature, certificate chain and committed user
+  // data before any field controlled by the document can become a structural
+  // refusal. A parseable forgery with another PCR0 is only
+  // `attestation_invalid`, never evidence that the deployment moved.
+  try {
+    verifyTeeAttestation({
+      attestationDocument: attestation.attestation,
+      trustedRootCertificates: [awsNitroRootDer()],
+      userData: attestation.userData,
+    });
+  } catch (cause) {
+    throw new EnclaveTrustRefused("attestation_invalid", (cause as Error).message ?? String(cause), { cause });
+  }
   let pcr0: Buffer;
   try {
     pcr0 = getPcr0(attestation.attestation);
@@ -203,15 +232,6 @@ export function verifyEnclaveAttestation(
       "pcr0_hash_mismatch",
       `keccak(PCR0) ${hash} is not TeeRegistry.PCR0_HASH() ${onChainPcr0Hash}`,
     );
-  }
-  try {
-    verifyTeeAttestation({
-      attestationDocument: attestation.attestation,
-      trustedRootCertificates: [awsNitroRootDer()],
-      userData: attestation.userData,
-    });
-  } catch (cause) {
-    throw new EnclaveTrustRefused("attestation_invalid", (cause as Error).message ?? String(cause), { cause });
   }
 }
 
