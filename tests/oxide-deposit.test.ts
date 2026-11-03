@@ -31,6 +31,7 @@ import {
   OXIDE_DEPOSIT_DAI,
   OXIDE_DEPOSIT_OXDAI,
   OXIDE_DEPOSIT_PER_TX_CAP,
+  OXIDE_DEPOSIT_NOTE_MAX,
   OXIDE_DEPOSIT_PORTAL,
   OXIDE_DEPOSIT_ROLLUP_VERSION,
   OXIDE_DEPOSIT_SENDER,
@@ -116,7 +117,7 @@ async function receiptFixture(
       underlying: OXIDE_DEPOSIT_DAI,
       l2Token: OXIDE_DEPOSIT_OXDAI,
       rollupVersion: OXIDE_DEPOSIT_ROLLUP_VERSION,
-      txAmountCap: OXIDE_DEPOSIT_PER_TX_CAP,
+      txAmountCap: OXIDE_DEPOSIT_NOTE_MAX,
       depositMessageIndex: INBOX_INDEX + 1n,
     },
   };
@@ -412,12 +413,50 @@ describe("Oxide deposit receipt verification", () => {
     );
   });
 
-  it("refuses an over-cap deposit amount", async () => {
+  it("accepts the pinned 5,166 DAI portal cap for a 25 DAI deposit", async () => {
+    const { chain } = await receiptFixture();
+
+    await expect(
+      verifyOxideDeposit(chain, TX_HASH, SALT),
+    ).resolves.toMatchObject({
+      amount: AMOUNT,
+    });
+  });
+
+  it.each([
+    ["the operating deposit cap", OXIDE_DEPOSIT_PER_TX_CAP],
+    ["one unit above the pinned note maximum", OXIDE_DEPOSIT_NOTE_MAX + 1n],
+  ])("refuses a portal cap at %s", async (_case, txAmountCap) => {
+    const { chain, state } = await receiptFixture();
+    state.portal = { ...state.portal, txAmountCap };
+
+    await expect(verifyOxideDeposit(chain, TX_HASH, SALT)).rejects.toThrow(
+      "wrong portal transaction cap",
+    );
+  });
+
+  it("accepts a deposit at the 1,000 DAI operating cap", async () => {
+    const { chain } = await receiptFixture(OXIDE_DEPOSIT_PER_TX_CAP);
+
+    await expect(
+      prepareOxideDeposit(OXIDE_DEPOSIT_PER_TX_CAP, SALT),
+    ).resolves.toMatchObject({ amount: OXIDE_DEPOSIT_PER_TX_CAP.toString() });
+    await expect(
+      verifyOxideDeposit(chain, TX_HASH, SALT),
+    ).resolves.toMatchObject({
+      amount: OXIDE_DEPOSIT_PER_TX_CAP,
+    });
+  });
+
+  it("refuses a deposit above 1,000 DAI before accepting portal state", async () => {
     const over = OXIDE_DEPOSIT_PER_TX_CAP + 1n;
     const { chain } = await receiptFixture(over);
-    await expect(verifyOxideDeposit(chain, TX_HASH, SALT)).rejects.toThrow(
-      "per-transaction cap",
-    );
+    const portalState = vi.fn(chain.portalState);
+
+    await expect(
+      verifyOxideDeposit({ ...chain, portalState }, TX_HASH, SALT),
+    ).rejects.toThrow("per-transaction cap");
+    expect(portalState).not.toHaveBeenCalled();
     await expect(prepareOxideDeposit(over, SALT)).rejects.toThrow(
       "per-transaction cap",
     );
