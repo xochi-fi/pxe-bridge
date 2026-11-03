@@ -40,6 +40,7 @@
     "test:e2e:up": "docker compose up -d --wait anvil aztec-sandbox && npm run test:e2e; ec=$?; docker compose down; [ $ec -eq 0 ] || exit $ec; docker compose up -d --wait anvil aztec-sandbox && npm run test:e2e:crash; ec=$?; docker compose down; exit $ec",
     "bridge-fee-juice": "tsx scripts/bridge-fee-juice.ts",
     "top-up-fee-juice": "tsx scripts/top-up-fee-juice.ts",
+    "fund-oxide": "tsx scripts/fund-oxide.ts",
     "update-allowlist": "tsx scripts/update-allowlist.ts",
     "oxide-allowlist": "tsx scripts/oxide-allowlist.ts",
     "admin": "tsx scripts/admin.ts",

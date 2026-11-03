@@ -467,6 +467,77 @@ design-A bridge, unchanged) or `oxide`; any other value refuses to start.
 | `PXE_BRIDGE_ACCOUNT_ADDRESS` | production | The Oxide sender's recorded address, as for any standard account |
 | `PXE_BRIDGE_ATTESTATION_API_KEY`, `_SECRET_ARN` (dev: `_SECRET_KEY`), `_SOURCE_CHAIN_ID`, `_ENVIRONMENT`, `_RELAY_URL` / `_RELAY_TOKEN` | for OX-11 | The readiness attestation producer ([settlement-operations.md](settlement-operations.md#recipient-readiness-attestations)): without it no Membership or RootUpdate is signed over the private allowlist and no recipient binding becomes ready. Optional to start; startup logs a warning when Oxide mode runs without it |
 
+### Funding the Oxide sender's private OXDAI balance
+
+`npm run fund-oxide` performs the canonical Oxide deposit: approve the pinned
+DAI portal, compute the recipient commitment with Oxide's helper, call
+`OxidePortal.deposit`, wait for its L1-to-L2 message, then run the existing
+`storeOxideDeposit` utility call in the sender's PXE. The helper and portal
+surface come from `aztec-labs-eng/zkmoney-public` commit
+`8fd198412a956f214639b5782d3a86e3d47ca60e`; see
+`src/oxide/vendor/VENDORED.md` and `src/oxide/portal-deposit.ts`.
+
+Stop the Oxide bridge before the store phase: the one-shot tool opens the same
+wallet data directory. Set `PXE_BRIDGE_ACCOUNT_ADDRESS` to the recorded Oxide
+sender. The command requires the chain, token, portal, L1 sender and Aztec
+recipient explicitly, then refuses any value that differs from the shipped
+Oxide v6 pins, the recorded account or the L1 key. The amount is a canonical
+positive decimal in DAI base units, not a decimal DAI display amount.
+
+Plan first. This validates arguments and an existing state file, if any, but
+makes no network request and creates no state:
+
+```bash
+PXE_BRIDGE_ACCOUNT_ADDRESS='<OXIDE_SENDER_AZTEC_ADDRESS>' \
+npm run fund-oxide -- \
+  --dry-run \
+  --state '<OWNER_ONLY_STATE_PATH>' \
+  --chain-id 1 \
+  --token '<PINNED_DAI_ADDRESS>' \
+  --portal '<PINNED_OXIDE_PORTAL_ADDRESS>' \
+  --recipient '<OXIDE_SENDER_AZTEC_ADDRESS>' \
+  --sender '<FUNDER_L1_ADDRESS>' \
+  --amount '<DAI_BASE_UNITS>'
+```
+
+For the live operator run, provide `L1_PRIVATE_KEY`,
+`PXE_BRIDGE_SECRET_KEY`, `PXE_BRIDGE_OXIDE_L1_RPC_URL`, `AZTEC_NODE_URL` and
+`PXE_BRIDGE_OXIDE_TOKEN_ARTIFACT` from the operator secret/config store. Never
+put either key on the command line. Use the same arguments as the plan, without
+`--dry-run`; `--wallet-data-dir '<PXE_WALLET_DATA_DIRECTORY>'` names the
+bridge's durable wallet store when it is not the default.
+
+The state path must not exist on the first run. The tool creates it as a 0600
+regular file and fsyncs it before approval or deposit. It contains the random
+shared-secret salt and signed transactions, but no private key; neither the
+salt nor the state JSON is printed. Its phases are:
+`prepared -> approved -> deposited -> message_ready -> stored`. Each change is
+an owner-only temporary file, fsync and atomic rename. The `deposited` phase is
+written with the signed raw transaction and hash **before broadcast**. A crash,
+timeout or RPC error after that point can only query or rebroadcast those exact
+bytes (same hash and nonce); no retry path calls `deposit` again.
+
+Rerun the exact command with the same state path after any interruption. A
+not-ready message leaves the verified event key, index and credited amount in
+`deposited`; rerunning polls it and continues. `store_deposit` is considered
+complete on a duplicate only when OxideToken returns its exact
+`deposit already stored` assertion. Every other store error is fatal and the
+state remains `message_ready`.
+
+Treat the state and every backup as a secret because they contain the salt.
+With the tool stopped, back it up without loosening permissions:
+
+```bash
+install -m 600 '<OWNER_ONLY_STATE_PATH>' '<OWNER_ONLY_BACKUP_PATH>'
+```
+
+To recover, restore that file with mode 0600 and rerun the identical command.
+Never edit it, choose a new state path or start another deposit to work around
+an error. If both state and backup are lost after deposit preparation or
+broadcast, stop: recover the exact known transaction and salt from controlled
+operator records. **Never submit a second L1 deposit.** Preserve the `stored`
+state as the immutable receipt.
+
 **Startup refuses**, before a key is fetched or a node is touched
 (`src/oxide/config.ts`):
 - an unknown `PXE_BRIDGE_SEND_MODE`;

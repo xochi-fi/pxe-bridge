@@ -468,6 +468,11 @@ export interface AztecClientOptions {
    * PXE_BRIDGE_ALLOW_SPONSORED_FPC through {@link sponsoredFpcSetting}.
    */
   allowSponsoredFpc?: boolean;
+  /**
+   * Refuses to deploy when the derived account is absent. Operator recovery
+   * tools set this so a utility call can never turn into an account deployment.
+   */
+  requireExistingAccount?: boolean;
 }
 
 /** Opts a production bridge into the SponsoredFPC deployment fee fallback. */
@@ -821,6 +826,7 @@ export class AztecClient implements IAztecClient {
 
   private readonly dataDirectory: string;
   private readonly expectedAccountAddress: string | undefined;
+  private readonly requireExistingAccount: boolean;
   /** Set once this client holds its directory; a retried connect() reuses it. */
   private claimedDataDirectory: string | null = null;
   /** Node client for reads and exact journaled sends; set in connect(). */
@@ -860,6 +866,7 @@ export class AztecClient implements IAztecClient {
     this.secretKey = secretKey;
     this.dataDirectory = options.dataDirectory ?? DEFAULT_WALLET_DATA_DIRECTORY;
     this.expectedAccountAddress = options.expectedAccountAddress;
+    this.requireExistingAccount = options.requireExistingAccount ?? false;
   }
 
   async connect(): Promise<void> {
@@ -954,6 +961,12 @@ export class AztecClient implements IAztecClient {
           `contract exists there on ${this.nodeUrl}. Refusing to deploy over a recorded ` +
           `account. Check AZTEC_NODE_URL; to deploy a new account, unset ` +
           `PXE_BRIDGE_ACCOUNT_DEPLOYMENT deliberately.`,
+      );
+    }
+
+    if (!alreadyDeployed && this.requireExistingAccount) {
+      throw new Error(
+        `Bridge account ${address.toString()} is not initialized on ${this.nodeUrl}; refusing operator-tool deployment`,
       );
     }
 

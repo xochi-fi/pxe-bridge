@@ -111,6 +111,7 @@ the check again on whatever artifact the build context carries.
 | `oxide-lib-tee/da_extractors.ts` | `vendor/oxide/yarn-project/oxide-lib-tee/src/da_extractors.ts` | unmodified |
 | `oxide-lib-tee/encryption.ts` | `vendor/oxide/yarn-project/oxide-lib-tee/src/encryption.ts` | unmodified |
 | `oxide-lib-tee/framing.ts` | `vendor/oxide/yarn-project/oxide-lib-tee/src/framing.ts` | unmodified |
+| `oxide-lib-tee/recipient_commitment.ts` | `vendor/oxide/yarn-project/oxide-lib-tee/src/recipient_commitment.ts` | unmodified; canonical helper used by `npm run fund-oxide` |
 | `oxide-lib-tee/grumpkin_schnorr_signature.ts` | `vendor/oxide/yarn-project/oxide-lib-tee/src/grumpkin_schnorr_signature.ts` | unmodified |
 | `oxide-lib-tee/hash.ts` | `vendor/oxide/yarn-project/oxide-lib-tee/src/hash.ts` | unmodified |
 | `oxide-lib-tee/migration_signature.ts` | `vendor/oxide/yarn-project/oxide-lib-tee/src/migration_signature.ts` | unmodified |
