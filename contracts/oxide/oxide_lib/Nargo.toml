@@ -1,0 +1,9 @@
+[package]
+name = "oxide_lib"
+type = "lib"
+compiler_version = ">=1.0.0"
+
+[dependencies]
+aztec = { git = "https://github.com/aztec-labs-eng/aztec-node", tag = "v6.0.0", directory = "noir-projects/aztec-nr/aztec" }
+sha256 = { tag = "v0.2.1", git = "https://github.com/noir-lang/sha256" }
+base64 = { tag = "v0.5.1", git = "https://github.com/noir-lang/noir_base64" }

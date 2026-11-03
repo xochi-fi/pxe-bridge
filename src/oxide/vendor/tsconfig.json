@@ -1,0 +1,24 @@
+// The vendored Oxide client subset (VENDORED.md) compiles under upstream's own
+// compiler options (zkmoney-public vendor/oxide/yarn-project/tsconfig.base.json),
+// not this repo's stricter ones, so that it can stay byte-for-byte upstream.
+// The root tsconfig references this project and excludes the directory.
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "lib": ["dom", "esnext", "es2017.object"],
+    "composite": true,
+    "declaration": true,
+    "sourceMap": true,
+    "rootDir": ".",
+    "outDir": "../../../dist/oxide/vendor",
+    "tsBuildInfoFile": "../../../dist/oxide/vendor/.tsbuildinfo"
+  },
+  "include": ["**/*.ts"]
+}

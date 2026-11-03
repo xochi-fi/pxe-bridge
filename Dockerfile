@@ -3,12 +3,20 @@ FROM node:22-bookworm AS builder
 WORKDIR /app
 COPY package.json package-lock.json tsconfig.json ./
 COPY src/ src/
+# The OxideToken artifact, when CI built it into the context
+# (`npm run build:oxide-token`, gitignored), is checked here with the sender's
+# own load gate before anything ships it: an image never carries an OxideToken
+# artifact of a class other than the deployed OXDAI one.
+COPY scripts/oxide-token-artifact.ts scripts/
+COPY contracts/oxide/ contracts/oxide/
 
 # Prune after building: the runtime stage copies node_modules wholesale, and
 # without this it shipped tsx, typescript and vitest into the production image.
 # tsx in particular is an arbitrary-TypeScript executor on the PATH of a
 # container holding a signing key.
-RUN npm ci && npm run build && rm -f dist/*.js.map dist/*.d.ts.map && npm prune --omit=dev
+RUN npm ci && npm run build \
+    && if [ -e contracts/oxide/oxide_token_contract/target/oxide_token_contract-OxideToken.json ]; then npm run check:oxide-token; fi \
+    && rm -f dist/*.js.map dist/*.d.ts.map && npm prune --omit=dev
 
 FROM node:22-bookworm-slim
 
@@ -41,6 +49,10 @@ COPY --from=builder /app/package.json .
 # An image built without it still runs the default Schnorr configuration; only
 # PXE_BRIDGE_SPENDING_LIMIT_ADMIN needs the artifact, and that path fails at
 # startup with a module resolution error naming the missing file.
+#
+# The same holds for the OxideToken artifact the Oxide sender loads
+# (PXE_BRIDGE_OXIDE_TOKEN_ARTIFACT=/app/contracts/oxide/oxide_token_contract/target/oxide_token_contract-OxideToken.json):
+# built by CI, checked in the builder stage above, absent from a plain checkout.
 COPY contracts/ contracts/
 
 ENV NODE_ENV=production

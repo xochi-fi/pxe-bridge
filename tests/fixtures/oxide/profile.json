@@ -1,0 +1,128 @@
+{
+    "profileId": "prod-v6",
+    "network": "mainnet",
+    "publishedAt": "2026-10-29T18:34:42Z",
+    "shared": {
+        "l1ChainId": 1,
+        "xmtpEnv": "production",
+        "rollupVersion": "2070860440",
+        "previousGenerationProfile": "https://dsp2gadnqihit.cloudfront.net/profiles/v5/0.44.0.json"
+    },
+    "current": "0.6.0",
+    "versions": {
+        "0.6.0": {
+            "schemaVersion": "1",
+            "gitSha": "ea3459dc835ebc6161a266147cfd45fc9daf09ab",
+            "deployedAt": "2026-10-29T18:30:27Z",
+            "nodeUrl": "https://mainnet-v6.rpc2.aztec-labs.com",
+            "l1RpcUrl": "https://ethereum-rpc.publicnode.com",
+            "accountServiceUrl": "https://account.zk.money",
+            "paylinkDomain": "https://paylink.zk.money",
+            "zkmoneyApiUrl": "https://api.zk.money",
+            "oxide": {
+                "manifestUrl": "https://v6-prod.oxide.zk.money/v6/v6-prod/releases.json",
+                "portal": "0xCB99C58Fe81Ae6b2cB4835e46F7b703745879042",
+                "expectedGitSha": "3d8e29dc359023012a91d75538ed757dc9add937"
+            },
+            "assets": [
+                {
+                    "symbol": "DAI",
+                    "portal": "0xCB99C58Fe81Ae6b2cB4835e46F7b703745879042",
+                    "expectedGitSha": "3d8e29dc359023012a91d75538ed757dc9add937"
+                }
+            ],
+            "contracts": {
+                "paylinkDirect": {
+                    "classId": "0x0a50799bbccaa0d0b8196faf0381804d4d6d11498b95b803faf5b2eb42d4580a"
+                },
+                "paylinkEmail": {
+                    "classId": "0x009eadb30bac16703cd1043228f746ed771d483caca544b7a5c825f905addbc6"
+                },
+                "obsidionAccountAlpha": {
+                    "classId": "0x03461842e6b1ea47d624dd2b09496d72b047f8809f1dc16aa658df76781ecd84"
+                },
+                "linkLocator": {
+                    "classId": "0x2f64572c012c76450cdf752ab9aca56219b9331efb1747685ae48ab455af620e"
+                },
+                "adminAccount": {
+                    "address": "0x11cd5916032b348719b154d09d4ffe6ffc2a76d6140989e3a13ed778cd1f3d35",
+                    "classId": "0x222287bfcd04411264393983dd8d01ca5ea9ae305d1a10a1e6d8deef7f17659b"
+                },
+                "sponsorFPC": {
+                    "address": "0x1083fec7585c981f2a67c0c3c8e9912de4c8fd0826fc6cbe18a346d7df57371a",
+                    "classId": "0x2f5af673b5eb7214d73a54e08bc5d985f9373b21506416301d9fd6da289e7c85"
+                },
+                "oidcKeyRegistry": {
+                    "address": "0x147ff0fda134e1f26132aa6a756d5ea18de5e9ec8ac2677afffe9504ecdfc944",
+                    "classId": "0x28572b4e14e21898a92e905f08402b771e15a458ccc325ebdafb0ed034aa6d8a"
+                },
+                "claimFpc": {
+                    "address": "0x15cd6b14759b315baf74cd8f5934fa951ad9a2336e2968038835e84e1261612b",
+                    "classId": "0x283d2bc372c29215bd0473948a6e4cad92078d685a9a1236be69968734d02a3b",
+                    "meta": {
+                        "configHash": "0xce1a1b2192e079aa38b279c2cb3d9057219a86176e5ad1dfc7eb1e180d3e11f8",
+                        "policyManifest": {
+                            "version": 2,
+                            "depth": 6,
+                            "rails": [
+                                {
+                                    "name": "registration-broadcast",
+                                    "gate": "nameClaim",
+                                    "policy": {
+                                        "root": "0x2b94465e4a2484afcc17bfe4ec494a56a52405eccde009331db9e0b8a031de94",
+                                        "entries": [
+                                            {
+                                                "kind": 4,
+                                                "target": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                                                "selector": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                                                "maxFee": "24660000000000000000"
+                                            }
+                                        ]
+                                    }
+                                },
+                                {
+                                    "name": "registered",
+                                    "gate": "registration",
+                                    "policy": {
+                                        "root": "0x2b94465e4a2484afcc17bfe4ec494a56a52405eccde009331db9e0b8a031de94",
+                                        "entries": [
+                                            {
+                                                "kind": 4,
+                                                "target": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                                                "selector": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                                                "maxFee": "24660000000000000000"
+                                            }
+                                        ]
+                                    }
+                                },
+                                {
+                                    "name": "voucher",
+                                    "gate": "none",
+                                    "policy": {
+                                        "root": "0x2b94465e4a2484afcc17bfe4ec494a56a52405eccde009331db9e0b8a031de94",
+                                        "entries": [
+                                            {
+                                                "kind": 4,
+                                                "target": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                                                "selector": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                                                "maxFee": "24660000000000000000"
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                },
+                "passwordFPC": {
+                    "address": "0x2773e6d259a64375283824f3e4c1f5108d55892ef65e8e5180b7d99582dbd562",
+                    "classId": "0x15bfb34047d8023fd35a969d6fbaadde4f35f66b3483a2745a99a70ff0155b7c"
+                }
+            },
+            "vkeys": {
+                "zkJwtVkeyHash": "0x22b90b825bbda7021efbbd846741127975d7d92fcaff6dd90d251fb66c59b905"
+            },
+            "artifactManifestSha256": "d0fad81b5eb638cddd3553789ad80b582c1df43f8dc7eb568863821c8d7d9a74"
+        }
+    }
+}

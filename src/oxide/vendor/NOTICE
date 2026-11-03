@@ -1,0 +1,24 @@
+zk.money wallet
+Copyright (c) 2026 Aztec Labs
+
+This repository is licensed under the MIT License (see LICENSE), except for the
+third-party material below, which keeps its own license.
+
+Sen font
+  Files: packages/design-system/fonts/Sen-VariableFont.ttf,
+         packages/web-wallet/public/fonts/Sen-VariableFont.ttf
+  Copyright 2023 The Sen Project Authors (https://github.com/philatype/Sen/)
+  License: SIL Open Font License 1.1 (see OFL.txt next to each copy)
+
+Remix Icon glyphs
+  Files: packages/web-wallet/src/assets/phone/*.svg,
+         packages/web-wallet/src/assets/deposit/{eth-fill,loop-right-line,question-mark,wallet-line}.svg,
+         packages/web-wallet/src/assets/withdraw/spy-line.svg and glyphs in
+         packages/design-system/src/components/Icon.tsx
+  Source: Remix Icon (https://remixicon.com), through Streamline
+          (https://www.streamlinehq.com)
+  License: the upstream Remix Icon license
+
+vendor/oxide
+  A subset of the Oxide protocol code by Aztec Labs. Files with an SPDX header
+  keep that license.

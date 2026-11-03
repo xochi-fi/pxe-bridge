@@ -1,0 +1,11 @@
+[package]
+name = "oxide_token_contract"
+type = "contract"
+compiler_version = ">=1.0.0"
+
+[dependencies]
+oxide_token_lib = { path = "../oxide_token_lib" }
+oxide_lib = { path = "../oxide_lib" }
+aztec = { git = "https://github.com/aztec-labs-eng/aztec-node", tag = "v6.0.0", directory = "noir-projects/aztec-nr/aztec" }
+compressed_string = { git = "https://github.com/aztec-labs-eng/aztec-node", tag = "v6.0.0", directory = "noir-projects/aztec-nr/compressed-string" }
+contract_instance_registry = { git = "https://github.com/aztec-labs-eng/aztec-node", tag = "v6.0.0", directory = "noir-projects/aztec-nr/contract-instance-registry-interface" }
