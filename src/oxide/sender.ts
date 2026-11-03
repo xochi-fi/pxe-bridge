@@ -153,7 +153,7 @@ function preflightRefusal(cause: unknown): { reason: string; retryable: boolean 
  * `not_ready` is retryable; `refused` says itself.
  */
 export interface OxideAdmission {
-  admit(terms: { recipient: string; amount: string }): Promise<OxideAdmissionVerdict>;
+  admit(terms: { operationId: string; recipient: string; amount: string }): Promise<OxideAdmissionVerdict>;
 }
 
 /** Per-call context of `OxideSender.send`. */
@@ -499,7 +499,7 @@ export class OxideSender {
       return { ...this.refuse(op, checked.reasons[0] ?? "readiness_observation_failed", true), notReady: checked.reasons };
     }
     if (checked.kind === "refused") return this.refuse(op, checked.reason, checked.retryable);
-    const verdict = await this.admission.admit({ recipient: terms.recipient, amount: terms.amount });
+    const verdict = await this.admission.admit({ operationId: id, recipient: terms.recipient, amount: terms.amount });
     if (verdict.kind === "not_ready") {
       const answer = this.refuse(op, verdict.reasons[0] ?? "readiness_observation_failed", true);
       return { ...answer, notReady: verdict.reasons };
