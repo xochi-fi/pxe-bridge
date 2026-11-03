@@ -5,15 +5,14 @@ import { DAI, type OxideCapsConfig } from "../src/oxide/caps.js";
 import type { OxideSendEvidence } from "../src/oxide/operation.js";
 import { OXIDE_V6_MAINNET } from "../src/oxide/pins.js";
 import {
-  JournaledBytesInvalid,
   type OxideBackend,
   type OxidePayout,
   type OxideProvenTx,
   type OxideSigned,
   type OxideSimulation,
   type OxideSized,
-  type OxideTxIdentity,
 } from "../src/oxide/sender.js";
+import { JournaledBytesMismatch, type TxIdentity } from "../src/tx-identity.js";
 
 /** The fee limit every fake proof declares: `evidenceFor`'s gas (606,480 L2 gas x 2 gwei, no DA fee). */
 export const FEE_LIMIT = 606_480n * 2_000_000_000n;
@@ -162,7 +161,7 @@ export class FakeBackend implements OxideBackend {
   /** Spend this note instead of the one the PXE would select (an account holding several). */
   forceNote: number | undefined;
   /** Replaces what `identify` answers for journaled bytes (bytes whose stored hash survives but whose data changed). */
-  identityOverride: ((txBytes: Buffer) => OxideTxIdentity) | undefined;
+  identityOverride: ((txBytes: Buffer) => TxIdentity) | undefined;
   /** True: a `crashAt: "send"` dies after the mark but before the node saw the bytes. */
   crashBeforeNode = false;
 
@@ -218,10 +217,10 @@ export class FakeBackend implements OxideBackend {
     });
   }
 
-  identify(txBytes: Buffer): Promise<OxideTxIdentity> {
+  identify(txBytes: Buffer): Promise<TxIdentity> {
     if (this.identityOverride) return Promise.resolve(this.identityOverride(txBytes));
     const { expiration } = JSON.parse(txBytes.toString()) as { expiration?: string };
-    if (expiration === undefined) return Promise.reject(new JournaledBytesInvalid("no expiration in the fake tx"));
+    if (expiration === undefined) return Promise.reject(new JournaledBytesMismatch("undecodable"));
     return Promise.resolve({ txHash: hashOfBytes(txBytes), expirationTimestamp: BigInt(expiration) });
   }
 

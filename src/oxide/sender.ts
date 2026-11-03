@@ -17,6 +17,7 @@ import {
 } from "./operation.js";
 import { OxidePinMismatch, OXIDE_V6_MAINNET } from "./pins.js";
 import { MAX_TX_LIFETIME } from "@aztec-labs/constants";
+import { assertJournaledIdentity, JournaledBytesMismatch, type TxIdentity } from "../tx-identity.js";
 
 /**
  * The Oxide sender (xochi-fi/pxe-bridge#84, phase 1): pays OXDAI to an Aztec
@@ -102,9 +103,9 @@ export interface OxideBackend {
   /**
    * The hash and protocol expiry a node gives `txBytes`, recomputed from the
    * transaction's data (never the stored hash prefix alone). Throws
-   * `JournaledBytesInvalid` when the bytes do not hash to their own data.
+   * `JournaledBytesMismatch` when the bytes do not decode or do not hash to their own data.
    */
-  identify(txBytes: Buffer): Promise<OxideTxIdentity>;
+  identify(txBytes: Buffer): Promise<TxIdentity>;
   send(txBytes: Buffer): Promise<void>;
   observe(txHash: string): Promise<NodeObservation>;
   /** The account's public fee juice balance at the node's latest state: what pays every send (`PREEXISTING_FEE_JUICE`). */
@@ -141,20 +142,6 @@ export interface OxidePayoutIdentity {
   noteIndex: number;
   /** The siloed note hash the enclave signed for it. */
   siloedNoteHash: string;
-}
-
-export interface OxideTxIdentity {
-  /** 0x, lowercase. */
-  txHash: string;
-  expirationTimestamp: bigint;
-}
-
-/** Journaled bytes that are not a transaction the node would accept as the journaled one. */
-export class JournaledBytesInvalid extends Error {
-  constructor(detail: string) {
-    super(`Journaled Oxide tx bytes refused: ${detail}`);
-    this.name = "JournaledBytesInvalid";
-  }
 }
 
 export type OxideSendOutcome =
@@ -557,19 +544,11 @@ export class OxideSender {
     // The bytes must still be the transaction the journal (and so the gate)
     // names: hash recomputed from the data, and the expiry inside them equal
     // to the journaled one the bound checks below read.
-    let identity: OxideTxIdentity | null = null;
     try {
-      identity = await this.backend.identify(bytes);
+      assertJournaledIdentity(await this.backend.identify(bytes), attempt);
     } catch (cause) {
-      if (!(cause instanceof JournaledBytesInvalid)) throw cause;
+      if (!(cause instanceof JournaledBytesMismatch)) throw cause;
       console.error(`[oxide] Journaled bytes of ${id} attempt ${attempt.attempt}: ${cause.message}`);
-    }
-    if (
-      identity === null ||
-      identity.txHash !== attempt.txHash.toLowerCase() ||
-      identity.expirationTimestamp.toString() !== attempt.expirationTimestamp
-    ) {
-      console.error(`[oxide] Journaled bytes of ${id} attempt ${attempt.attempt} are not the journaled transaction`);
       return this.answer(op, { state: "unknown", reason: "journaled_bytes_mismatch" });
     }
     const answer = await this.mayBroadcast({ operationId: id, fingerprint: op.fingerprint, txHash: attempt.txHash });

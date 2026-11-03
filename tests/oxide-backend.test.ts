@@ -4,14 +4,13 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { Fr } from "@aztec-labs/aztec.js/fields";
 import {
-  identifyTxBytes,
   loadOxideTokenArtifact,
   orderFingerprintMeta,
   OXIDE_TOKEN_ARTIFACT,
   oxideGasSettings,
   pinnedTokenImmutables,
 } from "../src/oxide/backend.js";
-import { JournaledBytesInvalid } from "../src/oxide/sender.js";
+import { decodeTxBytes, JournaledBytesMismatch } from "../src/tx-identity.js";
 import { mockTx } from "@aztec-labs/stdlib/testing";
 import { computeTokenImmutablesHash } from "../src/oxide/vendor/oxide-lib/token_immutables.js";
 
@@ -51,18 +50,22 @@ describe("Oxide backend policy", () => {
   });
 });
 
-describe("identifyTxBytes (real stdlib Tx codec)", () => {
+describe("decodeTxBytes (real stdlib Tx codec)", () => {
   it("answers the hash recomputed from the data and the expiry inside it", async () => {
     const tx = await mockTx(1);
-    const id = await identifyTxBytes(tx.toBuffer());
-    expect(id.txHash).toBe(tx.getTxHash().toString().toLowerCase());
-    expect(id.expirationTimestamp).toBe(tx.data.expirationTimestamp);
+    const { identity } = await decodeTxBytes(tx.toBuffer());
+    expect(identity.txHash).toBe(tx.getTxHash().toString().toLowerCase());
+    expect(identity.expirationTimestamp).toBe(tx.data.expirationTimestamp);
   });
 
   it("refuses bytes changed after the stored hash prefix, which getTxHash() alone would accept", async () => {
     const bytes = Buffer.from((await mockTx(2)).toBuffer());
     bytes[200] = bytes[200]! ^ 0xff;
-    await expect(identifyTxBytes(bytes)).rejects.toBeInstanceOf(JournaledBytesInvalid);
+    await expect(decodeTxBytes(bytes)).rejects.toMatchObject({ name: "JournaledBytesMismatch", detail: "stored_hash" });
+  });
+
+  it("refuses bytes that do not decode as a transaction", async () => {
+    await expect(decodeTxBytes(Buffer.from("not a tx"))).rejects.toBeInstanceOf(JournaledBytesMismatch);
   });
 });
 

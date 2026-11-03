@@ -43,16 +43,15 @@ import { OxideFleetRegistry, type OxideL1Reader } from "./enclave.js";
 import { oxideFeeLimit, type OxideSendEvidence } from "./operation.js";
 import { OXIDE_V6_MAINNET, type OxidePins } from "./pins.js";
 import {
-  JournaledBytesInvalid,
   type OxideBackend,
   type OxidePayout,
   type OxideProvenTx,
   type OxideSigned,
   type OxideSimulation,
   type OxideSized,
-  type OxideTxIdentity,
   type TokenOperationSummary,
 } from "./sender.js";
+import { decodeTxBytes, identifyTx, type TxIdentity } from "../tx-identity.js";
 
 /**
  * The real `OxideBackend`: Oxide's own send pipeline (upstream
@@ -404,16 +403,17 @@ export class PxeOxideBackend implements OxideBackend {
         feePerL2Gas: gas.maxFeesPerGas.feePerL2Gas.toString(),
       },
     };
+    const identity = await identifyTx(tx);
     return {
-      txHash: (await tx.getTxHash()).toString(),
+      txHash: identity.txHash,
       txBytes: tx.toBuffer(),
-      expirationTimestamp: tx.data.expirationTimestamp,
+      expirationTimestamp: identity.expirationTimestamp,
       evidence,
     };
   }
 
-  identify(txBytes: Buffer): Promise<OxideTxIdentity> {
-    return identifyTxBytes(txBytes);
+  async identify(txBytes: Buffer): Promise<TxIdentity> {
+    return (await decodeTxBytes(txBytes)).identity;
   }
 
   /** Exact journaled bytes to the ungated node, with nothing awaited before the call. */
@@ -463,18 +463,3 @@ export class PxeOxideBackend implements OxideBackend {
     });
   }
 }
-
-/**
- * The identity a node gives `txBytes`, recomputed from the transaction's data.
- * `Tx.fromBuffer` reads the hash stored at the front of the bytes and
- * `getTxHash()` returns it as is, so a hash read that way vouches for nothing
- * after the prefix (the expiry included). Refuses bytes whose stored hash is
- * not the hash of their data: the node would reject them.
- */
-export async function identifyTxBytes(txBytes: Buffer): Promise<OxideTxIdentity> {
-  const tx = Tx.fromBuffer(txBytes);
-  const computed = await Tx.computeTxHash(tx);
-  if (!computed.equals(tx.getTxHash())) throw new JournaledBytesInvalid("stored tx hash is not the hash of the tx data");
-  return { txHash: computed.toString().toLowerCase(), expirationTimestamp: tx.data.expirationTimestamp };
-}
-
