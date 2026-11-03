@@ -21,6 +21,7 @@ import {
   fakeGate,
   FakeNode,
   fakeAdmission,
+  settle,
   noPreflight,
   RECIPIENT,
   request,
@@ -65,17 +66,6 @@ function observed(outcome: OxideSendOutcome) {
   if (outcome.kind !== "observed") throw new Error(`expected an observation, got ${outcome.kind}`);
   return outcome;
 }
-
-/**
- * Lets a step that will never settle get there: event-loop turns, no timers.
- * The fake proof computes real note hashes, whose async hashing takes more
- * than one turn to reach the journal.
- */
-const settle = async () => {
-  for (let i = 0; i < 1_000; i += 1) {
-    await new Promise<void>((resolve) => setImmediate(resolve));
-  }
-};
 
 describe("OxideSender", () => {
   it("pays once and answers the payout identity the v2 rail needs", async () => {

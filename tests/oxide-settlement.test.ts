@@ -19,6 +19,7 @@ import {
   OXIDE_NETWORK,
   oxideParams,
   PAYOUT_NOTE_HASH_INDEX,
+  settle,
   tempJournalPath,
 } from "./oxide-fixtures.js";
 import { FakeAztecClient, openBoundJournal, rpcBody, settlementContext, settlementParams } from "./settlement-fixtures.js";
@@ -107,12 +108,6 @@ function error(response: JsonRpcResponse): { code: number; data: Record<string, 
   if (!("error" in response)) throw new Error(`expected an error, got ${JSON.stringify(response)}`);
   return response.error as { code: number; data: Record<string, unknown> };
 }
-
-const settle = async () => {
-  for (let i = 0; i < 1_000; i += 1) {
-    await new Promise<void>((resolve) => setImmediate(resolve));
-  }
-};
 
 const fingerprintOf = (params: Record<string, unknown>) => fingerprintTerms(termsFrom(CreateNoteSchema.parse(params)));
 

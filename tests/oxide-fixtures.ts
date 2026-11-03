@@ -325,21 +325,26 @@ export class FakeBackend implements OxideBackend {
 
   prove(sized: OxideSized): Promise<OxideProvenTx> {
     return this.step("prove", async () => {
-      const { payout, nullifiers } = sized.handle as { payout: OxidePayout; nullifiers: string[] };
-      // The recipient note the enclave signs: the real Oxide siloed hash of
-      // (recipient, OXDAI, amount, randomness), published by the node as its
-      // unique note hash under the tx's first nullifier.
-      const evidence = evidenceFor(payout, nullifiers);
-      const note = evidence.createdNotes[evidence.recipientNoteIndex]!;
-      const siloed = await oxideSiloedNoteHash({
-        recipient: note.owner,
-        token: OXIDE_V6_MAINNET.bridge.l2Token,
-        amount: BigInt(note.amount),
-        randomness: note.randomness,
-      });
-      evidence.teeNotes[evidence.recipientNoteIndex] = siloed.toString();
-      const txBytes = txBytesFor(nullifiers, this.expiration, await publishedNoteHashes(siloed, nullifiers[0]!));
-      return { txHash: hashOfBytes(txBytes), txBytes, expirationTimestamp: this.expiration, evidence };
+      proofsInFlight.count += 1;
+      try {
+        const { payout, nullifiers } = sized.handle as { payout: OxidePayout; nullifiers: string[] };
+        // The recipient note the enclave signs: the real Oxide siloed hash of
+        // (recipient, OXDAI, amount, randomness), published by the node as its
+        // unique note hash under the tx's first nullifier.
+        const evidence = evidenceFor(payout, nullifiers);
+        const note = evidence.createdNotes[evidence.recipientNoteIndex]!;
+        const siloed = await oxideSiloedNoteHash({
+          recipient: note.owner,
+          token: OXIDE_V6_MAINNET.bridge.l2Token,
+          amount: BigInt(note.amount),
+          randomness: note.randomness,
+        });
+        evidence.teeNotes[evidence.recipientNoteIndex] = siloed.toString();
+        const txBytes = txBytesFor(nullifiers, this.expiration, await publishedNoteHashes(siloed, nullifiers[0]!));
+        return { txHash: hashOfBytes(txBytes), txBytes, expirationTimestamp: this.expiration, evidence };
+      } finally {
+        proofsInFlight.count -= 1;
+      }
     });
   }
 
@@ -398,4 +403,23 @@ export const noPreflight = { assertPinned: () => Promise.resolve() };
 export function clock(start = T0) {
   const c = { t: start, now: () => c.t };
   return c;
+}
+
+/** Fake proofs still computing their note hashes (real, async 6.0.0 hashing). */
+export const proofsInFlight = { count: 0 };
+
+/**
+ * Lets every step that will settle get there: event-loop turns (no timers)
+ * until no fake proof is still hashing, then enough turns for the journal,
+ * gate and send that follow it. A step that never settles (`crashAt`, a
+ * hanging gate) stays where it is.
+ */
+export async function settle(): Promise<void> {
+  const turn = () => new Promise<void>((resolve) => setImmediate(resolve));
+  for (let i = 0; i < 100; i += 1) await turn();
+  for (let i = 0; proofsInFlight.count > 0; i += 1) {
+    if (i > 1_000_000) throw new Error("a fake proof never finished hashing");
+    await turn();
+  }
+  for (let i = 0; i < 100; i += 1) await turn();
 }
