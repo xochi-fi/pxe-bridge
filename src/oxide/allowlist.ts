@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { AllowlistTree, ALLOWLIST_CAPACITY, type AllowlistRecipient } from "../allowlist-tree.js";
 import { AllowlistRecipientsSchema } from "../types.js";
@@ -77,6 +78,8 @@ export class OxideAllowlist {
   private constructor(
     readonly tree: AllowlistTree,
     private readonly members: readonly AllowlistRecipient[],
+    /** SHA-256 of the canonical seed, for key-separation checks only. */
+    readonly seedSecretDigest: string,
   ) {}
 
   static async build(seed: string, recipients: unknown): Promise<OxideAllowlist> {
@@ -94,7 +97,8 @@ export class OxideAllowlist {
       // AllowlistTree's own messages name addresses; this one must not.
       throw new OxideAllowlistConfigError("the Oxide allowlist tree could not be built from its configuration");
     }
-    return new OxideAllowlist(tree, members);
+    const seedSecretDigest = createHash("sha256").update(seed.slice(2).toLowerCase()).digest("hex");
+    return new OxideAllowlist(tree, members, seedSecretDigest);
   }
 
   /** The private root, lowercase 0x hex. Never log it or put it on chain. */

@@ -693,6 +693,7 @@ async function main(): Promise<void> {
         attestationEnvironment.relay.token,
         process.env["SPENDING_LIMIT_ADMIN_KEY"],
       ].filter((value): value is string => value !== undefined),
+      oxideAllowlist ? [oxideAllowlist.seedSecretDigest] : [],
     );
     console.log(`[pxe-bridge] Attestation key loaded from ${resolved.source}`);
     const attestationProbe = oxideAllowlist ? new OxideAttestationProbe(client, oxideAllowlist) : client;

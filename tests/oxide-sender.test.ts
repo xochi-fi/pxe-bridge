@@ -254,6 +254,28 @@ describe("OxideSender", () => {
     expect(node.sent).toEqual([]);
   });
 
+  it("rechecks the mutable portal after proving and gate allow, before the mark", async () => {
+    const node = new FakeNode();
+    const gate = fakeGate("allow");
+    let checks = 0;
+    const preflight = {
+      assertPinned: () => {
+        checks += 1;
+        return checks === 1
+          ? Promise.resolve()
+          : Promise.reject(new EnclaveTrustRefused("portal_frozen", "frozen during prove"));
+      },
+    };
+    const { sender, journal } = boot(tempJournalPath(), node, { gate, preflight });
+    expect(observed(await sender.send(request())).observation).toMatchObject({
+      state: "prepared",
+      hold: "preflight_refused",
+    });
+    expect(checks).toBe(2);
+    expect(journal.get("op-1")?.state).toBe("prepared");
+    expect(node.sent).toEqual([]);
+  });
+
   it("a pipeline failure before the journal is not_submitted and retryable", async () => {
     const node = new FakeNode();
     const { sender, backend } = boot(tempJournalPath(), node);

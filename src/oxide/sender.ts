@@ -573,6 +573,18 @@ export class OxideSender {
       this.journal.recordHold(id, hold);
       return this.answer(this.journal.get(id)!, this.preparedObservation(attempt, hold));
     }
+    // The portal and deployment can move while the transaction is being
+    // proved or while the gate is deciding. Re-read after allow; once it
+    // returns, the bounds, mark and send below are one synchronous run.
+    try {
+      await this.preflight.assertPinned();
+    } catch (cause) {
+      const refusal = preflightRefusal(cause);
+      console.error(`[oxide] Preflight refused after allow: ${boundedErrorClass(cause)}`);
+      if (!refusal.retryable) return this.refuse(op, refusal.reason, false);
+      this.journal.recordHold(op.operationId, "preflight_refused");
+      return this.answer(this.journal.get(op.operationId)!, this.preparedObservation(attempt, "preflight_refused"));
+    }
     // Synchronous from here to the mark.
     if (this.nowSeconds() >= op.terms.validUntil) return this.refuse(op, "validity_bound_passed", false);
     if (BigInt(this.nowSeconds()) >= BigInt(attempt.expirationTimestamp)) {
