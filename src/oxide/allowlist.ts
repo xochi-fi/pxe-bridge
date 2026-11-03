@@ -147,3 +147,52 @@ export async function oxideAllowlistFromEnv(env: NodeJS.ProcessEnv): Promise<Oxi
   }
   return OxideAllowlist.build(seed, json);
 }
+
+/** One operator change to the private set. */
+export type OxideAllowlistChange =
+  | { mode: "add"; address: string; index: number }
+  | { mode: "revoke"; address: string };
+
+/** Positions no recipient holds, ascending. */
+export function freeOxidePositions(current: readonly AllowlistRecipient[]): number[] {
+  const taken = new Set(current.map(({ index }) => index));
+  return Array.from({ length: ALLOWLIST_CAPACITY }, (_, index) => index).filter((index) => !taken.has(index));
+}
+
+/**
+ * The set after one change, with the same checks `scripts/update-allowlist.ts`
+ * makes for the on-chain allowlist: an addition needs a free position and an
+ * address not already listed (revoke first to move one), a revocation needs a
+ * listed address. `sender` (the Oxide sending account) can never be added.
+ * Messages name positions, never addresses.
+ */
+export function planOxideAllowlistChange(
+  current: readonly AllowlistRecipient[],
+  change: OxideAllowlistChange,
+  sender?: string,
+): AllowlistRecipient[] {
+  const members = validateOxideRecipients(current);
+  const address = change.address.toLowerCase();
+  if (change.mode === "revoke") {
+    if (!members.some((member) => member.address === address)) {
+      throw new OxideAllowlistConfigError("the address to revoke is not in the current set");
+    }
+    return members.filter((member) => member.address !== address);
+  }
+  if (!HEX32.test(address) || ZERO32.test(address) || BigInt(address) >= FR_MODULUS) {
+    throw new OxideAllowlistConfigError("the address to add is not a nonzero 32-byte Aztec field element");
+  }
+  if (sender !== undefined && sender.toLowerCase() === address) {
+    throw new OxideAllowlistConfigError("the Oxide sending account cannot be its own recipient");
+  }
+  if (!Number.isInteger(change.index) || change.index < 0 || change.index >= ALLOWLIST_CAPACITY) {
+    throw new OxideAllowlistConfigError(`position ${change.index} is outside [0, ${ALLOWLIST_CAPACITY})`);
+  }
+  if (members.some((member) => member.index === change.index)) {
+    throw new OxideAllowlistConfigError(`position ${change.index} is already occupied`);
+  }
+  if (members.some((member) => member.address === address)) {
+    throw new OxideAllowlistConfigError("the address is already in the set; revoke it first to move it");
+  }
+  return validateOxideRecipients([...members, { address, index: change.index }]);
+}

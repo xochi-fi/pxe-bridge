@@ -1619,7 +1619,9 @@ export class AztecClient implements IAztecClient {
     recipient: string | undefined,
     genesisOrNetworkDigest: string,
   ): Promise<AccountAttestationObservation> {
-    if (!this.node || !this.solverAddress || this.spendingLimitConfig) {
+    // The spending-limit account is not the stock Schnorr class this mode signs for.
+    if (this.spendingLimitConfig) return { state: "unknown", reason: "account_class_mismatch" };
+    if (!this.node || !this.solverAddress) {
       return { state: "unknown", reason: "finalized_history_unavailable" };
     }
     const account = this.solverAddress;
