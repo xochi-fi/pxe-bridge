@@ -13,19 +13,20 @@ import {
 } from "../journal.js";
 import { capRefusal, CapExceeded, WINDOW_MS, type OxideCapsConfig } from "./caps.js";
 import {
-  fingerprintOxideTerms,
   isOxideSendEvidence,
   oxideFeeLimit,
   type OxideHold,
   type OxideObservation,
   type OxideSendEvidence,
-  type OxideTerms,
 } from "./operation.js";
+import { fingerprintTerms, type SettlementTerms } from "../settlement.js";
 
 /**
  * The Oxide sender's journal: the createNote journal's semantics
  * (src/journal.ts, docs/settlement-operations.md "Journal") for an Oxide send,
- * in its own file because the terms and the per-attempt evidence differ.
+ * in its own file because the per-attempt evidence differs. Each operation
+ * row holds the v2 terms (`sendMode` oxide) and their v2 request fingerprint,
+ * the same fingerprint the wire and may-broadcast carry.
  *
  * Shared with the settlement journal, deliberately: `synchronous=FULL` and a
  * rollback journal, the exclusive writer lock taken by a write at open, owner-
@@ -45,7 +46,8 @@ import {
  * - An unmarked prepared attempt is resent only as its journaled bytes.
  */
 
-export const OXIDE_JOURNAL_SCHEMA_VERSION = 1;
+/** 2 (0.4.0): rows hold v2 `SettlementTerms`; 1 held the unreleased phase-1 Oxide terms and is refused. */
+export const OXIDE_JOURNAL_SCHEMA_VERSION = 2;
 
 export type OxideOperationState =
   | "claimed"
@@ -58,7 +60,7 @@ export type OxideOperationState =
 export interface OxideStoredOperation {
   operationId: string;
   fingerprint: string;
-  terms: OxideTerms;
+  terms: SettlementTerms;
   state: OxideOperationState;
   reason: string | null;
   retryable: boolean;
@@ -374,9 +376,9 @@ export class OxideJournal {
         /^0x[0-9a-f]{64}$/.test(current.tx_hash) &&
         /^[0-9]+$/.test(current.expiration_timestamp) &&
         current.byte_length > 0;
-      let terms: OxideTerms | undefined;
+      let terms: SettlementTerms | undefined;
       try {
-        terms = JSON.parse(op.terms_json) as OxideTerms;
+        terms = JSON.parse(op.terms_json) as SettlementTerms;
       } catch {
         terms = undefined;
       }
@@ -410,9 +412,7 @@ export class OxideJournal {
         default:
           violation = `unknown state ${String(op.state)}`;
       }
-      if (violation === undefined && (terms === undefined || fingerprintOxideTerms(terms) !== op.fingerprint)) {
-        violation = "stored fingerprint is not the fingerprint of the stored terms";
-      }
+      if (violation === undefined) violation = termsViolation(terms, op.fingerprint);
       if (violation !== undefined) {
         this.disable("journal_inconsistent", `operation ${id}: ${violation}`);
         return;
@@ -471,8 +471,16 @@ export class OxideJournal {
     return evidence;
   }
 
-  claim(operationId: string, terms: OxideTerms): OxideClaimResult {
-    const fingerprint = fingerprintOxideTerms(terms);
+  /**
+   * Claims an operation id for these v2 terms (sendMode oxide), keyed by their
+   * v2 request fingerprint, or reports what it already is: same id and
+   * fingerprint is the same operation, another fingerprint a conflict.
+   */
+  claim(operationId: string, terms: SettlementTerms): OxideClaimResult {
+    if (terms.sendMode !== "oxide") {
+      throw new JournalWriteError(this.health(), `claim: sendMode ${terms.sendMode} is not journaled here`);
+    }
+    const fingerprint = fingerprintTerms(terms);
     let result: OxideClaimResult | undefined;
     this.write("claim", (db) => {
       const row = db.prepare("SELECT * FROM operations WHERE operation_id = ?").get(operationId) as OperationRow | undefined;
@@ -641,7 +649,7 @@ export class OxideJournal {
         row.mined_block !== null
           ? row.mined_block > anchorBlock
           : row.state === "prepared"
-            ? unexpired && nowSeconds < (JSON.parse(row.terms_json) as OxideTerms).validUntil
+            ? unexpired && nowSeconds < (JSON.parse(row.terms_json) as SettlementTerms).validUntil
             : unexpired;
       if (!counts) continue;
       const evidence = JSON.parse(row.evidence_json) as OxideSendEvidence;
@@ -691,7 +699,7 @@ export class OxideJournal {
     let sends = 0;
     for (const row of rows) {
       if (BigInt(nowSeconds) >= BigInt(row.expiration_timestamp)) continue;
-      if (row.state === "prepared" && nowSeconds >= (JSON.parse(row.terms_json) as OxideTerms).validUntil) continue;
+      if (row.state === "prepared" && nowSeconds >= (JSON.parse(row.terms_json) as SettlementTerms).validUntil) continue;
       total += oxideFeeLimit(JSON.parse(row.evidence_json) as OxideSendEvidence);
       sends += 1;
     }
@@ -856,6 +864,18 @@ export class OxideJournal {
   }
 }
 
+/** A stored row's terms this code did not write: unreadable, not oxide, or not hashing to the stored fingerprint. */
+function termsViolation(terms: SettlementTerms | undefined, fingerprint: string): string | undefined {
+  if (terms === undefined) return "stored terms are unreadable";
+  if (terms.sendMode !== "oxide") return "stored terms are not an oxide send";
+  try {
+    if (fingerprintTerms(terms) !== fingerprint) return "stored fingerprint is not the fingerprint of the stored terms";
+  } catch {
+    return "stored terms are unreadable";
+  }
+  return undefined;
+}
+
 function sumSpends(db: Database.Database, sinceMs: number): bigint {
   const rows = db.prepare("SELECT amount FROM spends WHERE at >= ?").all(sinceMs) as { amount: string }[];
   let total = 0n;
@@ -867,7 +887,7 @@ function toOperation(row: OperationRow): OxideStoredOperation {
   return {
     operationId: row.operation_id,
     fingerprint: row.fingerprint,
-    terms: JSON.parse(row.terms_json) as OxideTerms,
+    terms: JSON.parse(row.terms_json) as SettlementTerms,
     state: row.state,
     reason: row.reason,
     retryable: row.retryable === 1,

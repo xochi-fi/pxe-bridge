@@ -20,6 +20,8 @@ import {
   FakeBackend,
   fakeGate,
   FakeNode,
+  fakeAdmission,
+  settle,
   noPreflight,
   RECIPIENT,
   request,
@@ -35,30 +37,35 @@ import {
 function boot(
   path: string,
   node: FakeNode,
-  options: { gate?: ReturnType<typeof fakeGate>; caps?: OxideCapsConfig; c?: ReturnType<typeof clock>; preflight?: { assertPinned(): Promise<void> } } = {},
+  options: {
+    gate?: ReturnType<typeof fakeGate>;
+    caps?: OxideCapsConfig;
+    c?: ReturnType<typeof clock>;
+    preflight?: { assertPinned(): Promise<void> };
+    admission?: ReturnType<typeof fakeAdmission>;
+  } = {},
 ) {
   const c = options.c ?? clock();
   const journal = OxideJournal.open(path, { now: c.now, allowCreate: true });
   const backend = new FakeBackend(node);
   const gate = options.gate ?? fakeGate();
+  const admission = options.admission ?? fakeAdmission();
   const sender = new OxideSender({
     journal,
     backend,
     caps: options.caps ?? CAPS,
     preflight: options.preflight ?? noPreflight,
+    admission: admission.admission,
     mayBroadcast: gate.client,
     now: c.now,
   });
-  return { journal, backend, sender, gate, c };
+  return { journal, backend, sender, gate, c, admission };
 }
 
 function observed(outcome: OxideSendOutcome) {
   if (outcome.kind !== "observed") throw new Error(`expected an observation, got ${outcome.kind}`);
   return outcome;
 }
-
-/** Lets a step that will never settle get there. */
-const settle = () => new Promise((resolve) => setImmediate(resolve));
 
 describe("OxideSender", () => {
   it("pays once and answers the payout identity the v2 rail needs", async () => {
@@ -275,6 +282,32 @@ describe("OxideSender", () => {
     expect(journal.get("op-1")?.state).toBe("prepared");
     expect(node.sent).toEqual([]);
   });
+  it("does not mark or send when the deadline aborts during the post-allow preflight", async () => {
+    const node = new FakeNode();
+    let checks = 0;
+    let release!: () => void;
+    let entered!: () => void;
+    const enteredSecond = new Promise<void>((resolve) => (entered = resolve));
+    const blocked = new Promise<void>((resolve) => (release = resolve));
+    const preflight = {
+      assertPinned: () => {
+        checks += 1;
+        if (checks === 1) return Promise.resolve();
+        entered();
+        return blocked;
+      },
+    };
+    const { sender, journal } = boot(tempJournalPath(), node, { gate: fakeGate("allow"), preflight });
+    const controller = new AbortController();
+    const sending = sender.send({ ...request(), signal: controller.signal });
+    await enteredSecond;
+    controller.abort();
+    release();
+
+    expect(observed(await sending).observation).toMatchObject({ state: "prepared", hold: "interrupted" });
+    expect(journal.get("op-1")?.state).toBe("prepared");
+    expect(node.sent).toEqual([]);
+  });
 
   it("a pipeline failure before the journal is not_submitted and retryable", async () => {
     const node = new FakeNode();
@@ -367,23 +400,52 @@ describe("OxideSender", () => {
     expect(backend.calls).toEqual(["simulate"]); // the enclave never saw it
   });
 
-  it("classifies structural trust refusals as terminal and live-read failures as retryable", async () => {
+  it("refuses to sign when the pins or the enclave do not verify; a moved deployment is permanent (OX-6)", async () => {
+    // Structural: the live deployment is not the pinned one. No retry of this
+    // process clears it; the operation is not_submitted for good so the order
+    // can be refunded instead of polled until its deadline.
     for (const [error, reason, retryable] of [
       [new OxidePinMismatch("manifest", ["gitSha"]), "oxide_pin_mismatch", false],
-      [new EnclaveTrustRefused("pcr0_hash_mismatch", "moved"), "enclave_refused:pcr0_hash_mismatch", false],
+      [new OxidePinMismatch("profile", ["oxide.expectedGitSha"]), "oxide_pin_mismatch", false],
+      [new EnclaveTrustRefused("pcr0_not_pinned", "image"), "enclave_refused:pcr0_not_pinned", false],
+      [new EnclaveTrustRefused("pcr0_hash_mismatch", "registry"), "enclave_refused:pcr0_hash_mismatch", false],
+      [new EnclaveTrustRefused("l1_not_pinned", "PCR0_HASH"), "enclave_refused:l1_not_pinned", false],
+      // Transient: a pause, one document, or nothing read.
       [new EnclaveTrustRefused("portal_frozen", "frozen"), "enclave_refused:portal_frozen", true],
+      [new EnclaveTrustRefused("attestation_invalid", "COSE"), "enclave_refused:attestation_invalid", true],
       [new Error("network"), "oxide_pin_unverified", true],
     ] as const) {
       const { sender, backend } = boot(tempJournalPath(), new FakeNode(), {
         preflight: { assertPinned: () => Promise.reject(error) },
       });
-      expect(observed(await sender.send(request())).observation).toEqual({
-        state: "not_submitted",
-        reason,
-        retryable,
-      });
+      expect(observed(await sender.send(request())).observation).toEqual({ state: "not_submitted", reason, retryable });
       expect(backend.calls).toEqual([]);
     }
+  });
+
+  it("refuses permanently, before the enclave is asked, when the fleet's PCR0 does not hash to TeeRegistry.PCR0_HASH()", async () => {
+    // The attestation is verified when the fleet is first connected, inside
+    // the simulation (OxideFleetRegistry.verifyAttestation): a refused one
+    // reaches the sender as EnclaveTrustRefused from `simulate`, nothing is
+    // sealed, signed or proven, and the answer is permanent.
+    const node = new FakeNode();
+    const { sender, backend } = boot(tempJournalPath(), node);
+    const simulate = backend.simulate.bind(backend);
+    backend.simulate = () => {
+      backend.calls.push("simulate");
+      return Promise.reject(new EnclaveTrustRefused("pcr0_hash_mismatch", "keccak(PCR0) is not PCR0_HASH()"));
+    };
+    expect(observed(await sender.send(request())).observation).toEqual({
+      state: "not_submitted",
+      reason: "enclave_refused:pcr0_hash_mismatch",
+      retryable: false,
+    });
+    expect(backend.calls).toEqual(["simulate"]);
+    expect(node.sent).toEqual([]);
+    backend.simulate = simulate;
+    // Permanent: the same operation is answered from the journal, never re-run.
+    expect(observed(await sender.send(request())).observation).toMatchObject({ state: "not_submitted", retryable: false });
+    expect(backend.calls).toEqual(["simulate"]);
   });
 
   it("answers request_in_flight to a concurrent call for the same operation", async () => {

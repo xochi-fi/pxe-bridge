@@ -13,6 +13,7 @@ import {
 import { decodeTxBytes, JournaledBytesMismatch } from "../src/tx-identity.js";
 import { mockTx } from "@aztec-labs/stdlib/testing";
 import { computeTokenImmutablesHash } from "../src/oxide/vendor/oxide-lib/token_immutables.js";
+import { OXIDE_TRANSFER_META_LEN } from "../scripts/settlement-vectors.js";
 
 describe("Oxide backend policy", () => {
   it("the pinned immutables hash to the deployed OXDAI's on-chain immutablesHash", async () => {
@@ -81,6 +82,13 @@ describe("OxideToken artifact", () => {
   it.skipIf(!built)(`the source build is the deployed OXDAI class${skipped}`, async () => {
     const artifact = await loadOxideTokenArtifact(OXIDE_TOKEN_ARTIFACT);
     expect(artifact.functions.map((f) => f.name)).toEqual(expect.arrayContaining(["transfer", "publish_da", "store_immutables"]));
+  });
+
+  // docs/vectors/settlement-v2.json publishes the meta with this length.
+  it.skipIf(!built)(`transfer(meta) is as long as the settlement vector's order-fingerprint meta${skipped}`, async () => {
+    const artifact = await loadOxideTokenArtifact(OXIDE_TOKEN_ARTIFACT);
+    const meta = artifact.functions.find((f) => f.name === "transfer")?.parameters.find((p) => p.name === "meta");
+    expect(meta?.type).toMatchObject({ kind: "array", length: OXIDE_TRANSFER_META_LEN });
   });
 
   it.skipIf(!built)(`refuses the build with one function's bytecode changed${skipped}`, async () => {

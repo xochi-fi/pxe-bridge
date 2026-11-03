@@ -7,6 +7,7 @@ import {
   type IAztecClient,
   type JournaledTransfer,
   type JsonRpcResponse,
+  type NodeNetwork,
   type PreparedTransaction,
   type TransferOutcome,
 } from "./types.js";
@@ -22,6 +23,8 @@ import {
   type CreateNoteParams,
   type NodeObservation,
   type Observation,
+  type JournaledTerms,
+  type SendMode,
   type SettlementTerms,
 } from "./settlement.js";
 import {
@@ -44,6 +47,10 @@ import {
   type ReadinessReason,
 } from "./readiness.js";
 import { assertJournaledIdentity, JournaledBytesMismatch } from "./tx-identity.js";
+import { OXIDE_V6_MAINNET } from "./oxide/pins.js";
+import { oxideSettlementObservation } from "./oxide/settlement.js";
+import type { OxideAdmissionVerdict } from "./oxide/readiness.js";
+import type { OxideSendOutcome, OxideSender, OxideSettlementRead } from "./oxide/sender.js";
 
 export interface SettlementContext {
   journal: SettlementJournal;
@@ -61,6 +68,12 @@ export interface SettlementContext {
   timeoutMs: number;
   /** Same instance exposed by authenticated GET /ready. */
   readiness?: ReadinessObserver | undefined;
+  /**
+   * Oxide mode (`PXE_BRIDGE_SEND_MODE=oxide`, pxe-bridge#84): the Oxide
+   * sender serves every `sendMode: "oxide"` createNote, and this bridge serves
+   * no other send mode. Unset: spending_limit only, as before 0.4.0.
+   */
+  oxide?: OxideSender | undefined;
   now?: () => number;
 }
 
@@ -207,7 +220,7 @@ class GateClosed extends Error {}
 interface DriveState {
   op: StoredOperation;
   fingerprint: string;
-  terms: SettlementTerms;
+  terms: JournaledTerms;
 }
 
 /**
@@ -657,12 +670,168 @@ async function handleCreateNote(
       detail: "PXE_BRIDGE_JOURNAL is not set",
     });
   }
+  const served: SendMode = s.oxide ? "oxide" : "spending_limit";
+  if (parsed.data.sendMode !== served) return sendModeUnsupported(id, parsed.data.sendMode, served);
   const deadline = new RequestDeadline(s.timeoutMs, ctx.signal);
   try {
-    return await createNoteWithin(id, parsed.data, client, ctx, s, deadline);
+    return s.oxide
+      ? await createOxideNote(id, parsed.data, client, ctx, s, s.oxide, deadline)
+      : await createNoteWithin(id, parsed.data, client, ctx, s, deadline);
   } finally {
     deadline.dispose();
   }
+}
+
+/**
+ * `sendMode: "oxide"` (pxe-bridge#84): the operation is the Oxide sender's,
+ * journaled in the Oxide journal under its v2 terms and fingerprint. The
+ * request deadline closes the sender's gate exactly as it closes the
+ * spending-limit gate: once it passes, nothing this request started marks
+ * may-broadcast, and a journaled attempt is held for the retry.
+ */
+async function createOxideNote(
+  id: number | string,
+  params: CreateNoteParams,
+  client: IAztecClient,
+  ctx: RpcContext,
+  s: SettlementContext,
+  oxide: OxideSender,
+  deadline: RequestDeadline,
+): Promise<JsonRpcResponse> {
+  const operationId = params.operationId;
+  if (ctx.idempotencyKey !== operationId) {
+    return rpcError(id, RPC_ERRORS.INVALID_PARAMS, "Idempotency-Key must equal operationId", {
+      reason: "operation_id_mismatch",
+    });
+  }
+  const terms = termsFrom(params);
+  const fingerprint = fingerprintTerms(terms);
+  // The OXDAI token is pinned in this build, not configured: no request for
+  // another token can ever be served here. Permanent, before anything is claimed.
+  if (terms.token !== OXIDE_V6_MAINNET.bridge.l2Token) {
+    return rpcError(id, RPC_ERRORS.INVALID_PARAMS, "This bridge pays OXDAI only", { reason: "token_mismatch" });
+  }
+  // One operation id names one operation across both journals.
+  let settled: StoredOperation | undefined;
+  try {
+    settled = s.journal.get(operationId);
+  } catch (cause) {
+    return journalFault(id, s, operationId, cause);
+  }
+  if (settled) return conflict(id, operationId, fingerprint, settled.fingerprint);
+
+  const gate = new AbortController();
+  deadline.guard({ close: () => gate.abort() });
+  const call = oxide.send({
+    operationId,
+    terms,
+    signal: gate.signal,
+    termsCheck: () => oxideTermsCheck(s, client, terms),
+  });
+  ctx.trackBackground?.(call);
+  let outcome: OxideSendOutcome | typeof TIMED_OUT;
+  try {
+    outcome = await deadline.race(call);
+  } catch (cause) {
+    // Not a refusal the sender classified: which side of the mark it is on is unknown.
+    console.error(`[rpc] Oxide send failed unclassified: ${(cause as Error).message ?? String(cause)}`);
+    const observation: Observation = { state: "unknown", reason: "oxide_send_failed" };
+    await audit(ctx, observation);
+    return answer(id, { operationId, fingerprint }, observation);
+  }
+  if (outcome === TIMED_OUT) {
+    // Still running, and from now on it cannot mark: aztec_getSettlement
+    // answers in flight until it stops, then its journaled state.
+    return answer(id, { operationId, fingerprint }, { state: "request_in_flight" });
+  }
+  switch (outcome.kind) {
+    case "conflict":
+      return conflict(id, operationId, outcome.fingerprint, outcome.storedFingerprint);
+    case "journal_unavailable": {
+      console.error("[rpc] Oxide journal fault");
+      const health = oxide.journalHealth();
+      return journalUnavailable(
+        id,
+        health.writable ? { writable: false, reason: "journal_unreadable", detail: outcome.detail } : health,
+        operationId,
+      );
+    }
+    case "observed": {
+      const observation = await oxideSettlementObservation(outcome.observation, outcome.payout, terms);
+      await audit(ctx, observation);
+      if (outcome.notReady) {
+        return rpcError(id, RPC_ERRORS.NOT_READY, "Bridge is not ready for new settlement admission", {
+          reason: "bridge_not_ready",
+          reasons: outcome.notReady,
+          observation,
+        });
+      }
+      return answer(id, { operationId, fingerprint: outcome.fingerprint }, observation);
+    }
+  }
+}
+
+/**
+ * The Oxide terms against what this bridge serves, before a fresh attempt:
+ * the configured corridor and network digest, the pinned Oxide network, and
+ * the live node's identity. Mismatches carry the spending_limit reasons and
+ * semantics (`not_submitted`, retryable after revalidation).
+ */
+async function oxideTermsCheck(
+  s: SettlementContext,
+  client: IAztecClient,
+  terms: SettlementTerms,
+): Promise<OxideAdmissionVerdict> {
+  const corridor = s.corridor;
+  if (!s.mayBroadcast || !corridor) return { kind: "not_ready", reasons: ["readiness_observation_failed"] };
+  if (
+    terms.corridor.corridorId !== corridor.corridorId.toLowerCase() ||
+    terms.corridor.corridorRevision !== corridor.corridorRevision ||
+    terms.corridor.manifestDigest !== corridor.manifestDigest.toLowerCase()
+  ) {
+    return { kind: "refused", reason: "corridor_mismatch", retryable: true };
+  }
+  const pinned = OXIDE_V6_MAINNET;
+  if (
+    terms.network.genesisOrNetworkDigest !== corridor.genesisOrNetworkDigest.toLowerCase() ||
+    terms.network.l1ChainId !== pinned.l1ChainId.toString() ||
+    // Aztec's protocol chain id IS the L1 chain id (the tx context sets it
+    // from L1; aztec-client.ts networkIdentity), so both compare to it.
+    terms.network.aztecChainId !== pinned.l1ChainId.toString() ||
+    terms.network.protocolVersion !== pinned.rollupVersion.toString() ||
+    terms.network.rollupAddress !== pinned.rollupAddress
+  ) {
+    return { kind: "refused", reason: "network_mismatch", retryable: true };
+  }
+  let node: NodeNetwork;
+  try {
+    node = await client.networkIdentity();
+  } catch {
+    console.error("[rpc] Node network identity read failed");
+    return { kind: "not_ready", reasons: ["readiness_observation_failed"] };
+  }
+  if (
+    node.aztecChainId !== terms.network.aztecChainId ||
+    node.protocolVersion !== terms.network.protocolVersion ||
+    node.rollupAddress.toLowerCase() !== terms.network.rollupAddress ||
+    node.l1ChainId !== terms.network.l1ChainId
+  ) {
+    return { kind: "refused", reason: "network_mismatch", retryable: true };
+  }
+  return { kind: "admitted" };
+}
+
+/**
+ * A send mode this bridge does not serve (pxe-bridge#84). Permanent, and
+ * refused before anything is claimed: the same request can never succeed
+ * here, and journaling it would make its operation id a conflict elsewhere.
+ */
+function sendModeUnsupported(id: number | string, requested: SendMode, served: SendMode): JsonRpcResponse {
+  return rpcError(id, RPC_ERRORS.INVALID_PARAMS, `This bridge serves sendMode ${served} only`, {
+    reason: "send_mode_unsupported",
+    requested,
+    served,
+  });
 }
 
 async function createNoteWithin(
@@ -1016,7 +1185,7 @@ async function admissionRefusal(
 async function preparedHoldReasons(
   ctx: RpcContext,
   s: SettlementContext,
-  terms: SettlementTerms,
+  terms: JournaledTerms,
   deadline: RequestDeadline,
 ): Promise<{ reasons: ReadinessReason[]; readiness: OperationalReadiness | null }> {
   const reasons: ReadinessReason[] = [];
@@ -1369,6 +1538,43 @@ async function audit(ctx: RpcContext, observation: Observation): Promise<void> {
 }
 
 /**
+ * `aztec_getSettlement` for an operation the Oxide journal holds, in the v2
+ * shape; undefined when it holds none (the settlement journal answers then).
+ */
+async function getOxideSettlement(
+  id: number | string,
+  operationId: string,
+  oxide: OxideSender,
+): Promise<JsonRpcResponse | undefined> {
+  let read: OxideSettlementRead | undefined;
+  try {
+    read = await oxide.read(operationId);
+  } catch (cause) {
+    if (!(cause instanceof JournalUnreadableError)) throw cause;
+    console.error("[rpc] Oxide journal fault");
+    return journalUnavailable(id, { writable: false, reason: "journal_unreadable", detail: cause.message }, operationId);
+  }
+  if (!read) return undefined;
+  const { operation } = read;
+  return success(id, {
+    version: SETTLEMENT_VERSION,
+    operationId,
+    found: true,
+    fingerprint: operation.fingerprint,
+    terms: operation.terms,
+    state: operation.state,
+    attempts: read.attempts.map((a) => ({
+      attempt: a.attempt,
+      txHash: a.txHash,
+      expirationTimestamp: a.expirationTimestamp,
+      mayBroadcast: a.mayBroadcastAt !== null,
+    })),
+    observation: await oxideSettlementObservation(read.observation, read.payout, operation.terms),
+    journal: journalHealthWire(oxide.journalHealth()),
+  });
+}
+
+/**
  * Read-only recovery: the stored terms, every attempt and the current
  * observation. Served whether or not journal writes are enabled. An operation
  * the journal does not hold is `unknown` -- never "safe to retry".
@@ -1393,6 +1599,10 @@ async function handleGetSettlement(
     });
   }
   const { operationId } = parsed.data;
+  if (s.oxide) {
+    const oxide = await getOxideSettlement(id, operationId, s.oxide);
+    if (oxide) return oxide;
+  }
   let op: StoredOperation | undefined;
   let attempts: Attempt[] = [];
   try {

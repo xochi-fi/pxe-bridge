@@ -11,7 +11,20 @@ import {
   renderSettlementVectors,
 } from "../scripts/settlement-vectors.js";
 import { effectsProvePayout } from "../src/partial-note.js";
-import { CreateNoteSchema, SETTLEMENT_VERSION, fingerprintTerms, termsFrom } from "../src/settlement.js";
+import {
+  CreateNoteSchema,
+  SETTLEMENT_VERSION,
+  fingerprintLines,
+  fingerprintTerms,
+  termsFrom,
+} from "../src/settlement.js";
+import { orderFingerprintMeta } from "../src/oxide/backend.js";
+import {
+  locatePayoutNoteHash,
+  oxideNoteRandomness,
+  oxideSiloedNoteHash,
+  oxideUniqueNoteHash,
+} from "../src/oxide/payout-proof.js";
 
 interface Vector {
   contract: string;
@@ -138,5 +151,125 @@ describe("docs/vectors/settlement-v2.json (D-C canonical vector)", () => {
     for (const refusal of vector.createNote.refusals) {
       expect(CreateNoteSchema.safeParse(refusal.params).success, refusal.name).toBe(false);
     }
+  });
+});
+
+interface MinedVectorObservation {
+  state: string;
+  partialNoteRandomness: string | null;
+  payoutNoteHashIndex?: number | null;
+  effects: { state: string; noteHashes: string[]; nullifiers: string[] };
+}
+
+interface OxideVector {
+  createNote: {
+    body: { params: [Record<string, unknown>] };
+    canonicalTerms: Record<string, unknown>;
+    fingerprintLines: string[];
+    fingerprint: string;
+    spendingLimitCounterpart: { fingerprint: string };
+    result: { body: { result: { fingerprint: string; observation: MinedVectorObservation } } };
+  };
+  orderFingerprint: { tag: string; orderFingerprint: string; transferMetaLen: number; meta: string[] };
+  payoutProof: {
+    inputs: { randomnessSeed: string; randomnessIndex: number; partialNoteRandomness: string; payoutNoteHashIndex: number };
+    siloedNoteHash: string;
+    uniqueNoteHash: string;
+    revertedObservation: MinedVectorObservation;
+    revertHold: { observation: { state: string; reason: string } };
+    refusals: { name: string; sendMode?: string; observation: MinedVectorObservation }[];
+    bridgeHolds: { observation: { state: string; reason: string } };
+  };
+}
+
+/**
+ * What a consumer (Riddler `Shielded.PaymentProof`, oxide) checks of an oxide
+ * mined success: the index is an integer in range, and the unique note hash
+ * recomputed from the signed terms, the randomness and that index is the
+ * published note hash there.
+ */
+async function oxideObservationProves(
+  observation: MinedVectorObservation,
+  terms: { recipient: string; token: string; amount: string },
+): Promise<boolean> {
+  const index = observation.payoutNoteHashIndex;
+  if (typeof index !== "number" || !Number.isInteger(index) || index < 0) return false;
+  if (index >= observation.effects.noteHashes.length || observation.partialNoteRandomness === null) return false;
+  const siloed = await oxideSiloedNoteHash({
+    recipient: terms.recipient,
+    token: terms.token,
+    amount: BigInt(terms.amount),
+    randomness: observation.partialNoteRandomness,
+  });
+  const unique = await oxideUniqueNoteHash(siloed, Fr.fromString(observation.effects.nullifiers[0]!), index);
+  return unique.equals(Fr.fromString(observation.effects.noteHashes[index]!));
+}
+
+describe("docs/vectors/settlement-v2.json oxide case (sendMode, pxe-bridge#84)", () => {
+  const oxide = (vector as unknown as { oxide: OxideVector }).oxide;
+  const params = oxide.createNote.body.params[0];
+
+  // 0.3.0's committed vector fingerprint for these terms: adding sendMode
+  // must not move a single journaled spending_limit operation.
+  it("keeps the spending_limit fingerprint byte-identical to 0.3.0", () => {
+    expect(vector.createNote.fingerprint).toBe("0xef29c46772683bcab6d096ab4b5288111ba8f64cb8392ba6c72b802fcdbb6f88");
+    const { sendMode: _s, ...legacy } = termsFrom(CreateNoteSchema.parse(vector.createNote.body.params[0]));
+    expect(fingerprintTerms(legacy)).toBe(vector.createNote.fingerprint);
+  });
+
+  it("hashes sendMode oxide as one line right after accountMode", () => {
+    const terms = termsFrom(CreateNoteSchema.parse(params));
+    expect(terms).toEqual(oxide.createNote.canonicalTerms);
+    expect(fingerprintTerms(terms)).toBe(oxide.createNote.fingerprint);
+    expect(fingerprintLines(terms)).toEqual(oxide.createNote.fingerprintLines);
+    const at = oxide.createNote.fingerprintLines.indexOf("accountMode=standard");
+    expect(oxide.createNote.fingerprintLines[at + 1]).toBe("sendMode=oxide");
+    expect(oxide.createNote.fingerprintLines.filter((l) => l.startsWith("sendMode="))).toHaveLength(1);
+    expect(oxide.createNote.spendingLimitCounterpart.fingerprint).toBe(
+      fingerprintTerms({ ...terms, sendMode: "spending_limit" }),
+    );
+    expect(oxide.createNote.spendingLimitCounterpart.fingerprint).not.toBe(oxide.createNote.fingerprint);
+    expect(oxide.createNote.result.body.result.fingerprint).toBe(oxide.createNote.fingerprint);
+  });
+
+  it("carries the request fingerprint as the order fingerprint in the transfer meta", () => {
+    expect(oxide.orderFingerprint.orderFingerprint).toBe(oxide.createNote.fingerprint);
+    expect(oxide.orderFingerprint.tag).toBe("pxe-bridge/oxide-order-fingerprint/v1");
+    const meta = orderFingerprintMeta(oxide.createNote.fingerprint, oxide.orderFingerprint.transferMetaLen);
+    expect(meta.map((f) => f.toString())).toEqual(oxide.orderFingerprint.meta);
+    const fp = oxide.createNote.fingerprint.slice(2);
+    expect(BigInt(oxide.orderFingerprint.meta[1]!)).toBe(BigInt(`0x${fp.slice(0, 32)}`));
+    expect(BigInt(oxide.orderFingerprint.meta[2]!)).toBe(BigInt(`0x${fp.slice(32)}`));
+    expect(oxide.orderFingerprint.meta.slice(3).every((f) => BigInt(f) === 0n)).toBe(true);
+  });
+
+  it("proves the payout from the mined effects at payoutNoteHashIndex, and only there", async () => {
+    const terms = { recipient: String(params["recipient"]), token: String(params["token"]), amount: String(params["amount"]) };
+    const observation = oxide.createNote.result.body.result.observation;
+    expect(observation.partialNoteRandomness).toBe(
+      (await oxideNoteRandomness(Fr.fromString(oxide.payoutProof.inputs.randomnessSeed), oxide.payoutProof.inputs.randomnessIndex)).toString(),
+    );
+    expect(observation.payoutNoteHashIndex).toBe(oxide.payoutProof.inputs.payoutNoteHashIndex);
+    expect(observation.effects.noteHashes[observation.payoutNoteHashIndex!]).toBe(oxide.payoutProof.uniqueNoteHash);
+    expect(await oxideObservationProves(observation, terms)).toBe(true);
+    const siloed = await oxideSiloedNoteHash({ ...terms, amount: BigInt(terms.amount), randomness: observation.partialNoteRandomness! });
+    expect(siloed.toString()).toBe(oxide.payoutProof.siloedNoteHash);
+    expect(await locatePayoutNoteHash({ ...observation.effects, state: "available" }, siloed)).toEqual({
+      kind: "found",
+      index: oxide.payoutProof.inputs.payoutNoteHashIndex,
+    });
+    expect(await oxideObservationProves(observation, { ...terms, recipient: "0x" + "1d".repeat(32) })).toBe(false);
+    expect(await oxideObservationProves(observation, { ...terms, amount: (BigInt(terms.amount) + 1n).toString() })).toBe(false);
+    for (const refusal of oxide.payoutProof.refusals) {
+      expect(await oxideObservationProves(refusal.observation, terms), refusal.name).toBe(false);
+    }
+    expect(oxide.payoutProof.revertedObservation).toMatchObject({ state: "reverted", payoutNoteHashIndex: null });
+    expect(await oxideObservationProves(oxide.payoutProof.revertedObservation, terms)).toBe(false);
+    expect(oxide.payoutProof.revertHold.observation).toEqual({ state: "unknown", reason: "payout_proof_uncommitted" });
+    expect(oxide.payoutProof.bridgeHolds.observation).toEqual({ state: "unknown", reason: "payout_note_hash_unresolved" });
+  });
+
+  it("carries no payoutNoteHashIndex on the spending_limit observation", () => {
+    expect("payoutNoteHashIndex" in vector.createNote.result.body.result.observation).toBe(false);
   });
 });

@@ -52,11 +52,22 @@ import {
   CreateNoteSchema,
   SETTLEMENT_VERSION,
   SETTLEMENT_VERSIONS_RETIRED,
+  fingerprintLines,
   fingerprintTerms,
   termsFrom,
   type NetworkIdentity,
   type Observation,
 } from "../src/settlement.js";
+import { orderFingerprintMeta } from "../src/oxide/backend.js";
+import { OXIDE_V6_MAINNET } from "../src/oxide/pins.js";
+import {
+  locatePayoutNoteHash,
+  oxideInnerNoteHash,
+  oxideNoteRandomness,
+  oxideSiloedNoteHash,
+  oxideUniqueNoteHash,
+} from "../src/oxide/payout-proof.js";
+import { BALANCES_STORAGE_SLOT } from "../src/oxide/vendor/oxide-lib-tee/oxide_constants.gen.js";
 
 export const VECTOR_PATH = resolve(import.meta.dirname, "../docs/vectors/settlement-v2.json");
 
@@ -130,6 +141,7 @@ const PARAMS = {
     manifestDigest: "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d",
   },
   accountMode: "spending_limit",
+  sendMode: "spending_limit",
   recipient: "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
   recipientDescriptorDigest: "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
   token: "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
@@ -156,6 +168,11 @@ function shouted(params: typeof PARAMS): typeof PARAMS {
     recipientDescriptorDigest: up(params.recipientDescriptorDigest),
     token: up(params.token),
   };
+}
+
+function withoutKey(params: typeof PARAMS, key: keyof typeof PARAMS): Record<string, unknown> {
+  const { [key]: _dropped, ...rest } = params;
+  return rest;
 }
 
 /** Refused at the schema (-32602), each a single change to the canonical params. */
@@ -185,6 +202,10 @@ const REFUSALS: { name: string; params: Record<string, unknown> }[] = [
   { name: "amount with a leading zero", params: { ...PARAMS, amount: "01000000" } },
   { name: "amount as a JSON number", params: { ...PARAMS, amount: 1000000 } },
   { name: "an unknown member", params: { ...PARAMS, chainId: 1 } },
+  { name: "sendMode missing", params: withoutKey(PARAMS, "sendMode") },
+  { name: "sendMode unknown", params: { ...PARAMS, sendMode: "transfer_to_private" } },
+  { name: "sendMode null", params: { ...PARAMS, sendMode: null } },
+  { name: "sendMode oxide with accountMode spending_limit", params: { ...PARAMS, sendMode: "oxide" } },
 ];
 
 /**
@@ -274,6 +295,204 @@ async function finalizedPayout(): Promise<{ observation: Observation; partialNot
       uniqueNoteHash,
       siloedValidityNullifier: evidence.siloedValidityNullifier.toString(),
       completionLogTag: evidence.completionLogTag.toString(),
+    },
+  };
+}
+
+/**
+ * The Oxide case (sendMode "oxide", pxe-bridge#84 decided 2026-11-03): the
+ * same request as the spending_limit case on the standard account, paying the
+ * pinned OXDAI token (`OXIDE_V6_MAINNET.bridge.l2Token`), 1 OXDAI.
+ */
+const OXIDE_PARAMS: typeof PARAMS = {
+  ...PARAMS,
+  operationId: "riddler-shielded-00000000-0000-4000-8000-000000000002",
+  accountMode: "standard",
+  sendMode: "oxide",
+  token: OXIDE_V6_MAINNET.bridge.l2Token,
+  amount: "1000000000000000000",
+};
+
+/**
+ * `transfer(meta)` length of the OxideToken artifact at the pinned class
+ * (`TRANSFER_META_LEN = MAX_EVENT_SERIALIZED_LEN - 3`, 7 in aztec-nr 6.0.0);
+ * the sender reads it from the artifact, `tests/oxide-backend.test.ts`
+ * checks it against a built one.
+ */
+export const OXIDE_TRANSFER_META_LEN = 7;
+
+/**
+ * Oxide payout-proof inputs. The randomness is the token's own derivation
+ * (`randomness.nr`: `P2([seed, index])`) from a fixture seed; the tx's
+ * first nullifier is a fixture; the payout note sits at position 1, between
+ * two other note hashes (fixed filler: the fee payer's and the change note).
+ */
+export const OXIDE_PAYOUT_FIXTURE = {
+  randomnessSeed: "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+  randomnessIndex: 0,
+  firstNullifier: "0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+  payoutNoteHashIndex: 1,
+  noteHashCount: 3,
+} as const;
+
+async function oxideCase(spendingLimitFinalized: Observation): Promise<Record<string, unknown>> {
+  const parsed = CreateNoteSchema.parse(OXIDE_PARAMS);
+  const terms = termsFrom(parsed);
+  const fingerprint = fingerprintTerms(terms);
+  const spendingLimitCounterpart = fingerprintTerms({ ...terms, sendMode: "spending_limit" });
+  if (fingerprint === spendingLimitCounterpart) throw new Error("sendMode does not move the fingerprint");
+  if (fingerprintTerms(termsFrom(CreateNoteSchema.parse(shouted(OXIDE_PARAMS)))) !== fingerprint) {
+    throw new Error("case changed the oxide fingerprint");
+  }
+  const meta = orderFingerprintMeta(fingerprint, OXIDE_TRANSFER_META_LEN).map((f) => f.toString());
+
+  const randomness = (
+    await oxideNoteRandomness(Fr.fromString(OXIDE_PAYOUT_FIXTURE.randomnessSeed), OXIDE_PAYOUT_FIXTURE.randomnessIndex)
+  ).toString();
+  const siloed = await oxideSiloedNoteHash({
+    recipient: terms.recipient,
+    token: terms.token,
+    amount: BigInt(terms.amount),
+    randomness,
+  });
+  const firstNullifier = Fr.fromString(OXIDE_PAYOUT_FIXTURE.firstNullifier);
+  const unique = await oxideUniqueNoteHash(siloed, firstNullifier, OXIDE_PAYOUT_FIXTURE.payoutNoteHashIndex);
+  const noteHashes = Array.from({ length: OXIDE_PAYOUT_FIXTURE.noteHashCount }, (_, i) =>
+    i === OXIDE_PAYOUT_FIXTURE.payoutNoteHashIndex ? unique.toString() : "0x" + (i + 0x21).toString(16).repeat(32),
+  );
+  const effects = {
+    state: "available" as const,
+    noteHashes,
+    nullifiers: [OXIDE_PAYOUT_FIXTURE.firstNullifier, "0x" + "2f".repeat(32)],
+  };
+  const located = await locatePayoutNoteHash(effects, siloed);
+  if (located.kind !== "found" || located.index !== OXIDE_PAYOUT_FIXTURE.payoutNoteHashIndex) {
+    throw new Error("the bridge does not locate the vector's payout note hash");
+  }
+  const mined = {
+    txHash: "0x" + "7b".repeat(32),
+    expirationTimestamp: EXPIRATION_TIMESTAMP,
+    executionResult: "success" as const,
+    blockHash: "0x" + "b2".repeat(32),
+    blockNumber: "4243",
+    observedAt: 1899990000,
+    effects,
+    partialNoteRandomness: randomness,
+  };
+  const finalized: Observation = {
+    state: "finalized",
+    ...mined,
+    receiptStatus: "finalized",
+    payoutNoteHashIndex: OXIDE_PAYOUT_FIXTURE.payoutNoteHashIndex,
+  };
+  const withAnotherOrder = noteHashes.filter((_, i) => i !== OXIDE_PAYOUT_FIXTURE.payoutNoteHashIndex);
+  const absent = await locatePayoutNoteHash({ ...effects, noteHashes: withAnotherOrder }, siloed);
+  if (absent.kind !== "unresolved") throw new Error("a payout note hash at another position must not be located");
+  // Raw reverted wire shape retained as a consumer refusal vector. The bridge
+  // does not emit it until prepared bytes commit the payout proof.
+  const reverted: Observation = {
+    state: "reverted",
+    ...mined,
+    executionResult: "reverted",
+    receiptStatus: "finalized",
+    effects: { ...effects, noteHashes: withAnotherOrder },
+    payoutNoteHashIndex: null,
+  };
+  const { payoutNoteHashIndex: _omit, ...withoutIndex } = finalized as Observation & { payoutNoteHashIndex: number };
+
+  return {
+    note:
+      "sendMode \"oxide\": the Oxide OXDAI sender. Same wire (pxe-bridge.settlement.v2) and request shape; " +
+      "accountMode must be \"standard\". The fingerprint adds the line sendMode=oxide right after " +
+      "accountMode=...; a spending_limit request adds no line, so its fingerprint is 0.3.0's.",
+    createNote: {
+      body: { jsonrpc: "2.0", id: 1, method: "aztec_createNote", params: [OXIDE_PARAMS] },
+      canonicalTerms: terms,
+      fingerprintLines: fingerprintLines(terms),
+      fingerprint,
+      spendingLimitCounterpart: {
+        note: "The same terms with sendMode spending_limit (no sendMode line): a different fingerprint.",
+        fingerprint: spendingLimitCounterpart,
+      },
+      result: {
+        body: {
+          jsonrpc: "2.0",
+          id: 1,
+          result: { version: SETTLEMENT_VERSION, operationId: OXIDE_PARAMS.operationId, fingerprint, observation: finalized },
+        },
+      },
+    },
+    orderFingerprint: {
+      note:
+        "The order fingerprint the transfer carries in its private meta is the request fingerprint. " +
+        "meta = [sha256ToField(tag), hi128, lo128, 0...], hi128/lo128 the fingerprint's first/last 16 bytes; " +
+        "the length is the OxideToken transfer(meta) length.",
+      tag: "pxe-bridge/oxide-order-fingerprint/v1",
+      orderFingerprint: fingerprint,
+      transferMetaLen: OXIDE_TRANSFER_META_LEN,
+      meta,
+    },
+    payoutProof: {
+      note:
+        "Recompute a successful payout note from the signed recipient, token and amount and " +
+        "observation.partialNoteRandomness; require uniqueNoteHash(observation.payoutNoteHashIndex) == " +
+        "effects.noteHashes[payoutNoteHashIndex] (effects.nullifiers[0] is the nonce's first nullifier). " +
+        "Values are the @aztec-labs 6.0.0 hashes and Oxide's computeSiloedNoteHash. " +
+        "The raw reverted observation is a consumer-refusal vector: the bridge holds it because prepared bytes do not commit this proof.",
+      formula: {
+        randomness: "P2([seed, index]) (OxideToken randomness.nr next_randomness)",
+        noteHash: "P2WithSeparator([amount, recipient, BALANCES_STORAGE_SLOT, randomness], DOM_SEP__NOTE_HASH)",
+        siloedNoteHash: "siloNoteHash(token, noteHash)",
+        uniqueNoteHash:
+          "computeUniqueNoteHash(computeNoteHashNonce(effects.nullifiers[0], payoutNoteHashIndex), siloedNoteHash)",
+      },
+      constants: { DOM_SEP__NOTE_HASH: DomainSeparator.NOTE_HASH, BALANCES_STORAGE_SLOT },
+      inputs: {
+        recipient: terms.recipient,
+        token: terms.token,
+        amount: terms.amount,
+        randomnessSeed: OXIDE_PAYOUT_FIXTURE.randomnessSeed,
+        randomnessIndex: OXIDE_PAYOUT_FIXTURE.randomnessIndex,
+        partialNoteRandomness: randomness,
+        firstNullifier: OXIDE_PAYOUT_FIXTURE.firstNullifier,
+        payoutNoteHashIndex: OXIDE_PAYOUT_FIXTURE.payoutNoteHashIndex,
+      },
+      noteHash: (await oxideInnerNoteHash({ recipient: terms.recipient, token: terms.token, amount: BigInt(terms.amount), randomness })).toString(),
+      siloedNoteHash: siloed.toString(),
+      uniqueNoteHash: unique.toString(),
+      revertedObservation: reverted,
+      revertHold: {
+        observation: { state: "unknown", reason: "payout_proof_uncommitted" },
+      },
+      refusals: [
+        {
+          name: "payoutNoteHashIndex names another note hash",
+          observation: { ...finalized, payoutNoteHashIndex: 0 },
+        },
+        {
+          name: "payoutNoteHashIndex out of range",
+          observation: { ...finalized, payoutNoteHashIndex: OXIDE_PAYOUT_FIXTURE.noteHashCount },
+        },
+        { name: "payoutNoteHashIndex negative", observation: { ...finalized, payoutNoteHashIndex: -1 } },
+        { name: "payoutNoteHashIndex null on a finalized success", observation: { ...finalized, payoutNoteHashIndex: null } },
+        { name: "payoutNoteHashIndex missing on an oxide mined observation", observation: withoutIndex },
+        {
+          name: "randomness of another note",
+          observation: { ...finalized, partialNoteRandomness: PAYOUT_FIXTURE.partialNoteRandomness },
+        },
+        {
+          name: "spending_limit observation carrying payoutNoteHashIndex",
+          sendMode: "spending_limit",
+          observation: { ...spendingLimitFinalized, payoutNoteHashIndex: PAYOUT_FIXTURE.noteHashIndex },
+        },
+      ],
+      bridgeHolds: {
+        note:
+          "When the bridge cannot find the payout's unique note hash at exactly one position of a mined " +
+          "transaction's effects (effects unavailable, hash absent, or present twice) it answers this " +
+          "instead of a mined observation; the operation stays marked and is never refundable on it.",
+        observation: { state: "unknown", reason: "payout_note_hash_unresolved" },
+      },
     },
   };
 }
@@ -425,6 +644,7 @@ export async function buildSettlementVectors(): Promise<Record<string, unknown>>
         { status: 202, body: { version: MAY_BROADCAST_VERSION, operationId: OPERATION_ID, decision: "allow" } },
       ],
     },
+    oxide: await oxideCase(payout.observation),
   };
 }
 

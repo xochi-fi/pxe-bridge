@@ -53,18 +53,19 @@ export interface OxideRuntime {
 }
 
 /**
- * Builds the Oxide sender and the fresh-send admission predicate on a
- * connected standard-mode client. Refuses, before anything can be sent,
- * unless L1, the Oxide manifest and the zk.money profile all describe the
- * pinned v6 deployment and the artifact is the deployed class. The integration
- * layer must ask `readiness.admit` before a fresh send, then call
- * `OxideSender.send`; nothing here serves HTTP or invokes admission itself.
+ * Builds the Oxide sender on a connected standard-mode client. Refuses only
+ * what is local and fixed: an artifact that is not the deployed class, an
+ * OXDAI instance not locked to it, spend keys that do not derive the account.
+ * The live deployment (L1, the Oxide manifest, the zk.money profile, the
+ * portal, the enclave) is NOT asserted here: an outage of any of them must
+ * not stop the bridge from serving `aztec_getSettlement` and recovering
+ * journaled payouts. It is checked before every fresh attempt and every
+ * resend (`preflight.assertPinned`), the enclave is connected on first sign,
+ * and readiness reports all of it (`/ready`, admission).
  */
 export async function createOxideSender(config: OxideSenderConfig): Promise<OxideRuntime> {
   const l1 = config.l1 ?? viemL1Reader(config.l1RpcUrl);
-  await assertL1Pinned(l1);
   const pins = new OxidePinChecker();
-  await pins.assertPinned();
 
   const { wallet: embedded, account, node } = config.client.oxideContext();
   // EmbeddedWallet implements Wallet; its declared optional members do not
@@ -123,6 +124,6 @@ export async function createOxideSender(config: OxideSenderConfig): Promise<Oxid
     corridor: config.corridor,
     attestationConfigured: config.attestationConfigured,
   });
-  sender = new OxideSender({ journal, backend, caps, mayBroadcast: config.mayBroadcast, preflight });
+  sender = new OxideSender({ journal, backend, caps, mayBroadcast: config.mayBroadcast, preflight, admission: readiness });
   return { sender, readiness };
 }

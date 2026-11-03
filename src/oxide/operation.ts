@@ -1,81 +1,30 @@
-import { createHash } from "node:crypto";
-import { z } from "zod";
-import type { NodeObservation } from "../settlement.js";
+import type { NodeObservation, SettlementTerms } from "../settlement.js";
+import { OXIDE_V6_MAINNET } from "./pins.js";
 
 /**
- * The Oxide send operation (xochi-fi/pxe-bridge#84, phase 1). Internal: no
- * wire contract is published for it yet, because the settlement version it
- * will be served under (v2 or a v3 carrying the Oxide evidence) is undecided.
- * Everything below is what the sender journals and answers its caller with.
+ * The Oxide send operation (xochi-fi/pxe-bridge#84). It is served under
+ * `pxe-bridge.settlement.v2` with `sendMode: "oxide"` (decided 2026-11-03):
+ * the journal keeps the operation's v2 terms and its v2 request fingerprint
+ * (`fingerprintTerms`), so an operation id names the same terms here as on
+ * the wire, and the same id with any other v2 terms is a conflict. The order
+ * fingerprint the transfer carries in its private `meta` is that request
+ * fingerprint. Everything below is what the sender journals and answers its
+ * caller with.
  */
-export const OXIDE_SEND_VERSION = "pxe-bridge.oxide-send.v1";
 
-const HEX32 = /^0x[0-9a-fA-F]{64}$/;
-const BN254_FR_MODULUS = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001n;
-const MAX_U128 = (1n << 128n) - 1n;
-
-/** What a caller asks the sender to pay. `operationId` is the idempotency key. */
-export const OxideSendRequestSchema = z
-  .object({
-    operationId: z
-      .string()
-      .min(1)
-      .max(128)
-      .regex(/^[\x21-\x7e]+$/, "operationId must be printable ASCII without spaces"),
-    /** Aztec address of the recipient account (stock SchnorrAccount on the corridor). */
-    recipient: z
-      .string()
-      .regex(HEX32, "recipient must be 32-byte hex")
-      .refine((s) => !HEX32.test(s) || (BigInt(s) !== 0n && BigInt(s) < BN254_FR_MODULUS), "recipient must be a nonzero field"),
-    /** OXDAI base units (18 dp), canonical decimal string. */
-    amount: z
-      .string()
-      .regex(/^[1-9][0-9]*$/, "amount must be a canonical positive decimal string")
-      .refine((s) => !/^[1-9][0-9]*$/.test(s) || BigInt(s) <= MAX_U128, "amount exceeds u128"),
-    /** Riddler's order fingerprint, carried in the transfer's private `meta`. */
-    orderFingerprint: z.string().regex(HEX32, "orderFingerprint must be 32-byte hex"),
-    /** Unix seconds. Nothing is sent at or after it. */
-    validUntil: z.number().int().positive(),
-  })
-  .strict();
-
-export type OxideSendRequest = z.infer<typeof OxideSendRequestSchema>;
-
-/** The journaled terms: the request's value terms, canonicalized, plus the pinned token. */
-export interface OxideTerms {
-  version: typeof OXIDE_SEND_VERSION;
-  recipient: string;
-  token: string;
-  amount: string;
-  orderFingerprint: string;
-  validUntil: number;
+/** Terms this sender can never pay: not an Oxide send. */
+export class OxideTermsRefused extends Error {
+  constructor(readonly reason: "send_mode_not_oxide" | "account_mode_not_standard" | "token_not_oxdai") {
+    super(`Oxide send refused: ${reason}`);
+    this.name = "OxideTermsRefused";
+  }
 }
 
-export function oxideTerms(request: OxideSendRequest, token: string): OxideTerms {
-  return {
-    version: OXIDE_SEND_VERSION,
-    recipient: request.recipient.toLowerCase(),
-    token: token.toLowerCase(),
-    amount: request.amount,
-    orderFingerprint: request.orderFingerprint.toLowerCase(),
-    validUntil: request.validUntil,
-  };
-}
-
-const FINGERPRINT_DOMAIN = "pxe-bridge/oxide-send-fingerprint/v1";
-
-/** Bridge-owned: same operation id with another fingerprint is a conflict. */
-export function fingerprintOxideTerms(terms: OxideTerms): string {
-  const lines = [
-    FINGERPRINT_DOMAIN,
-    `version=${terms.version}`,
-    `recipient=${terms.recipient.toLowerCase()}`,
-    `token=${terms.token.toLowerCase()}`,
-    `amount=${terms.amount}`,
-    `orderFingerprint=${terms.orderFingerprint.toLowerCase()}`,
-    `validUntil=${terms.validUntil}`,
-  ];
-  return `0x${createHash("sha256").update(lines.join("\n")).digest("hex")}`;
+/** The v2 terms the Oxide sender pays: `sendMode` oxide, the standard account, the pinned OXDAI token. */
+export function assertOxideTerms(terms: SettlementTerms): void {
+  if (terms.sendMode !== "oxide") throw new OxideTermsRefused("send_mode_not_oxide");
+  if (terms.accountMode !== "standard") throw new OxideTermsRefused("account_mode_not_standard");
+  if (terms.token.toLowerCase() !== OXIDE_V6_MAINNET.bridge.l2Token) throw new OxideTermsRefused("token_not_oxdai");
 }
 
 /**
@@ -171,7 +120,3 @@ export type OxideObservation =
       effects: Extract<NodeObservation, { kind: "mined" }>["effects"];
     }
   | { state: "unknown"; reason: string };
-
-export type OxideSendResult =
-  | { kind: "conflict"; operationId: string; fingerprint: string; storedFingerprint: string }
-  | { kind: "observed"; operationId: string; fingerprint: string; observation: OxideObservation };

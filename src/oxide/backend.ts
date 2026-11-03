@@ -243,11 +243,27 @@ export class PxeOxideBackend implements OxideBackend {
 
   private constructor(
     private readonly options: Omit<PxeOxideBackendOptions, "secretKey">,
-    private readonly fleet: FleetSigner,
+    private readonly connectFleet: () => Promise<FleetSigner>,
     private readonly spend: SpendMetadata,
     private readonly proving: ProvingInternals,
   ) {
     this.account = options.account.toString().toLowerCase();
+  }
+
+  private fleetConnection: Promise<FleetSigner> | undefined;
+
+  /**
+   * The enclave fleet, verified and pinned on first use rather than at
+   * startup: an enclave or L1 outage must not stop the bridge from serving
+   * recovery reads and resending journaled attempts, which never need it.
+   * A failed connection is retried by the next call.
+   */
+  private fleet(): Promise<FleetSigner> {
+    this.fleetConnection ??= this.connectFleet().catch((cause: unknown) => {
+      this.fleetConnection = undefined;
+      throw cause;
+    });
+    return this.fleetConnection;
   }
 
   static async create(options: PxeOxideBackendOptions): Promise<PxeOxideBackend> {
@@ -268,8 +284,8 @@ export class PxeOxideBackend implements OxideBackend {
     if (!spend.ownerAddressPreimage.address.equals(options.account)) {
       throw new Error("Oxide spend metadata does not derive the connected standard account");
     }
-    const fleet = await FleetSigner.connect(pins.enclaveUrl, new OxideFleetRegistry(options.l1, pins));
-    return new PxeOxideBackend({ ...retained, pins }, fleet, spend, proving as ProvingInternals);
+    const connectFleet = () => FleetSigner.connect(pins.enclaveUrl, new OxideFleetRegistry(options.l1, pins));
+    return new PxeOxideBackend({ ...retained, pins }, connectFleet, spend, proving as ProvingInternals);
   }
 
   private get pins(): OxidePins {
@@ -289,7 +305,7 @@ export class PxeOxideBackend implements OxideBackend {
     const collected = collectAccountingEffects(token.address, result.offchainEffects);
     const tokenOperation = await hydrateTokenOperation(node, {
       tokenAddress: token.address,
-      teeRegistry: this.fleet.teeRegistry,
+      teeRegistry: (await this.fleet()).teeRegistry,
       anchorBlockHeader: anchor,
       collected,
       resolveSpendMetadata: async (nullified) => {
@@ -318,7 +334,7 @@ export class PxeOxideBackend implements OxideBackend {
 
   async sign(simulation: OxideSimulation): Promise<OxideSigned> {
     const simulated = simulation.handle as Simulated;
-    const signOutput = await this.fleet.signTokenOperation(simulated.tokenOperation);
+    const signOutput = await (await this.fleet()).signTokenOperation(simulated.tokenOperation);
     // The enclave must have signed exactly the notes it was asked to.
     const notes = simulated.tokenOperation.createdNotes;
     if (signOutput.signatures.length !== notes.length || signOutput.teeNotes.length !== notes.length) {

@@ -59,6 +59,7 @@ export function settlementParams(overrides: Record<string, unknown> = {}): Recor
       manifestDigest: CORRIDOR.manifestDigest,
     },
     accountMode: "spending_limit",
+    sendMode: "spending_limit",
     recipient: RECIPIENT,
     recipientDescriptorDigest: DESCRIPTOR_DIGEST,
     token: TOKEN,

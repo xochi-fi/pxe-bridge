@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
-import { fingerprintTerms, type Observation, type SettlementTerms } from "./settlement.js";
+import { fingerprintTerms, type Observation, journaledSendMode, type JournaledTerms, type SettlementTerms } from "./settlement.js";
 
 /**
  * The durable settlement journal (xochi-fi/pxe-bridge#45; decided 2026-10-25).
@@ -101,7 +101,7 @@ export type Hold = "may_broadcast_unknown" | "may_broadcast_denied" | "interrupt
 export interface StoredOperation {
   operationId: string;
   fingerprint: string;
-  terms: SettlementTerms;
+  terms: JournaledTerms;
   state: OperationState;
   reason: string | null;
   retryable: boolean;
@@ -625,9 +625,9 @@ export class SettlementJournal {
 
     for (const op of operations) {
       const id = op.operation_id;
-      let terms: SettlementTerms | undefined;
+      let terms: JournaledTerms | undefined;
       try {
-        terms = JSON.parse(op.terms_json) as SettlementTerms;
+        terms = JSON.parse(op.terms_json) as JournaledTerms;
       } catch {
         terms = undefined;
       }
@@ -683,6 +683,9 @@ export class SettlementJournal {
               terms === undefined
                 ? "stored terms are unreadable"
                 : "stored fingerprint is not the fingerprint of the stored terms";
+          } else if (journaledSendMode(terms) !== "spending_limit") {
+            // Oxide operations live in the Oxide journal (src/oxide/journal.ts).
+            violation = "an oxide operation in the settlement journal";
           }
         } catch {
           violation = "stored terms are unreadable";
@@ -854,6 +857,10 @@ export class SettlementJournal {
    * Same id with a different fingerprint is a conflict and changes nothing.
    */
   claim(operationId: string, fingerprint: string, terms: SettlementTerms): ClaimResult {
+    if (terms.sendMode !== "spending_limit") {
+      // Never reached through rpc.ts, which routes oxide to the Oxide journal.
+      throw new JournalWriteError(this.health(), `claim: sendMode ${terms.sendMode} is not journaled here`);
+    }
     let result: ClaimResult | undefined;
     this.write("claim", (db) => {
       const row = db
@@ -1533,7 +1540,7 @@ export function enforceOwnerOnly(path: string, hwmPath: string): void {
  */
 function spendViolation(
   spend: { amount: unknown; at: unknown } | undefined,
-  terms: SettlementTerms | undefined,
+  terms: JournaledTerms | undefined,
   markedAt: number,
   state: string,
 ): string | undefined {
@@ -1554,7 +1561,7 @@ function toOperation(row: OperationRow): StoredOperation {
   return {
     operationId: row.operation_id,
     fingerprint: row.fingerprint,
-    terms: JSON.parse(row.terms_json) as SettlementTerms,
+    terms: JSON.parse(row.terms_json) as JournaledTerms,
     state: row.state,
     reason: row.reason,
     retryable: row.retryable === 1,

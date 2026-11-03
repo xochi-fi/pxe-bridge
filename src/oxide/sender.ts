@@ -1,39 +1,44 @@
-import { JournalUnreadableError, JournalWriteError } from "../journal.js";
+import { JournalUnreadableError, JournalWriteError, type JournalHealth } from "../journal.js";
 import type { MayBroadcastClient } from "../may-broadcast.js";
 import { known, unknown, type ReadinessFact, type ReadinessReason } from "../readiness.js";
-import type { NodeObservation } from "../settlement.js";
+import {
+  fingerprintTerms,
+  OperationIdSchema,
+  SettlementTermsSchema,
+  type NodeObservation,
+  type SettlementTerms,
+} from "../settlement.js";
 import { CapExceeded, OxideCaps, type OxideCapsConfig } from "./caps.js";
 import { EnclaveTrustRefused, enclaveRefusalPermanent } from "./enclave.js";
 import type { OxideAttempt, OxideJournal, OxideStoredOperation } from "./journal.js";
 import {
-  fingerprintOxideTerms,
-  OxideSendRequestSchema,
-  oxideTerms,
+  assertOxideTerms,
   oxideFeeLimit,
   type OxideHold,
   type OxideObservation,
   type OxideSendEvidence,
-  type OxideTerms,
 } from "./operation.js";
-import { OxidePinMismatch, OXIDE_V6_MAINNET } from "./pins.js";
+import { OxidePinMismatch } from "./pins.js";
+import type { OxideAdmissionVerdict } from "./readiness.js";
 import { MAX_TX_LIFETIME } from "@aztec-labs/constants";
 import { assertJournaledIdentity, JournaledBytesMismatch, type TxIdentity } from "../tx-identity.js";
 
 /**
- * The Oxide sender (xochi-fi/pxe-bridge#84, phase 1): pays OXDAI to an Aztec
- * recipient through Oxide's enclave-signed `transfer` + `publish_da`, on the
- * bridge's standard Schnorr account, with the createNote journal's rules
+ * The Oxide sender (xochi-fi/pxe-bridge#84): pays OXDAI to an Aztec recipient
+ * through Oxide's enclave-signed `transfer` + `publish_da`, on the bridge's
+ * standard Schnorr account, with the createNote journal's rules
  * (src/oxide/journal.ts) so a restart at any step never pays twice.
  *
  *   admission -> simulate -> check the TokenOperation -> fee runway floor
  *   -> enclave sign -> size gas -> fee runway -> prove
  *   -> journal the proven tx -> may-broadcast -> mark (+ cap re-check) -> send
  *
- * `OxideSender.send` is the internal API the settlement layer will call. It
- * serves under `pxe-bridge.settlement.v2` with an Oxide rail tag (decided on
- * #84 / Riddler#1428); this PR does not wire it. Its answer carries what that
- * wiring needs: the tx hash, the protocol expiry (journaled as its own bound,
- * required >= `validUntil`) and the payout note's randomness and index.
+ * `aztec_createNote` with `sendMode: "oxide"` reaches `OxideSender.send`
+ * (src/rpc.ts). The operation is the v2 operation: its journal row holds the
+ * v2 terms and fingerprint, may-broadcast is asked for that fingerprint, and
+ * the transfer's order fingerprint is it. The answer carries what the v2
+ * observation needs: the tx hash, the protocol expiry (journaled as its own
+ * bound, required >= `validUntil`) and the payout note's randomness.
  */
 
 /** What the backend is asked to pay. */
@@ -140,6 +145,24 @@ function preflightRefusal(cause: unknown): { reason: string; retryable: boolean 
   return { reason: "oxide_pin_unverified", retryable: true };
 }
 
+/**
+ * New admission for a fresh attempt (`OxideReadiness`, src/oxide/readiness.ts):
+ * the recipient is in the private allowlist and the sender is ready.
+ * Consulted after the journal claim and only before a fresh attempt; a
+ * journaled attempt keeps recovering without it, as in spending_limit mode.
+ * `not_ready` is retryable; `refused` says itself.
+ */
+export interface OxideAdmission {
+  admit(terms: { operationId: string; recipient: string; amount: string }): Promise<OxideAdmissionVerdict>;
+}
+
+/** Per-call context of `OxideSender.send`. */
+export interface OxideSendContext {
+  /** The caller's response deadline: aborted, nothing this call started marks. */
+  signal?: AbortSignal | undefined;
+  /** The caller's terms check (corridor, network), asked before admission on a fresh attempt only. */
+  termsCheck?: (() => Promise<OxideAdmissionVerdict>) | undefined;
+}
 /** What a send answers: the observation, plus the payout's identity once an attempt exists. */
 export interface OxideSendAnswer {
   kind: "observed";
@@ -148,6 +171,8 @@ export interface OxideSendAnswer {
   observation: OxideObservation;
   /** Present once a proven transaction is journaled for the operation. */
   payout?: OxidePayoutIdentity;
+  /** Set when this call's admission said `not_ready`: the readiness reasons, first one journaled. */
+  notReady?: ReadinessReason[];
 }
 
 export interface OxidePayoutIdentity {
@@ -155,7 +180,7 @@ export interface OxidePayoutIdentity {
   expirationTimestamp: string;
   /** Randomness of the recipient's note: with (recipient, amount) it opens the signed note hash. Never log it. */
   noteRandomness: string;
-  /** Position of the recipient's note among the TokenOperation's created notes. */
+  /** Position of the recipient's note among the TokenOperation's created notes. Internal: never the wire's index. */
   noteIndex: number;
   /** The siloed note hash the enclave signed for it. */
   siloedNoteHash: string;
@@ -165,6 +190,14 @@ export type OxideSendOutcome =
   | OxideSendAnswer
   | { kind: "conflict"; operationId: string; fingerprint: string; storedFingerprint: string }
   | { kind: "journal_unavailable"; operationId: string; detail: string };
+
+/** `aztec_getSettlement` for an operation the Oxide journal holds. */
+export interface OxideSettlementRead {
+  operation: OxideStoredOperation;
+  attempts: OxideAttempt[];
+  observation: OxideObservation;
+  payout?: OxidePayoutIdentity;
+}
 
 /** The TokenOperation is not the transfer the sender asked for. Never sent to the enclave. */
 export class UnexpectedTokenOperation extends Error {
@@ -247,7 +280,9 @@ export interface OxideSenderOptions {
   backend: OxideBackend;
   caps: OxideCapsConfig;
   preflight: OxidePreflight;
-  /** The broadcast gate: only an exact `allow` marks. Riddler's may-broadcast once wired. */
+  /** New admission (allowlist membership, readiness): asked once per fresh attempt, after the claim. */
+  admission: OxideAdmission;
+  /** The broadcast gate (Riddler's may-broadcast): only an exact `allow` marks. */
   mayBroadcast: MayBroadcastClient;
   now?: () => number;
 }
@@ -264,6 +299,7 @@ export class OxideSender {
   private readonly backend: OxideBackend;
   private readonly caps: OxideCaps;
   private readonly preflight: OxidePreflight;
+  private readonly admission: OxideAdmission;
   private readonly mayBroadcast: MayBroadcastClient;
   private readonly now: () => number;
   private readonly inFlight = new Set<string>();
@@ -274,36 +310,42 @@ export class OxideSender {
     this.journal = options.journal;
     this.backend = options.backend;
     this.preflight = options.preflight;
+    this.admission = options.admission;
     this.mayBroadcast = options.mayBroadcast;
     this.now = options.now ?? Date.now;
     this.caps = new OxideCaps(options.caps, (since) => this.journal.spentSince(since), this.now);
   }
 
   /**
-   * Pays `{recipient, amount, orderFingerprint}` once for `operationId`, or
-   * reports what that operation already is. Throws only on a malformed request.
+   * Pays the v2 `terms` (sendMode oxide) once for `operationId`, or reports
+   * what that operation already is. `signal` is the caller's response
+   * deadline: once it aborts nothing this call started may be marked
+   * may-broadcast (a journaled attempt is held `interrupted` for the retry).
+   * `termsCheck` is the caller's check of the terms against what this bridge
+   * serves (corridor, network), asked with admission before a fresh attempt
+   * only. Throws only on terms that are not an Oxide send or are malformed.
    */
-  async send(input: {
-    recipient: string;
-    amount: string;
-    orderFingerprint: string;
-    operationId: string;
-    validUntil: number;
-  }): Promise<OxideSendOutcome> {
-    const request = OxideSendRequestSchema.parse(input);
-    const terms = oxideTerms(request, OXIDE_V6_MAINNET.bridge.l2Token);
-    const id = request.operationId;
+  async send(input: { operationId: string; terms: SettlementTerms } & OxideSendContext): Promise<OxideSendOutcome> {
+    const id = OperationIdSchema.parse(input.operationId);
+    const terms = SettlementTermsSchema.parse(input.terms);
+    assertOxideTerms(terms);
     if (this.inFlight.has(id)) {
-      return {
-        kind: "observed",
-        operationId: id,
-        fingerprint: fingerprintOxideTerms(terms),
-        observation: { state: "request_in_flight" },
-      };
+      const fingerprint = fingerprintTerms(terms);
+      let stored: OxideStoredOperation | undefined;
+      try {
+        stored = this.journal.get(id);
+      } catch (cause) {
+        if (!(cause instanceof JournalUnreadableError)) throw cause;
+        return { kind: "journal_unavailable", operationId: id, detail: cause.message };
+      }
+      if (stored && stored.fingerprint !== fingerprint) {
+        return { kind: "conflict", operationId: id, fingerprint, storedFingerprint: stored.fingerprint };
+      }
+      return { kind: "observed", operationId: id, fingerprint, observation: { state: "request_in_flight" } };
     }
     this.inFlight.add(id);
     try {
-      return await this.drive(id, terms);
+      return await this.drive(id, terms, input);
     } catch (cause) {
       if (cause instanceof Answer) return cause.answer;
       if (cause instanceof JournalWriteError || cause instanceof JournalUnreadableError) {
@@ -316,30 +358,87 @@ export class OxideSender {
     }
   }
 
+  /** The Oxide journal's health, for the wire's `journal_unavailable` answer. */
+  journalHealth(): JournalHealth {
+    return this.journal.health();
+  }
+
+  /**
+   * Read-only recovery for `aztec_getSettlement`: undefined when the Oxide
+   * journal does not hold the operation. A marked operation reads the node; a
+   * call driving the operation right now answers `request_in_flight` until
+   * the node knows its transaction.
+   */
+  async read(operationId: string): Promise<OxideSettlementRead | undefined> {
+    const op = this.journal.get(operationId);
+    if (!op) return undefined;
+    const driving = this.inFlight.has(operationId);
+    let observation: OxideObservation;
+    switch (op.state) {
+      case "claimed":
+        observation = driving
+          ? { state: "request_in_flight" }
+          : { state: "not_submitted", reason: "interrupted_before_prepare", retryable: true };
+        break;
+      case "not_submitted":
+        observation = this.notSubmittedObservation(op);
+        break;
+      case "finalized":
+      case "reverted":
+        observation = op.observation ?? { state: "unknown", reason: "terminal_observation_missing" };
+        break;
+      case "prepared": {
+        const attempt = this.currentAttempt(op);
+        observation = driving
+          ? { state: "request_in_flight" }
+          : attempt
+            ? this.preparedObservation(attempt, op.hold ?? "interrupted")
+            : { state: "unknown", reason: "missing_transaction_identity" };
+        break;
+      }
+      case "may_broadcast":
+        observation = await this.observe(op);
+        if (driving && observation.state === "submitted_unknown") observation = { state: "request_in_flight" };
+        break;
+    }
+    // The observation may have just recorded a terminal outcome: answer from the durable row.
+    const current = this.journal.get(operationId) ?? op;
+    if ((current.state === "finalized" || current.state === "reverted") && current.observation) {
+      observation = current.observation;
+    }
+    const answered = this.answer(current, observation);
+    return {
+      operation: current,
+      attempts: this.journal.attempts(operationId),
+      observation,
+      ...(answered.payout ? { payout: answered.payout } : {}),
+    };
+  }
+
   private nowSeconds(): number {
     return Math.floor(this.now() / 1000);
   }
 
-  private async drive(id: string, terms: OxideTerms): Promise<OxideSendOutcome> {
+  private async drive(id: string, terms: SettlementTerms, context: OxideSendContext): Promise<OxideSendOutcome> {
     const claim = this.journal.claim(id, terms);
     if (claim.kind === "conflict") {
       return {
         kind: "conflict",
         operationId: id,
-        fingerprint: fingerprintOxideTerms(terms),
+        fingerprint: fingerprintTerms(terms),
         storedFingerprint: claim.operation.fingerprint,
       };
     }
     const op = claim.operation;
     if (claim.kind === "existing") {
-      const resumed = await this.resume(op);
+      const resumed = await this.resume(op, context.signal);
       if (resumed) return resumed;
     }
-    return this.fresh(this.journal.get(id)!);
+    return this.fresh(this.journal.get(id)!, context);
   }
 
   /** An operation the journal already holds. Undefined when it provably never broadcast and was re-armed. */
-  private async resume(op: OxideStoredOperation): Promise<OxideSendAnswer | undefined> {
+  private async resume(op: OxideStoredOperation, signal: AbortSignal | undefined): Promise<OxideSendAnswer | undefined> {
     switch (op.state) {
       case "finalized":
       case "reverted":
@@ -377,19 +476,35 @@ export class OxideSender {
           this.journal.recordHold(op.operationId, "preflight_refused");
           return this.answer(this.journal.get(op.operationId)!, this.preparedObservation(attempt, "preflight_refused"));
         }
-        return this.broadcast(op, attempt);
+        return this.broadcast(op, attempt, signal);
       }
     }
   }
 
-  private async fresh(op: OxideStoredOperation): Promise<OxideSendAnswer> {
+  private async fresh(op: OxideStoredOperation, context: OxideSendContext): Promise<OxideSendAnswer> {
+    const { signal } = context;
     const { terms, operationId: id } = op;
     if (this.nowSeconds() >= terms.validUntil) return this.refuse(op, "validity_bound_passed", false);
+    // The caller was already answered: start nothing it can no longer hear about.
+    if (signal?.aborted) return this.refuse(op, "response_deadline", true);
     const payout: OxidePayout = {
       recipient: terms.recipient,
       amount: BigInt(terms.amount),
-      orderFingerprint: terms.orderFingerprint,
+      // The order fingerprint is the v2 request fingerprint (pxe-bridge#84).
+      orderFingerprint: op.fingerprint,
     };
+
+    const checked = context.termsCheck ? await context.termsCheck() : ({ kind: "admitted" } as const);
+    if (checked.kind === "not_ready") {
+      return { ...this.refuse(op, checked.reasons[0] ?? "readiness_observation_failed", true), notReady: checked.reasons };
+    }
+    if (checked.kind === "refused") return this.refuse(op, checked.reason, checked.retryable);
+    const verdict = await this.admission.admit({ operationId: id, recipient: terms.recipient, amount: terms.amount });
+    if (verdict.kind === "not_ready") {
+      const answer = this.refuse(op, verdict.reasons[0] ?? "readiness_observation_failed", true);
+      return { ...answer, notReady: verdict.reasons };
+    }
+    if (verdict.kind === "refused") return this.refuse(op, verdict.reason, verdict.retryable);
 
     try {
       this.caps.admit(id, payout.amount);
@@ -398,6 +513,10 @@ export class OxideSender {
       return this.refuse(op, `cap:${cause.reason}`, cause.reason === "daily_cap_exhausted");
     }
 
+    // The deployment must be the pinned one before anything is simulated or
+    // sealed. A moved manifest/profile (#744) or a structural enclave/L1
+    // mismatch is permanent: no retry of this process clears it, only a
+    // reviewed re-pin (OX-6). An unread pin is transient.
     try {
       await this.preflight.assertPinned();
     } catch (cause) {
@@ -434,7 +553,7 @@ export class OxideSender {
     } finally {
       release();
     }
-    return this.broadcast(this.journal.get(id)!, recorded);
+    return this.broadcast(this.journal.get(id)!, recorded, signal);
   }
 
   private async acquireLane(): Promise<() => void> {
@@ -552,9 +671,15 @@ export class OxideSender {
   /**
    * The gate, for a fresh attempt or the exact bytes of an unmarked one. Only
    * an `allow` marks; the mark is the last durable step, then a synchronous
-   * bound check, then the send with nothing awaited in between.
+   * bound check, then the send with nothing awaited in between. Once `signal`
+   * has aborted (the caller was answered) nothing marks: the attempt is held
+   * `interrupted` and a later call resends these exact bytes.
    */
-  private async broadcast(op: OxideStoredOperation, attempt: OxideAttempt): Promise<OxideSendAnswer> {
+  private async broadcast(
+    op: OxideStoredOperation,
+    attempt: OxideAttempt,
+    signal: AbortSignal | undefined,
+  ): Promise<OxideSendAnswer> {
     const id = op.operationId;
     const bytes = this.journal.attemptBytes(id, attempt.attempt);
     // The bytes must still be the transaction the journal (and so the gate)
@@ -567,11 +692,13 @@ export class OxideSender {
       console.error(`[oxide] Journaled transaction identity mismatch: ${boundedErrorClass(cause)}`);
       return this.answer(op, { state: "unknown", reason: "journaled_bytes_mismatch" });
     }
+    if (signal?.aborted) return this.hold(id, attempt, "interrupted");
     const answer = await this.mayBroadcast({ operationId: id, fingerprint: op.fingerprint, txHash: attempt.txHash });
+
+    // Synchronous from here to the mark.
+    if (signal?.aborted) return this.hold(id, attempt, "interrupted");
     if (answer.decision !== "allow") {
-      const hold: OxideHold = answer.decision === "deny" ? "may_broadcast_denied" : "may_broadcast_unknown";
-      this.journal.recordHold(id, hold);
-      return this.answer(this.journal.get(id)!, this.preparedObservation(attempt, hold));
+      return this.hold(id, attempt, answer.decision === "deny" ? "may_broadcast_denied" : "may_broadcast_unknown");
     }
     // The portal and deployment can move while the transaction is being
     // proved or while the gate is deciding. Re-read after allow; once it
@@ -582,10 +709,9 @@ export class OxideSender {
       const refusal = preflightRefusal(cause);
       console.error(`[oxide] Preflight refused after allow: ${boundedErrorClass(cause)}`);
       if (!refusal.retryable) return this.refuse(op, refusal.reason, false);
-      this.journal.recordHold(op.operationId, "preflight_refused");
-      return this.answer(this.journal.get(op.operationId)!, this.preparedObservation(attempt, "preflight_refused"));
+      return this.hold(id, attempt, "preflight_refused");
     }
-    // Synchronous from here to the mark.
+    if (signal?.aborted) return this.hold(id, attempt, "interrupted");
     if (this.nowSeconds() >= op.terms.validUntil) return this.refuse(op, "validity_bound_passed", false);
     if (BigInt(this.nowSeconds()) >= BigInt(attempt.expirationTimestamp)) {
       // The gate bound this hash; a fresh proof would carry another. Requote under a new operation id.
@@ -597,8 +723,7 @@ export class OxideSender {
       if (!(cause instanceof CapExceeded)) throw cause;
       // The durable window is full. The attempt stays prepared and unmarked, so
       // a later call resends these exact bytes once spends age out.
-      this.journal.recordHold(id, "cap_window_full");
-      return this.answer(this.journal.get(id)!, this.preparedObservation(attempt, "cap_window_full"));
+      return this.hold(id, attempt, "cap_window_full");
     }
     this.caps.release(id);
     const marked = this.journal.get(id)!;
@@ -660,6 +785,10 @@ export class OxideSender {
           !("observedAt" in previous) ||
           JSON.stringify({ ...previous, observedAt: 0 }) !== JSON.stringify({ ...observation, observedAt: 0 });
         if (!changed) return previous;
+        // Without its effects the payout cannot be located (payoutNoteHashIndex),
+        // and a recorded finalized outcome is never re-read: leave it to the
+        // next read, which asks the node again.
+        if (node.effects.state !== "available") return observation;
         try {
           this.journal.recordObservation(op.operationId, observation);
         } catch (cause) {
@@ -678,6 +807,13 @@ export class OxideSender {
 
   private preparedObservation(attempt: OxideAttempt, hold: OxideHold): OxideObservation {
     return { state: "prepared", txHash: attempt.txHash, expirationTimestamp: attempt.expirationTimestamp, hold };
+  }
+
+  /** Records why the journaled, unmarked attempt is not sent now, and answers it as prepared. */
+  private hold(id: string, attempt: OxideAttempt, hold: OxideHold): OxideSendAnswer {
+    if (hold === "interrupted") console.warn(`[oxide] ${id} held: the caller was answered before the mark`);
+    this.journal.recordHold(id, hold);
+    return this.answer(this.journal.get(id)!, this.preparedObservation(attempt, hold));
   }
 
   private notSubmittedObservation(op: OxideStoredOperation): OxideObservation {

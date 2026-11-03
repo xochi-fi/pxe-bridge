@@ -40,6 +40,7 @@
             "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
           },
           "accountMode": "spending_limit",
+          "sendMode": "spending_limit",
           "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
           "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
           "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
@@ -62,6 +63,7 @@
         "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
       },
       "accountMode": "spending_limit",
+      "sendMode": "spending_limit",
       "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
       "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
       "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
@@ -88,6 +90,7 @@
             "manifestDigest": "0x4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D"
           },
           "accountMode": "spending_limit",
+          "sendMode": "spending_limit",
           "recipient": "0x1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C",
           "recipientDescriptorDigest": "0xD5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5D5",
           "token": "0x2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B",
@@ -123,6 +126,7 @@
             "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
           },
           "accountMode": "spending_limit",
+          "sendMode": "spending_limit",
           "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
           "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
           "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
@@ -151,6 +155,7 @@
             "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
           },
           "accountMode": "spending_limit",
+          "sendMode": "spending_limit",
           "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
           "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
           "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
@@ -179,6 +184,7 @@
             "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
           },
           "accountMode": "spending_limit",
+          "sendMode": "spending_limit",
           "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
           "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
           "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
@@ -207,6 +213,7 @@
             "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
           },
           "accountMode": "spending_limit",
+          "sendMode": "spending_limit",
           "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
           "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
           "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
@@ -235,6 +242,7 @@
             "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
           },
           "accountMode": "spending_limit",
+          "sendMode": "spending_limit",
           "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
           "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
           "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
@@ -263,6 +271,7 @@
             "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
           },
           "accountMode": "spending_limit",
+          "sendMode": "spending_limit",
           "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
           "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
           "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
@@ -291,6 +300,7 @@
             "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
           },
           "accountMode": "spending_limit",
+          "sendMode": "spending_limit",
           "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
           "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
           "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
@@ -319,6 +329,7 @@
             "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
           },
           "accountMode": "spending_limit",
+          "sendMode": "spending_limit",
           "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
           "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
           "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
@@ -347,6 +358,7 @@
             "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
           },
           "accountMode": "spending_limit",
+          "sendMode": "spending_limit",
           "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
           "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
           "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
@@ -375,12 +387,128 @@
             "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
           },
           "accountMode": "spending_limit",
+          "sendMode": "spending_limit",
           "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
           "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
           "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
           "amount": "1000000",
           "validUntil": 1900000000,
           "chainId": 1
+        },
+        "error": {
+          "code": -32602
+        }
+      },
+      {
+        "name": "sendMode missing",
+        "params": {
+          "version": "pxe-bridge.settlement.v2",
+          "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
+          "network": {
+            "aztecChainId": "11155111",
+            "protocolVersion": "3924331020",
+            "rollupAddress": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "l1ChainId": "11155111",
+            "genesisOrNetworkDigest": "0x9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e"
+          },
+          "corridor": {
+            "corridorId": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            "corridorRevision": 1,
+            "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
+          },
+          "accountMode": "spending_limit",
+          "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+          "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
+          "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "amount": "1000000",
+          "validUntil": 1900000000
+        },
+        "error": {
+          "code": -32602
+        }
+      },
+      {
+        "name": "sendMode unknown",
+        "params": {
+          "version": "pxe-bridge.settlement.v2",
+          "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
+          "network": {
+            "aztecChainId": "11155111",
+            "protocolVersion": "3924331020",
+            "rollupAddress": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "l1ChainId": "11155111",
+            "genesisOrNetworkDigest": "0x9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e"
+          },
+          "corridor": {
+            "corridorId": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            "corridorRevision": 1,
+            "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
+          },
+          "accountMode": "spending_limit",
+          "sendMode": "transfer_to_private",
+          "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+          "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
+          "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "amount": "1000000",
+          "validUntil": 1900000000
+        },
+        "error": {
+          "code": -32602
+        }
+      },
+      {
+        "name": "sendMode null",
+        "params": {
+          "version": "pxe-bridge.settlement.v2",
+          "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
+          "network": {
+            "aztecChainId": "11155111",
+            "protocolVersion": "3924331020",
+            "rollupAddress": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "l1ChainId": "11155111",
+            "genesisOrNetworkDigest": "0x9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e"
+          },
+          "corridor": {
+            "corridorId": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            "corridorRevision": 1,
+            "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
+          },
+          "accountMode": "spending_limit",
+          "sendMode": null,
+          "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+          "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
+          "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "amount": "1000000",
+          "validUntil": 1900000000
+        },
+        "error": {
+          "code": -32602
+        }
+      },
+      {
+        "name": "sendMode oxide with accountMode spending_limit",
+        "params": {
+          "version": "pxe-bridge.settlement.v2",
+          "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000001",
+          "network": {
+            "aztecChainId": "11155111",
+            "protocolVersion": "3924331020",
+            "rollupAddress": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "l1ChainId": "11155111",
+            "genesisOrNetworkDigest": "0x9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e"
+          },
+          "corridor": {
+            "corridorId": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            "corridorRevision": 1,
+            "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
+          },
+          "accountMode": "spending_limit",
+          "sendMode": "oxide",
+          "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+          "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
+          "token": "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "amount": "1000000",
+          "validUntil": 1900000000
         },
         "error": {
           "code": -32602
@@ -565,5 +693,390 @@
         }
       }
     ]
+  },
+  "oxide": {
+    "note": "sendMode \"oxide\": the Oxide OXDAI sender. Same wire (pxe-bridge.settlement.v2) and request shape; accountMode must be \"standard\". The fingerprint adds the line sendMode=oxide right after accountMode=...; a spending_limit request adds no line, so its fingerprint is 0.3.0's.",
+    "createNote": {
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "aztec_createNote",
+        "params": [
+          {
+            "version": "pxe-bridge.settlement.v2",
+            "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000002",
+            "network": {
+              "aztecChainId": "11155111",
+              "protocolVersion": "3924331020",
+              "rollupAddress": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+              "l1ChainId": "11155111",
+              "genesisOrNetworkDigest": "0x9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e"
+            },
+            "corridor": {
+              "corridorId": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+              "corridorRevision": 1,
+              "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
+            },
+            "accountMode": "standard",
+            "sendMode": "oxide",
+            "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+            "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
+            "token": "0x11d2bed21a36289fd6f6a6af93a546b5be7115caf957f0f700f42d56e25fe0a3",
+            "amount": "1000000000000000000",
+            "validUntil": 1900000000
+          }
+        ]
+      },
+      "canonicalTerms": {
+        "network": {
+          "aztecChainId": "11155111",
+          "protocolVersion": "3924331020",
+          "rollupAddress": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "l1ChainId": "11155111",
+          "genesisOrNetworkDigest": "0x9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e"
+        },
+        "corridor": {
+          "corridorId": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+          "corridorRevision": 1,
+          "manifestDigest": "0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d"
+        },
+        "accountMode": "standard",
+        "sendMode": "oxide",
+        "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+        "recipientDescriptorDigest": "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
+        "token": "0x11d2bed21a36289fd6f6a6af93a546b5be7115caf957f0f700f42d56e25fe0a3",
+        "amount": "1000000000000000000",
+        "validUntil": 1900000000
+      },
+      "fingerprintLines": [
+        "pxe-bridge/settlement-fingerprint/v1",
+        "network.aztecChainId=11155111",
+        "network.protocolVersion=3924331020",
+        "network.rollupAddress=0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network.l1ChainId=11155111",
+        "network.genesisOrNetworkDigest=0x9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e",
+        "corridor.corridorId=0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+        "corridor.corridorRevision=1",
+        "corridor.manifestDigest=0x4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d",
+        "accountMode=standard",
+        "sendMode=oxide",
+        "recipient=0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+        "recipientDescriptorDigest=0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
+        "token=0x11d2bed21a36289fd6f6a6af93a546b5be7115caf957f0f700f42d56e25fe0a3",
+        "amount=1000000000000000000",
+        "validUntil=1900000000"
+      ],
+      "fingerprint": "0x535e68e8334b25b8f5ecfefd572175e46420cdd364ae55b5fdc459c1a41aad9c",
+      "spendingLimitCounterpart": {
+        "note": "The same terms with sendMode spending_limit (no sendMode line): a different fingerprint.",
+        "fingerprint": "0x446c8520e81b8aa9a9b21667ed2b77b2c121a008b95070c3ec713ae1e706abd3"
+      },
+      "result": {
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 1,
+          "result": {
+            "version": "pxe-bridge.settlement.v2",
+            "operationId": "riddler-shielded-00000000-0000-4000-8000-000000000002",
+            "fingerprint": "0x535e68e8334b25b8f5ecfefd572175e46420cdd364ae55b5fdc459c1a41aad9c",
+            "observation": {
+              "state": "finalized",
+              "txHash": "0x7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b",
+              "expirationTimestamp": "1900076355",
+              "executionResult": "success",
+              "blockHash": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+              "blockNumber": "4243",
+              "observedAt": 1899990000,
+              "effects": {
+                "state": "available",
+                "noteHashes": [
+                  "0x2121212121212121212121212121212121212121212121212121212121212121",
+                  "0x225defdca34a4842764134ac7a1139acaf12406764e39cfa9ad3d0dc3623ccda",
+                  "0x2323232323232323232323232323232323232323232323232323232323232323"
+                ],
+                "nullifiers": [
+                  "0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+                  "0x2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f"
+                ]
+              },
+              "partialNoteRandomness": "0x0f9369230bca88ad6d009e611ad2ff316738d044e7855e1b9e206b6275b0824b",
+              "receiptStatus": "finalized",
+              "payoutNoteHashIndex": 1
+            }
+          }
+        }
+      }
+    },
+    "orderFingerprint": {
+      "note": "The order fingerprint the transfer carries in its private meta is the request fingerprint. meta = [sha256ToField(tag), hi128, lo128, 0...], hi128/lo128 the fingerprint's first/last 16 bytes; the length is the OxideToken transfer(meta) length.",
+      "tag": "pxe-bridge/oxide-order-fingerprint/v1",
+      "orderFingerprint": "0x535e68e8334b25b8f5ecfefd572175e46420cdd364ae55b5fdc459c1a41aad9c",
+      "transferMetaLen": 7,
+      "meta": [
+        "0x008e275e1d3f481c971dd7fe577c3e6098e062bbe4e52c0a418300c7763c901f",
+        "0x00000000000000000000000000000000535e68e8334b25b8f5ecfefd572175e4",
+        "0x000000000000000000000000000000006420cdd364ae55b5fdc459c1a41aad9c",
+        "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "0x0000000000000000000000000000000000000000000000000000000000000000"
+      ]
+    },
+    "payoutProof": {
+      "note": "Recompute a successful payout note from the signed recipient, token and amount and observation.partialNoteRandomness; require uniqueNoteHash(observation.payoutNoteHashIndex) == effects.noteHashes[payoutNoteHashIndex] (effects.nullifiers[0] is the nonce's first nullifier). Values are the @aztec-labs 6.0.0 hashes and Oxide's computeSiloedNoteHash. The raw reverted observation is a consumer-refusal vector: the bridge holds it because prepared bytes do not commit this proof.",
+      "formula": {
+        "randomness": "P2([seed, index]) (OxideToken randomness.nr next_randomness)",
+        "noteHash": "P2WithSeparator([amount, recipient, BALANCES_STORAGE_SLOT, randomness], DOM_SEP__NOTE_HASH)",
+        "siloedNoteHash": "siloNoteHash(token, noteHash)",
+        "uniqueNoteHash": "computeUniqueNoteHash(computeNoteHashNonce(effects.nullifiers[0], payoutNoteHashIndex), siloedNoteHash)"
+      },
+      "constants": {
+        "DOM_SEP__NOTE_HASH": 116501019,
+        "BALANCES_STORAGE_SLOT": 1
+      },
+      "inputs": {
+        "recipient": "0x1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+        "token": "0x11d2bed21a36289fd6f6a6af93a546b5be7115caf957f0f700f42d56e25fe0a3",
+        "amount": "1000000000000000000",
+        "randomnessSeed": "0x0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+        "randomnessIndex": 0,
+        "partialNoteRandomness": "0x0f9369230bca88ad6d009e611ad2ff316738d044e7855e1b9e206b6275b0824b",
+        "firstNullifier": "0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+        "payoutNoteHashIndex": 1
+      },
+      "noteHash": "0x20ce0b063ed2b3ef3c56fbc517ccafba44aa9f5bf5913983cf4488d7c2d44c3f",
+      "siloedNoteHash": "0x282a91ec3d99c89144f090afc0c8f873a922ff3eb8d961bce0dd2a3c3bfea337",
+      "uniqueNoteHash": "0x225defdca34a4842764134ac7a1139acaf12406764e39cfa9ad3d0dc3623ccda",
+      "revertedObservation": {
+        "state": "reverted",
+        "txHash": "0x7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b",
+        "expirationTimestamp": "1900076355",
+        "executionResult": "reverted",
+        "blockHash": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "blockNumber": "4243",
+        "observedAt": 1899990000,
+        "effects": {
+          "state": "available",
+          "noteHashes": [
+            "0x2121212121212121212121212121212121212121212121212121212121212121",
+            "0x2323232323232323232323232323232323232323232323232323232323232323"
+          ],
+          "nullifiers": [
+            "0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+            "0x2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f"
+          ]
+        },
+        "partialNoteRandomness": "0x0f9369230bca88ad6d009e611ad2ff316738d044e7855e1b9e206b6275b0824b",
+        "receiptStatus": "finalized",
+        "payoutNoteHashIndex": null
+      },
+      "revertHold": {
+        "observation": {
+          "state": "unknown",
+          "reason": "payout_proof_uncommitted"
+        }
+      },
+      "refusals": [
+        {
+          "name": "payoutNoteHashIndex names another note hash",
+          "observation": {
+            "state": "finalized",
+            "txHash": "0x7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b",
+            "expirationTimestamp": "1900076355",
+            "executionResult": "success",
+            "blockHash": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+            "blockNumber": "4243",
+            "observedAt": 1899990000,
+            "effects": {
+              "state": "available",
+              "noteHashes": [
+                "0x2121212121212121212121212121212121212121212121212121212121212121",
+                "0x225defdca34a4842764134ac7a1139acaf12406764e39cfa9ad3d0dc3623ccda",
+                "0x2323232323232323232323232323232323232323232323232323232323232323"
+              ],
+              "nullifiers": [
+                "0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+                "0x2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f"
+              ]
+            },
+            "partialNoteRandomness": "0x0f9369230bca88ad6d009e611ad2ff316738d044e7855e1b9e206b6275b0824b",
+            "receiptStatus": "finalized",
+            "payoutNoteHashIndex": 0
+          }
+        },
+        {
+          "name": "payoutNoteHashIndex out of range",
+          "observation": {
+            "state": "finalized",
+            "txHash": "0x7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b",
+            "expirationTimestamp": "1900076355",
+            "executionResult": "success",
+            "blockHash": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+            "blockNumber": "4243",
+            "observedAt": 1899990000,
+            "effects": {
+              "state": "available",
+              "noteHashes": [
+                "0x2121212121212121212121212121212121212121212121212121212121212121",
+                "0x225defdca34a4842764134ac7a1139acaf12406764e39cfa9ad3d0dc3623ccda",
+                "0x2323232323232323232323232323232323232323232323232323232323232323"
+              ],
+              "nullifiers": [
+                "0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+                "0x2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f"
+              ]
+            },
+            "partialNoteRandomness": "0x0f9369230bca88ad6d009e611ad2ff316738d044e7855e1b9e206b6275b0824b",
+            "receiptStatus": "finalized",
+            "payoutNoteHashIndex": 3
+          }
+        },
+        {
+          "name": "payoutNoteHashIndex negative",
+          "observation": {
+            "state": "finalized",
+            "txHash": "0x7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b",
+            "expirationTimestamp": "1900076355",
+            "executionResult": "success",
+            "blockHash": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+            "blockNumber": "4243",
+            "observedAt": 1899990000,
+            "effects": {
+              "state": "available",
+              "noteHashes": [
+                "0x2121212121212121212121212121212121212121212121212121212121212121",
+                "0x225defdca34a4842764134ac7a1139acaf12406764e39cfa9ad3d0dc3623ccda",
+                "0x2323232323232323232323232323232323232323232323232323232323232323"
+              ],
+              "nullifiers": [
+                "0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+                "0x2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f"
+              ]
+            },
+            "partialNoteRandomness": "0x0f9369230bca88ad6d009e611ad2ff316738d044e7855e1b9e206b6275b0824b",
+            "receiptStatus": "finalized",
+            "payoutNoteHashIndex": -1
+          }
+        },
+        {
+          "name": "payoutNoteHashIndex null on a finalized success",
+          "observation": {
+            "state": "finalized",
+            "txHash": "0x7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b",
+            "expirationTimestamp": "1900076355",
+            "executionResult": "success",
+            "blockHash": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+            "blockNumber": "4243",
+            "observedAt": 1899990000,
+            "effects": {
+              "state": "available",
+              "noteHashes": [
+                "0x2121212121212121212121212121212121212121212121212121212121212121",
+                "0x225defdca34a4842764134ac7a1139acaf12406764e39cfa9ad3d0dc3623ccda",
+                "0x2323232323232323232323232323232323232323232323232323232323232323"
+              ],
+              "nullifiers": [
+                "0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+                "0x2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f"
+              ]
+            },
+            "partialNoteRandomness": "0x0f9369230bca88ad6d009e611ad2ff316738d044e7855e1b9e206b6275b0824b",
+            "receiptStatus": "finalized",
+            "payoutNoteHashIndex": null
+          }
+        },
+        {
+          "name": "payoutNoteHashIndex missing on an oxide mined observation",
+          "observation": {
+            "state": "finalized",
+            "txHash": "0x7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b",
+            "expirationTimestamp": "1900076355",
+            "executionResult": "success",
+            "blockHash": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+            "blockNumber": "4243",
+            "observedAt": 1899990000,
+            "effects": {
+              "state": "available",
+              "noteHashes": [
+                "0x2121212121212121212121212121212121212121212121212121212121212121",
+                "0x225defdca34a4842764134ac7a1139acaf12406764e39cfa9ad3d0dc3623ccda",
+                "0x2323232323232323232323232323232323232323232323232323232323232323"
+              ],
+              "nullifiers": [
+                "0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+                "0x2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f"
+              ]
+            },
+            "partialNoteRandomness": "0x0f9369230bca88ad6d009e611ad2ff316738d044e7855e1b9e206b6275b0824b",
+            "receiptStatus": "finalized"
+          }
+        },
+        {
+          "name": "randomness of another note",
+          "observation": {
+            "state": "finalized",
+            "txHash": "0x7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b",
+            "expirationTimestamp": "1900076355",
+            "executionResult": "success",
+            "blockHash": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+            "blockNumber": "4243",
+            "observedAt": 1899990000,
+            "effects": {
+              "state": "available",
+              "noteHashes": [
+                "0x2121212121212121212121212121212121212121212121212121212121212121",
+                "0x225defdca34a4842764134ac7a1139acaf12406764e39cfa9ad3d0dc3623ccda",
+                "0x2323232323232323232323232323232323232323232323232323232323232323"
+              ],
+              "nullifiers": [
+                "0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+                "0x2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f"
+              ]
+            },
+            "partialNoteRandomness": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+            "receiptStatus": "finalized",
+            "payoutNoteHashIndex": 1
+          }
+        },
+        {
+          "name": "spending_limit observation carrying payoutNoteHashIndex",
+          "sendMode": "spending_limit",
+          "observation": {
+            "state": "finalized",
+            "txHash": "0x7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a",
+            "expirationTimestamp": "1900076355",
+            "executionResult": "success",
+            "blockHash": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+            "blockNumber": "4242",
+            "receiptStatus": "finalized",
+            "observedAt": 1899990000,
+            "effects": {
+              "state": "available",
+              "noteHashes": [
+                "0x1111111111111111111111111111111111111111111111111111111111111111",
+                "0x1212121212121212121212121212121212121212121212121212121212121212",
+                "0x1313131313131313131313131313131313131313131313131313131313131313",
+                "0x1414141414141414141414141414141414141414141414141414141414141414",
+                "0x1515151515151515151515151515151515151515151515151515151515151515",
+                "0x22f0affca3f1681d09d20263af3abee59393fae0e5126108ebdace132c530e4b"
+              ],
+              "nullifiers": [
+                "0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+                "0x23dbb29697678f351de5b9739b26ae5b853c5802f984402a327913dd06653a01"
+              ]
+            },
+            "partialNoteRandomness": "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+            "payoutNoteHashIndex": 5
+          }
+        }
+      ],
+      "bridgeHolds": {
+        "note": "When the bridge cannot find the payout's unique note hash at exactly one position of a mined transaction's effects (effects unavailable, hash absent, or present twice) it answers this instead of a mined observation; the operation stays marked and is never refundable on it.",
+        "observation": {
+          "state": "unknown",
+          "reason": "payout_note_hash_unresolved"
+        }
+      }
+    }
   }
 }
