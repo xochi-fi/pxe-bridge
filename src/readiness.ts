@@ -79,7 +79,18 @@ export type ReadinessReason =
   | "finalized_tip_from_future"
   | "finalized_tip_stale"
   | "readiness_observation_failed"
-  | "backend_capacity_exhausted";
+  | "backend_capacity_exhausted"
+  // Oxide mode (src/oxide/readiness.ts).
+  | "private_balance_unknown"
+  | "private_balance_insufficient"
+  | "journal_unreadable"
+  | "oxide_pins_unknown"
+  | "oxide_pin_mismatch"
+  | "oxide_l1_unknown"
+  | "oxide_l1_not_pinned"
+  | "oxide_portal_frozen"
+  | "enclave_unreachable"
+  | "enclave_attestation_refused";
 
 export type ReadinessFact<T> =
   | { state: "known"; value: T }

@@ -665,6 +665,56 @@ export class OxideJournal {
     return this.read((db) => sumSpends(db, sinceMs));
   }
 
+  /**
+   * Payout principal a private balance read at PXE block `syncedBlock` does
+   * not yet reflect: every current attempt that may still land on state that
+   * read has not seen (a prepared one with its bounds open, a marked one not
+   * yet observed mined before its protocol expiry) plus any observed mined
+   * ABOVE `syncedBlock`. The same rows `liveNullifiers` counts, so the
+   * readiness surface and the sender's own note selection agree on what is
+   * still in flight. The amount is the proven recipient note's.
+   */
+  committedPrincipal(nowSeconds: number, syncedBlock: number): { total: bigint; sends: number } {
+    const rows = this.read((db) =>
+      db
+        .prepare(
+          `SELECT o.state, json_extract(o.terms_json, '$.validUntil') AS valid_until,
+                  a.expiration_timestamp, a.evidence_json,
+                  CAST(json_extract(o.observation_json, '$.blockNumber') AS INTEGER) AS mined_block
+           FROM operations o JOIN attempts a ON a.operation_id = o.operation_id AND a.attempt = o.current_attempt
+           WHERE o.state = 'prepared'
+              OR (o.state = 'may_broadcast' AND json_extract(o.observation_json, '$.blockNumber') IS NULL)
+              OR (o.state IN ('may_broadcast', 'finalized', 'reverted')
+                  AND CAST(json_extract(o.observation_json, '$.blockNumber') AS INTEGER) > ?)`,
+        )
+        .all(syncedBlock),
+    ) as {
+      state: OxideOperationState;
+      valid_until: number | null;
+      expiration_timestamp: string;
+      evidence_json: string;
+      mined_block: number | null;
+    }[];
+    let total = 0n;
+    let sends = 0;
+    for (const row of rows) {
+      const unexpired = BigInt(nowSeconds) < BigInt(row.expiration_timestamp);
+      const counts =
+        row.mined_block !== null
+          ? row.mined_block > syncedBlock
+          : row.state === "prepared"
+            ? unexpired && (row.valid_until === null || nowSeconds < row.valid_until)
+            : unexpired;
+      if (!counts) continue;
+      const evidence = JSON.parse(row.evidence_json) as OxideSendEvidence;
+      const note = evidence.createdNotes[evidence.recipientNoteIndex];
+      if (note === undefined) throw new Error("journaled evidence names no recipient note");
+      total += BigInt(note.amount);
+      sends += 1;
+    }
+    return { total, sends };
+  }
+
   close(): void {
     this.db?.close();
     this.db = null;

@@ -243,19 +243,27 @@ export interface FinalizedAttestationObservation {
     | { state: "present"; classId: string; initialized: boolean };
 }
 
+/** Why a finalized account observation is unknown: nothing is signed from it. */
+export type AccountAttestationRefusal =
+  | "finalized_history_unavailable"
+  | "finalized_reference_invalid"
+  | "finalized_tip_stale"
+  | "finalized_tip_from_future"
+  | "account_address_mismatch"
+  | "account_class_mismatch"
+  | "account_not_initialized";
+
 export type AttestationObservation =
   | { state: "known"; value: FinalizedAttestationObservation }
-  | {
-      state: "unknown";
-      reason:
-        | "finalized_history_unavailable"
-        | "finalized_reference_invalid"
-        | "finalized_tip_stale"
-        | "finalized_tip_from_future"
-        | "account_address_mismatch"
-        | "account_class_mismatch"
-        | "account_not_initialized";
-    };
+  | { state: "unknown"; reason: AccountAttestationRefusal };
+
+/**
+ * The chain half of an observation, without the allowlist root: what the
+ * standard (Oxide) account mode observes, whose root is private and off chain.
+ */
+export type AccountAttestationObservation =
+  | { state: "known"; value: Omit<FinalizedAttestationObservation, "allowlistRoot"> }
+  | { state: "unknown"; reason: AccountAttestationRefusal };
 
 export interface AttestationChainProbe {
   observeAttestationChain(
@@ -327,6 +335,7 @@ export function readAttestationEnvironment(
     env["PXE_BRIDGE_SECRET_KEY"],
     env["SPENDING_LIMIT_ADMIN_KEY"],
     env["PXE_BRIDGE_ALLOWLIST_SEED"],
+    env["PXE_BRIDGE_OXIDE_ALLOWLIST_SEED"],
   ]
     .filter((value): value is string => value !== undefined)
     .map(normalizeKeyMaterial);
@@ -362,7 +371,7 @@ export function readAttestationEnvironment(
 export interface AttestationAuditEvent {
   method: AttestationMethod | "RootUpdate";
   outcome: "signed" | "refused" | "delivered" | "retry";
-  reason?: AttestationRefusalReason | "relay_unavailable";
+  reason?: AttestationRefusalReason | "relay_unavailable" | "finalized_tip_not_advanced";
 }
 
 export interface AttestationProducerOptions {
@@ -789,6 +798,10 @@ export class RootUpdatePublisher {
     }
     const identity = observation.value.allowlistRoot.toLowerCase();
     if (!this.needsFreshRecord(identity)) return;
+    if (this.awaitsHigherBlock(identity, observation.value.finalized.blockNumber)) {
+      this.audit?.({ method: "RootUpdate", outcome: "retry", reason: "finalized_tip_not_advanced" });
+      return;
+    }
     const record = await this.producer.rootUpdate(observation.value);
     if (!record) {
       this.audit?.({ method: "RootUpdate", outcome: "retry", reason: "signer_failed" });
@@ -816,6 +829,29 @@ export class RootUpdatePublisher {
       idempotencyKey: digest,
     });
     this.emittedThisRun = true;
+  }
+
+  /**
+   * Whether a CHANGED root must wait for a later finalized block. The Worker
+   * keeps one RootUpdate per corridor and replaces it only from a strictly
+   * higher `rootBlock` (an equal one is acknowledged as superseded and
+   * dropped), so a new root signed at the block of the last envelope would be
+   * accepted by the relay and never take effect. An on-chain root moves only
+   * in a later block; a private Oxide root can move between two ticks.
+   */
+  private awaitsHigherBlock(identity: string, blockNumber: string): boolean {
+    const latest = this.journal.latestRootUpdate();
+    if (latest === undefined) return false;
+    const envelope = RootUpdateEnvelopeSchema.safeParse(latest.payload);
+    if (!envelope.success) return false;
+    const { corridor_id, corridor_revision, record } = envelope.data;
+    const domain = this.producer.domainConfig;
+    return (
+      record.root !== identity &&
+      corridor_id === domain.corridorId.toLowerCase() &&
+      corridor_revision === domain.corridorRevision &&
+      BigInt(blockNumber) <= BigInt(record.rootBlock)
+    );
   }
 
   /**

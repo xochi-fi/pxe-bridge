@@ -21,7 +21,8 @@ import {
   buildSeedCapsule,
   buildStrictModeCapsule,
 } from "./vendor/oxide-client/capsules.js";
-import { FleetSigner } from "./vendor/oxide-client/fleet_signer.js";
+import { FleetSigner, verifyAndPin } from "./vendor/oxide-client/fleet_signer.js";
+import { DEFAULT_TIMEOUTS } from "./vendor/oxide-client/enclave_transport.js";
 import { buildSpendMetadata } from "./vendor/oxide-client/spend_metadata.js";
 import {
   collectAccountingEffects,
@@ -460,6 +461,47 @@ export class PxeOxideBackend implements OxideBackend {
     return oxideGasSettings(used.totalGas, used.teardownGas, worst, {
       ...(this.options.gasMarginBps !== undefined ? { gasMarginBps: this.options.gasMarginBps } : {}),
       ...(this.options.feeMultiplier !== undefined ? { feeMultiplier: this.options.feeMultiplier } : {}),
+    });
+  }
+
+  /**
+   * The sending account's PRIVATE OXDAI balance as its own PXE holds it: the
+   * token's `balance_of` utility (unspent notes plus stored deposits), with
+   * the PXE's synced block read BEFORE the call. The PXE syncs forward before
+   * a utility runs, so the balance reflects at least that block, and pairing
+   * it with the earlier number only ever overstates what is still in flight
+   * (`OxideJournal.committedPrincipal`). OXDAI has no public balance.
+   */
+  async privateBalance(): Promise<{ observed: bigint; syncedBlock: number }> {
+    const wallet: unknown = this.options.wallet;
+    const pxe: unknown = wallet !== null && typeof wallet === "object" && "pxe" in wallet ? wallet.pxe : undefined;
+    if (
+      pxe === null ||
+      typeof pxe !== "object" ||
+      !("getSyncedBlockHeader" in pxe) ||
+      typeof pxe.getSyncedBlockHeader !== "function"
+    ) {
+      throw new Error("Wallet has no pxe.getSyncedBlockHeader");
+    }
+    const header: BlockHeader = await pxe.getSyncedBlockHeader();
+    const syncedBlock = Number(header.globalVariables.blockNumber);
+    if (!Number.isSafeInteger(syncedBlock) || syncedBlock < 0) throw new Error("PXE synced block is not a block number");
+    const { account, token } = this.options;
+    const { result } = await token.methods["balance_of"]!(account).simulate({ from: account });
+    if (typeof result !== "bigint" || result < 0n) throw new Error("balance_of returned no u128");
+    return { observed: result, syncedBlock };
+  }
+
+  /**
+   * Fetches the fleet's attestation and verifies it as a pin would (Nitro
+   * chain, pinned PCR0, TeeRegistry PCR0_HASH and registered keys) without
+   * moving the signer's pin. Throws `EnclaveTrustRefused` on a refused
+   * attestation, anything else when the fleet or L1 cannot be read.
+   */
+  async attestEnclave(timeoutMs = 10_000): Promise<void> {
+    await verifyAndPin(this.pins.enclaveUrl, new OxideFleetRegistry(this.options.l1, this.pins), {
+      ...DEFAULT_TIMEOUTS,
+      attestationMs: timeoutMs,
     });
   }
 }

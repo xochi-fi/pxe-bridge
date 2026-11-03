@@ -24,7 +24,11 @@ import {
   deriveStorageSlotInMap,
 } from "@aztec-labs/stdlib/hash";
 import { jsonStringify } from "@aztec-labs/foundation/json-rpc";
-import { ACCOUNT_ADDRESS_ENV, assertAccountIdentity } from "./account-identity.js";
+import {
+  ACCOUNT_ADDRESS_ENV,
+  assertAccountIdentity,
+  SCHNORR_CLASS_ID_6_0_0,
+} from "./account-identity.js";
 import {
   PartialNoteUnresolved,
   type BroadcastGate,
@@ -62,7 +66,11 @@ import {
   SpendingLimitAccountContract,
   type SpendingLimitConfig,
 } from "./spending-limit-account.js";
-import type { AttestationObservation } from "./attestation.js";
+import type {
+  AccountAttestationObservation,
+  AccountAttestationRefusal,
+  AttestationObservation,
+} from "./attestation.js";
 import { assertJournaledIdentity, decodeTxBytes, identifyTx, type TxIdentity } from "./tx-identity.js";
 
 const MAX_TOKEN_CACHE_SIZE = 100;
@@ -1561,12 +1569,102 @@ export class AztecClient implements IAztecClient {
     ) {
       return { state: "unknown", reason: "account_address_mismatch" };
     }
+    const contract = this.spendingLimitContract;
+    const solver = this.solverAddress;
+    let root: string | undefined;
+    const observed = await this.observeFinalizedAttestation(
+      this.node,
+      recipient,
+      genesisOrNetworkDigest,
+      async (node, reference, stage) => {
+        stage("solver_artifact");
+        const artifact = await contract.getContractArtifact();
+        const initializedLayout = artifact.storageLayout["initialized"];
+        const rootLayout = artifact.storageLayout["allowlist_root"];
+        if (!initializedLayout || !rootLayout) return "finalized_history_unavailable";
+        const expectedClassId = (await getContractClassFromArtifact(artifact)).id
+          .toString()
+          .toLowerCase();
+        stage("solver_instance");
+        const solverInstance = await node.getContract(solver, reference);
+        if (!solverInstance) return "account_not_initialized";
+        if (solverInstance.currentContractClassId.toString().toLowerCase() !== expectedClassId) {
+          return "account_class_mismatch";
+        }
+        stage("solver_initialization");
+        const initialized = await node.getPublicStorageAt(reference, solver, initializedLayout.slot);
+        if (initialized.toBigInt() !== 1n) return "account_not_initialized";
+        stage("allowlist_root");
+        root = (await node.getPublicStorageAt(reference, solver, rootLayout.slot))
+          .toString()
+          .toLowerCase();
+        return undefined;
+      },
+    );
+    if (observed.state === "unknown") return observed;
+    if (root === undefined) return { state: "unknown", reason: "finalized_history_unavailable" };
+    return { state: "known", value: { ...observed.value, allowlistRoot: root } };
+  }
+
+  /**
+   * The finalized observation behind an Oxide-mode readiness attestation
+   * (xochi-fi/xochi#775 option a): the same exact finalized reference,
+   * network and recipient deployment as `observeAttestationChain`, for the
+   * `standard` account. The paying account must be the stock SchnorrAccount
+   * 6.0.0 class, published and initialized at that reference. It carries no
+   * allowlist root: Oxide mode's root is the bridge's private off-chain one
+   * (src/oxide/attestation.ts), never read from or written to the chain.
+   */
+  async observeStandardAccountChain(
+    recipient: string | undefined,
+    genesisOrNetworkDigest: string,
+  ): Promise<AccountAttestationObservation> {
+    if (!this.node || !this.solverAddress || this.spendingLimitConfig) {
+      return { state: "unknown", reason: "finalized_history_unavailable" };
+    }
+    const account = this.solverAddress;
+    return this.observeFinalizedAttestation(
+      this.node,
+      recipient,
+      genesisOrNetworkDigest,
+      async (node, reference, stage) => {
+        stage("sender_instance");
+        const instance = await node.getContract(account, reference);
+        if (!instance) return "account_not_initialized";
+        if (instance.currentContractClassId.toString().toLowerCase() !== SCHNORR_CLASS_ID_6_0_0) {
+          return "account_class_mismatch";
+        }
+        stage("sender_initialization");
+        const witness = await node.getNullifierMembershipWitness(
+          reference,
+          await computeSiloedPrivateInitializationNullifier(account, instance.initializationHash),
+        );
+        return witness === undefined ? "account_not_initialized" : undefined;
+      },
+    );
+  }
+
+  /**
+   * One exact, nonzero, fresh finalized reference with synchronized history,
+   * the account check `checkAccount` makes against it, then the recipient's
+   * deployment at the same reference. No read falls back to proven or latest.
+   */
+  private async observeFinalizedAttestation(
+    node: AztecNode,
+    recipient: string | undefined,
+    genesisOrNetworkDigest: string,
+    checkAccount: (
+      node: AztecNode,
+      reference: { number: BlockNumber; hash: BlockHash },
+      stage: (name: string) => void,
+    ) => Promise<AccountAttestationRefusal | undefined>,
+  ): Promise<AccountAttestationObservation> {
     let observationStage = "node_state";
     try {
       const [nodeInfo, worldState, tips] = await Promise.all([
-        this.node.getNodeInfo(),
-        this.node.getWorldStateSyncStatus(),
-        this.node.getChainTips(),
+        node.getNodeInfo(),
+        node.getWorldStateSyncStatus(),
+        node.getChainTips(),
       ]);
       const tip = tips.finalized.block;
       const number = Number(tip.number);
@@ -1588,7 +1686,7 @@ export class AztecClient implements IAztecClient {
       }
       const reference = { number: tip.number, hash: BlockHash.fromString(tip.hash) };
       observationStage = "finalized_block";
-      const block = await this.node.getBlockData(reference);
+      const block = await node.getBlockData(reference);
       if (
         !block ||
         Number(block.header.globalVariables.blockNumber) !== number ||
@@ -1602,42 +1700,11 @@ export class AztecClient implements IAztecClient {
       );
       if (timeReason !== undefined) return { state: "unknown", reason: timeReason };
 
-      observationStage = "solver_artifact";
-      const artifact = await this.spendingLimitContract.getContractArtifact();
-      const initializedLayout = artifact.storageLayout["initialized"];
-      const rootLayout = artifact.storageLayout["allowlist_root"];
-      if (!initializedLayout || !rootLayout) {
-        return { state: "unknown", reason: "finalized_history_unavailable" };
-      }
-      const expectedClassId = (await getContractClassFromArtifact(artifact)).id
-        .toString()
-        .toLowerCase();
-      observationStage = "solver_instance";
-      const solverInstance = await this.node.getContract(this.solverAddress, reference);
-      if (!solverInstance) {
-        return { state: "unknown", reason: "account_not_initialized" };
-      }
-      if (
-        solverInstance.currentContractClassId.toString().toLowerCase() !==
-        expectedClassId
-      ) {
-        return { state: "unknown", reason: "account_class_mismatch" };
-      }
-      observationStage = "solver_initialization";
-      const initialized = await this.node.getPublicStorageAt(
-        reference,
-        this.solverAddress,
-        initializedLayout.slot,
-      );
-      if (initialized.toBigInt() !== 1n) {
-        return { state: "unknown", reason: "account_not_initialized" };
-      }
-      observationStage = "allowlist_root";
-      const root = await this.node.getPublicStorageAt(
-        reference,
-        this.solverAddress,
-        rootLayout.slot,
-      );
+      const accountRefusal = await checkAccount(node, reference, (name) => {
+        observationStage = name;
+      });
+      if (accountRefusal !== undefined) return { state: "unknown", reason: accountRefusal };
+
       let recipientDeployment:
         | { state: "absent" }
         | { state: "present"; classId: string; initialized: boolean }
@@ -1645,14 +1712,14 @@ export class AztecClient implements IAztecClient {
       if (recipient !== undefined) {
         const address = AztecAddress.fromStringUnsafe(recipient);
         observationStage = "recipient_instance";
-        const instance = await this.node.getContract(address, reference);
+        const instance = await node.getContract(address, reference);
         if (instance) {
           observationStage = "recipient_initialization";
           const initializationNullifier = await computeSiloedPrivateInitializationNullifier(
             address,
             instance.initializationHash,
           );
-          const initializationWitness = await this.node.getNullifierMembershipWitness(
+          const initializationWitness = await node.getNullifierMembershipWitness(
             reference,
             initializationNullifier,
           );
@@ -1675,7 +1742,6 @@ export class AztecClient implements IAztecClient {
             blockHash: tip.hash.toLowerCase(),
             timestamp: block.header.globalVariables.timestamp.toString(),
           },
-          allowlistRoot: root.toString().toLowerCase(),
           ...(recipientDeployment ? { recipientDeployment } : {}),
         },
       };

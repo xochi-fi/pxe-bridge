@@ -5,6 +5,7 @@ import { JsonRpcRequestSchema, RPC_ERRORS, type IAztecClient } from "./types.js"
 import type { TransactionLimits } from "./limits.js";
 import type { AuditLogger } from "./audit.js";
 import type { ReadinessObserver } from "./readiness.js";
+import type { OxideReadinessProjection } from "./oxide/readiness.js";
 import {
   AttestationRpcRequestSchema,
   attestationHttpStatus,
@@ -70,6 +71,11 @@ export interface ServerOptions {
   settlement?: SettlementContext | undefined;
   /** Authoritative operational readiness, shared with createNote admission. */
   readiness?: ReadinessObserver | undefined;
+  /**
+   * Oxide mode's readiness (src/oxide/readiness.ts), served on `/ready` in
+   * place of the spending-limit projection. Exclusive with `readiness`.
+   */
+  oxideReadiness?: { observe(): Promise<OxideReadinessProjection> } | undefined;
   /** The HTTP response deadline; RESPONSE_TIMEOUT_MS unless a test shortens it. */
   responseTimeoutMs?: number | undefined;
   /** Readiness observation deadline; READINESS_TIMEOUT_MS unless a test shortens it. */
@@ -250,25 +256,34 @@ export function assertDistinctCredentials(
   }
 }
 
-type ReadinessProjection = Awaited<ReturnType<ReadinessObserver["observe"]>>;
-
-async function observeReadiness(
-  observation: Promise<ReadinessProjection>,
+/**
+ * One bounded observation shared by every concurrent caller: timed-out
+ * callers cannot accumulate backend reads or retained waiters.
+ */
+function singleFlight<T>(
+  source: { observe(signal?: AbortSignal): Promise<T> },
   timeoutMs: number,
-  abort: () => void,
-): Promise<ReadinessProjection> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      abort();
-      reject(new Error("readiness observation timed out"));
-    }, timeoutMs);
-  });
-  try {
-    return await Promise.race([observation, timeout]);
-  } finally {
-    clearTimeout(timer);
-  }
+): () => Promise<T> {
+  let flight: Promise<T> | undefined;
+  return () => {
+    if (flight) return flight;
+    const controller = new AbortController();
+    const raw = Promise.resolve().then(() => source.observe(controller.signal));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error("readiness observation timed out"));
+      }, timeoutMs);
+    });
+    const bounded = Promise.race([raw, timeout]).finally(() => clearTimeout(timer));
+    flight = bounded;
+    const clear = () => {
+      if (flight === bounded) flight = undefined;
+    };
+    void raw.then(clear, clear);
+    return bounded;
+  };
 }
 
 /**
@@ -382,39 +397,20 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
     throw new Error("Server and settlement must share one readiness observer");
   }
   const sourceReadinessObserver = opts.readiness ?? opts.settlement?.readiness;
-  type ReadinessFlight = {
-    raw: Promise<ReadinessProjection>;
-    bounded: Promise<ReadinessProjection>;
-  };
-  let readinessFlight: ReadinessFlight | undefined;
-  const currentReadinessObservation = (): Promise<ReadinessProjection> => {
-    if (!sourceReadinessObserver) {
-      return Promise.reject(new Error("readiness observer is not configured"));
-    }
-    if (readinessFlight) return readinessFlight.bounded;
-
-    const controller = new AbortController();
-    const raw = Promise.resolve().then(() =>
-      sourceReadinessObserver.observe(controller.signal),
-    );
-    const flight = {
-      raw,
-      bounded: observeReadiness(
-        raw,
-        opts.readinessTimeoutMs ?? READINESS_TIMEOUT_MS,
-        () => controller.abort(),
-      ),
-    };
-    readinessFlight = flight;
-    const clear = () => {
-      if (readinessFlight === flight) readinessFlight = undefined;
-    };
-    void raw.then(clear, clear);
-    return flight.bounded;
-  };
-  const readinessObserver: ReadinessObserver | undefined = sourceReadinessObserver
+  if (opts.oxideReadiness !== undefined && sourceReadinessObserver !== undefined) {
+    throw new Error("Oxide mode serves its own readiness; configure one readiness source");
+  }
+  const readinessTimeoutMs = opts.readinessTimeoutMs ?? READINESS_TIMEOUT_MS;
+  const currentReadinessObservation = sourceReadinessObserver
+    ? singleFlight(sourceReadinessObserver, readinessTimeoutMs)
+    : undefined;
+  const currentOxideObservation = opts.oxideReadiness
+    ? singleFlight(opts.oxideReadiness, readinessTimeoutMs)
+    : undefined;
+  const readinessObserver: ReadinessObserver | undefined = currentReadinessObservation
     ? { observe: currentReadinessObservation }
     : undefined;
+  const observeServedReadiness = currentOxideObservation ?? currentReadinessObservation;
   const readinessRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const rpcRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const recoveryRateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
@@ -566,12 +562,12 @@ export function createApp(client: IAztecClient, opts: ServerOptions = {}): Serve
           sendJson(res, 503, { ready: false, reasons: ["initializing"] });
           return;
         }
-        if (!readinessObserver) {
+        if (!observeServedReadiness) {
           sendJson(res, 503, { ready: false, reasons: ["readiness_observer_unconfigured"] });
           return;
         }
         try {
-          const readiness = await currentReadinessObservation();
+          const readiness = await observeServedReadiness();
           const projected =
             backendInFlight >= MAX_RPC_IN_FLIGHT ||
             ordinaryBodyInFlight >= MAX_RPC_BODY_IN_FLIGHT
