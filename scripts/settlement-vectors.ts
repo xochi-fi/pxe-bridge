@@ -385,17 +385,20 @@ async function oxideCase(spendingLimitFinalized: Observation): Promise<Record<st
     receiptStatus: "finalized",
     payoutNoteHashIndex: OXIDE_PAYOUT_FIXTURE.payoutNoteHashIndex,
   };
+  const withAnotherOrder = noteHashes.filter((_, i) => i !== OXIDE_PAYOUT_FIXTURE.payoutNoteHashIndex);
+  const absent = await locatePayoutNoteHash({ ...effects, noteHashes: withAnotherOrder }, siloed);
+  if (absent.kind !== "unresolved") throw new Error("a payout note hash at another position must not be located");
+  // A reverted transaction drops its revertible note hashes: the payout note
+  // is not among the effects (a consumer treats it there as a contradiction).
   const reverted: Observation = {
     state: "reverted",
     ...mined,
     executionResult: "reverted",
     receiptStatus: "finalized",
+    effects: { ...effects, noteHashes: withAnotherOrder },
     payoutNoteHashIndex: null,
   };
   const { payoutNoteHashIndex: _omit, ...withoutIndex } = finalized as Observation & { payoutNoteHashIndex: number };
-  const withAnotherOrder = noteHashes.filter((_, i) => i !== OXIDE_PAYOUT_FIXTURE.payoutNoteHashIndex);
-  const absent = await locatePayoutNoteHash({ ...effects, noteHashes: withAnotherOrder }, siloed);
-  if (absent.kind !== "unresolved") throw new Error("a payout note hash at another position must not be located");
 
   return {
     note:
