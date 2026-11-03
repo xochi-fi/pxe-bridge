@@ -857,6 +857,7 @@ async function main(): Promise<void> {
       client,
       secretKey,
       journalPath: sendMode.journalPath,
+      initializeJournal: sendMode.initializeJournal,
       l1RpcUrl: sendMode.l1RpcUrl,
       tokenArtifactPath: sendMode.tokenArtifactPath,
       mayBroadcast: mayBroadcast!,

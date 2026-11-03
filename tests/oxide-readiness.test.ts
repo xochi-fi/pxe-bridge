@@ -476,19 +476,21 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
     const { readiness, journal } = await readinessSetup({
       balance: { privateBalance: async () => ({ observed: 100n * DAI, syncedBlock: 100 }) },
     });
-    const ownTerms = oxideTerms(
-      OxideSendRequestSchema.parse(request({ recipient, amount: (80n * DAI).toString(), validUntil: NOW + 600 })),
-      OXIDE_V6_MAINNET.bridge.l2Token,
-    );
+    const ownTerms = request({
+      recipient,
+      amount: (80n * DAI).toString(),
+      validUntil: NOW + 600,
+    }).terms;
     journal.claim("own-operation", ownTerms);
     expect(
       await readiness.admit({ operationId: "own-operation", recipient, amount: (80n * DAI).toString() }),
     ).toEqual({ kind: "admitted" });
 
-    const peerTerms = oxideTerms(
-      OxideSendRequestSchema.parse(request({ recipient, amount: (30n * DAI).toString(), validUntil: NOW + 600 })),
-      OXIDE_V6_MAINNET.bridge.l2Token,
-    );
+    const peerTerms = request({
+      recipient,
+      amount: (30n * DAI).toString(),
+      validUntil: NOW + 600,
+    }).terms;
     journal.claim("peer-operation", peerTerms);
     expect(
       await readiness.admit({ operationId: "own-operation", recipient, amount: (80n * DAI).toString() }),
@@ -804,10 +806,11 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
     // simulated, signed and proven -- minutes -- and will spend the same
     // notes; a /ready served meanwhile must not show that principal free.
     const { readiness, journal } = await readinessSetup();
-    const terms = oxideTerms(
-      OxideSendRequestSchema.parse(request({ recipient, amount: (120n * DAI).toString(), validUntil: NOW + 600 })),
-      OXIDE_V6_MAINNET.bridge.l2Token,
-    );
+    const terms = request({
+      recipient,
+      amount: (120n * DAI).toString(),
+      validUntil: NOW + 600,
+    }).terms;
     journal.claim("op-1", terms);
     const projection = await readiness.observe();
     expect(projection.oxide.privateBalance).toMatchObject({
@@ -837,10 +840,11 @@ describe("Oxide readiness", { timeout: 60_000 }, () => {
         },
       },
     });
-    const terms = oxideTerms(
-      OxideSendRequestSchema.parse(request({ recipient, amount: (50n * DAI).toString(), validUntil: NOW + 60 })),
-      OXIDE_V6_MAINNET.bridge.l2Token,
-    );
+    const terms = request({
+      recipient,
+      amount: (50n * DAI).toString(),
+      validUntil: NOW + 60,
+    }).terms;
     journal.claim("op-1", terms);
     const attempt = journal.recordPrepared("op-1", {
       txHash: "0x" + "01".padStart(64, "0"),

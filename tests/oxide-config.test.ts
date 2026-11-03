@@ -34,10 +34,27 @@ describe("resolveSendModeConfig (PXE_BRIDGE_SEND_MODE)", () => {
     expect(resolveSendModeConfig(OXIDE_ENV)).toEqual({
       mode: "oxide",
       journalPath: OXIDE_ENV["PXE_BRIDGE_OXIDE_JOURNAL"],
+      initializeJournal: false,
       l1RpcUrl: "https://eth.example",
       tokenArtifactPath: OXIDE_ENV["PXE_BRIDGE_OXIDE_TOKEN_ARTIFACT"],
       caps: expect.objectContaining({ maxPerTx: DEFAULT_MAX_PER_TX, dailyLimit: DEFAULT_DAILY_LIMIT }),
     });
+  });
+
+  it("passes only an explicit journal initialization acknowledgement", () => {
+    expect(resolveSendModeConfig({ ...OXIDE_ENV, PXE_BRIDGE_OXIDE_JOURNAL_INITIALIZE: "true" })).toMatchObject({
+      mode: "oxide",
+      initializeJournal: true,
+    });
+    expect(() =>
+      resolveSendModeConfig({ ...OXIDE_ENV, PXE_BRIDGE_OXIDE_JOURNAL_INITIALIZE: "TRUE" }),
+    ).toThrow(/must be "true" or "false"/);
+    expect(() =>
+      resolveSendModeConfig({
+        PXE_BRIDGE_SEND_MODE: "spending_limit",
+        PXE_BRIDGE_OXIDE_JOURNAL_INITIALIZE: "true",
+      }),
+    ).toThrow(/set without PXE_BRIDGE_SEND_MODE=oxide/);
   });
 
   it.each([

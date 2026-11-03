@@ -15,6 +15,7 @@ export type SendModeConfig =
   | {
       mode: "oxide";
       journalPath: string;
+      initializeJournal: boolean;
       l1RpcUrl: string;
       tokenArtifactPath: string;
       caps: OxideCapsConfig;
@@ -23,6 +24,7 @@ export type SendModeConfig =
 /** Read only in Oxide mode; set in spending_limit mode they would be silently ignored. */
 const OXIDE_ONLY = [
   "PXE_BRIDGE_OXIDE_JOURNAL",
+  "PXE_BRIDGE_OXIDE_JOURNAL_INITIALIZE",
   "PXE_BRIDGE_OXIDE_L1_RPC_URL",
   "PXE_BRIDGE_OXIDE_TOKEN_ARTIFACT",
   "PXE_BRIDGE_OXIDE_MAX_PER_TX",
@@ -82,6 +84,15 @@ export function resolveSendModeConfig(env: NodeJS.ProcessEnv): SendModeConfig {
   }
   const missing = OXIDE_REQUIRED.filter((name) => !set(env, name));
   if (missing.length > 0) throw new Error(`${SEND_MODE_ENV}=oxide requires ${missing.join(", ")}`);
+  const initializeJournalRaw = env["PXE_BRIDGE_OXIDE_JOURNAL_INITIALIZE"];
+  if (
+    initializeJournalRaw !== undefined &&
+    initializeJournalRaw !== "" &&
+    initializeJournalRaw !== "true" &&
+    initializeJournalRaw !== "false"
+  ) {
+    throw new Error('PXE_BRIDGE_OXIDE_JOURNAL_INITIALIZE must be "true" or "false"');
+  }
   const journalPath = env["PXE_BRIDGE_OXIDE_JOURNAL"]!;
   if (resolve(journalPath) === resolve(env["PXE_BRIDGE_JOURNAL"]!)) {
     throw new Error("PXE_BRIDGE_OXIDE_JOURNAL must be its own file, not PXE_BRIDGE_JOURNAL");
@@ -99,6 +110,7 @@ export function resolveSendModeConfig(env: NodeJS.ProcessEnv): SendModeConfig {
   return {
     mode: "oxide",
     journalPath,
+    initializeJournal: initializeJournalRaw === "true",
     l1RpcUrl,
     tokenArtifactPath: env["PXE_BRIDGE_OXIDE_TOKEN_ARTIFACT"]!,
     caps: capsFromEnv(env),
