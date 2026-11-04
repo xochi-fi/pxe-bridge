@@ -190,6 +190,7 @@ CREATE TABLE allowlist_control_audit (
 `;
 
 class StateError extends Error {}
+export class AllowlistControlConflictError extends Error {}
 
 export interface OxideJournalIdentity {
   account: string;
@@ -211,6 +212,7 @@ export class OxideJournal {
   private journalId = "";
   private generation = 0;
   private fresh = false;
+  private needsSchema2Migration = false;
   private readonly hwmPath: string;
   private readonly now: () => number;
   private readonly allowCreate: boolean;
@@ -274,7 +276,16 @@ export class OxideJournal {
     if (!this.healthState.writable) return;
     this.checkHighWaterMark();
     if (!this.healthState.writable) return;
+    if (this.needsSchema2Migration) {
+      try {
+        this.migrateSchema2(db);
+      } catch (cause) {
+        this.classifyOpenError(cause);
+        return;
+      }
+    }
     this.checkInvariants();
+
   }
 
   private classifyOpenError(cause: unknown): void {
@@ -324,41 +335,7 @@ export class OxideJournal {
     }
     const schemaVersion = Number(meta.get("schema_version"));
     if (schemaVersion === 2) {
-      db.transaction(() => {
-        db.exec(`
-          CREATE TABLE allowlist_control_state (
-            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-            sequence TEXT NOT NULL,
-            root TEXT NOT NULL,
-            recipients_json TEXT NOT NULL
-          );
-          CREATE TABLE allowlist_control_operations (
-            operation_id TEXT PRIMARY KEY,
-            action TEXT NOT NULL CHECK (action IN ('approve', 'revoke')),
-            recipient TEXT NOT NULL,
-            sequence TEXT NOT NULL,
-            previous_root TEXT NOT NULL,
-            next_root TEXT NOT NULL,
-            digest TEXT NOT NULL,
-            recipients_json TEXT NOT NULL,
-            signature TEXT,
-            state TEXT NOT NULL CHECK (state IN ('prepared', 'authorized', 'applied')),
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
-          );
-          CREATE UNIQUE INDEX allowlist_control_sequence_unique
-            ON allowlist_control_operations(sequence);
-          CREATE TABLE allowlist_control_audit (
-            audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            operation_id TEXT NOT NULL,
-            action TEXT NOT NULL,
-            event TEXT NOT NULL,
-            created_at INTEGER NOT NULL
-          );
-        `);
-        db.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'")
-          .run(String(OXIDE_JOURNAL_SCHEMA_VERSION));
-      })();
+      this.needsSchema2Migration = true;
     } else if (schemaVersion !== OXIDE_JOURNAL_SCHEMA_VERSION) {
       this.disable("unknown_schema_version", `journal schema ${meta.get("schema_version")} is not supported`);
       return;
@@ -377,6 +354,45 @@ export class OxideJournal {
     ) {
       this.disable("account_mismatch", "Oxide journal identity does not match this account, token and deployment");
     }
+  }
+
+  private migrateSchema2(db: Database.Database): void {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE allowlist_control_state (
+          singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+          sequence TEXT NOT NULL,
+          root TEXT NOT NULL,
+          recipients_json TEXT NOT NULL
+        );
+        CREATE TABLE allowlist_control_operations (
+          operation_id TEXT PRIMARY KEY,
+          action TEXT NOT NULL CHECK (action IN ('approve', 'revoke')),
+          recipient TEXT NOT NULL,
+          sequence TEXT NOT NULL,
+          previous_root TEXT NOT NULL,
+          next_root TEXT NOT NULL,
+          digest TEXT NOT NULL,
+          recipients_json TEXT NOT NULL,
+          signature TEXT,
+          state TEXT NOT NULL CHECK (state IN ('prepared', 'authorized', 'applied')),
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE UNIQUE INDEX allowlist_control_sequence_unique
+          ON allowlist_control_operations(sequence);
+        CREATE TABLE allowlist_control_audit (
+          audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          operation_id TEXT NOT NULL,
+          action TEXT NOT NULL,
+          event TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+      `);
+      db.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'")
+        .run(String(OXIDE_JOURNAL_SCHEMA_VERSION));
+    })();
+    this.needsSchema2Migration = false;
   }
 
   /** Same rule as the settlement journal: below the mark, another id, or no mark beside a used journal. */
@@ -928,6 +944,18 @@ export class OxideJournal {
     return row ? toAllowlistControlOperation(row) : undefined;
   }
 
+  pendingAllowlistControlOperation(): AllowlistControlOperation | undefined {
+    const row = this.read((db) =>
+      db.prepare(
+        `SELECT * FROM allowlist_control_operations
+          WHERE state IN ('prepared', 'authorized')
+          ORDER BY created_at, operation_id
+          LIMIT 1`,
+      ).get(),
+    ) as AllowlistControlRow | undefined;
+    return row ? toAllowlistControlOperation(row) : undefined;
+  }
+
   prepareAllowlistControlOperation(input: Omit<AllowlistControlOperation, "signature" | "state">): AllowlistControlOperation {
     const existing = this.allowlistControlOperation(input.operationId);
     if (existing) {
@@ -943,6 +971,12 @@ export class OxideJournal {
         throw new JournalWriteError(this.healthState, "allowlist operation id was replayed with different content");
       }
       return existing;
+    }
+    const pending = this.pendingAllowlistControlOperation();
+    if (pending) {
+      throw new AllowlistControlConflictError(
+        `allowlist operation ${pending.operationId} must be applied before ${input.operationId}`,
+      );
     }
     this.write("prepare allowlist control operation", (db) => {
       const current = db

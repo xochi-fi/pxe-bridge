@@ -636,15 +636,19 @@ async function main(): Promise<void> {
 
   const { key: secretKey, source: keySource } = await resolveSecretKey();
   console.log(`[pxe-bridge] Secret key loaded from ${keySource}`);
-  const controlConfig: AllowlistControlConfig | undefined = readAllowlistControlConfig(process.env, [
-    secretKey,
-    API_KEY,
-    RECOVERY_API_KEY,
-    ADMIN_KEY,
-    MAY_BROADCAST_TOKEN,
-    attestationEnvironment?.apiKey,
-    attestationEnvironment?.relay.token,
-  ]);
+  const controlConfig: AllowlistControlConfig | undefined = readAllowlistControlConfig(
+    process.env,
+    [
+      secretKey,
+      API_KEY,
+      RECOVERY_API_KEY,
+      ADMIN_KEY,
+      MAY_BROADCAST_TOKEN,
+      attestationEnvironment?.apiKey,
+      attestationEnvironment?.relay.token,
+    ],
+    oxideAllowlist ? [oxideAllowlist.seedSecretDigest] : [],
+  );
 
   // Opened before the wallet, so a second bridge on the same journal stops
   // here, before it has derived a key or touched the node. Any other defect

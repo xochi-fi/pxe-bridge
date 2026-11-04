@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_DAILY_LIMIT, DEFAULT_MAX_PER_TX } from "../src/oxide/caps.js";
 import { readAllowlistControlConfig } from "../src/oxide/allowlist-control.js";
@@ -140,5 +141,19 @@ describe("readAllowlistControlConfig", () => {
       ),
     ).toThrow(/HTTPS/);
     expect(() => readAllowlistControlConfig(control, ["dedicated-control-token"])).toThrow(/differ/);
+  });
+
+  it("refuses a control token equal to the private allowlist seed", () => {
+    const seed = `0x${"aB".repeat(32)}`;
+    const seedDigest = createHash("sha256")
+      .update(seed.slice(2).toLowerCase())
+      .digest("hex");
+    expect(() =>
+      readAllowlistControlConfig(
+        { ...control, PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_TOKEN: seed },
+        [],
+        [seedDigest],
+      ),
+    ).toThrow(/private seed or key/);
   });
 });

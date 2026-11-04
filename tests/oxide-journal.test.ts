@@ -2,7 +2,7 @@ import { copyFileSync, readFileSync, statSync, unlinkSync, writeFileSync } from 
 import { describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
 import { JournalLockedError } from "../src/journal.js";
-import { OxideJournal } from "../src/oxide/journal.js";
+import { AllowlistControlConflictError, OxideJournal } from "../src/oxide/journal.js";
 import { fingerprintTerms } from "../src/settlement.js";
 import { CAPS, evidenceFor, RECIPIENT, request, tempJournalPath } from "./oxide-fixtures.js";
 
@@ -93,6 +93,47 @@ describe("OxideJournal", () => {
     const mark = JSON.parse(readFileSync(`${path}.hwm`, "utf8")) as { generation: number };
     writeFileSync(`${path}.hwm`, JSON.stringify({ journalId: "other", generation: mark.generation }));
     expect(OxideJournal.open(path).health()).toMatchObject({ writable: false, reason: "rollback_detected" });
+  });
+
+  it("does not migrate schema 2 before rollback validation", () => {
+    const path = tempJournalPath();
+    OxideJournal.open(path, { allowCreate: true }).close();
+    const db = new Database(path);
+    db.exec(`
+      DROP TABLE allowlist_control_audit;
+      DROP TABLE allowlist_control_operations;
+      DROP TABLE allowlist_control_state;
+      UPDATE meta SET value = '2' WHERE key = 'schema_version';
+    `);
+    db.close();
+    const mark = JSON.parse(readFileSync(`${path}.hwm`, "utf8")) as {
+      journalId: string;
+      generation: number;
+    };
+    writeFileSync(
+      `${path}.hwm`,
+      JSON.stringify({ ...mark, generation: mark.generation + 1 }),
+    );
+
+    const rolledBack = OxideJournal.open(path);
+    expect(rolledBack.health()).toMatchObject({
+      writable: false,
+      reason: "rollback_detected",
+    });
+    rolledBack.close();
+    const inspected = new Database(path, { readonly: true });
+    expect(
+      inspected.prepare("SELECT value FROM meta WHERE key = 'schema_version'").pluck().get(),
+    ).toBe("2");
+    expect(
+      inspected
+        .prepare(
+          "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name LIKE 'allowlist_control_%'",
+        )
+        .pluck()
+        .get(),
+    ).toBe(0);
+    inspected.close();
   });
 
   it("refuses malformed evidence at write and at open", () => {
@@ -240,6 +281,61 @@ describe("OxideJournal", () => {
       sequence: "1",
       digest,
     });
+  });
+
+  it("allows only one delayed allowlist replacement at a time", () => {
+    const journal = OxideJournal.open(tempJournalPath(), { allowCreate: true });
+    const root0 = `0x${"31".repeat(32)}`;
+    const root1 = `0x${"32".repeat(32)}`;
+    const root2 = `0x${"33".repeat(32)}`;
+    const digest1 = `0x${"34".repeat(32)}`;
+    const digest2 = `0x${"35".repeat(32)}`;
+    const recipient1 = `0x${"36".repeat(32)}`;
+    const recipient2 = `0x${"37".repeat(32)}`;
+    const operation1 = {
+      operationId: "delayed-1",
+      action: "approve" as const,
+      recipient: recipient1,
+      sequence: "1",
+      previousRoot: root0,
+      root: root1,
+      digest: digest1,
+      recipients: [{ address: recipient1, index: 1 }],
+    };
+    const operation2 = {
+      operationId: "delayed-2",
+      action: "approve" as const,
+      recipient: recipient2,
+      sequence: "2",
+      previousRoot: root1,
+      root: root2,
+      digest: digest2,
+      recipients: [
+        { address: recipient1, index: 1 },
+        { address: recipient2, index: 2 },
+      ],
+    };
+    journal.initializeAllowlistControl(root0, []);
+    expect(journal.prepareAllowlistControlOperation(operation1).state).toBe("prepared");
+    expect(journal.prepareAllowlistControlOperation(operation1).state).toBe("prepared");
+    expect(() => journal.prepareAllowlistControlOperation(operation2)).toThrow(
+      AllowlistControlConflictError,
+    );
+    expect(journal.health()).toEqual({ writable: true });
+    expect(
+      journal.authorizeAllowlistControlOperation(
+        operation1.operationId,
+        operation1.sequence,
+        operation1.digest,
+        `0x${"38".repeat(65)}`,
+      ).state,
+    ).toBe("authorized");
+    expect(() => journal.prepareAllowlistControlOperation(operation2)).toThrow(
+      AllowlistControlConflictError,
+    );
+    expect(journal.applyAllowlistControlOperation(operation1.operationId).state).toBe("applied");
+    expect(journal.prepareAllowlistControlOperation(operation2).state).toBe("prepared");
+    expect(journal.prepareAllowlistControlOperation(operation2).state).toBe("prepared");
   });
 
   it("refuses stale sequence, conflicting replay, and unsigned application", () => {

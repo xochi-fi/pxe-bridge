@@ -1,4 +1,4 @@
-import { randomInt } from "node:crypto";
+import { createHash, randomInt } from "node:crypto";
 import { encodeAbiParameters, getAddress, keccak256, recoverMessageAddress, type Hex } from "viem";
 import { z } from "zod";
 import { ALLOWLIST_CAPACITY, type AllowlistRecipient } from "../allowlist-tree.js";
@@ -11,13 +11,17 @@ import { type AllowlistControlOperation, OxideJournal } from "./journal.js";
 const HEX32 = /^0x[0-9a-f]{64}$/;
 const HEX65 = /^0x[0-9a-f]{130}$/;
 const LOOPBACK: Record<string, true> = { localhost: true, "127.0.0.1": true, "[::1]": true };
+const RecipientSchema = z
+  .string()
+  .regex(/^0x[0-9a-f]{64}$/i)
+  .transform((recipient) => recipient.toLowerCase());
 
 const PollResponseSchema = z
   .object({
     operation_id: z.string().min(1).max(128),
     binding_id: z.string().min(1).max(128),
     action: z.enum(["approve", "revoke"]),
-    recipient: z.string().regex(HEX32),
+    recipient: RecipientSchema,
     state: z.literal("queued"),
   })
   .strict()
@@ -27,7 +31,7 @@ const PollResponseSchema = z
         operation_id: z.string().min(1).max(128),
         binding_id: z.string().min(1).max(128),
         action: z.enum(["approve", "revoke"]),
-        recipient: z.string().regex(HEX32),
+        recipient: RecipientSchema,
         state: z.literal("authorized"),
         sequence: z.string().regex(/^(0|[1-9][0-9]*)$/),
         digest: z.string().regex(HEX32),
@@ -37,6 +41,17 @@ const PollResponseSchema = z
   );
 
 type PollResponse = z.infer<typeof PollResponseSchema>;
+export type AllowlistControlRefusalCode =
+  | "recipient_already_allowed"
+  | "recipient_not_allowed"
+  | "allowlist_full";
+
+class DeterministicControlRefusal extends Error {
+  constructor(readonly code: AllowlistControlRefusalCode) {
+    super(code);
+  }
+}
+
 
 export interface AllowlistControlConfig {
   url: string;
@@ -48,6 +63,7 @@ export interface AllowlistControlConfig {
 export function readAllowlistControlConfig(
   env: NodeJS.ProcessEnv,
   distinctCredentials: readonly (string | undefined)[] = [],
+  distinctCredentialDigests: readonly string[] = [],
 ): AllowlistControlConfig | undefined {
   const names = [
     "PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_URL",
@@ -81,6 +97,12 @@ export function readAllowlistControlConfig(
   }
   if (distinctCredentials.some((credential) => credential !== undefined && credential === values[1])) {
     throw new Error("Oxide allowlist control token must differ from every other bridge credential");
+  }
+  const tokenDigest = createHash("sha256")
+    .update(/^0x[0-9a-f]{64}$/i.test(values[1]!) ? values[1]!.slice(2).toLowerCase() : values[1]!)
+    .digest("hex");
+  if (distinctCredentialDigests.includes(tokenDigest)) {
+    throw new Error("Oxide allowlist control token must differ from every private seed or key");
   }
   let admin: `0x${string}`;
   try {
@@ -164,7 +186,18 @@ export class OxideAllowlistController {
     if (!operation) {
       const current = this.journal.allowlistControlState();
       if (!current) throw new Error("allowlist control state is unavailable");
-      const recipients = replaceRecipient(current.recipients, command.action, command.recipient);
+      let recipients: AllowlistRecipient[];
+      try {
+        recipients = replaceRecipient(current.recipients, command.action, command.recipient);
+      } catch (cause) {
+        if (!(cause instanceof DeterministicControlRefusal)) throw cause;
+        await this.expectNoContent({
+          kind: "refusal",
+          operation_id: command.operation_id,
+          code: cause.code,
+        });
+        return;
+      }
       const replacement = await this.allowlist.replacement(recipients);
       const sequence = (BigInt(current.sequence) + 1n).toString();
       const digest = allowlistOperationDigest({
@@ -275,12 +308,12 @@ function replaceRecipient(
   const normalized = recipient.toLowerCase();
   const present = current.some(({ address }) => address.toLowerCase() === normalized);
   if (action === "revoke") {
-    if (!present) throw new Error("recipient is not in the private set");
+    if (!present) throw new DeterministicControlRefusal("recipient_not_allowed");
     return current.filter(({ address }) => address.toLowerCase() !== normalized).map((member) => ({ ...member }));
   }
-  if (present) throw new Error("recipient is already in the private set");
+  if (present) throw new DeterministicControlRefusal("recipient_already_allowed");
   const occupied = new Set(current.map(({ index }) => index));
-  if (occupied.size >= ALLOWLIST_CAPACITY) throw new Error("private set has no free position");
+  if (occupied.size >= ALLOWLIST_CAPACITY) throw new DeterministicControlRefusal("allowlist_full");
   let index = randomInt(ALLOWLIST_CAPACITY);
   while (occupied.has(index)) index = (index + 1) % ALLOWLIST_CAPACITY;
   return [...current.map((member) => ({ ...member })), { address: normalized, index }].sort(
