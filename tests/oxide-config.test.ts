@@ -109,7 +109,7 @@ describe("resolveSendModeConfig (PXE_BRIDGE_SEND_MODE)", () => {
 describe("readAllowlistControlConfig", () => {
   const control = {
     PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_URL: "https://api.example/control",
-    PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_TOKEN: "dedicated-control-token",
+    PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_TOKEN: "dedicated-control-token-value-12345",
     PXE_BRIDGE_OXIDE_ALLOWLIST_ADMIN: `0x${"11".repeat(20)}`,
   };
 
@@ -126,7 +126,7 @@ describe("readAllowlistControlConfig", () => {
   it("accepts HTTPS or loopback HTTP and refuses credential aliasing", () => {
     expect(readAllowlistControlConfig(control)).toMatchObject({
       url: "https://api.example/control",
-      token: "dedicated-control-token",
+      token: "dedicated-control-token-value-12345",
       intervalMs: 10_000,
     });
     expect(
@@ -140,8 +140,45 @@ describe("readAllowlistControlConfig", () => {
         { ...control, PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_URL: "http://api.example/control" },
       ),
     ).toThrow(/HTTPS/);
-    expect(() => readAllowlistControlConfig(control, ["dedicated-control-token"])).toThrow(/differ/);
+    expect(() =>
+      readAllowlistControlConfig(control, ["dedicated-control-token-value-12345"]),
+    ).toThrow(/differ/);
   });
+
+  it.each([16, 24, 31])("refuses a %i-character control token", (length) => {
+    expect(() =>
+      readAllowlistControlConfig({
+        ...control,
+        PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_TOKEN: "x".repeat(length),
+      }),
+    ).toThrow(/at least 32 characters/);
+  });
+
+  it("accepts a dedicated 32-character control token", () => {
+    expect(
+      readAllowlistControlConfig({
+        ...control,
+        PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_TOKEN: "x".repeat(32),
+      }),
+    ).toMatchObject({ token: "x".repeat(32) });
+  });
+
+  it.each(["K1", "readiness"])(
+    "refuses alternate hex encoding of the %s credential",
+    () => {
+      const key = `0x${"ab".repeat(32)}`;
+      const alternateEncoding = "AB".repeat(32);
+      expect(() =>
+        readAllowlistControlConfig(
+          {
+            ...control,
+            PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_TOKEN: alternateEncoding,
+          },
+          [key],
+        ),
+      ).toThrow(/credential or private key/);
+    },
+  );
 
   it("refuses a control token equal to the private allowlist seed", () => {
     const seed = `0x${"aB".repeat(32)}`;
@@ -154,6 +191,6 @@ describe("readAllowlistControlConfig", () => {
         [],
         [seedDigest],
       ),
-    ).toThrow(/private seed or key/);
+    ).toThrow(/credential or private key/);
   });
 });

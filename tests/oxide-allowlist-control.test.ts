@@ -56,7 +56,7 @@ describe("OxideAllowlistController", () => {
     const controller = new OxideAllowlistController(
       {
         url: "https://worker.example/control",
-        token: "dedicated-control-token",
+        token: "dedicated-control-token-value-12345",
         admin: `0x${"75".repeat(20)}`,
         intervalMs: 10_000,
       },

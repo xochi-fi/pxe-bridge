@@ -53,6 +53,13 @@ class DeterministicControlRefusal extends Error {
 }
 
 
+function credentialDigest(value: string): string {
+  const trimmed = value.trim();
+  const encodedKey = /^(?:0x)?([0-9a-f]{64})$/i.exec(trimmed);
+  const canonical = encodedKey?.[1]?.toLowerCase() ?? trimmed;
+  return createHash("sha256").update(canonical).digest("hex");
+}
+
 export interface AllowlistControlConfig {
   url: string;
   token: string;
@@ -92,17 +99,18 @@ export function readAllowlistControlConfig(
   if (endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && LOOPBACK[endpoint.hostname])) {
     throw new Error("PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_URL must use HTTPS or loopback HTTP");
   }
-  if (values[1]!.length < 16) {
-    throw new Error("PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_TOKEN must contain at least 16 characters");
+  if (values[1]!.length < 32) {
+    throw new Error("PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_TOKEN must contain at least 32 characters");
   }
-  if (distinctCredentials.some((credential) => credential !== undefined && credential === values[1])) {
-    throw new Error("Oxide allowlist control token must differ from every other bridge credential");
-  }
-  const tokenDigest = createHash("sha256")
-    .update(/^0x[0-9a-f]{64}$/i.test(values[1]!) ? values[1]!.slice(2).toLowerCase() : values[1]!)
-    .digest("hex");
-  if (distinctCredentialDigests.includes(tokenDigest)) {
-    throw new Error("Oxide allowlist control token must differ from every private seed or key");
+  const tokenDigest = credentialDigest(values[1]!);
+  const reservedDigests = new Set([
+    ...distinctCredentials
+      .filter((credential): credential is string => credential !== undefined)
+      .map(credentialDigest),
+    ...distinctCredentialDigests.map((digest) => digest.toLowerCase()),
+  ]);
+  if (reservedDigests.has(tokenDigest)) {
+    throw new Error("Oxide allowlist control token must differ from every other bridge credential or private key");
   }
   let admin: `0x${string}`;
   try {

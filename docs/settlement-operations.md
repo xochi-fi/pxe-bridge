@@ -834,8 +834,10 @@ Enable the controller only with the complete, independent set:
 
 - `PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_URL`: the Worker's dedicated bridge
   control route; HTTPS or loopback HTTP only.
-- `PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_TOKEN`: dedicated bearer, different from
-  every RPC, admin, may-broadcast, attestation and relay credential.
+- `PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_TOKEN`: dedicated bearer of at least 32
+  characters. Its canonical digest must differ from every RPC, admin,
+  may-broadcast, attestation and relay credential, the K1 account key, and the
+  inline or file-backed private allowlist seed.
 - `PXE_BRIDGE_OXIDE_ALLOWLIST_ADMIN`: separately custodied EVM admin address.
 - optional `PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_INTERVAL_MS`, 1,000-300,000;
   default 10,000.
