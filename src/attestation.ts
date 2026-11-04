@@ -377,7 +377,7 @@ export interface AttestationAuditEvent {
 export interface AttestationProducerOptions {
   probe: AttestationChainProbe;
   journal: SettlementJournal;
-  allowlistTree: AllowlistTree;
+  allowlistTree: AllowlistTree | (() => AllowlistTree);
   signer: ReadinessSigner;
   domain: AttestationDomainConfig;
   now?: () => number;
@@ -411,12 +411,17 @@ export class AttestationProducer {
     return this.options.domain;
   }
 
+  private get allowlistTree(): AllowlistTree {
+    const configured = this.options.allowlistTree;
+    return typeof configured === "function" ? configured() : configured;
+  }
+
   async attestMembership(params: AttestationParams): Promise<MembershipResult> {
     const validated = await this.validateRequest(params, "aztec_attestRecipientMembership");
     if (validated.status === "refused") return validated;
     const { observation, descriptorDigest } = validated;
     const root = observation.allowlistRoot.toLowerCase();
-    const localRoot = this.options.allowlistTree.root.toString().toLowerCase();
+    const localRoot = this.allowlistTree.root.toString().toLowerCase();
     if (root !== localRoot) {
       return this.refuse("aztec_attestRecipientMembership", "allowlist_root_mismatch");
     }
@@ -430,14 +435,14 @@ export class AttestationProducer {
     if (!snapshot) {
       return this.refuse("aztec_attestRecipientMembership", "allowlist_snapshot_unavailable");
     }
-    if (!this.options.allowlistTree.matchesRecipients(snapshot.recipients)) {
+    if (!this.allowlistTree.matchesRecipients(snapshot.recipients)) {
       return this.refuse("aztec_attestRecipientMembership", "membership_uncertain");
     }
 
     const listed = snapshot.recipients.some(
       ({ address }) => address.toLowerCase() === params.recipient.toLowerCase(),
     );
-    const witness = this.options.allowlistTree.witnessFor(params.recipient);
+    const witness = this.allowlistTree.witnessFor(params.recipient);
     if (witness) {
       try {
         const reproduced = await rootFromSiblingPath(

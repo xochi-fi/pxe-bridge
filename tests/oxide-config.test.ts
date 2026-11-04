@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_DAILY_LIMIT, DEFAULT_MAX_PER_TX } from "../src/oxide/caps.js";
+import { readAllowlistControlConfig } from "../src/oxide/allowlist-control.js";
 import { resolveSendModeConfig } from "../src/oxide/config.js";
 
 /** A complete Oxide-mode environment. */
@@ -34,6 +36,11 @@ describe("resolveSendModeConfig (PXE_BRIDGE_SEND_MODE)", () => {
     expect(() =>
       resolveSendModeConfig({ PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS_FILE: "/run/secrets/recipients" }),
     ).toThrow(/ALLOWLIST_RECIPIENTS_FILE/);
+    expect(() =>
+      resolveSendModeConfig({
+        PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_URL: "https://api.example/control",
+      }),
+    ).toThrow(/CONTROL_URL/);
   });
 
   it("resolves a complete Oxide environment with the default caps", () => {
@@ -96,5 +103,94 @@ describe("resolveSendModeConfig (PXE_BRIDGE_SEND_MODE)", () => {
     expect(() =>
       resolveSendModeConfig({ ...OXIDE_ENV, PXE_BRIDGE_OXIDE_MAX_PER_TX: "2", PXE_BRIDGE_OXIDE_DAILY_LIMIT: "1" }),
     ).toThrow(/cannot exceed/);
+  });
+});
+
+describe("readAllowlistControlConfig", () => {
+  const control = {
+    PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_URL: "https://api.example/control",
+    PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_TOKEN: "dedicated-control-token-value-12345",
+    PXE_BRIDGE_OXIDE_ALLOWLIST_ADMIN: `0x${"11".repeat(20)}`,
+  };
+
+  it("is absent by default and requires every gate together", () => {
+    expect(readAllowlistControlConfig({})).toBeUndefined();
+    expect(() =>
+      readAllowlistControlConfig({ PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_URL: control.PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_URL }),
+    ).toThrow(/requires/);
+    expect(() =>
+      readAllowlistControlConfig({ PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_INTERVAL_MS: "1000" }),
+    ).toThrow(/requires/);
+  });
+
+  it("accepts HTTPS or loopback HTTP and refuses credential aliasing", () => {
+    expect(readAllowlistControlConfig(control)).toMatchObject({
+      url: "https://api.example/control",
+      token: "dedicated-control-token-value-12345",
+      intervalMs: 10_000,
+    });
+    expect(
+      readAllowlistControlConfig({
+        ...control,
+        PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_URL: "http://127.0.0.1:8787/control",
+      }),
+    ).toMatchObject({ url: "http://127.0.0.1:8787/control" });
+    expect(() =>
+      readAllowlistControlConfig(
+        { ...control, PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_URL: "http://api.example/control" },
+      ),
+    ).toThrow(/HTTPS/);
+    expect(() =>
+      readAllowlistControlConfig(control, ["dedicated-control-token-value-12345"]),
+    ).toThrow(/differ/);
+  });
+
+  it.each([16, 24, 31])("refuses a %i-character control token", (length) => {
+    expect(() =>
+      readAllowlistControlConfig({
+        ...control,
+        PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_TOKEN: "x".repeat(length),
+      }),
+    ).toThrow(/at least 32 characters/);
+  });
+
+  it("accepts a dedicated 32-character control token", () => {
+    expect(
+      readAllowlistControlConfig({
+        ...control,
+        PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_TOKEN: "x".repeat(32),
+      }),
+    ).toMatchObject({ token: "x".repeat(32) });
+  });
+
+  it.each(["K1", "readiness"])(
+    "refuses alternate hex encoding of the %s credential",
+    () => {
+      const key = `0x${"ab".repeat(32)}`;
+      const alternateEncoding = "AB".repeat(32);
+      expect(() =>
+        readAllowlistControlConfig(
+          {
+            ...control,
+            PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_TOKEN: alternateEncoding,
+          },
+          [key],
+        ),
+      ).toThrow(/credential or private key/);
+    },
+  );
+
+  it("refuses a control token equal to the private allowlist seed", () => {
+    const seed = `0x${"aB".repeat(32)}`;
+    const seedDigest = createHash("sha256")
+      .update(seed.slice(2).toLowerCase())
+      .digest("hex");
+    expect(() =>
+      readAllowlistControlConfig(
+        { ...control, PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_TOKEN: seed },
+        [],
+        [seedDigest],
+      ),
+    ).toThrow(/credential or private key/);
   });
 });

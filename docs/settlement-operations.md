@@ -827,33 +827,60 @@ the sending account, OXDAI token and pinned Oxide deployment; a mismatch
 refuses writes. Never use initialization to recover a lost journal: restore
 the matched database and high-water mark, then reconcile every ambiguous send.
 
-**Approving a recipient** (`scripts/oxide-allowlist.ts`; production procedure
-in G1 below):
+**Live G2 approve/revoke control.** The static file and
+`scripts/oxide-allowlist.ts` remain bootstrap/offline-recovery inputs only.
+Normal approval never stops the bridge and never rewrites the mounted file.
+Enable the controller only with the complete, independent set:
 
-1. Stop the bridge. Its journal holds an exclusive lock while it runs.
-2. With the CURRENT seed and set in the environment and `PXE_BRIDGE_JOURNAL`
-   pointing at the bridge's settlement journal, run
-   `--add 0x<address> --index random`. The script refuses unless the set
-   builds the root of the newest RootUpdate the bridge enqueued (`--initial`
-   only while the journal holds none). A mismatch means either the set is not
-   the one the bridge runs, or the bridge has not yet published a RootUpdate
-   for its current set (after a restart it waits for a finalized block above
-   the last one, `finalized_tip_not_advanced`): start it, wait for the
-   publish, stop it, retry. It also refuses an occupied position, a listed
-   address and the sending account (`PXE_BRIDGE_ACCOUNT_ADDRESS`), and prints
-   the next set, and nothing else, on stdout. It is secret.
-3. Store the next set and start the bridge on it. It publishes the new root's
-   RootUpdate from the next finalized block, and the Worker marks the binding
-   `ready` on its next refresh.
+- `PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_URL`: the Worker's dedicated bridge
+  control route; HTTPS or loopback HTTP only.
+- `PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_TOKEN`: dedicated bearer of at least 32
+  characters. Its canonical digest must differ from every RPC, admin,
+  may-broadcast, attestation and relay credential, the K1 account key, and the
+  inline or file-backed private allowlist seed.
+- `PXE_BRIDGE_OXIDE_ALLOWLIST_ADMIN`: separately custodied EVM admin address.
+- optional `PXE_BRIDGE_OXIDE_ALLOWLIST_CONTROL_INTERVAL_MS`, 1,000-300,000;
+  default 10,000.
 
-**Revoking a recipient** is not just closing future admission. A fresh send to
-a revoked recipient is refused PERMANENTLY, including an order whose source
-funds Riddler already pulled. So: (1) close Riddler intake for the recipient;
-(2) drain every obligation to it that has not yet reached createNote (paid, or
-refunded on its own path); (3) then run `--revoke 0x<address>` as above and
-restart. A prepared attempt already journaled still resends its exact bytes;
-one whose bytes lapse needs a fresh attempt and is refused like a new send.
-Xochi's binding drops to `pending` once the new root lands.
+All are Oxide-only. A partial set, revision other than 2, missing readiness
+attestations/journals/corridor, credential alias or invalid URL/address refuses
+startup. With all absent the controller is dark.
+
+The bridge polls outbound; it adds or removes exactly the Worker's named
+recipient, chooses a private free position for an approval and builds a full
+replacement without installing it. The Oxide journal first commits operation
+id, action, recipient, previous/next private roots, full replacement, sequence
+and digest. An exact queued replay returns the same proposal. Different content
+under the same id, a stale sequence or a state that no longer extends the
+durable current root is refused.
+
+The operator signs only the proposed digest with the configured admin. The
+bridge verifies the exact operation, monotonic sequence, digest and recovered
+admin before marking the replacement authorized. One SQLite transaction then
+advances the sequence/current set and marks the operation applied. Only after
+that durable commit does it atomically install the in-memory tree, record the
+attestation snapshot and push the existing RootUpdate wire. If delivery of the
+proposal or applied result is ambiguous, the next poll reconciles and repeats
+only the exact retained message; it never generates another replacement or
+blindly reapplies the mutation.
+
+The control HTTP messages carry one operation and recipient or a digest. They
+never carry the private set, root, position or membership witness. Bridge logs
+carry one stable refusal event and no operation-private values. The settlement
+journal and Oxide journal now both contain private allowlist material; archive
+and restore their database/high-water-mark pairs together under owner-only
+custody.
+
+An approval does not make a Worker binding ready. It remains pending until the
+normal Membership and RootUpdate refresh succeeds. An applied revocation
+closes fresh admission immediately; already journaled exact send bytes retain
+their normal recovery semantics. Close intake and reconcile admitted
+obligations before revocation. Do not resolve an ambiguous send by revoking and
+paying again.
+
+For an offline recovery, stop the bridge, restore the journal authority, and
+use `scripts/oxide-allowlist.ts` only to reproduce the retained set. Do not use
+the script as a parallel approval path.
 
 ### G1: approving or revoking an Oxide recipient in production
 

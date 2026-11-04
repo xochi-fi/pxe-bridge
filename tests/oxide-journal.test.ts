@@ -2,7 +2,7 @@ import { copyFileSync, readFileSync, statSync, unlinkSync, writeFileSync } from 
 import { describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
 import { JournalLockedError } from "../src/journal.js";
-import { OxideJournal } from "../src/oxide/journal.js";
+import { AllowlistControlConflictError, OxideJournal } from "../src/oxide/journal.js";
 import { fingerprintTerms } from "../src/settlement.js";
 import { CAPS, evidenceFor, RECIPIENT, request, tempJournalPath } from "./oxide-fixtures.js";
 
@@ -95,6 +95,47 @@ describe("OxideJournal", () => {
     expect(OxideJournal.open(path).health()).toMatchObject({ writable: false, reason: "rollback_detected" });
   });
 
+  it("does not migrate schema 2 before rollback validation", () => {
+    const path = tempJournalPath();
+    OxideJournal.open(path, { allowCreate: true }).close();
+    const db = new Database(path);
+    db.exec(`
+      DROP TABLE allowlist_control_audit;
+      DROP TABLE allowlist_control_operations;
+      DROP TABLE allowlist_control_state;
+      UPDATE meta SET value = '2' WHERE key = 'schema_version';
+    `);
+    db.close();
+    const mark = JSON.parse(readFileSync(`${path}.hwm`, "utf8")) as {
+      journalId: string;
+      generation: number;
+    };
+    writeFileSync(
+      `${path}.hwm`,
+      JSON.stringify({ ...mark, generation: mark.generation + 1 }),
+    );
+
+    const rolledBack = OxideJournal.open(path);
+    expect(rolledBack.health()).toMatchObject({
+      writable: false,
+      reason: "rollback_detected",
+    });
+    rolledBack.close();
+    const inspected = new Database(path, { readonly: true });
+    expect(
+      inspected.prepare("SELECT value FROM meta WHERE key = 'schema_version'").pluck().get(),
+    ).toBe("2");
+    expect(
+      inspected
+        .prepare(
+          "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name LIKE 'allowlist_control_%'",
+        )
+        .pluck()
+        .get(),
+    ).toBe(0);
+    inspected.close();
+  });
+
   it("refuses malformed evidence at write and at open", () => {
     const path = tempJournalPath();
     const journal = OxideJournal.open(path, { allowCreate: true });
@@ -180,5 +221,164 @@ describe("OxideJournal", () => {
       reason: "journal_inconsistent",
       detail: expect.stringContaining("not the fingerprint of the stored terms"),
     });
+  });
+  it("migrates schema 2 to the durable allowlist control schema", () => {
+    const path = tempJournalPath();
+    OxideJournal.open(path, { allowCreate: true }).close();
+    const db = new Database(path);
+    db.exec(`
+      DROP TABLE allowlist_control_audit;
+      DROP TABLE allowlist_control_operations;
+      DROP TABLE allowlist_control_state;
+      UPDATE meta SET value = '2' WHERE key = 'schema_version';
+    `);
+    db.close();
+    const journal = OxideJournal.open(path);
+    expect(journal.health()).toEqual({ writable: true });
+    expect(journal.initializeAllowlistControl(`0x${"01".repeat(32)}`, [])).toMatchObject({
+      sequence: "0",
+    });
+  });
+
+  it("durably applies one monotonic allowlist replacement and reconciles an exact replay", () => {
+    const path = tempJournalPath();
+    const journal = OxideJournal.open(path, { allowCreate: true });
+    const firstRoot = `0x${"11".repeat(32)}`;
+    const nextRoot = `0x${"12".repeat(32)}`;
+    const digest = `0x${"13".repeat(32)}`;
+    const recipient = `0x${"14".repeat(32)}`;
+    expect(journal.initializeAllowlistControl(firstRoot, [])).toEqual({
+      sequence: "0",
+      root: firstRoot,
+      recipients: [],
+    });
+    const prepared = journal.prepareAllowlistControlOperation({
+      operationId: "allow-1",
+      action: "approve",
+      recipient,
+      sequence: "1",
+      previousRoot: firstRoot,
+      root: nextRoot,
+      digest,
+      recipients: [{ address: recipient, index: 17 }],
+    });
+    expect(prepared.state).toBe("prepared");
+    expect(
+      journal.authorizeAllowlistControlOperation("allow-1", "1", digest, `0x${"15".repeat(65)}`).state,
+    ).toBe("authorized");
+    expect(journal.applyAllowlistControlOperation("allow-1").state).toBe("applied");
+    expect(journal.applyAllowlistControlOperation("allow-1").state).toBe("applied");
+    journal.close();
+
+    const reopened = OxideJournal.open(path);
+    expect(reopened.allowlistControlState()).toEqual({
+      sequence: "1",
+      root: nextRoot,
+      recipients: [{ address: recipient, index: 17 }],
+    });
+    expect(reopened.allowlistControlOperation("allow-1")).toMatchObject({
+      state: "applied",
+      sequence: "1",
+      digest,
+    });
+  });
+
+  it("allows only one delayed allowlist replacement at a time", () => {
+    const journal = OxideJournal.open(tempJournalPath(), { allowCreate: true });
+    const root0 = `0x${"31".repeat(32)}`;
+    const root1 = `0x${"32".repeat(32)}`;
+    const root2 = `0x${"33".repeat(32)}`;
+    const digest1 = `0x${"34".repeat(32)}`;
+    const digest2 = `0x${"35".repeat(32)}`;
+    const recipient1 = `0x${"36".repeat(32)}`;
+    const recipient2 = `0x${"37".repeat(32)}`;
+    const operation1 = {
+      operationId: "delayed-1",
+      action: "approve" as const,
+      recipient: recipient1,
+      sequence: "1",
+      previousRoot: root0,
+      root: root1,
+      digest: digest1,
+      recipients: [{ address: recipient1, index: 1 }],
+    };
+    const operation2 = {
+      operationId: "delayed-2",
+      action: "approve" as const,
+      recipient: recipient2,
+      sequence: "2",
+      previousRoot: root1,
+      root: root2,
+      digest: digest2,
+      recipients: [
+        { address: recipient1, index: 1 },
+        { address: recipient2, index: 2 },
+      ],
+    };
+    journal.initializeAllowlistControl(root0, []);
+    expect(journal.prepareAllowlistControlOperation(operation1).state).toBe("prepared");
+    expect(journal.prepareAllowlistControlOperation(operation1).state).toBe("prepared");
+    expect(() => journal.prepareAllowlistControlOperation(operation2)).toThrow(
+      AllowlistControlConflictError,
+    );
+    expect(journal.health()).toEqual({ writable: true });
+    expect(
+      journal.authorizeAllowlistControlOperation(
+        operation1.operationId,
+        operation1.sequence,
+        operation1.digest,
+        `0x${"38".repeat(65)}`,
+      ).state,
+    ).toBe("authorized");
+    expect(() => journal.prepareAllowlistControlOperation(operation2)).toThrow(
+      AllowlistControlConflictError,
+    );
+    expect(journal.applyAllowlistControlOperation(operation1.operationId).state).toBe("applied");
+    expect(journal.prepareAllowlistControlOperation(operation2).state).toBe("prepared");
+    expect(journal.prepareAllowlistControlOperation(operation2).state).toBe("prepared");
+  });
+
+  it("refuses stale sequence, conflicting replay, and unsigned application", () => {
+    const journal = OxideJournal.open(tempJournalPath(), { allowCreate: true });
+    const firstRoot = `0x${"21".repeat(32)}`;
+    const nextRoot = `0x${"22".repeat(32)}`;
+    const digest = `0x${"23".repeat(32)}`;
+    const recipient = `0x${"24".repeat(32)}`;
+    journal.initializeAllowlistControl(firstRoot, []);
+    expect(() =>
+      journal.prepareAllowlistControlOperation({
+        operationId: "stale",
+        action: "approve",
+        recipient,
+        sequence: "2",
+        previousRoot: firstRoot,
+        root: nextRoot,
+        digest,
+        recipients: [{ address: recipient, index: 1 }],
+      }),
+    ).toThrow(/monotonic/);
+    journal.prepareAllowlistControlOperation({
+      operationId: "allow-1",
+      action: "approve",
+      recipient,
+      sequence: "1",
+      previousRoot: firstRoot,
+      root: nextRoot,
+      digest,
+      recipients: [{ address: recipient, index: 1 }],
+    });
+    expect(() => journal.applyAllowlistControlOperation("allow-1")).toThrow(/not authorized/);
+    expect(() =>
+      journal.prepareAllowlistControlOperation({
+        operationId: "allow-1",
+        action: "revoke",
+        recipient,
+        sequence: "1",
+        previousRoot: firstRoot,
+        root: nextRoot,
+        digest,
+        recipients: [],
+      }),
+    ).toThrow(/replayed/);
   });
 });

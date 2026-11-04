@@ -73,11 +73,17 @@ export function validateOxideRecipients(input: unknown): AllowlistRecipient[] {
   });
 }
 
-/** The private set and its tree. Holds no method that lists or logs members. */
+export interface OxideAllowlistReplacement {
+  readonly tree: AllowlistTree;
+  readonly recipients: readonly AllowlistRecipient[];
+  readonly root: string;
+}
+
+/** The private set and its tree. Holds no method that logs members. */
 export class OxideAllowlist {
   private constructor(
-    readonly tree: AllowlistTree,
-    private readonly members: readonly AllowlistRecipient[],
+    private readonly seed: string,
+    private state: OxideAllowlistReplacement,
     /** SHA-256 of the canonical seed, for key-separation checks only. */
     readonly seedSecretDigest: string,
   ) {}
@@ -98,22 +104,57 @@ export class OxideAllowlist {
       throw new OxideAllowlistConfigError("the Oxide allowlist tree could not be built from its configuration");
     }
     const seedSecretDigest = createHash("sha256").update(seed.slice(2).toLowerCase()).digest("hex");
-    return new OxideAllowlist(tree, members, seedSecretDigest);
+    return new OxideAllowlist(
+      seed,
+      { tree, recipients: members, root: tree.root.toString().toLowerCase() },
+      seedSecretDigest,
+    );
+  }
+
+  /** The current tree. Consumers read this getter for every attestation. */
+  get tree(): AllowlistTree {
+    return this.state.tree;
   }
 
   /** The private root, lowercase 0x hex. Never log it or put it on chain. */
   get root(): string {
-    return this.tree.root.toString().toLowerCase();
+    return this.state.root;
   }
 
   /** Whether `recipient` holds a position whose witness reproduces the root. */
   admits(recipient: string): boolean {
-    return HEX32.test(recipient) && this.tree.witnessFor(recipient) !== undefined;
+    return HEX32.test(recipient) && this.state.tree.witnessFor(recipient) !== undefined;
   }
 
   /** The set as the journal snapshot records it (src/journal.ts `recordAllowlistSnapshot`). */
   snapshot(): AllowlistRecipient[] {
-    return this.members.map((member) => ({ ...member }));
+    return this.state.recipients.map((member) => ({ ...member }));
+  }
+
+  /**
+   * Build, but do not install, a full replacement. The caller durably commits
+   * its signed operation before `install` atomically swaps the in-memory view.
+   */
+  async replacement(recipients: unknown): Promise<OxideAllowlistReplacement> {
+    const members = validateOxideRecipients(recipients);
+    let tree: AllowlistTree;
+    try {
+      tree = await AllowlistTree.build(this.seed, members);
+    } catch {
+      throw new OxideAllowlistConfigError("the Oxide allowlist replacement could not be built");
+    }
+    return { tree, recipients: members, root: tree.root.toString().toLowerCase() };
+  }
+
+  install(replacement: OxideAllowlistReplacement): void {
+    if (replacement.root !== replacement.tree.root.toString().toLowerCase()) {
+      throw new OxideAllowlistConfigError("the Oxide allowlist replacement root is inconsistent");
+    }
+    this.state = {
+      tree: replacement.tree,
+      recipients: validateOxideRecipients(replacement.recipients),
+      root: replacement.root,
+    };
   }
 }
 
