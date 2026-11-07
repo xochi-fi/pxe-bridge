@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -14,6 +14,7 @@ import {
   recordBridgedClaim,
   recoverFeeJuiceClaim,
   topUpFeeJuice,
+  writeClaimFile,
   writePendingDeposit,
   type ClaimingWallet,
   type PendingFeeJuiceDeposit,
@@ -272,6 +273,30 @@ describe("pending deposit file", () => {
     const path = pendingDepositPath(SECRET_HASH, dir);
     writeFileSync(path, JSON.stringify({ ...pending, messageLeafIndex: "7" }));
     expect(() => findPendingDeposit(SECRET_HASH, dir)).toThrow(/go together/);
+  });
+
+  // --claim-out: the file a --fee-juice-claim consumer reads.
+  it("writes the consumer claim owner-only, lower-case, without the message hash", () => {
+    const claim = {
+      claimAmount: pending.claimAmount,
+      // A --recover env secret may be upper-case; xochi-sdk accepts only lower.
+      claimSecret: "0x" + "AB".repeat(32),
+      messageLeafIndex: "7",
+      messageHash: "0x" + "ee".repeat(32),
+    };
+    const path = join(dir, "claim.json");
+    writeClaimFile(path, claim);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
+      claimAmount: "1000",
+      claimSecret: "0x" + "ab".repeat(32),
+      messageLeafIndex: "7",
+    });
+    // A rerun with --recover rewrites the same claim.
+    writeClaimFile(path, claim);
+    // Another deposit's claim must not replace an unconsumed one.
+    expect(() => writeClaimFile(path, { ...claim, messageLeafIndex: "8" })).toThrow(/EEXIST/);
+    expect(JSON.parse(readFileSync(path, "utf8")).messageLeafIndex).toBe("7");
   });
 });
 

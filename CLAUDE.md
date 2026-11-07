@@ -28,6 +28,7 @@ npm run bridge-fee-juice -- --recipient 0x<addr>   # bridge fee juice from L1, p
 npm run bridge-fee-juice -- --deployer --recipient 0x<addr>   # same, printed as PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM
 npm run bridge-fee-juice -- --wait 0x<messageHash>   # resume a timed-out wait; never rerun the bridge step
 npm run bridge-fee-juice -- [--deployer] --recipient 0x<addr> --recover <deposit file>   # find a deposit whose run died; same --deployer as the lost run, or the claim prints under the wrong variable
+npm run bridge-fee-juice -- --recipient 0x<addr> [--recover <deposit file>] --claim-out <file>   # write {claimAmount, claimSecret (lower-case), messageLeafIndex} owner-only before the wait instead of printing it (a --fee-juice-claim file; stdout gets only the path and message hash); never replaces a different claim; a failed write stops before the wait and keeps the deposit file
 npm run bridge-fee-juice -- [--deployer] --address-only   # dev: derive the address from PXE_BRIDGE_SECRET_KEY, offline
 npm run top-up-fee-juice # bridge + claim on an account's behalf (spending limit account); env only, refuses arguments
 npm run update-allowlist -- --add 0x<addr> --index <n>   # add one allowlist recipient
