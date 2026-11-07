@@ -127,6 +127,29 @@ export function recordBridgedClaim(path: string, claim: BridgedFeeJuiceClaim): v
   renameSync(tmp, path);
 }
 
+/**
+ * Writes the claim a consumer takes (`--fee-juice-claim FILE`) to `path`,
+ * owner-only. Never replaces a different claim, which may be the only copy of
+ * an unconsumed one; an identical file, from a rerun with --recover, is kept.
+ */
+export function writeClaimFile(path: string, claim: BridgedFeeJuiceClaim): void {
+  const { claimAmount, claimSecret, messageLeafIndex } = claim;
+  const body = `${JSON.stringify({ claimAmount, claimSecret, messageLeafIndex })}\n`;
+  let fd: number;
+  try {
+    fd = openSync(path, "wx", 0o600);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST" && readFileSync(path, "utf8") === body) return;
+    throw err;
+  }
+  try {
+    writeSync(fd, body);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /** The claim a deposit file records once its deposit landed; undefined before. */
 export function bridgedClaimOf(deposit: PendingFeeJuiceDeposit): BridgedFeeJuiceClaim | undefined {
   if (deposit.messageLeafIndex === undefined || deposit.messageHash === undefined) return undefined;

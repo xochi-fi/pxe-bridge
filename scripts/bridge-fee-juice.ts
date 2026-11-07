@@ -45,10 +45,16 @@
  * deposit lands, before the wait. If the wait times out, the deposit is done:
  * resume with --wait <messageHash> rather than bridging again.
  *
+ * --claim-out FILE also writes {claimAmount, claimSecret, messageLeafIndex},
+ * the shape a --fee-juice-claim consumer reads, owner-only, before the wait.
+ * It never replaces a different claim. If the write fails the run stops before
+ * the wait and keeps the deposit file; rerun with --recover <file> --claim-out.
+ *
  * Usage:
  *   npx tsx scripts/bridge-fee-juice.ts [--deployer|--admin] --recipient 0x<address>
  *   npx tsx scripts/bridge-fee-juice.ts [--deployer] [--address-only]   (dev, key mode)
  *   npx tsx scripts/bridge-fee-juice.ts [--deployer|--admin] --recipient 0x<address> --recover <file>|0x<secretHash>
+ *     (each bridging or --recover form also takes --claim-out FILE)
  *   npx tsx scripts/bridge-fee-juice.ts --wait 0x<messageHash>
  *
  * Env:
@@ -106,6 +112,7 @@ import {
   recordBridgedClaim,
   recoverFeeJuiceClaim,
   waitForL1ToL2Message,
+  writeClaimFile,
   writePendingDeposit,
 } from "../src/fee-juice.js";
 import type { PendingFeeJuiceDeposit } from "../src/fee-juice.js";
@@ -113,7 +120,8 @@ import type { BridgedFeeJuiceClaim } from "../src/types.js";
 
 const USAGE =
   "Usage: bridge-fee-juice [--deployer|--admin] --recipient 0x<address> [--recover <file>|0x<secretHash>] | " +
-  "[--deployer] [--address-only] (dev, PXE_BRIDGE_SECRET_KEY) | --wait 0x<messageHash>";
+  "[--deployer] [--address-only] (dev, PXE_BRIDGE_SECRET_KEY) | --wait 0x<messageHash>; " +
+  "bridging and --recover take --claim-out FILE";
 
 /** The spending-limit admin, as the bridge reads it; `--admin` checks the recipient against it. */
 const ADMIN_ADDRESS_ENV = "PXE_BRIDGE_SPENDING_LIMIT_ADMIN";
@@ -143,6 +151,7 @@ async function main(): Promise<void> {
     recipient?: string;
     recover?: string;
     wait?: string;
+    "claim-out"?: string;
   };
   try {
     ({ values } = parseArgs({
@@ -153,6 +162,7 @@ async function main(): Promise<void> {
         recipient: { type: "string" },
         recover: { type: "string" },
         wait: { type: "string" },
+        "claim-out": { type: "string" },
       },
       strict: true,
       allowPositionals: false,
@@ -169,7 +179,8 @@ async function main(): Promise<void> {
       values.admin ||
       values["address-only"] ||
       values.recipient !== undefined ||
-      values.recover !== undefined
+      values.recover !== undefined ||
+      values["claim-out"] !== undefined
     ) {
       fail(`--wait takes no other argument. ${USAGE}`);
     }
@@ -184,6 +195,10 @@ async function main(): Promise<void> {
   const toAdmin = values.admin === true;
   const addressOnly = values["address-only"] === true;
   const recoverArg = values.recover;
+  const claimOut = values["claim-out"];
+  if (claimOut !== undefined && (addressOnly || claimOut === "")) {
+    fail(`--claim-out needs a file and a deposit, not --address-only. ${USAGE}`);
+  }
   // A deposit file, or a secret hash whose file is in the working directory.
   // A hash with no file there takes the secret from the env.
   let recoverFile: ReturnType<typeof findPendingDeposit>;
@@ -411,6 +426,18 @@ async function main(): Promise<void> {
     console.log(`${envName}='${JSON.stringify(claimJson)}'`);
     console.log(`\nL1 to L2 message hash: ${messageHash}\n`);
     if (depositFile !== undefined && recorded === undefined) recordBridgedClaim(depositFile, claim);
+    // Thrown before the wait: the catch below keeps the deposit file.
+    if (claimOut !== undefined) {
+      try {
+        writeClaimFile(claimOut, claim);
+      } catch (err) {
+        throw new Error(
+          `Cannot write --claim-out ${claimOut}: ${(err as Error).message}` +
+            (depositFile !== undefined ? `. Rerun with:\n${recoverCommand(depositFile)} --claim-out <file>` : ""),
+        );
+      }
+      console.log(`Claim written to ${claimOut} (owner-only).\n`);
+    }
   };
 
   console.log(`Connecting to Aztec node at ${AZTEC_NODE_URL}`);
