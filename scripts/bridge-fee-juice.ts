@@ -45,10 +45,12 @@
  * deposit lands, before the wait. If the wait times out, the deposit is done:
  * resume with --wait <messageHash> rather than bridging again.
  *
- * --claim-out FILE also writes {claimAmount, claimSecret, messageLeafIndex},
- * the shape a --fee-juice-claim consumer reads, owner-only, before the wait.
- * It never replaces a different claim. If the write fails the run stops before
- * the wait and keeps the deposit file; rerun with --recover <file> --claim-out.
+ * --claim-out FILE writes {claimAmount, claimSecret, messageLeafIndex}, the
+ * shape a --fee-juice-claim consumer reads (secret lower-case), owner-only,
+ * before the wait, instead of printing it: stdout gets only the path and the
+ * message hash. It never replaces a different claim. If the write fails the
+ * run stops before the wait and keeps the deposit file; rerun with
+ * --recover <file> --claim-out.
  *
  * Usage:
  *   npx tsx scripts/bridge-fee-juice.ts [--deployer|--admin] --recipient 0x<address>
@@ -419,15 +421,12 @@ async function main(): Promise<void> {
   // Printed before the wait: the L1 deposit is done and cannot be undone,
   // and a wait that times out must not take the only copy of the claim. The
   // file gets the claim too, since the terminal may not survive the wait.
+  // With --claim-out the claim goes only to that file, never to stdout.
   const printClaim = (claim: BridgedFeeJuiceClaim): void => {
     bridged = claim;
     const { messageHash, ...claimJson } = claim;
-    console.log("\nBridged. Set this on the bridge once the message has synced:\n");
-    console.log(`${envName}='${JSON.stringify(claimJson)}'`);
-    console.log(`\nL1 to L2 message hash: ${messageHash}\n`);
-    if (depositFile !== undefined && recorded === undefined) recordBridgedClaim(depositFile, claim);
-    // Thrown before the wait: the catch below keeps the deposit file.
     if (claimOut !== undefined) {
+      // Thrown before the wait: the catch below keeps the deposit file.
       try {
         writeClaimFile(claimOut, claim);
       } catch (err) {
@@ -436,8 +435,13 @@ async function main(): Promise<void> {
             (depositFile !== undefined ? `. Rerun with:\n${recoverCommand(depositFile)} --claim-out <file>` : ""),
         );
       }
-      console.log(`Claim written to ${claimOut} (owner-only).\n`);
+      console.log(`\nBridged. Claim written to ${claimOut} (owner-only); use it once the message has synced.`);
+    } else {
+      console.log("\nBridged. Set this on the bridge once the message has synced:\n");
+      console.log(`${envName}='${JSON.stringify(claimJson)}'`);
     }
+    console.log(`\nL1 to L2 message hash: ${messageHash}\n`);
+    if (depositFile !== undefined && recorded === undefined) recordBridgedClaim(depositFile, claim);
   };
 
   console.log(`Connecting to Aztec node at ${AZTEC_NODE_URL}`);
@@ -490,7 +494,7 @@ async function main(): Promise<void> {
   } catch (err) {
     if (bridged !== undefined) {
       fail(
-        `\n${(err as Error).message}.\nThe deposit is on L1 and the claim above stays valid` +
+        `\n${(err as Error).message}.\nThe deposit is on L1 and the claim ${claimOut === undefined ? "above " : ""}stays valid` +
           (depositFile !== undefined ? `, also recorded in ${depositFile}` : "") +
           ". Do not run the bridge step again: that deposits a second time. Resume the wait with:\n" +
           `  npm run bridge-fee-juice -- --wait ${bridged.messageHash}`,

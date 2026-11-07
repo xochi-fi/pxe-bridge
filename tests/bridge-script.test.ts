@@ -1,8 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getSchnorrAccountContractAddress } from "@aztec-labs/accounts/schnorr";
 import { deriveAccountKeys, deriveDeployerKeys, type AccountKeys } from "../src/aztec-client.js";
+import { recordBridgedClaim, writePendingDeposit } from "../src/fee-juice.js";
 
 const SCRIPT = fileURLToPath(new URL("../scripts/bridge-fee-juice.ts", import.meta.url));
 const ADMIN = "0x" + "ab".repeat(32);
@@ -124,5 +128,49 @@ describe("bridge-fee-juice deployer target", { timeout: 60_000 }, () => {
     const r = run({ PXE_BRIDGE_SECRET_KEY: KEY }, ["--deployer", "--recipient", OTHER]);
     expect(r.status).toBe(1);
     expect(r.out).toContain("not both");
+  });
+});
+
+// A recorded deposit file prints its claim without L1; the wait then fails
+// against an unreachable node, after the claim boundary under test.
+describe("bridge-fee-juice --claim-out", { timeout: 60_000 }, () => {
+  it("writes the claim to the file and never prints its secret", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pxe-bridge-claim-out-"));
+    try {
+      const secret = "0x" + "0A".repeat(32);
+      const deposit = writePendingDeposit(
+        {
+          recipient: OTHER,
+          claimAmount: "4000000000000000000",
+          claimSecret: secret,
+          secretHash: "0x" + "0b".repeat(32),
+          l1FromBlock: "42",
+          l1Sender: "0x" + "cd".repeat(20),
+        },
+        dir,
+      );
+      recordBridgedClaim(deposit, {
+        claimAmount: "4000000000000000000",
+        claimSecret: secret,
+        messageLeafIndex: "7",
+        messageHash: "0x00" + "ee".repeat(31),
+      });
+      const claimFile = join(dir, "claim.json");
+      const r = run({ AZTEC_NODE_URL: "http://127.0.0.1:9" }, [
+        "--deployer",
+        "--recipient",
+        OTHER,
+        "--recover",
+        deposit,
+        "--claim-out",
+        claimFile,
+      ]);
+      expect(r.out).toContain(`Claim written to ${claimFile}`);
+      expect(r.out.toLowerCase()).not.toContain(secret.slice(2).toLowerCase());
+      expect(r.out).not.toContain("PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM=");
+      expect(JSON.parse(readFileSync(claimFile, "utf8")).claimSecret).toBe(secret.toLowerCase());
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

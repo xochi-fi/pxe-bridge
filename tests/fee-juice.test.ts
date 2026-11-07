@@ -276,10 +276,11 @@ describe("pending deposit file", () => {
   });
 
   // --claim-out: the file a --fee-juice-claim consumer reads.
-  it("writes the consumer claim owner-only, without the message hash", () => {
+  it("writes the consumer claim owner-only, lower-case, without the message hash", () => {
     const claim = {
       claimAmount: pending.claimAmount,
-      claimSecret: pending.claimSecret,
+      // A --recover env secret may be upper-case; xochi-sdk accepts only lower.
+      claimSecret: "0x" + "AB".repeat(32),
       messageLeafIndex: "7",
       messageHash: "0x" + "ee".repeat(32),
     };
@@ -288,7 +289,7 @@ describe("pending deposit file", () => {
     expect(statSync(path).mode & 0o777).toBe(0o600);
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
       claimAmount: "1000",
-      claimSecret: pending.claimSecret,
+      claimSecret: "0x" + "ab".repeat(32),
       messageLeafIndex: "7",
     });
     // A rerun with --recover rewrites the same claim.
