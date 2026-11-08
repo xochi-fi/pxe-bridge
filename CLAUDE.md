@@ -1,10 +1,10 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Project Overview
-
-JSON-RPC bridge that connects EVM intent solvers to Aztec L2 shielded settlement. Runs an HTTP server wrapping Aztec SDK operations via an embedded PXE wallet. Supports both standard Schnorr accounts and a custom spending-limit account contract (Noir) with on-chain per-tx caps, daily volume limits, recipient allowlist, and timelocked admin.
+JSON-RPC bridge from EVM intent solvers to Aztec L2 shielded settlement: a
+`node:http` server wrapping the Aztec SDK through an embedded PXE wallet.
+Supports a plain Schnorr account and a custom spending-limit account contract
+(Noir) with on-chain per-tx caps, a daily window, a Merkle recipient allowlist
+and a timelocked admin.
 
 ```
 EVM Solver --JSON-RPC--> pxe-bridge --Aztec SDK--> Aztec L2 Node
@@ -13,156 +13,259 @@ EVM Solver --JSON-RPC--> pxe-bridge --Aztec SDK--> Aztec L2 Node
 ## Commands
 
 ```bash
-npm install              # install dependencies
-npm run build            # tsc compile to dist/
-npm run typecheck        # tsc --noEmit for src/ and (via tsconfig.test.json) tests/ and scripts/
-npm test                 # vitest run (unit + integration)
-npm run test:watch       # vitest in watch mode
-npm run test:coverage    # vitest with v8 coverage
-npm run test:e2e         # e2e tests except the crash smoke (requires running Aztec sandbox)
-npm run test:e2e:crash   # crash smoke alone (requires a FRESH sandbox; see E2E Tests)
-npm run test:e2e:up      # compose up, e2e, compose down; then the same for the crash smoke
-npm run dev              # run with tsx (no build step)
-npm start                # run compiled dist/index.js
-npm run bridge-fee-juice -- --recipient 0x<addr>   # bridge fee juice from L1, print FEE_JUICE_CLAIM (Schnorr only)
-npm run bridge-fee-juice -- --deployer --recipient 0x<addr>   # same, printed as PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM
-npm run bridge-fee-juice -- --wait 0x<messageHash>   # resume a timed-out wait; never rerun the bridge step
-npm run bridge-fee-juice -- [--deployer] --recipient 0x<addr> --recover <deposit file>   # find a deposit whose run died; same --deployer as the lost run, or the claim prints under the wrong variable
-npm run bridge-fee-juice -- --recipient 0x<addr> [--recover <deposit file>] --claim-out <file>   # write {claimAmount, claimSecret (lower-case), messageLeafIndex} owner-only before the wait instead of printing it (a --fee-juice-claim file; stdout gets only the path and message hash); never replaces a different claim; a failed write stops before the wait and keeps the deposit file
-npm run bridge-fee-juice -- [--deployer] --address-only   # dev: derive the address from PXE_BRIDGE_SECRET_KEY, offline
-npm run top-up-fee-juice # bridge + claim on an account's behalf (spending limit account); env only, refuses arguments
-npm run update-allowlist -- --add 0x<addr> --index <n>   # add one allowlist recipient
-npm run update-allowlist -- --revoke 0x<addr>            # revoke one allowlist recipient
-npm run -s oxide-allowlist -- --add 0x<addr> --index random  # Oxide private allowlist: print the next set (bridge stopped; dev, secrets in env)
-npm run -s oxide-allowlist -- --revoke 0x<addr>   # drain the recipient's obligations first (docs)
-npm run -s oxide-allowlist -- --stdin   # production: seed, set and the change as KEY=VALUE lines on stdin, nothing in argv/env (docs G1)
-docker build --target oxide-allowlist -t pxe-bridge-oxide-allowlist:<tag> .   # production tool image (docs G1)
+npm install
+npm run build            # tsc -b
+npm run typecheck        # src/, tests/, scripts/
+npm test                 # vitest run
+npm run test:watch
+npm run test:coverage
+npm run test:e2e         # needs a running sandbox; excludes the crash smoke
+npm run test:e2e:crash   # crash smoke alone, on a FRESH sandbox
+npm run test:e2e:up      # compose up, e2e, compose down; then the crash smoke
+npm run dev              # tsx src/index.ts
+npm start                # node dist/index.js
+
+npm run bridge-fee-juice -- --recipient 0x<addr>                 # L1 -> L2 fee juice; prints FEE_JUICE_CLAIM
+npm run bridge-fee-juice -- --deployer --recipient 0x<addr>      # same, as PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM
+npm run bridge-fee-juice -- --admin --recipient 0x<addr>         # same, as SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM
+npm run bridge-fee-juice -- --wait 0x<messageHash>               # resume a timed-out wait; never rerun the bridge step
+npm run bridge-fee-juice -- [--deployer] --recipient 0x<addr> --recover <deposit file>   # recover a run that died
+npm run bridge-fee-juice -- --recipient 0x<addr> --claim-out <file>   # write the claim owner-only instead of printing it
+npm run bridge-fee-juice -- [--deployer] --address-only          # dev: derive the address from PXE_BRIDGE_SECRET_KEY
+npm run top-up-fee-juice          # bridge + claim on an account's behalf; env only, refuses arguments
+npm run update-allowlist -- --add 0x<addr> --index <n>
+npm run update-allowlist -- --revoke 0x<addr>
+npm run -s oxide-allowlist -- --add 0x<addr> --index random     # Oxide private allowlist; bridge stopped
+npm run -s oxide-allowlist -- --revoke 0x<addr>                 # drain the recipient's obligations first
+npm run -s oxide-allowlist -- --stdin                           # production: KEY=VALUE lines on stdin, nothing in argv/env
+docker build --target oxide-allowlist -t pxe-bridge-oxide-allowlist:<tag> .
 npm run admin -- status [--expect-root <hex>] [--expect-paused] [--min-fee-juice <n>]   # exit bits 2 pause, 4 proposal, 8 root, 16 fee juice
 npm run admin -- pause|unpause|apply-limits|cancel-limits
 npm run admin -- propose-limits --max-per-tx <n> --daily <n>
-npm run build:oxide-token   # compile the OxideToken artifact from contracts/oxide (aztec-up 6.0.0), refuse unless OXDAI's class
-npm run check:oxide-token [-- <artifact.json>]   # the class check alone
+npm run build:oxide-token         # compile the OxideToken artifact; refuses unless OXDAI's class
+npm run check:oxide-token [-- <artifact.json>]
 ```
 
-Admin commands read `SPENDING_LIMIT_ACCOUNT`, `SPENDING_LIMIT_ADMIN_KEY` (not needed by `status`) and `AZTEC_NODE_URL`; `update-allowlist` also `PXE_BRIDGE_ALLOWLIST_SEED` and `PXE_BRIDGE_ALLOWLIST_RECIPIENTS`, which `status` uses for the expected root when `--expect-root` is absent. All need the artifact in `contracts/spending_limit_account/target/`.
+Admin commands read `SPENDING_LIMIT_ACCOUNT`, `SPENDING_LIMIT_ADMIN_KEY` (not
+`status`) and `AZTEC_NODE_URL`; `update-allowlist` also
+`PXE_BRIDGE_ALLOWLIST_SEED` and `PXE_BRIDGE_ALLOWLIST_RECIPIENTS`. All need the
+artifact in `contracts/spending_limit_account/target/`.
 
-CI runs `typecheck` -> `test` -> `build`, then a separate `e2e` job via docker compose. The `contract` job also builds the OxideToken artifact (`npm run build:oxide-token`) and fails unless it is the deployed OXDAI class.
+CI runs `typecheck` -> `test` -> `build`, an `e2e` job via docker compose, and a
+`contract` job that compiles both contracts and checks `CLASS_ID`,
+`ARTIFACT_SHA256` and the OXDAI class.
 
-## E2E Tests
+## E2E tests
 
-E2e tests (`tests/e2e/`) run against a real Aztec sandbox node via `docker-compose.yml` (Anvil L1 + Aztec node). The `globalSetup` auto-starts compose if `AZTEC_NODE_URL` is not set.
+`tests/e2e/` runs against `docker-compose.yml` (Anvil + `azteclabs/aztec:6.0.0`,
+no platform pin). `globalSetup` starts compose unless `AZTEC_NODE_URL` is set;
+`AZTEC_NODE_URL` and `L1_RPC_URL` point the suite elsewhere.
 
-Anvil (`foundry:v1.8.5`, the foundry the 6.0.0 toolchain bundles) runs with `--block-base-fee-per-gas 0`, which it holds constant, and automines: no `--block-time`, because the 6.0.0 local network's automine sequencer drives L1 time itself, and under `--block-time 1` its proposals reverted `Rollup__SlotAlreadyInChain` until startup timed out. Automine advances one 12-second slot per transaction, so Compose starts Anvil five minutes behind wall time; larger offsets (-1,800, -2,700, -3,600 s) make the 6.0.0 local network fail its own startup ("Insufficient fee per gas"). Under traffic the chain clock still runs far ahead (CI run 41004463168: -191 s to +2,870 s across the suite), which left every crash-recovery bridge refusing `finalized_tip_from_future`, so the crash smoke (`tests/e2e/crash-recovery.test.ts`, whose bridges must pass `/ready`) is excluded from `npm run test:e2e` and runs alone on a fresh sandbox via `npm run test:e2e:crash` (`E2E_SUITE=crash` in `vitest.config.e2e.ts`; CI and `test:e2e:up` recreate compose in between). Even alone its setup runs the clock about 600 s ahead, so its `beforeAll` waits (up to 20 minutes) for the finalized tip to return to wall time before any bridge starts, and its `startBridge` reports the last `/ready` answer when a bridge never becomes ready. The attestation smoke likewise waits for the tip to return inside the production 300-second future-skew limit rather than weakening that policy; a stalled run still breaches the 7,200-second age limit. With a nonzero base fee the L2 min fee steps down 3-15x at each L1 fee oracle refresh, and a send priced off `getPredictedMinFees` right after a checkpoint is simulated against the previous, higher fee and rejected. CI starts compose itself and dumps `docker compose logs` on e2e failure. `AZTEC_NODE_URL` and `L1_RPC_URL` point the suite at a sandbox on other ports.
-The sandbox node's own L1-client drift startup check is disabled only in Compose because startup latency makes that deliberate offset exceed its 300-second default; bridge readiness and attestation still enforce 7,200 seconds maximum age and 300 seconds maximum future skew. Production node configuration keeps its default drift check.
-
-Compose also passes Anvil `--slots-in-an-epoch 1`, matching the Aztec SDK's
-test launcher. Anvil defines its finalized L1 tag as
-`latest - 2 * slots-in-an-epoch`; without this flag a short sandbox run can
-complete L2 deployment and funding while the finalized L2 tip remains genesis.
-`advanceFinalizedTip()` in `tests/e2e/helpers.ts` then drives real L2
-transactions until the pre-existing proposed tip is visible at `finalized`.
-It does not sleep or substitute `proven`/`latest`.
-
-Compose pins no platform, so the sandbox (`azteclabs/aztec:6.0.0`, tracking the SDK; 6.0.0 images moved to the `azteclabs` namespace with the npm scope) runs the host's native image: amd64 on CI, arm64 on Apple Silicon. Barretenberg crashes under amd64 emulation (SIGILL), which is what the old `linux/amd64` pin produced on a Mac (xochi-fi/xochi#513). The sandbox has no restart policy: the 5.1.0 one needed `restart: on-failure:3` because its bb.js lost a fixed 5s prover-socket race at startup, which bb.js 5.2.0 and later no longer have. Every e2e client gets its own wallet data directory (`walletDataDirectory()` in `tests/e2e/helpers.ts`), and a wallet calling a contract it did not deploy registers it first (`registerPublished()`): with one shared store, contracts registered by one wallet were silently visible to all of them.
+- Anvil: `--block-base-fee-per-gas 0`, automine (no `--block-time`), started
+  five minutes behind wall time, `--slots-in-an-epoch 1`. Larger offsets fail
+  the local network's startup; a nonzero base fee makes sends priced off
+  `getPredictedMinFees` fail simulation after each L1 fee refresh.
+- The chain clock runs ahead under traffic, so the crash smoke
+  (`tests/e2e/crash-recovery.test.ts`) runs alone (`E2E_SUITE=crash`) and its
+  `beforeAll` waits up to 20 minutes for the finalized tip to return inside
+  the 300-second future-skew limit. Do not weaken that policy.
+- `advanceFinalizedTip()` in `tests/e2e/helpers.ts` drives real L2
+  transactions until the proposed tip is `finalized`; never sleep or
+  substitute `proven`/`latest`.
+- Every e2e client gets its own wallet data directory
+  (`walletDataDirectory()`); a wallet calling a contract it did not deploy
+  registers it first (`registerPublished()`).
+- The sandbox's own L1 drift check is disabled only in compose; production
+  nodes keep it.
 
 ## Required Environment
 
-| Variable                          | Required | Default                 | Description                                                                                             |
-| --------------------------------- | -------- | ----------------------- | ------------------------------------------------------------------------------------------------------- |
-| `PXE_BRIDGE_SECRET_KEY`           | Dev only | --                      | 32-byte hex key, must be below the BN254 Fr modulus (rejected when NODE_ENV=production)                 |
-| `PXE_BRIDGE_SECRET_ARN`           | Prod     | --                      | AWS Secrets Manager ARN/name for secret key                                                             |
-| `PXE_BRIDGE_API_KEY`              | No       | --                      | Bearer token for RPC auth (warns if unset)                                                              |
-| `PXE_BRIDGE_RECOVERY_API_KEY`     | No       | --                      | Distinct bearer token for reserved `POST /api/recovery` body/rate/backend capacity. Startup refuses equality with every other credential; unset makes the dedicated endpoint 404 |
-| `PXE_BRIDGE_ADMIN_KEY`            | No       | --                      | Bearer token for `POST /admin/resume`. Must differ from the RPC key; startup refuses equality so a caller who can move funds cannot clear the breaker that stopped them. Unset makes the endpoint 404 |
-| `AZTEC_NODE_URL`                  | No       | `http://localhost:8080` | Aztec L2 node endpoint                                                                                  |
-| `PXE_BRIDGE_HOST`                 | No       | `127.0.0.1`             | Bind address (localhost-only by default)                                                                |
-| `PXE_BRIDGE_PORT`                 | No       | `8547`                  | HTTP listen port (validated 0-65535)                                                                    |
-| `PXE_BRIDGE_ACCOUNT_ADDRESS`      | Prod     | --                      | The bridge account's recorded AztecAddress. `connect()` refuses, before deploying or serving, an account whose key derives anywhere else (`account-identity.ts`). Required when `NODE_ENV=production` unless `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1` |
-| `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY` | Prod, first deploy only | --       | `1` lets a production bridge start without `PXE_BRIDGE_ACCOUNT_ADDRESS`; record the logged address, then remove it. Same name as PR #42's deployment-record flag |
-| `FEE_JUICE_CLAIM`                 | No       | --                      | JSON: `{claimAmount, claimSecret, messageLeafIndex}` for L1->L2 bridged deployment fee. Plain Schnorr only -- refused at startup alongside `PXE_BRIDGE_SPENDING_LIMIT_ADMIN`, which has no fee branch that can consume a claim (use `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM` there). Produced by `npm run bridge-fee-juice -- --recipient <Account address>` |
-| `PXE_BRIDGE_ALLOW_SPONSORED_FPC`  | No       | on outside production   | `true`/`false`. Whether an undeployed account may pay its deployment via SponsoredFPC, a testing contract that exists only on sandbox and testnet. It is the fallback when no `FEE_JUICE_CLAIM` covers the plain account, or neither a `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM` nor a deployer balance covering the deploy pays for the spending-limit account and its deployer. Refused under `NODE_ENV=production` unless `true`; any other value is rejected at startup. The refusal fires in `connect()` only if an account actually needs deploying, so a deployed account restarts either way, and names the deployer or account. Once refused, any nonzero deployer balance is tried, so a dust deposit fails the deploy instead |
-| `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM` | No | -- | JSON, same shape as `FEE_JUICE_CLAIM`, bridged to the spending-limit account's deployer (salt `baseSalt + 1`). The deployer self-deploys with it and pays the account's deployment from the remaining balance, so a production spending-limit bridge deploys without SponsoredFPC. Requires `PXE_BRIDGE_SPENDING_LIMIT_ADMIN`; refused at startup without it. Produced by `npm run bridge-fee-juice -- --deployer --recipient <Deployer address>`; must cover the deployer's fee plus the account deploy's full fee limit (gas limits x 10x predicted max fee), plus the fee limit of each top-up claim the deployer sends (`FEE_JUICE_PAYER_DEPLOYER=true`) |
-| `PXE_BRIDGE_MAX_AMOUNT`           | No       | --                      | Per-tx amount ceiling (rejects above this)                                                              |
-| `PXE_BRIDGE_DAILY_LIMIT`          | No       | --                      | 24h rolling volume cap; circuit-breaker pauses bridge                                                   |
-| `PXE_BRIDGE_COOLDOWN_THRESHOLD`   | No       | --                      | Amount threshold triggering cooldown delay                                                              |
-| `PXE_BRIDGE_COOLDOWN_DELAY_MS`    | No       | --                      | Delay in ms for amounts >= cooldown threshold                                                           |
-| `PXE_BRIDGE_AUDIT_LOG`            | No       | stdout                  | File path for the JSON-lines audit log. Output only, except that adoption of a fresh journal reads it as the pre-journal (legacy) log and is refused while it holds an unresolved key or a spend inside 24h (`legacy-audit.ts`) |
-| `PXE_BRIDGE_JOURNAL`              | Prod     | --                      | SQLite settlement journal: operations, exact prepared tx bytes/hash, may-broadcast marks, the rolling-spend window. Its directory must be 0700 and its files are forced 0600. Unset refuses `aztec_createNote`/`aztec_getSettlement`. See docs/settlement-operations.md (also `PXE_BRIDGE_JOURNAL_ADOPT_ACCOUNT` = `<account>@<journal id>`, one-shot; `PXE_BRIDGE_SETTLEMENT_CORRIDOR`; `PXE_BRIDGE_MAY_BROADCAST_URL` (https, or loopback http)/`_TOKEN`) |
-| `PXE_BRIDGE_ATTESTATION_API_KEY` | With attestations | -- | Dedicated Bearer token for `POST /api/attestation`; must differ from the main RPC, admin, may-broadcast and RootUpdate relay credentials |
-| `PXE_BRIDGE_ATTESTATION_SECRET_ARN` | Prod attestations | -- | AWS Secrets Manager ARN/name for the dedicated secp256k1 readiness signer. Resolved material must not equal spend/admin/allowlist custody or any RPC/admin/may-broadcast/attestation/relay bearer |
-| `PXE_BRIDGE_ATTESTATION_SECRET_KEY` | Dev attestations | -- | Dev-only nonzero secp256k1 scalar; refused in production |
-| `PXE_BRIDGE_ATTESTATION_SOURCE_CHAIN_ID` | With attestations | -- | Positive decimal source-chain id in the trusted readiness domain |
-| `PXE_BRIDGE_ATTESTATION_ENVIRONMENT` | With attestations | -- | Trusted environment string in the readiness domain |
-| `PXE_BRIDGE_ATTESTATION_RELAY_URL` / `_TOKEN` | With attestations | -- | HTTPS (or loopback HTTP) RootUpdate relay and dedicated outbound token |
-| `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` | No       | --                      | AztecAddress (32-byte hex) enabling on-chain spending limit account. Requires `PXE_BRIDGE_MAX_AMOUNT` and `PXE_BRIDGE_DAILY_LIMIT`, since the contract rejects a zero limit |
-| `PXE_BRIDGE_SPENDING_LIMIT_TOKEN` | With admin | --                    | AztecAddress (32-byte hex) of the single token the account may move. Fixed at construction, no setter; required when the admin is set. `aztec_createNote` with any other token is refused with invalid params before budget is reserved or a proof is built |
-| `PXE_BRIDGE_ALLOWLIST_SEED`        | With admin | --                    | 32-byte hex secret every allowlist leaf salt derives from. SENSITIVE: anyone holding it can test a candidate address against the on-chain allowlist. Losing it is unrecoverable, since the account stores only a root and the set cannot be read back off chain. Warned about, not refused, when read from the env in production: unlike the signing key it cannot move funds |
-| `PXE_BRIDGE_ALLOWLIST_RECIPIENTS`  | With admin | --                    | JSON array of `{address, index}`, e.g. `[{"address":"0x...","index":137}]`. Index is the tree position in `[0, 1024)` and must match what the admin actually built, since position is part of the commitment. Assign positions randomly: filling left to right makes the first touch of a position visibly an addition |
-| `PXE_BRIDGE_ACCOUNT_DEPLOYMENT`    | Prod, with admin | --              | JSON record the bridge logs after deploying the spending limit account: `{address, maxAmountPerTx, dailyLimit, admin, token, allowlistRoot}`. The address derives from this alone, so allowlist updates and limit changes do not move it. With it set the bridge never deploys, and refuses to start if the record does not reproduce its address, nothing is initialized there, or admin/token differ. Do not edit it |
-| `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY`  | No       | --                      | `1` lets a production bridge deploy the spending limit account without a record. First deployment only; remove once the record is persisted |
-| `PXE_BRIDGE_SEND_MODE`             | No       | `spending_limit`        | `spending_limit` (unset) or `oxide`. `oxide` serves only `sendMode: "oxide"` createNotes through the Oxide sender on the standard account and refuses spending_limit ones (`-32602` `send_mode_unsupported`); startup refuses an inconsistent mix (`src/oxide/config.ts`) |
-| `PXE_BRIDGE_OXIDE_JOURNAL`         | With Oxide | --                    | Oxide sender journal (`src/oxide/journal.ts`, schema 2: v2 terms keyed by the v2 fingerprint): its own SQLite file beside, never the same as, `PXE_BRIDGE_JOURNAL`; same directory/permission rules. Required, with `_L1_RPC_URL`, `_TOKEN_ARTIFACT`, the corridor and may-broadcast, when `PXE_BRIDGE_SEND_MODE=oxide`; refused otherwise |
-| `PXE_BRIDGE_OXIDE_L1_RPC_URL`      | With Oxide | --                    | Ethereum mainnet RPC, view calls only: TeeRegistry `PCR0_HASH`/`$teeKeys`/`$registrationMessages`, CertManager root hash, OxidePortal immutables and `$frozen` |
-| `PXE_BRIDGE_OXIDE_TOKEN_ARTIFACT`  | With Oxide | --                    | Compiled OxideToken JSON, not committed: `npm run build:oxide-token` writes `contracts/oxide/oxide_token_contract/target/oxide_token_contract-OxideToken.json` (the image carries it there; `src/oxide/vendor/VENDORED.md`); refused unless its class is the deployed OXDAI class |
-| `PXE_BRIDGE_OXIDE_MAX_PER_TX`      | No       | 1000 DAI (1e21)         | Oxide off-chain per-tx cap, base units. Never above the token's 5,166 DAI `maxNoteAmount`, which is checked as well |
-| `PXE_BRIDGE_OXIDE_DAILY_LIMIT`     | No       | 10000 DAI (1e22)        | Oxide rolling-24h cap, base units, rebuilt from the journal's spend rows and re-checked inside the may-broadcast mark transaction |
-| `PXE_BRIDGE_OXIDE_ALLOWLIST_SEED`  | Oxide mode | --                    | 32-byte hex secret every Oxide allowlist leaf salt derives from; must differ from `PXE_BRIDGE_ALLOWLIST_SEED`. SECRET: with it a root can be tested against candidate addresses |
-| `PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS` | Oxide mode | --               | The PRIVATE recipient set, JSON `[{address, index}]` (`"[]"` admits nobody). Secret store only; never on chain, in the manifest, a public repo or a log. Changed only with `npm run oxide-allowlist` |
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `PXE_BRIDGE_SECRET_KEY` | Dev only | -- | 32-byte hex key below the BN254 Fr modulus; rejected when `NODE_ENV=production` |
+| `PXE_BRIDGE_SECRET_ARN` | Prod | -- | AWS Secrets Manager ARN/name for the secret key |
+| `PXE_BRIDGE_API_KEY` | No | -- | Bearer token for RPC and `/ready` (warns if unset) |
+| `PXE_BRIDGE_RECOVERY_API_KEY` | No | -- | Distinct bearer for `POST /api/recovery`; must differ from every other credential; unset makes the route 404 |
+| `PXE_BRIDGE_ADMIN_KEY` | No | -- | Bearer for `POST /admin/resume`; must differ from the RPC key; unset makes the route 404 |
+| `AZTEC_NODE_URL` | No | `http://localhost:8080` | Aztec node |
+| `PXE_BRIDGE_HOST` | No | `127.0.0.1` | Bind address |
+| `PXE_BRIDGE_PORT` | No | `8547` | Listen port |
+| `PXE_BRIDGE_ACCOUNT_ADDRESS` | Prod | -- | Recorded account address; `connect()` refuses a key that derives elsewhere. Required in production unless `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1` |
+| `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY` | First deploy only | -- | `1` lets a production bridge start without an address or deployment record; record the logged values, then remove it |
+| `FEE_JUICE_CLAIM` | No | -- | `{claimAmount, claimSecret, messageLeafIndex}` for the plain account's deployment fee. Refused with `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` |
+| `PXE_BRIDGE_ALLOW_SPONSORED_FPC` | No | on outside production | `true`/`false`. Whether an undeployed account may pay its deployment via SponsoredFPC (sandbox/testnet only). Refused under `NODE_ENV=production` unless `true`; any other value is rejected |
+| `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM` | No | -- | Claim bridged to the spending-limit deployer (salt + 1); it self-deploys and pays the account deploy. Requires `PXE_BRIDGE_SPENDING_LIMIT_ADMIN`. Must cover the deployer's fee, the account deploy's full fee limit and any top-up claims the deployer sends |
+| `PXE_BRIDGE_MAX_AMOUNT` | No | -- | Per-tx amount ceiling |
+| `PXE_BRIDGE_DAILY_LIMIT` | No | -- | 24h rolling volume cap; circuit breaker |
+| `PXE_BRIDGE_COOLDOWN_THRESHOLD` | No | -- | Amount at or above which the cooldown applies |
+| `PXE_BRIDGE_COOLDOWN_DELAY_MS` | No | -- | Cooldown delay |
+| `PXE_BRIDGE_AUDIT_LOG` | No | stdout | JSON-lines audit log path. Output only, except adoption reads it as the legacy log (`legacy-audit.ts`) |
+| `PXE_BRIDGE_JOURNAL` | Prod | -- | SQLite settlement journal. Directory 0700, files 0600. Unset refuses `aztec_createNote`/`aztec_getSettlement`. See docs/settlement-operations.md (also `PXE_BRIDGE_JOURNAL_ADOPT_ACCOUNT`, `PXE_BRIDGE_SETTLEMENT_CORRIDOR`, `PXE_BRIDGE_MAY_BROADCAST_URL`/`_TOKEN`) |
+| `PXE_BRIDGE_ATTESTATION_API_KEY` | With attestations | -- | Bearer for `POST /api/attestation`; must differ from every other credential |
+| `PXE_BRIDGE_ATTESTATION_SECRET_ARN` | Prod attestations | -- | Secrets Manager ARN of the secp256k1 readiness signer; must not equal any custody or bearer value |
+| `PXE_BRIDGE_ATTESTATION_SECRET_KEY` | Dev attestations | -- | Dev-only secp256k1 scalar; refused in production |
+| `PXE_BRIDGE_ATTESTATION_SOURCE_CHAIN_ID` | With attestations | -- | Positive decimal source-chain id |
+| `PXE_BRIDGE_ATTESTATION_ENVIRONMENT` | With attestations | -- | Environment string in the readiness domain |
+| `PXE_BRIDGE_ATTESTATION_RELAY_URL` / `_TOKEN` | With attestations | -- | HTTPS (or loopback HTTP) RootUpdate relay and its token |
+| `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` | No | -- | Admin AztecAddress; enables the spending-limit account. Requires `PXE_BRIDGE_MAX_AMOUNT` and `PXE_BRIDGE_DAILY_LIMIT` |
+| `PXE_BRIDGE_SPENDING_LIMIT_TOKEN` | With admin | -- | The single token the account may move; fixed at construction. Other tokens are refused with invalid params |
+| `PXE_BRIDGE_ALLOWLIST_SEED` | With admin | -- | 32-byte hex secret every leaf salt derives from. SENSITIVE and unrecoverable (SECURITY.md, "Losing the allowlist"); warned about in production env |
+| `PXE_BRIDGE_ALLOWLIST_RECIPIENTS` | With admin | -- | JSON `[{address, index}]`, index in `[0, 1024)`, matching what the admin built. Assign positions randomly |
+| `PXE_BRIDGE_ACCOUNT_DEPLOYMENT` | Prod, with admin | -- | `{address, maxAmountPerTx, dailyLimit, admin, token, allowlistRoot}` logged after deployment. Fixes the address across allowlist and limit changes. With it set the bridge never deploys. Do not edit |
+| `PXE_BRIDGE_SEND_MODE` | No | `spending_limit` | `spending_limit` or `oxide`. Each refuses the other's createNotes (`-32602` `send_mode_unsupported`) |
+| `PXE_BRIDGE_OXIDE_JOURNAL` | With Oxide | -- | Oxide sender journal (schema 2); its own SQLite file, never `PXE_BRIDGE_JOURNAL`'s path |
+| `PXE_BRIDGE_OXIDE_L1_RPC_URL` | With Oxide | -- | Ethereum mainnet RPC, view calls only |
+| `PXE_BRIDGE_OXIDE_TOKEN_ARTIFACT` | With Oxide | -- | Compiled OxideToken JSON from `npm run build:oxide-token`; refused unless the OXDAI class |
+| `PXE_BRIDGE_OXIDE_MAX_PER_TX` | No | 1000 DAI (1e21) | Oxide per-tx cap, base units; never above the token's 5,166 DAI `maxNoteAmount` |
+| `PXE_BRIDGE_OXIDE_DAILY_LIMIT` | No | 10000 DAI (1e22) | Oxide rolling-24h cap, base units |
+| `PXE_BRIDGE_OXIDE_ALLOWLIST_SEED` | Oxide mode | -- | Oxide allowlist seed; must differ from `PXE_BRIDGE_ALLOWLIST_SEED`. SECRET |
+| `PXE_BRIDGE_OXIDE_ALLOWLIST_RECIPIENTS` | Oxide mode | -- | The PRIVATE recipient set, JSON `[{address, index}]`. Secret store only; changed only with `npm run oxide-allowlist` |
 
 ## Architecture
 
-Twenty TypeScript source files plus a Noir contract and the Oxide sender (`src/oxide/`), no framework -- plain `node:http` server with zod validation:
+Plain `node:http` with zod validation, no framework. Contract table and
+operator procedures: docs/settlement-operations.md, docs/operations.md.
 
-- **`account-identity.ts`** -- Fail-closed checks that a derived account is the recorded one. `resolveAccountIdentityConfig` reads `PXE_BRIDGE_ACCOUNT_ADDRESS` / `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY` and refuses a production start with neither, and a set-but-empty address in any mode; `assertAccountIdentity` refuses a mismatch, naming both addresses and the derived class, and blames the SchnorrAccount class change (5.1.0 `0x0191cefa...` -> 5.2.0 `0x0833459d...` -> 6.0.0 `0x2f7d07db...`, the 6.0.0 one pinned against the installed artifact in `tests/account-identity.test.ts`) only when the derived class is the 6.0.0 Schnorr one, otherwise the account's constructor inputs. The stored admin is read by `readAccountState` in `scripts/spending-limit-admin.ts` (slots from the artifact's storage layout, class checked first), since the contract has no getter. `assertAccountIdentity` is used by `connect()`, the admin CLIs via `connectAdmin` (admin), `top-up-fee-juice.ts` (payer, `FEE_JUICE_PAYER_ADDRESS`) and `bridge-fee-juice.ts` (bridge account: requires `PXE_BRIDGE_ACCOUNT_ADDRESS`, or `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1` for a first deployment; `--admin` checks the recipient against `PXE_BRIDGE_SPENDING_LIMIT_ADMIN`). Exists because an SDK that changes the stock SchnorrAccount class (5.2.0 and 6.0.0 did) moves every plain Schnorr address; see SECURITY.md "Account address pinning".
-- **`index.ts`** -- Entrypoint: validates local configuration, binds a process-local startup surface, then resolves remote secrets, opens the journal and constructs `AztecClient`. `/status` therefore survives a stalled secret provider as well as a stalled wallet connection. Authenticated `/ready` reports `initializing`; every other route is 503 until the wallet connects, the journal binds, and auxiliary services start.
-- **`secrets.ts`** -- Secret key resolution: AWS Secrets Manager fetch (via `PXE_BRIDGE_SECRET_ARN`) or env var fallback (`PXE_BRIDGE_SECRET_KEY`, dev only). Rejects env var when `NODE_ENV=production`. Supports plain hex and JSON `{"key":"..."}` secret formats. Validates the key is 32 bytes and below the BN254 Fr modulus; roughly 81% of random 32-byte values are not, so this rejects at startup with a named cause rather than deep in the SDK at connect time.
-- **`attestation.ts`, `attestation-secret.ts`** -- Optional issue-#50 readiness producer. Strict exported Zod contracts admit the recipient descriptor/digest/address, network/corridor identities and recipient authorization at dedicated `POST /api/attestation`; source/block/witness inputs are forbidden, and caller network/corridor values are compared with trusted local state rather than selecting the domain. Attestations require the durable spending-limit deployment record. The SDK validates the pinned `aztec-6.0.0` descriptor, recipient derivation and Schnorr authorization before one exact finalized observation. Before root/deployment reads, that observation validates recorded solver address, pinned compiled class, initialization, retained synchronized history, exact nonzero number/hash, and the shared 7,200-second age/300-second future-skew policy. Membership requires the durable snapshot's complete mapping to equal the in-memory tree. Successful JSON-RPC results are exact signed Membership or RecipientDeployment records; uncertainty is HTTP 503 with an unsigned typed JSON-RPC refusal. RootUpdate relay bodies are corridor envelopes containing the exact signed record. The journal's write-before-send outbox retries a pending current-root payload/key before creating anything new; a delivered record does not suppress the later process's startup push. `RootUpdatePublisher` also re-signs an unchanged root once the latest record is `ROOT_UPDATE_REFRESH_SECONDS` (3,600) old, because consumers re-verify the stored RootUpdate against the 7,200-second max age; it delivers pending envelopes even when the (20-second bounded) chain observation or the enqueue fails, and counts only a direct 204 (redirects refused). Audit includes only method/outcome/typed reason.
-- **`server.ts`** -- HTTP server factory (`createApp(client, opts?)`) plus the process-local startup surface. Bearer auth uses constant-time comparison and separate auth-failure limiters; request rate, Content-Type, body size, body concurrency and response deadlines are enforced. Public `GET /status` exposes process-local liveness only, uses its own rate limiter, and performs no Aztec RPC. Initialization keeps authenticated `/ready` at 503 and every other non-liveness route at 503. `GET /ready` requires `PXE_BRIDGE_API_KEY`, uses a dedicated readiness limiter, and returns the same bounded, single-flight hard-readiness projection used by settlement admission; timed-out callers cannot accumulate Aztec RPCs or retained waiters, and ordinary body/backend saturation is not reported ready. Main RPC and attestation share one 16-body intake pool; `POST /api/recovery` requires the distinct `PXE_BRIDGE_RECOVERY_API_KEY` before it accepts body bytes and admits only `aztec_getSettlement` through a separate 16-body pool, rate limiter and backend-work pool. `POST /admin/resume` uses a credential and limiter that startup refuses to share with RPC.
-- **`readiness.ts`** -- The one typed operational predicate used by authenticated `/ready` and new `aztec_createNote` admission. It requires design-A spending-limit mode and a durable deployment record; exact derived account/class/token/root/limits; initialized and unpaused finalized state; finalized inventory, rolling headroom and fee runway; a healthy journal holding its exclusive writer fence; complete network identity; node transaction readiness; and synchronized retained history. The chain probe captures one exact nonzero `finalized` number/hash and anchors every contract/storage observation to it, with no `proven` or `latest` fallback; its timestamp may be at most 7,200 seconds old or 300 seconds ahead of local time. Admissible headroom is `min(local 24h window, on-chain headroom)`; on-chain headroom is the daily limit less `effectiveRollingSpent` (the contract's `spend_buckets`/`spend_bucket` replayed through `advance_window` to the finalized timestamp; pinned against `main.nr` `advance_window_matches_typescript`), marked exposure and reservations. Marked exposure (`journal.ts` `mayBroadcastExposure`, selected through the `attempts_expiration` expression index) is every `may_broadcast` or terminal operation whose attempt's protocol expiration is not before the finalized timestamp, less terminal ones whose recorded block is at or below the finalized block; past expiration the transaction landed at or before finalized or never will, so this is exact for any finalized reference, a lagging node's included. The observer's `reconcile` hook (`rpc.ts` `createLandedReconciler`, wired in `index.ts`) checks up to eight unexpired marked operations not last observed included above the finalized block, resuming after the last one the previous probe checked, through the `aztec_getSettlement` node observation before evaluating, so a landed transfer is not counted both in finalized state and as exposure; only a finalized receipt records an outcome. It gets `RECONCILE_BUDGET_MS` (5 seconds) and its abort reaches the node read; an overrun leaves the operations counted rather than failing readiness. Required inventory is `reservations + admissible headroom + marked principal`; required fee juice is `(pre-mark reservations + marked operations + ceil(admissible headroom / live per-tx cap)) * (transaction gas limits * predicted maximum fee per gas)`. Unknown observations fail closed. Concurrent requests share one (single-flighted) observation, so `rpc.ts` `runAttempt` re-evaluates capacity against the live window and journal synchronously with each reservation (`admissionCapacityReasons`, which also refuses an amount over on-chain headroom with `spend_window_insufficient`). Existing marked-operation lookup and reconciliation bypass new admission and remain available, but marked operations are never replayed when one node reports them absent. An already admitted `prepared` operation also bypasses it: `rpc.ts` `preparedHoldReasons` holds its exact bytes only on per-operation facts (journal/fence lost, may-broadcast unconfigured, node network != the operation's, finalized paused, finalized root != configured tree) and `preparedCapacityReasons` on its amount and one fee not being covered on top of marked exposure and other reservations (`operation_inventory_insufficient`, `operation_fee_runway_insufficient`, `operation_spend_window_insufficient`), or on inventory or the contract window being unread (`inventory_unknown`, `spend_window_unknown`/`spend_window_inconsistent`, or `readiness_observation_failed` with no projection: a shortfall in either reverts after paying its fee; an unread fee juice balance is not a hold). The fee hold exists although an underfunded fee payer is rejected by the 6.0.0 node rather than charged, because sending would still mark the operation. A full in-memory window answers `prepared` instead of re-proving (docs/settlement-operations.md).
-- **`rpc.ts`** -- JSON-RPC 2.0 dispatch. Method switch: `aztec_createNote` -> `handleCreateNote`, `aztec_getVersion` -> `handleGetVersion`. Sanitizes internal errors before returning to caller. Uses `null` id for invalid envelopes per spec. Refuses a `token` other than `IAztecClient.pinnedToken()` (case-insensitive) before reserving budget: the contract checks the token only in public, which the send does not simulate, so a wrong token would be proven, sent, reverted, and paid for in fee juice. A `PostSubmissionError` commits the reservation rather than releasing it, and answers with a distinct message plus `error.data.txHash`: the transfer may be on chain, so the caller must reconcile rather than retry.
-- **`aztec-client.ts`** -- `AztecClient` wraps the Aztec SDK v6 embedded wallet, derives stable account/deployer keys, owns isolated LMDB wallet storage, deploys or reconnects the plain or spending-limit account, registers only class-checked Token instances, prepares deterministic transactions and broadcasts exact journaled bytes. Its PXE installs `bridgeTaggingSecretStrategy` as the `resolveTaggingSecretStrategy` hook (xochi shielded-execution D4, amended 2026-11-01): address-derived tagging for unconstrained delivery, which is how `transfer_to_private` delivers its note, so no published tag can be matched against the recipient's address; constrained delivery to another account is refused rather than sent through the revealing non-interactive handshake. A recipient finds its notes after `registerSender(<bridge account address>)`; `tests/e2e/recipient-privacy.test.ts` checks both the absent handshake and the independent recipient's discovery against an unhooked control. Spending-limit deployments use a dedicated Schnorr deployer and either its bridged Fee Juice claim/balance or explicitly permitted SponsoredFPC; a persisted deployment record fixes the account constructor inputs and address across later policy changes. The client exposes the hard-readiness chain probe: it captures one exact nonzero finalized block reference, validates the block, and uses that same number/hash for account class/storage (including the 25 `spend_buckets` slots and `spend_bucket`, unknown rather than zero when unreadable), Token class/inventory and Fee Juice storage. It reads node/network/world-state status and computes the transfer fee limit from SDK transaction gas limits and the same headroom max-fee settings used by transfers. It never substitutes a latest/proven read for a missing finalized observation. Secret key material is zeroed after connection, wallet-directory aliases are fenced in-process, and transaction sends have a 120-second timeout.
-- **`fee-juice.ts`** -- Bridging fee juice from L1 and claiming it on another account's behalf. Exists because the spending-limit account cannot acquire fee juice itself: its entrypoint admits exactly one call and requires it to be `transfer_to_private` on the pinned token, and every fee payment method contributes a second call to the same AppPayload (`mergeExecutionPayloads`), so `PREEXISTING_FEE_JUICE` is its only fee branch. `FeeJuice.claim(to, ...)` names its beneficiary in an argument rather than taking `msg_sender`, so a funded payer can credit the account. `bridgeFeeJuice()` generates the claim secret itself and hands it to `onSecret` before any L1 write, then deposits on L1 (approve + `depositToAztecPublic`, not the SDK's `bridgeTokensPublic`, which returns the secret only with the receipt, so a run killed after broadcast lost the deposit), hands the claim and its message hash to `onClaim` before waiting for the message, then returns the claim; the L1 deposit cannot be undone, so a wait that times out must not take the only copy with it. `recoverFeeJuiceClaim()` rebuilds the claim from what `onSecret` recorded by scanning the portal's `DepositToAztecPublic` events to the recipient (`to` is the only indexed field; amount and secret hash are matched client-side) from the recorded L1 block; on a miss, the recorded L1 sender's latest and pending nonces say whether the deposit can still land or bridging anew is safe. `writePendingDeposit()` / `findPendingDeposit()` persist what `onSecret` receives to an owner-only `fee-juice-deposit-<secretHash>.json` in the working directory, which the scripts write before any L1 write, add the landed claim to, and delete only once the claim is safe: message synced (`bridge-fee-juice`) or claim transaction succeeded (`top-up-fee-juice`). `recordBridgedClaim()` adds the claim by write-and-rename; `bridgedClaimOf()` reads it back, so recovery from an enriched file skips L1. `topUpFeeJuice()` does bridge, wait, claim. `scripts/bridge-fee-juice.ts` and `scripts/top-up-fee-juice.ts` are thin CLIs over these, and `tests/e2e/helpers.ts` drives the same functions against the sandbox. `bridge-fee-juice` takes the recipient as an address (`--recipient`), so production needs no secret key to bridge; deriving it from `PXE_BRIDGE_SECRET_KEY` is dev only and offline. `top-up-fee-juice` pays from a separate payer (`FEE_JUICE_PAYER_KEY`) or from the deployer (`FEE_JUICE_PAYER_DEPLOYER=true`, key via `resolveSecretKey`), checks the payer by its init nullifier since the deployer is unpublished, opens its wallet stores under `os.tmpdir()` and deletes them on exit, SIGINT, SIGTERM and SIGHUP (SIGKILL or a crash leaves them), and resumes from `FEE_JUICE_RESUME_CLAIM` without a second deposit. There is no `transfer` on FeeJuice, so an existing L2 balance cannot be moved and every top-up starts on L1.
-- **`types.ts`** -- JSON-RPC envelope schema and error codes (-32001 request_in_flight, -32002 submitted_unknown, -32003 operation_conflict, -32004 journal_unavailable, -32005 not_submitted, -32006 bridge_not_ready), `IAztecClient` (`createNote(params, gate)`, `broadcastPrepared(bytes, gate)`, `observeTx`, `networkIdentity`, `accountMode`), `BroadcastGate`/`PreparedTransaction`/`TransferOutcome`, and the strict `AccountDeploymentSchema`. The createNote payload schema is in `settlement.ts`.
-- **`limits.ts`** -- `TransactionLimits` class: per-tx ceiling (`PXE_BRIDGE_MAX_AMOUNT`), 24h rolling volume cap with circuit-breaker (`PXE_BRIDGE_DAILY_LIMIT`), configurable cooldown delay for large transfers. Checked before every `createNote`. Application-level defense-in-depth; on-chain limits (Phase 2) enforce independently. The breaker trips on committed volume only: when it reaches the cap, or leaves less than 1% of the cap and less than the request needs. The second case exists because admission never lets committed volume exceed the cap, so a drain in amounts that do not divide it stops short and never reached the first. Otherwise a single request larger than the remaining budget is rejected on its own, since tripping there let one oversized request stop the bridge for a full window. In-flight reservations count toward the budget and never toward the trip. `restore()` seeds the window from durable journal spend rows at startup.
-- **`audit.ts`** -- `AuditLogger`: output-only JSON-lines log containing only timestamp, method and observation state. Recipient, operation, note, transaction, request-origin, token, amount and free-form reason identifiers are excluded. Nothing reads it back.
-- **`partial-note.ts`** -- xochi-fi/pxe-bridge#78: the `transfer_to_private` partial-note randomness Riddler needs to prove a payout's recipient. `installRandomnessCapture` wraps `UtilityExecutionOracle.prototype.getRandomField` (via the public `@aztec-labs/pxe/simulator` export; `PrivateExecutionOracle` must inherit it) to record into an AsyncLocalStorage scope opened around one `createNote` send; `bindPxeOperations` binds the wallet PXE's `operationQueue.run` to the caller's async context, because the queue runs every operation from one consumer loop and would otherwise lose the scope. After proving, `aztec-client.ts` reads `C` from the tx's one `_finalize_transfer_to_private_unsafe` call and selects the one captured `r` with `P2([recipient, r], 568912195) == C`; none or several throws `PartialNoteUnresolved` before the gate (`not_submitted`, `partial_note_randomness_unresolved`, not retryable). Also the derivation Riddler checks (`payoutEvidence`, `effectsProvePayout`), pinned against Riddler's vendored vector in `tests/partial-note.test.ts` and against a real proof in the e2e. `r` is never logged.
-- **`tx-identity.ts`** -- A transaction's identity from its data: `identifyTx` recomputes the hash with `Tx.computeTxHash` (stdlib's `Tx.fromBuffer(...).getTxHash()` only returns the stored prefix) and refuses bytes whose prefix differs; `assertJournaledIdentity` requires that hash and the expiry inside the bytes to equal the journaled ones. `broadcastPrepared` runs both before the randomness check and the gate, and the gate repeats the comparison; a resume that fails either is never sent, Riddler is not asked, the attempt stays `prepared`, and the answer is `unknown`, `journaled_bytes_mismatch`.
-- **`settlement.ts`** / **`journal.ts`** / **`may-broadcast.ts`** / **`legacy-audit.ts`** -- the `pxe-bridge.settlement.v2` operation contract (versioned createNote payload in `@xochi/spec`'s encodings, bridge-owned fingerprint, discriminated observations; v2 adds `partialNoteRandomness` to every mined observation and refuses v1 with `settlement_version_unsupported`), the SQLite journal that is the recovery authority (fenced single writer, owner-only files, a full startup invariant, writes disabled on corruption/rollback/lost journal/missing tx identity/inconsistency, reads kept; adoption of a fresh journal is one-shot, bound to its id, and refused while `legacy-audit.ts` finds the pre-journal audit log undrained; schema 3 stores each attempt's partial-note randomness with its bytes, NULL for pre-v2 attempts, which are never sent), and the synchronous Riddler may-broadcast query (HTTPS or loopback only; only an HTTP 200 `allow` marks; Riddler binds the first allow, so the `.hwm` is defence in depth, not the rollback guarantee). `rpc.ts` journals the exact prepared tx and its randomness through the `BroadcastGate` that `aztec-client.ts` runs immediately before `aztecNode.sendTx`, under one request deadline. A marked operation is observation-only and never replayed; absence from one node is not proof of no broadcast. `scripts/settlement-vectors.ts` generates the canonical vector `docs/vectors/settlement-v2.json` (`npm run generate:settlement-vectors`; a test fails when it is stale). Contract table: docs/settlement-operations.md.
-- **`allowlist-tree.ts`** -- The allowlist, as the bridge holds it. Builds a dense height-10 Merkle tree whose leaves are commitments `h(recipient, salt)`, derives a membership witness per recipient, and exports `rootFromSiblingPath()` as the mirror of the circuit's verification. Salts derive from one secret seed rather than being stored per leaf: they have to be secret, since addresses are enumerable and a publicly derivable salt would let anyone recompute a leaf and test candidates against it. Dense because per-leaf salts leave no canonical empty subtrees to short-circuit, which is what bounds the height at 10 rather than something larger -- building costs `2^height` hashes, 0.33s here against 21s at height 16. Four hash values, plus the root of a full-height path at a non-palindromic index (which pins which side the running node goes on), are pinned identically here and in `main.nr`, because the two implementations never meet at runtime and drift would surface only as every transfer reverting.
-- **`spending-limit-account.ts`** -- Custom Aztec account contract TypeScript wrapper. Constructor args, and so the address, come from `SpendingLimitConfig.deployment` when set and from live config only on a first deploy: the live limits and allowlist root are meant to change after deployment, and deriving from them moved the address on the next restart, which deployed an empty account and orphaned the funded one. Admin and token must match the record. `SpendingLimitAccountContract` implements `AccountContract` with a custom entrypoint that includes declared amount/recipient in the signed hash via `spendingLimitSignedHash()`, whose output for a fixed input is pinned identically in `main.nr` (`signed_hash_matches_typescript`). The entrypoint derives the amount, the recipient AND the membership witness from the `transfer_to_private` call in the payload it is signing, so declared == actual holds by construction and there is no per-call state for a concurrent send to overwrite. The tree lives in a holder shared by reference with every entrypoint, since `getAccount()` is called afresh on every wallet resolution and is not memoized, so per-instance state is written to an orphan while a sibling entrypoint signs. Sharing one tree across concurrent sends is safe: the witness is unsigned, the leaf is rebuilt from the signed recipient, and the root is revalidated against live storage at inclusion time. `loadSpendingLimitArtifact()` loads the artifact without a signing key, for the operator scripts. Used with the Noir contract in `contracts/spending_limit_account/`.
-- **`contracts/spending_limit_account/`** -- Noir account contract (compiled with `aztec compile`, not `aztec-nargo compile` -- the latter is a symlink to plain `nargo`, ships no transpiler, and emits `transpiled: false`, which `loadContractArtifact` rejects). Extends Schnorr with `check_spending_public`: per-tx cap, 25-bucket sliding daily window, a Merkle recipient allowlist compared as one root, single permitted token, timelocked `propose_limits`/`apply_limits`. The allowlist is one storage slot: membership is proven in private against a root and public only checks that root, so the contract never puts the set on chain. Members first paid before the bridge installed address-derived tagging are still confirmable from the recipient-keyed handshake tag that first transfer published; members first paid since publish none (SECURITY.md "What is public"). `update_recipient` is the whole allowlist API, taking `(index, old_leaf, new_leaf, sibling_path)`; it verifies the path against the current root before recomputing, which constrains it to one leaf per call. Every call publishes its sibling path. The admin key alone can rewrite any position touched by a published `update_recipient`, and that position's sibling (`index ^ 1`); the seed protects only positions that are neither (#32). It is untimelocked, deliberately: the contract cannot tell addition, removal and substitution apart, so one policy has to cover all three, and the 24h notice bought public legibility that a secret set does not have while costing revocation latency. `pause`/`unpause` remains the immediate emergency stop against a compromised signing key, checked in `check_spending_public` so it bites at inclusion time. Against a compromised admin key it is the attacker's lever instead: the admin is fixed at construction and nothing else can unpause, so that key alone can freeze the account indefinitely (#27). Every root change invalidates in-flight transactions, additions included; there is no grace window, because accepting a superseded root would also mean accepting a revoked recipient. The entrypoint asserts `fee_payment_method == PREEXISTING_FEE_JUICE` and then calls `set_as_fee_payer()`/`end_setup()` unconditionally: the byte is unsigned, and under the stock branching any other value skipped `end_setup()` and left the transfer and the spending check in the non-revertible setup phase. Artifact is built into `target/` by the `contract` CI job and gitignored, not committed. Compiled by the 6.0.0 toolchain against aztec-nr v6.0.0 (`Nargo.toml`, `AZTEC_COMPILE_VERSION` in CI) for the testnet tracer (#55). NM-1019 audited the 5.1.0-compiled bytecode of the same `main.nr`; the 6.0.0 bytecode differs through aztec-nr and the compiler, not the source (SECURITY.md "6.0.0 artifact of record"). The class ID, and so the account address, stays fixed only while both pins do: do not move either with an SDK bump.
-
-  Because the artifact is rebuilt every CI run, `scripts/contract-class-id.js` pins its contract class ID against `contracts/spending_limit_account/CLASS_ID`. The class ID feeds address derivation, so toolchain drift would otherwise move the account address silently: the bridge would find nothing there, deploy a fresh empty account, log "Ready", and strand the balance at the old address. Any deliberate change to `main.nr` moves the class ID, so `CLASS_ID` has to be updated in the same commit. The check warns instead of failing while `CLASS_ID` is absent, since the value of record is the one the x86 CI run produces. (`HARDWARE_CONCURRENCY=1 aztec compile` also finishes natively on arm64: it reproduced the 5.1.0 pin on 2026-10-17 and again on 2026-10-25, and produced the current 6.0.0 `CLASS_ID`, which the first x86 run must confirm; only under amd64 emulation does barretenberg SIGILL. Values and provenance: SECURITY.md "6.0.0 artifact of record".) To re-baseline after a deliberate contract change, download the `contract-artifact` from the CI run into `target/` and run `node scripts/contract-class-id.js`. Then re-check `PARAM_TIMELOCK_SECONDS` and `PARAM_APPLY_WINDOW_SECONDS` in `scripts/spending-limit-admin.ts` against `main.nr` and update `TIMELOCK_CHECKED_AT_CLASS_ID` in `tests/spending-limit-admin.test.ts` to the new class ID; that test fails until you do.
-
-  The entrypoint ABI the TypeScript side encodes against (`spendingLimitEntrypointAbi()` in `spending-limit-account.ts`) is hand-written, not read from the artifact. Drift there keeps the address and breaks the selector or argument layout, so the `contract` job also runs "entrypoint ABI matches the compiled artifact" in `tests/spending-limit-account.test.ts` against the freshly built artifact. The `check` job has no artifact and skips that test. CI compiles with `HARDWARE_CONCURRENCY=1`: otherwise `bb aztec_process` derives the private functions' verification keys concurrently, which bb 5.1.0 was not thread-safe for, and the constructor VK, and with it the class ID, intermittently came out wrong. One 8-thread bb 6.0.0 build matched the single-threaded one byte for byte; the setting stays until that is shown at scale.
-
-- **`scripts/admin.ts`, `scripts/update-allowlist.ts`** -- Admin CLIs over `scripts/spending-limit-admin.ts`, which holds the shared parts: admin self-deploy (`npm run admin -- deploy`, paid from `SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM`, named apart from the bridge's `FEE_JUICE_CLAIM`; the admin key never goes in `PXE_BRIDGE_SECRET_KEY`, since the bridge and `bridge-fee-juice` would persist it in `./aztec-wallet-data`), admin derivation via `deriveAccountKeys`, an `EmbeddedWallet` with `proverEnabled`, and a send that prints the tx hash before waiting for the receipt. `ephemeral: true` alone still writes the wallet and PXE LMDB stores, admin key included, to `os.tmpdir()` and never deletes them, so `connectAdmin` and `deployAdmin` open both stores themselves and `runScript` deletes them on exit, on a throw and on SIGHUP/SIGINT/SIGTERM (not SIGKILL; exit 128 + signal, which status bits, all below 32, cannot reach). Keys and the seed are read with `takeSecretEnv`, which deletes them from `process.env`, and range-checked via `secrets.ts` `validateKey` before the SDK sees them, since the SDK's range error prints the value. `status` reads public storage with `node.getPublicStorageAt` at the slots in the artifact's `storageLayout`, because the contract has no getters for limits, pause or the pending proposal; `readAccountState` refuses unless `node.getContract(account)` has the artifact's class ID, since another version's layout would decode the wrong slots. Every field it reads packs to one Field; a `PublicImmutable` holds its value at its slot and a hash at the next. The node is trusted: no public-data witness. Exit bits (1 alone error; 2 pause state not expected, `--expect-paused` inverts; 4 proposal pending; 8 root not expected; 16 admin fee juice below `--min-fee-juice`) back a cron alert. Sends refuse unless the key derives the on-chain admin; `update-allowlist` also unless the configured set reproduces `allowlist_root`. `pause` is checked only in `check_spending_public`, so a compromised signing key can still burn fee juice on reverting transactions while paused.
-
-- **`src/oxide/`** -- xochi-fi/pxe-bridge#84: the OXDAI (zk.money Oxide DAI, Aztec v6 mainnet) sender, served for `aztec_createNote` with `sendMode: "oxide"` when `PXE_BRIDGE_SEND_MODE=oxide` (`index.ts` -> `createOxideSender`, `rpc.ts` `createOxideNote`, `oxide/settlement.ts` maps its answer onto the v2 observation, `oxide/payout-proof.ts` finds `payoutNoteHashIndex`). `createOxideSender` builds it on a connected `standard`-mode `AztecClient` (`oxideContext()`; the spending-limit entrypoint admits one call, an Oxide send is `transfer` + `publish_da`) and `OxideSender.send({operationId, terms})` takes the v2 terms; the journal keys operations by the v2 fingerprint, which is also the transfer's order fingerprint. Its answer carries the tx hash, the protocol expiry and the payout note's randomness. Pipeline (`backend.ts`, upstream `submit()` split): simulate with a seed capsule -> `payoutNoteIndex` checks the TokenOperation pays exactly the recipient -> enclave `signTokenOperation` (HPKE, `vendor/`) -> final batch simulated for an explicit gas limit (`size`) -> PXE `proveTx` -> journaled -> may-broadcast -> mark (caps re-checked in the same transaction) -> synchronous bound check -> exact bytes to the ungated node. `journal.ts` keeps createNote's journal rules in its own file. The PXE selects notes knowing nothing of attempts it has not seen mined, so fresh attempts run one at a time from simulation to the journal and a simulation emitting a nullifier that a live attempt carries (prepared with bounds open, marked and unmined before expiry, or mined above the simulation's anchor) is refused `inputs_pending` before the enclave is asked; a marked attempt the node never saw therefore holds the account's notes until its protocol expiry. `enclave.ts`: before sealing, the attestation's PCR0 must be the pinned image and hash to the live `TeeRegistry.PCR0_HASH()`, and its COSE signature must chain to the AWS Nitro root (whose keccak is the registry's `CertManager.ROOT_CA_CERT_HASH`). `pins.ts`: the v6 deployment, refused when the Oxide manifest or zk.money profile moves. Pins and L1 (`assertL1Pinned`: PCR0 hash, trust root, portal, not frozen) are re-checked before every fresh attempt and before a held attempt's bytes are resent (`preflight_refused` keeps it prepared). Token immutables come from the pinned manifest, never upstream `readOxideTokenImmutables` (wrong name, wrong address). Requires `proven expiry >= validUntil`. Fee runway: the account pays its own fee (`PREEXISTING_FEE_JUICE`), so its public fee juice (read like standard mode's, `FEE_JUICE_BALANCES_SLOT`, at `latest`) must cover this send's fee limit (`gasLimits x maxFeesPerGas`) plus the fee limits of every other attempt that may still land (`OxideJournal.committedFees`: prepared with bounds open, marked and unmined before expiry). It is checked against the unsigned `transfer`'s floor before the enclave is asked and against the signed batch's exact limit (`size`) before proving; short is `not_submitted` `fee_runway_low`, an unread balance `fee_runway_unknown`, both retryable. `OxideSender.feeRunway()` is the readiness read (`oxideFeeRunwayReasons`: `fee_runway_unknown` / `fee_runway_insufficient` when the balance does not cover the committed sends plus one at the node's per-tx gas limit); nothing serves it on `/ready` until the sender is wired. `vendor/` is the upstream subset, built as a project reference under upstream's compiler options (`VENDORED.md`).
-
-- **`src/oxide/allowlist.ts`, `attestation.ts`, `readiness.ts`** -- Oxide-mode readiness (pxe-bridge#84, xochi#751/#775 option a). The recipient policy is a PRIVATE off-chain allowlist (`OxideAllowlist`, the same seed-salted tree as `allowlist-tree.ts`, from `PXE_BRIDGE_OXIDE_ALLOWLIST_*`); `OxideAttestationProbe` pairs `AztecClient.observeStandardAccountChain` (sender published at the stock SchnorrAccount 6.0.0 class and initialized at the exact finalized reference, plus the recipient's deployment) with that private root, so `AttestationProducer`/`RootUpdatePublisher` sign Membership and RootUpdate the Worker verifies unchanged. `OxideReadiness` is `/ready` in Oxide mode and the fresh-send admission. `ready` is serving health only (pins, L1, portal, enclave, node, journal, attestation, corridor, network): Riddler pays already-admitted orders on it. Capacity for a new order is `admission.freshSend` (private OXDAI balance from the PXE net of in-flight principal via `OxideJournal.committedPrincipal`, served from a bounded snapshot while the PXE proves; fee runway; caps window). Every fact `known` or `unknown` with a reason, never zero; a recipient outside the set is refused `recipient_not_allowlisted`, and a deployment that is no longer the pinned one (manifest/profile moved, L1 not pinned, enclave PCR0 not the pinned image or not hashing to `TeeRegistry.PCR0_HASH()`) is refused PERMANENTLY at admission with the sender's own reason strings (OX-6; unread, malformed-shape and `attestation_invalid` stay transient; `enclaveRefusalPermanent` in `enclave.ts` is the one classifier); failures are logged by error class only. `committedPrincipal` counts CLAIMED operations too (the proving window) and is netted at the snapshot's read time. The settlement journal holds the private set (`allowlist_snapshots`, pruned at Oxide startup) and is a secret. Production allowlist changes use the `oxide-allowlist` Docker target (docs G1). Nothing here exposes the set, its root or its size. Shape and operator flow: docs/settlement-operations.md "Oxide mode: the private allowlist" and "Oxide readiness".
+- **`index.ts`** -- Entrypoint. Validates local config, binds `/status`, then
+  resolves secrets, opens the journal and constructs `AztecClient`. Every
+  other route is 503 until the wallet connects and the journal binds.
+- **`server.ts`** -- `createApp(client, opts?)`. Constant-time bearer auth
+  with separate auth-failure limiters; rate, Content-Type, body size, body
+  concurrency (one 16-body pool for RPC and attestation, a separate one for
+  `/api/recovery`) and response deadlines. `/status` is liveness only.
+  `/ready` serves the single-flight hard-readiness projection.
+- **`rpc.ts`** -- JSON-RPC 2.0 dispatch. Refuses a token other than
+  `pinnedToken()` before reserving budget. A `PostSubmissionError` commits the
+  reservation and answers with `error.data.txHash`: reconcile, never retry.
+- **`readiness.ts`** -- The one typed predicate behind `/ready` and
+  `aztec_createNote` admission. One exact nonzero `finalized` block anchors
+  every observation (no `proven`/`latest` fallback; at most 7,200 s old, 300 s
+  ahead). Admissible headroom is `min(local 24h window, on-chain headroom)`;
+  marked exposure counts every unexpired `may_broadcast` operation. Required
+  inventory is `reservations + headroom + marked principal`; required fee
+  juice is `(pre-mark reservations + marked + ceil(headroom / per-tx cap)) *
+  fee limit`. Unknown observations fail closed. `rpc.ts` `runAttempt`
+  re-evaluates capacity synchronously with each reservation; a `prepared`
+  operation is held only on per-operation facts (`preparedHoldReasons`,
+  `preparedCapacityReasons`).
+- **`aztec-client.ts`** -- Wraps the SDK v6 embedded wallet: key derivation,
+  isolated LMDB storage, deploy or reconnect, class-checked Token instances,
+  deterministic prepared transactions, broadcast of exact journaled bytes.
+  Installs `bridgeTaggingSecretStrategy` (address-derived tagging; refuses
+  the revealing non-interactive handshake). Owns the finalized chain probe.
+  Secret key zeroed after connection; sends time out at 120 s.
+- **`account-identity.ts`** -- Fail-closed check that a derived account is the
+  recorded one; used by `connect()`, the admin CLIs, `top-up-fee-juice.ts`
+  and `bridge-fee-juice.ts`. See SECURITY.md "Account address pinning".
+- **`secrets.ts`** -- Secrets Manager or dev env key; validates 32 bytes
+  below the Fr modulus at startup.
+- **`attestation.ts`, `attestation-secret.ts`** -- `POST /api/attestation`
+  (issue #50): strict Zod contracts, one exact finalized observation, signed
+  Membership / RecipientDeployment records or an unsigned typed refusal.
+  `RootUpdatePublisher` re-signs an unchanged root every
+  `ROOT_UPDATE_REFRESH_SECONDS` (3,600) and delivers via a write-before-send
+  outbox; only a direct 204 counts.
+- **`fee-juice.ts`** -- Bridge from L1 and claim on another account's behalf
+  (the spending-limit account admits one call, so `PREEXISTING_FEE_JUICE` is
+  its only fee branch). The claim secret is persisted owner-only before any
+  L1 write; `recoverFeeJuiceClaim()` rebuilds it from portal events.
+- **`types.ts`** -- Envelope schema, error codes (-32001 request_in_flight,
+  -32002 submitted_unknown, -32003 operation_conflict, -32004
+  journal_unavailable, -32005 not_submitted, -32006 bridge_not_ready),
+  `IAztecClient`, `AccountDeploymentSchema`.
+- **`limits.ts`** -- `TransactionLimits`: per-tx ceiling, 24h rolling window
+  with circuit breaker, cooldown. The breaker trips on committed volume only
+  (cap reached, or under 1% left and less than the request). `restore()`
+  seeds the window from journal spend rows.
+- **`audit.ts`** -- Output-only JSON lines: timestamp, method, observation
+  state. No identifiers. Nothing reads it back.
+- **`partial-note.ts`** -- (#78) Captures the `transfer_to_private` partial
+  note randomness `r` by wrapping `getRandomField` in an AsyncLocalStorage
+  scope around one send and selecting the `r` with
+  `P2([recipient, r], 568912195) == C`. None or several:
+  `PartialNoteUnresolved`, not retryable. `r` is never logged.
+- **`tx-identity.ts`** -- Recomputes a transaction's hash from its bytes
+  (`Tx.computeTxHash`) and requires it and the expiry to equal the journaled
+  ones before any resend; a mismatch is `unknown`, `journaled_bytes_mismatch`.
+- **`settlement.ts` / `journal.ts` / `may-broadcast.ts` / `legacy-audit.ts`**
+  -- The `pxe-bridge.settlement.v2` contract, the SQLite journal (fenced
+  single writer, 0600, startup invariant, writes disabled on corruption or
+  rollback, one-shot adoption), and the synchronous Riddler may-broadcast
+  query (only HTTP 200 `allow` marks). `scripts/settlement-vectors.ts`
+  generates `docs/vectors/settlement-v2.json`; a test fails when it is stale.
+- **`allowlist-tree.ts`** -- Dense height-10 Merkle tree of `h(recipient,
+  salt)` with seed-derived salts; `rootFromSiblingPath()` mirrors the
+  circuit. Hashes and path orientation are pinned identically in `main.nr`.
+- **`spending-limit-account.ts`** -- `AccountContract` wrapper. Constructor
+  args come from `SpendingLimitConfig.deployment` when set. The entrypoint
+  derives amount, recipient and witness from the `transfer_to_private` call
+  it signs (`spendingLimitSignedHash()`, pinned in `main.nr`). The tree is
+  shared by reference across entrypoints. `spendingLimitEntrypointAbi()` is
+  hand-written; the `contract` job checks it against the artifact.
+- **`contracts/spending_limit_account/`** -- Noir account contract; build
+  with `aztec compile` (never `aztec-nargo compile`) at
+  `HARDWARE_CONCURRENCY=1`. `check_spending_public`: per-tx cap, 25-bucket
+  daily window, allowlist root, single token, timelocked limits, `pause`.
+  `update_recipient` is the whole allowlist API and is untimelocked. Asserts
+  `fee_payment_method == PREEXISTING_FEE_JUICE`. Artifact is gitignored and
+  built by CI. Any change to `main.nr` moves the class ID: update
+  `contracts/spending_limit_account/CLASS_ID` (from the x86 CI artifact,
+  `node scripts/contract-class-id.js`) and `TIMELOCK_CHECKED_AT_CLASS_ID` in
+  `tests/spending-limit-admin.test.ts` in the same commit, and re-check
+  `PARAM_TIMELOCK_SECONDS` / `PARAM_APPLY_WINDOW_SECONDS` in
+  `scripts/spending-limit-admin.ts`. Do not move the 6.0.0 toolchain or
+  aztec-nr pin with an SDK bump. Values: SECURITY.md "6.0.0 artifact of
+  record".
+- **`scripts/admin.ts`, `scripts/update-allowlist.ts`** -- CLIs over
+  `scripts/spending-limit-admin.ts`: admin self-deploy (`npm run admin --
+  deploy`, `SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM`), temp wallet stores
+  deleted on exit and signals, secrets via `takeSecretEnv`, `status` reading
+  public storage at the artifact's slots (class checked first; node trusted).
+  Never put the admin key in `PXE_BRIDGE_SECRET_KEY`.
+- **`src/oxide/`** -- (#84) The OXDAI sender for `sendMode: "oxide"` on the
+  standard account. Pipeline: simulate -> `payoutNoteIndex` -> enclave
+  `signTokenOperation` (HPKE) -> final simulate -> `proveTx` -> journal ->
+  may-broadcast -> mark -> bound check -> send. Fresh attempts run one at a
+  time; a simulation touching a live attempt's nullifier is `inputs_pending`.
+  `enclave.ts` pins PCR0 against `TeeRegistry.PCR0_HASH()` and the Nitro
+  root; `pins.ts` pins the v6 deployment; `assertL1Pinned` runs before every
+  attempt and resend. Fee runway (`OxideSender.feeRunway()`) must cover this
+  send plus every attempt that may still land. `vendor/` is the upstream
+  subset (`VENDORED.md`).
+- **`src/oxide/allowlist.ts`, `attestation.ts`, `readiness.ts`** -- Oxide
+  readiness (xochi#751/#775 option a): PRIVATE off-chain allowlist
+  (`OxideAllowlist`), `OxideAttestationProbe` over the stock SchnorrAccount
+  6.0.0 class, `OxideReadiness` serving `/ready` (serving health) and
+  `admission.freshSend` (capacity). Un-pinned deployments are refused
+  PERMANENTLY at admission (OX-6; `enclaveRefusalPermanent` is the one
+  classifier). Nothing exposes the set, its root or its size.
 
 ## Security
 
-- Binds to `127.0.0.1` by default -- set `PXE_BRIDGE_HOST=0.0.0.0` only behind a reverse proxy
-- API key auth via `Authorization: Bearer <key>` -- required for production
-- `Content-Type: application/json` required on POST (blocks browser CSRF without CORS headers)
-- Secret key fetched from AWS Secrets Manager in production (env var rejected)
-- Secret key zeroed from memory after wallet derivation
-- On-chain spending limits via custom Noir account contract (per-tx cap, daily volume, Merkle recipient allowlist, timelocked limits)
-- The recipient allowlist is a secret set as far as the contract goes. Only its root is on chain, membership is proven in private, and the salts that make leaves unguessable derive from an operator-held seed. Recipients are tagged address-derived, so a recipient first paid since that change publishes nothing matchable against its address and must `registerSender(<bridge account address>)` to find its notes; members paid before it keep recipient-keyed handshake tags on chain, so anyone holding such an address can confirm it and their number is public (SECURITY.md "What is public")
-- The admin key alone can freeze the account for good and rewrite any allowlist position whose path a published `update_recipient` exposed (#32); it cannot spend. Admin key, signing key and allowlist seed must be held apart: admin + signing key can drain to an attacker-built leaf within live limits. See SECURITY.md, "An attacker holding the admin key"
-- Fee juice top-up needs a payer key but adds no trusted party: the L1->L2 message commits to its beneficiary, so a claim can only credit the account it was bridged to
-- Production spending-limit deploy, no SponsoredFPC: (1) start the bridge once with no claim; it logs `Account address` and `Deployer address` and stops at the SponsoredFPC refusal before sending; (2) `npm run bridge-fee-juice -- --deployer --recipient <Deployer address>` prints `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM` and the message hash, then waits (`--wait <messageHash>` resumes; the claim secret is written to an owner-only `fee-juice-deposit-<secretHash>.json` before the deposit, the landed claim is added to it, and it is deleted only once the message has synced; `--deployer --recipient <Deployer address> --recover <file>` recovers a run that died; rerunning deposits twice); (3) start the bridge with that claim, wait for `Ready`; (4) `FEE_JUICE_PAYER_KEY` set (via `read -s` or `op run`, never inline) to a separately bootstrapped plain Schnorr payer, then `npm run top-up-fee-juice` to the logged `Account address` for transfer fees. `FEE_JUICE_PAYER_DEPLOYER=true` (pay from the deployer's leftover balance) is refused under `NODE_ENV=production`, because the deployer key is the bridge's signing key and the script would load it onto the operator's machine. `FEE_JUICE_PAYER_DEPLOYER`, `FEE_JUICE_MINT` and `FEE_JUICE_PAYER_SPONSORED` accept only `true`/`false`, and `FEE_JUICE_PAYER_SPONSORED=true` is gated by the same policy as `PXE_BRIDGE_ALLOW_SPONSORED_FPC`. The top-up deposit file likewise keeps the claim until the claim transaction succeeds
-- Rate limiting: 60 RPC requests/min sliding window
-- Response headers: `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`
-- Docker: runs as non-root (`USER node`), `npm ci` for reproducible builds, source maps stripped
+- Binds to `127.0.0.1`; set `PXE_BRIDGE_HOST=0.0.0.0` only behind a reverse
+  proxy. Bearer auth required in production. `Content-Type: application/json`
+  required on POST. 60 requests/min. `X-Content-Type-Options: nosniff`,
+  `Cache-Control: no-store`.
+- Secret key from Secrets Manager in production; zeroed after derivation.
+- Admin key, signing key and allowlist seed are held apart: admin + signing
+  key can drain to an attacker-built leaf within live limits (SECURITY.md,
+  "An attacker holding the admin key").
+- Production spending-limit deploy: docs/operations.md "Deploying the
+  spending-limit account in production". `FEE_JUICE_PAYER_DEPLOYER=true` is
+  refused under `NODE_ENV=production`.
+- Docker: `USER node`, `npm ci`, source maps stripped.
 
 ## Key Details
 
-- ESM-only (`"type": "module"`), all imports use `.js` extension
-- Strict tsconfig: `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`, `verbatimModuleSyntax`
-- Aztec SDK/runtime v6.0.0 (`@aztec-labs/*`, sandbox image `azteclabs/aztec:6.0.0`), which is what the Aztec public testnet reports; the spending-limit contract is compiled by the 6.0.0 toolchain against aztec-nr v6.0.0 (see above). Aztec mainnet has also run 6.0.0 since its v6 upgrade on 2026-10-26 (https://announce.aztec.network/a/2026-10-upgrade-the-v6-upgrade-executed-on) -- dynamic imports for `@aztec-labs/aztec.js/fields` and `@aztec-labs/aztec.js/addresses` inside methods (tree-shaking friendly)
-- The admitted Token class (`assertStandardTokenInstance`) and the SponsoredFPC address are derived from `@aztec-labs/noir-contracts.js`, so they move with an SDK bump: under 6.0.0 the Token class is `0x067df4dd...` (the XTU test token's class) and the SponsoredFPC is `0x2d8fff82...`, the testnet's; under 5.2.0 the Token class was `0x00c2bb75...`, under 5.1.0 `0x0c228a68...`, and a token deployed from an older artifact is refused
-- Docker image requires trixie's libstdc++ for `@aztec-foundation/bb.js` GLIBCXX_3.4.32
-- CI pushes to `ghcr.io/xochi-fi/pxe-bridge` on semver tags only
+- ESM-only, `.js` import extensions; strict tsconfig
+  (`exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`,
+  `verbatimModuleSyntax`).
+- Aztec SDK/runtime 6.0.0 (`@aztec-labs/*`, `azteclabs/aztec:6.0.0`); the
+  contract is compiled by the 6.0.0 toolchain against aztec-nr v6.0.0.
+  `@aztec-labs/aztec.js/fields` and `/addresses` are dynamically imported
+  inside methods.
+- The admitted Token class and the SponsoredFPC address come from
+  `@aztec-labs/noir-contracts.js` and move with an SDK bump (6.0.0 Token
+  class `0x067df4dd...`, SponsoredFPC `0x2d8fff82...`).
+- Docker image needs trixie's libstdc++ (`GLIBCXX_3.4.32` for bb.js).
+- CI pushes to `ghcr.io/xochi-fi/pxe-bridge` on semver tags only.
