@@ -1,243 +1,75 @@
 # PXE Bridge Security Scaling
 
-Incremental hardening plan for pxe-bridge's trust model, ordered by
-effort and blast-radius reduction. Each phase is independently shippable.
+Open hardening work, ordered by effort and blast-radius reduction. Phases 0-2
+(application limits, Secrets Manager key, spending-limit Noir account) have
+shipped; see SECURITY.md and CLAUDE.md for what exists.
 
-## Phase 0: Application-Level Hardening (code only)
+Any edit to `main.nr` that reaches the bytecode moves the class ID and so the
+account address. Update `contracts/spending_limit_account/CLASS_ID` in the same
+commit, re-baselined from the x86 CI artifact, and land anything below that
+touches `main.nr` before an address is fixed. See SECURITY.md, "Build supply
+chain".
 
-No infra changes. Caps the blast radius of a compromised key or rogue caller.
-
-- [x] **Per-tx amount ceiling** -- reject `aztec_createNote` above a configurable
-      max (env `PXE_BRIDGE_MAX_AMOUNT`). Log and return RPC error.
-- [x] **Rolling volume limit** -- 24h sliding window aggregate spend cap
-      (env `PXE_BRIDGE_DAILY_LIMIT`). Circuit-breaker: pause all note creation
-      when exceeded, require manual re-enable or process restart.
-- [x] **Structured audit log** -- JSON-lines log of every `createNote` call:
-      timestamp, recipient, token, amount, txHash, clientIP. Separate from
-      application logs. Write to stdout with a parseable prefix or a dedicated
-      log file (`PXE_BRIDGE_AUDIT_LOG`).
-- [x] **Cooldown for large transfers** -- configurable delay (e.g. 30s) for
-      amounts at or above a threshold, giving monitoring a window to
-      alert/intervene.
-
-## Phase 1: Key Management (infra)
-
-Move the secret key out of process memory at rest.
-
-- [x] **AWS Secrets Manager / Parameter Store** -- fetch `PXE_BRIDGE_SECRET_KEY`
-      at startup via `@aws-sdk/client-secrets-manager`, zero after wallet
-      derivation (current pattern, but key never touches env vars or disk).
-- [x] **Env var elimination** -- stop accepting the key via env var in production.
-      Env vars are visible in `/proc/pid/environ`, `docker inspect`, and crash
-      dumps. Accept only a secret ARN/path.
-- [x] **IAM scoping** -- bridge process role can only read the one secret. No
-      write, no KMS decrypt beyond what Secrets Manager needs.
-
-## Phase 2: Custom Noir Account Contract
-
-Aztec's account abstraction is native -- every account is a contract. Move
-authorization logic on-chain so it's enforced even if the bridge is compromised.
-
-- [x] **Spending-limit account contract** -- Noir contract that extends the
-      Schnorr account with a per-tx cap and a 25-bucket sliding daily window,
-      both `u128` and both stored in public state. Enforced by
-      `check_spending_public`, which the entrypoint enqueues. Exceeding a limit
-      does not make the tx unprovable: it is proven, included, and reverted in
-      the public phase. That is deliberate, and it is what makes revocation
-      immediate.
-- [x] **Recipient allowlist** -- one storage slot holding the root of a
-      height-10 Merkle tree whose leaves are commitments `h(recipient, salt)`.
-      Membership is proven in private; public compares only the proven root
-      against the stored one, so a transfer proven against a superseded
-      allowlist cannot be included. Replaced 8 slots of public storage, which
-      published a candidate set on every transfer and published every entry
-      through the admin's own calls (NM-1019 [Medium]). `min_anonymity_set` and
-      its floor plumbing are gone with it: a root has no candidate set to size.
-- [x] **Timelock for parameter changes** -- 24h
-      (`PARAM_TIMELOCK_SECONDS`), timestamp-based rather than block-based, with
-      a 24h window to apply before a proposal expires. Covers limit changes
-      only. `pause` and `update_recipient` are immediate: `pause` because a
-      timelock would hand a compromised signer the notice they need, and
-      `update_recipient` because addition and revocation are indistinguishable
-      by construction, so one policy has to cover both and revocation is the
-      one that cannot wait.
-
-Compiled with `aztec compile`, not `nargo compile` or `aztec-nargo compile`.
-The latter is a symlink to plain `nargo`, ships no transpiler, and emits
-`transpiled: false`, which `loadContractArtifact` rejects. The artifact is
-gitignored and rebuilt by the `contract` CI job. TypeScript wrapper at
-`src/spending-limit-account.ts`, wired into `aztec-client.ts` via
-`AccountManager.create()`. Enabled by setting `PXE_BRIDGE_SPENDING_LIMIT_ADMIN`
-(32-byte hex AztecAddress), which also requires `PXE_BRIDGE_MAX_AMOUNT` and
-`PXE_BRIDGE_DAILY_LIMIT`, since the contract rejects a zero limit. Limits are
-validated at init and apply time (`daily_limit >= max_per_tx`, both non-zero,
-`u128`). Deployed and exercised end to end against the sandbox by
-`tests/e2e/spending-limit.test.ts` in the `e2e` CI job.
-
-> **Constraint on every further contract change: the class ID.** Any edit to
-> `main.nr` that reaches the bytecode moves the contract class ID, which feeds
-> address derivation, so the account lands at a different address. Before a
-> deployment exists that is free. After one, it strands the balance at the old
-> address while the bridge deploys a fresh empty account and logs "Ready".
->
-> Practically this means three things. Every deliberate contract change updates
-> `contracts/spending_limit_account/CLASS_ID` in the same commit, re-baselined
-> from the x86 CI artifact, the build of record.
-> `scripts/contract-class-id.js` fails the job on unexplained drift. And
-> anything on the deferred list below that touches `main.nr` (transaction
-> cancellation, for one) has to land before an address is fixed, not after.
->
-> `aztec compile` produced a different class ID from identical sources in three
-> CI runs. Cause: `bb aztec_process` derives the private functions' verification
-> keys concurrently and bb 5.1.0 is not thread-safe there, so the constructor
-> VK was occasionally wrong. The job now runs it with `HARDWARE_CONCURRENCY=1`.
-> Archive the artifact a deployment was made against rather than rebuilding it.
-> See SECURITY.md, "Build supply chain".
-
-## Security Hardening Pass (2026-04-20)
-
-Cross-cutting fixes from security audit against 2026 threat landscape
-($482M stolen YTD, 76% from infrastructure attacks not code exploits).
-
-- [x] **API key timing leak** -- padded both buffers to equal length before
-      `timingSafeEqual`; no more key-length leakage via early return.
-- [x] **Circuit breaker auto-reset** -- `TransactionLimits` now tracks
-      `pausedAt` and auto-resumes after the full 24h window elapses.
-- [x] **Reject zero amounts** -- amount regex requires positive integers
-      (`^[1-9]\d*$`).
-- [x] **Audit log file permissions** -- created with `0o600` on first write.
-- [x] **Rate limiter test coverage** -- 8 tests (burst, per-key, sliding
-      window, edge cases). `RateLimiter` class exported for direct testing.
-- [x] **Health check rate limited** -- `/status` endpoint now rate-limited.
-- [x] **Type-safe receipt handling** -- replaced unsafe `as unknown as
-    Record` casts with explicit `typeof`/`Array.isArray` guards.
-- [x] **Non-localhost TLS warning** -- logs warning when binding to
-      non-localhost, recommends reverse proxy.
-- [x] **Docker HEALTHCHECK** -- 30s interval, curl to `/status`.
-- [x] **Noir contract limit validation** -- `initialize_public_state` and
-      `apply_limits` assert `daily_limit >= max_per_tx` and reject zero in
-      either slot. Range is the `u128` type itself since NM-1019 [High]; the
-      original u64 check capped every limit at 18.45 tokens at 18 decimals.
-- [ ] ~~**Admin daily reset**~~ -- `reset_daily_spent()` was REMOVED. An
-      untimelocked admin write of `daily_spent = 0` is the same impact as
-      NM-1019 [High] "Daily counter can be reset to zero", just reached
-      through the admin instead of through field arithmetic.
-- [x] **Transaction cancellation** -- FIXED. NM-1019 [Low] "cancellable
-      transactions cannot be cancelled" was correct: the entrypoint pushed a
-      cancellation nullifier and offered no path to use it. The branch is
-      deleted, which was the preferred of the two resolutions because it fails
-      safe if a future SDK flips `BaseWallet.cancellableTransactions` off its
-      hardcoded `false`. The alternative, branching on zero non-empty calls,
-      was rejected: it is a second shape through the entrypoint on which the
-      fee branch still runs. The `cancellable` ABI parameter stays, read and
-      ignored, because entrypoint arguments are positional. Landed with the
-      Merkle allowlist so the two share one class ID move. Rationale in
-      SECURITY.md, "Transaction cancellation is not supported".
-
-Known limitations (acceptable for alpha):
+## Known limitations
 
 - `Fr` objects hold key material on heap until GC (SDK limitation).
-- Rate limiter uses `socket.remoteAddress`; deploy behind reverse proxy
-  for accurate client IP.
-- Transfer amounts are public. `declared_amount` is an argument to
-  `check_spending_public`, along with the token and the allowlist root.
-  Inherent to checking against public storage. The recipient is not: it is
-  proven against the root in private. See SECURITY.md, "What is public".
-- The allowlist cannot be recovered from the chain. Losing the seed or the
-  position list is terminal for allowlist management, and unlike the public
-  array it replaced there is no way to read the set back. See SECURITY.md,
-  "Losing the allowlist".
-- The spending-limit account cannot acquire fee juice itself: it pays only from
-  its existing balance (`PREEXISTING_FEE_JUICE`), which refills only when an
-  operator runs `npm run top-up-fee-juice` from an L1-funded key. `/ready`
-  refuses new `createNote` admission with `fee_runway_insufficient` when the
-  finalized balance cannot pay for the in-flight and still-includable marked
-  transfers plus ceil(admissible headroom / per-tx cap) more, and a resumed
-  `prepared` transfer is held (`operation_fee_runway_insufficient`) unless it
-  is covered on top of those; but nothing alerts on it. Tracked in Phase 3.
-
-Resolved since this list was written: the fixed-epoch daily reset, which
-depended on block production rate and could wedge a stalled chain's counter, is
-now a timestamp-anchored 25-bucket sliding window (NM-1019 [Medium]). `aztec
-compile` producing a different class ID from identical sources was concurrent
-VK derivation in bb, serialised in CI with `HARDWARE_CONCURRENCY=1`.
+- Rate limiter uses `socket.remoteAddress`; deploy behind a reverse proxy for
+  accurate client IP.
+- Transfer amounts are public (SECURITY.md, "What is public").
+- The allowlist cannot be recovered from the chain (SECURITY.md, "Losing the
+  allowlist").
+- The spending-limit account cannot acquire fee juice itself; `/ready` refuses
+  admission with `fee_runway_insufficient` when the balance is short, and a
+  resumed `prepared` transfer is held (`operation_fee_runway_insufficient`),
+  but nothing alerts on it. Tracked in Phase 3.
 
 ## Phase 3: Hot/Cold Wallet Split
-
-Bound exposure per chain by separating operational funds from reserves.
 
 - [ ] **Hot wallet** -- the existing solver account, funded with 1-2 days of
       expected settlement volume. pxe-bridge operates on this wallet only.
 - [ ] **Cold reserve** -- Gnosis Safe (L1) or multi-sig Aztec account holding
       the bulk of funds. Manual or semi-automated top-up to hot wallet when
       balance drops below threshold.
-- [ ] **Balance monitoring** -- alert when hot wallet balance drops below
-      configurable floor or spikes unexpectedly (possible drain). `/ready`
-      exposes finalized inventory and fee runway; nothing pages on them yet.
-- [ ] **Fee juice balance alerting** -- `/ready` reports
-      `fee_runway_insufficient` and stops new admission, and a resumed
-      `prepared` operation the balance cannot cover is held
-      (`operation_fee_runway_insufficient`, #67). The missing part is a
-      monitor that polls `/ready` and pages before the runway runs out, since
-      refilling needs an operator on L1.
-- [x] **Auto-pause on low balance** -- spending-limit mode only (plain Schnorr
-      mode is never ready and refuses every `createNote`). Not a pause:
-      `src/readiness.ts` refuses each new `createNote` admission with
-      `inventory_insufficient` while finalized inventory is below reservations
-      plus admissible headroom plus the principal of marked transfers that may
-      still land after the finalized block, so the hot wallet must hold all
-      three (#46, #62, #67). Admissible headroom is the smaller of the app's
-      24h window and the contract's 25-bucket window read at the finalized
-      block, and capacity is re-checked against the live window in the same
-      turn as each reservation, so concurrent requests cannot share it. A
-      resumed `prepared` operation is held with
-      `operation_inventory_insufficient` or
-      `operation_spend_window_insufficient` instead.
+- [ ] **Balance monitoring** -- alert when hot wallet balance drops below a
+      configurable floor or spikes unexpectedly. `/ready` exposes finalized
+      inventory and fee runway; nothing pages on them yet.
+- [ ] **Fee juice balance alerting** -- a monitor that polls `/ready` and pages
+      before the runway runs out, since refilling needs an operator on L1.
 
 ## Phase 4: External Signer via AuthWitnessProvider
 
-Aztec SDK v4 has `AuthWitnessProvider` -- a single-method interface
-(`createAuthWit(messageHash) -> AuthWitness`) that decouples signing from
-the wallet. The signing key can live in a KMS/HSM instead of JS heap memory.
+`AuthWitnessProvider` (`createAuthWit(messageHash) -> AuthWitness`) decouples
+signing from the wallet, so the signing key can live in a KMS/HSM.
 
-- [ ] **KMS AuthWitnessProvider** -- implement `AuthWitnessProvider` that calls
-      AWS KMS (or GCP Cloud KMS) to sign. Use an ECDSA (secp256k1) account
-      contract since KMS supports secp256k1 natively; Schnorr over Grumpkin
-      would require a custom KMS plugin.
+- [ ] **KMS AuthWitnessProvider** -- sign via AWS KMS (or GCP Cloud KMS). Use an
+      ECDSA (secp256k1) account contract; Schnorr over Grumpkin would need a
+      custom KMS plugin.
 - [ ] **Switch account contract** -- deploy `EcdsaKAccountContract` instead of
-      `SchnorrAccountContract`. Migration requires deploying a new account and
-      transferring funds.
+      `SchnorrAccountContract`. Requires a new account and a funds transfer.
 - [ ] **Privacy key handling** -- nullifier/tagging/viewing keys must still
-      reside in PXE memory (Aztec limitation). These don't authorize spending
-      but do reveal note contents. Accept this tradeoff or investigate TEE
-      for the PXE process.
+      reside in PXE memory. They do not authorize spending but reveal note
+      contents. Accept, or investigate a TEE for the PXE process.
 
-Limitation: this path requires Aztec SDK to keep `AuthWitnessProvider` stable
-across versions. Pin SDK version and test signer integration on upgrades.
+Requires the SDK to keep `AuthWitnessProvider` stable; pin the SDK and test the
+signer on upgrades.
 
 ## Phase 5: Multi-Party Authorization
 
-For high-value or high-trust deployments. Significant complexity increase.
-
-- [ ] **Threshold signing (long-term)** -- split signing key across N parties
-      using threshold ECDSA (tss-lib). Requires a DKG ceremony and a
-      coordination layer for co-signing. Only justified at scale.
-- [ ] **Multi-sig Noir account contract** -- N-of-M signature verification in
-      the on-chain `is_valid` function. Simpler than threshold signing but
-      requires M parties to submit auth witnesses per tx. Latency tradeoff.
-- [ ] **Admin multi-sig** -- Gnosis Safe for operational actions: pause bridge,
-      change spending limits, rotate keys. 2-of-3 minimum, 48h timelock for
-      parameter changes.
+- [ ] **Threshold signing** -- split the signing key across N parties
+      (threshold ECDSA, tss-lib). Needs a DKG ceremony and a co-signing
+      coordination layer. Only justified at scale.
+- [ ] **Multi-sig Noir account contract** -- N-of-M verification in `is_valid`.
+      Simpler than threshold signing; M auth witnesses per tx.
+- [ ] **Admin multi-sig** -- Gnosis Safe for pause, limit changes, key
+      rotation. 2-of-3 minimum, 48h timelock for parameter changes.
 
 ## Not Feasible Yet
 
-- **Trustless settlement contract** -- an Aztec contract that verifies L1
-  settlement proofs directly, eliminating the solver. Aztec's cross-chain
-  system is inbox/outbox message-passing only; no arbitrary L1 state proof
-  verification. Revisit when Aztec ships L1 storage proof primitives.
-- **Full key isolation** -- privacy keys (nullifier, tagging, viewing) must
-  remain in PXE memory. Only the signing key can be delegated externally.
-  TEE enclave is the only mitigation for privacy key exposure.
+- **Trustless settlement contract** -- Aztec's cross-chain system is
+  inbox/outbox message passing only; no arbitrary L1 state proof verification.
+  Revisit when Aztec ships L1 storage proof primitives.
+- **Full key isolation** -- privacy keys must remain in PXE memory. Only the
+  signing key can be delegated; a TEE is the only mitigation.
 
 ## Research Sources
 
@@ -245,6 +77,6 @@ For high-value or high-trust deployments. Significant complexity increase.
 - Across spoke pools (bounded per-chain hot exposure, UMA optimistic oracle)
 - Connext/Everclear watchers (invariant monitoring, contract-level pause)
 - LayerZero RateLimiter library (per-second token flow caps at OApp layer)
-- Aztec SDK v4 `AuthWitnessProvider`, `AccountContract`, `BaseAccount` interfaces
-- Aztec `EcdsaKAccountContract` / `EcdsaRAccountContract` for KMS-compatible signing
+- Aztec `AuthWitnessProvider`, `AccountContract`, `BaseAccount` interfaces
+- Aztec `EcdsaKAccountContract` / `EcdsaRAccountContract` for KMS signing
 - Aztec inbox/outbox L1<->L2 message passing (TokenPortal, FeeJuicePortal)

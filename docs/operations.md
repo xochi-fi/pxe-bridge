@@ -1,60 +1,37 @@
 # Operating the bridge
 
-Operator procedures: recording the account address, the spending-limit
-deployment record, fee juice, and administering the spending-limit account.
-The settlement contract, readiness and attestations are in
-[settlement-operations.md](settlement-operations.md); threat model and
-incident runbook in [SECURITY.md](../SECURITY.md). The complete environment
-variable table is in [CLAUDE.md](../CLAUDE.md#required-environment).
+Operator procedures: the account address, the spending-limit deployment
+record, fee juice, account administration and Oxide mode. Settlement
+contract, readiness and attestations: [settlement-operations.md](settlement-operations.md).
+Threat model and incident runbook: [SECURITY.md](../SECURITY.md). Full
+environment table: [CLAUDE.md](../CLAUDE.md#required-environment).
 
 ## Account address
 
-The bridge's account address derives from its key **and** from the account
-contract's class, so an SDK upgrade that changes the class moves the address
-even though the key did not change. Aztec 5.2.0 and 6.0.0 both did exactly that
-for the stock SchnorrAccount. A bridge that simply derived its address would
-come up at the new, empty address and deploy an account there while the funded
-one sat at the old address.
+The address derives from the key and the account contract's class, so an SDK
+upgrade that changes the class moves it. The bridge records the address and
+`connect()` refuses to deploy or serve as anything else:
 
-So the address is recorded, and `connect()` refuses to deploy or serve as
-anything else:
+1. First deployment: start with `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1`
+   (production only). The bridge logs `[pxe-bridge] Account address: 0x...`.
+2. Set `PXE_BRIDGE_ACCOUNT_ADDRESS` to that address and remove the flag.
+3. If the bridge later refuses with "derives to ... but
+   PXE_BRIDGE_ACCOUNT_ADDRESS is ...", do not change the variable or set the
+   flag: either deploys a fresh, empty account. Read SECURITY.md, "Account
+   address pinning".
 
-1. First deployment: start with `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1` (production
-   only; development needs nothing). The bridge logs
-   `[pxe-bridge] Account address: 0x...`.
-2. Set `PXE_BRIDGE_ACCOUNT_ADDRESS` to that address and remove the flag. In
-   production one of the two is required.
-3. If the bridge later refuses with "derives to ... but PXE_BRIDGE_ACCOUNT_ADDRESS
-   is ...", do not change the variable to the new address to make it start.
-   Read SECURITY.md, "Account address pinning", first.
+In spending-limit mode the address also commits to admin, token,
+`PXE_BRIDGE_MAX_AMOUNT`, `PXE_BRIDGE_DAILY_LIMIT` and the allowlist root. The
+deployment record below fixes those, so `update-allowlist` and limit changes
+do not move it. Its `address` field satisfies `PXE_BRIDGE_ACCOUNT_ADDRESS`;
+if both are set they must be equal.
 
-In spending-limit mode the address also commits to the account's constructor
-inputs: admin, token, `PXE_BRIDGE_MAX_AMOUNT`, `PXE_BRIDGE_DAILY_LIMIT` and the
-allowlist root. The deployment record (`PXE_BRIDGE_ACCOUNT_DEPLOYMENT`, see
-below) fixes those inputs, so `npm run update-allowlist` or new limits do not
-move the address of a bridge that carries it. Its `address` field records the
-same account as `PXE_BRIDGE_ACCOUNT_ADDRESS`: with the record set the variable
-is optional, and if both are set they must be equal or the bridge refuses to
-start. Without the record, changing any input moves the derived address, and a
-bridge with `PXE_BRIDGE_ACCOUNT_ADDRESS` recorded refuses to restart on it. Do
-not unset `PXE_BRIDGE_ACCOUNT_ADDRESS` or set `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1`
-to bring it up: without either record the bridge deploys a fresh, empty account
-at the new address.
-
-Upgrading without the old logs, you can see the address this key derives to
-without deploying anything. Set `PXE_BRIDGE_ACCOUNT_ADDRESS` to the address you
-believe is funded (or any nonzero 32-byte placeholder) and start the bridge.
-`connect()` logs `[pxe-bridge] Account address: 0x...` and, on a mismatch,
-refuses before deploying, with an error naming the derived address. If the
-address is not the funded one, do not record it; see step 3.
+To see which address a key derives to without deploying, set
+`PXE_BRIDGE_ACCOUNT_ADDRESS` to the address you believe is funded (or any
+nonzero placeholder) and start: on a mismatch the bridge refuses before
+deploying, naming the derived address.
 
 ## Spending-limit account deployment record
-
-The spending-limit account's address derives from its constructor arguments:
-the per-tx cap, the daily limit, the admin, the token and the allowlist root.
-The cap, the limit and the root are all meant to change after deployment, so
-the bridge does not derive the address from live configuration once the account
-exists. It derives it from a deployment record instead:
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
@@ -62,8 +39,7 @@ exists. It derives it from a deployment record instead:
 | `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY` | Prod, first deploy only | -- | `1` lets a production bridge deploy without a record |
 
 1. First deployment: start with no record (in production, with
-   `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1`). The bridge deploys and logs the
-   record:
+   `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1`). The bridge deploys and logs:
 
    ```
    [pxe-bridge] ACCOUNT DEPLOYMENT RECORD. Persist this as PXE_BRIDGE_ACCOUNT_DEPLOYMENT ...
@@ -72,88 +48,55 @@ exists. It derives it from a deployment record instead:
 
 2. Store that JSON as `PXE_BRIDGE_ACCOUNT_DEPLOYMENT`, remove
    `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY`, and archive the record with the
-   allowlist seed. Do not edit it afterwards.
+   allowlist seed. Do not edit it.
 3. After `npm run update-allowlist`, change only
    `PXE_BRIDGE_ALLOWLIST_RECIPIENTS` and restart. After `apply_limits`, change
-   `PXE_BRIDGE_MAX_AMOUNT` / `PXE_BRIDGE_DAILY_LIMIT` if you want the
-   application-level limits to follow. Neither moves the address.
+   `PXE_BRIDGE_MAX_AMOUNT` / `PXE_BRIDGE_DAILY_LIMIT` if the application-level
+   limits should follow.
 
 With a record set the bridge never deploys. It refuses to start if the record
-does not derive the recorded address from the secret key (wrong key, edited
-record, or a moved contract class), if no initialized account exists at that
-address on `AZTEC_NODE_URL`, or if `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` /
-`PXE_BRIDGE_SPENDING_LIMIT_TOKEN` differ from the record. In production it also
-refuses to start without a record unless `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1`.
-Outside production it deploys without asking, and logs the record on every
-start that lacks one.
+does not derive the recorded address from the secret key, if no initialized
+account exists at that address, or if `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` /
+`PXE_BRIDGE_SPENDING_LIMIT_TOKEN` differ from it. Outside production it
+deploys and logs the record on every start that lacks one.
 
 ## Fee juice
 
-Every transaction the bridge sends is paid for in fee juice, which is bridged
-in from L1 and cannot be bought, transferred or withdrawn on L2. How the bridge
-gets it depends on which account it runs:
+Every transaction is paid in fee juice, bridged from L1; it cannot be bought,
+transferred or withdrawn on L2.
 
 | Account | Deployment fee | Later transactions | How you fund it |
 | --- | --- | --- | --- |
-| Plain Schnorr (default) | `FEE_JUICE_CLAIM`, else SponsoredFPC | Own balance | `npm run bridge-fee-juice -- --recipient <Account address>` (with `PXE_BRIDGE_ACCOUNT_ADDRESS` set to the same address, or `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1` before the first deployment), then set `FEE_JUICE_CLAIM` |
+| Plain Schnorr (default) | `FEE_JUICE_CLAIM`, else SponsoredFPC | Own balance | `npm run bridge-fee-juice -- --recipient <Account address>` (with `PXE_BRIDGE_ACCOUNT_ADDRESS` set, or `PXE_BRIDGE_ALLOW_ACCOUNT_DEPLOY=1` before the first deployment), then set `FEE_JUICE_CLAIM` |
 | Spending limit (`PXE_BRIDGE_SPENDING_LIMIT_ADMIN`) | `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM`, via the deployer, else SponsoredFPC | Pre-existing balance only | `npm run bridge-fee-juice -- --deployer --recipient <Deployer address>` to deploy, `npm run top-up-fee-juice` to run |
 
-The spending-limit account cannot claim for itself. Its entrypoint admits
-exactly one call and requires it to be `transfer_to_private` on the pinned
-token, and every way of paying a fee adds a second call to the same payload, so
-each of them is rejected by the account's own guard. Setting `FEE_JUICE_CLAIM`
-alongside `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` is refused at startup rather than
-failing during deployment.
+The spending-limit account cannot claim for itself (its entrypoint admits
+exactly one call); `FEE_JUICE_CLAIM` alongside `PXE_BRIDGE_SPENDING_LIMIT_ADMIN`
+is refused at startup.
 
 ### Deployment fee and SponsoredFPC
 
-An account the node does not know yet is deployed on first start, and that
-deployment needs a fee. A plain Schnorr account pays it from `FEE_JUICE_CLAIM`
-when one is set. Otherwise the bridge falls back to SponsoredFPC, a testing
-contract that pays anyone's fee and exists only on sandbox and testnet.
+A plain Schnorr account pays its deployment from `FEE_JUICE_CLAIM`, else from
+SponsoredFPC (sandbox and testnet only). The spending-limit account is
+deployed from a plain Schnorr **deployer** at salt + 1 of the same key, logged
+as `Deployer address: 0x...` while the account needs deploying. With
+`PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM` (bridged to the deployer) it deploys
+itself and pays the account's deployment from the remainder; without it, a
+deployer with a balance pays both, one with none falls back to SponsoredFPC.
 
-The spending-limit account cannot deploy itself (its guard rejects the
-deployment payload), so the bridge first deploys a plain Schnorr **deployer**
-account and sends the deployment from it. The deployer is derived from the same
-secret key under the account salt plus one, so it needs no key material of its
-own and lands at the same address on every restart. Its address is logged as
-`Deployer address: 0x...` whenever the account still needs deploying.
-
-With `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM` set, the deployer deploys itself
-with that claim and then pays for the spending-limit account's deployment out
-of what is left: the deployment is sent from the deployer with no fee payment
-method, so the deployer pays from its own fee juice balance. The claim has to be
-bridged to the deployer, not to the account (`npm run bridge-fee-juice --
---deployer --recipient <Deployer address>`), and is refused without
-`PXE_BRIDGE_SPENDING_LIMIT_ADMIN`. Without it, a deployer that already holds
-fee juice pays both deployments from that balance; one that holds none falls
-back to SponsoredFPC for both. If the claim is already spent while the deployer is not yet
-deployed, the deployer deploys itself from the balance the claim credited; with
-no balance left, startup fails naming the spent claim before sending anything.
-
-The fallback is refused when `NODE_ENV=production`, which the image sets,
-unless `PXE_BRIDGE_ALLOW_SPONSORED_FPC=true`. `false` refuses it in any
-environment, and any other value is rejected at startup. Startup logs which way
-it is set. When refused, an undeployed account stops the bridge during startup
-with an error naming the account and this variable, before anything is sent,
-rather than failing inside the deployment. An account that is already deployed
-(initialized on chain, published or not, as v0.1.2 left it) needs no deployment
-fee and starts either way.
-
-Set `PXE_BRIDGE_ALLOW_SPONSORED_FPC=true` only when the node is a sandbox or
-testnet.
+The fallback is refused under `NODE_ENV=production` (set by the image) unless
+`PXE_BRIDGE_ALLOW_SPONSORED_FPC=true`; `false` refuses it anywhere; any other
+value is rejected at startup. When refused, an undeployed account stops the
+bridge before anything is sent. Set `true` only against a sandbox or testnet.
 
 ### Deploying the spending-limit account in production
 
-1. **Get the deployer address.** Start the bridge once with the
-   spending-limit configuration and no claim. It logs
-   `[pxe-bridge] Account address: 0x...` and `[pxe-bridge] Deployer address: 0x...`,
-   then stops at the SponsoredFPC refusal before sending anything. Both
-   addresses are public; the key stays in Secrets Manager.
+1. **Get the deployer address.** Start the bridge once with the spending-limit
+   configuration and no claim. It logs `Account address` and
+   `Deployer address`, then stops at the SponsoredFPC refusal.
 
-2. **Bridge fee juice to it.** Keep the L1 key out of shell history and the
-   process list: read it from the terminal, or run under `op run` with an
-   `op://` reference.
+2. **Bridge fee juice to it.** Keep the L1 key out of shell history: read it
+   from the terminal, or run under `op run` with an `op://` reference.
 
    ```bash
    read -s L1_PRIVATE_KEY; export L1_PRIVATE_KEY
@@ -163,18 +106,11 @@ testnet.
    unset L1_PRIVATE_KEY
    ```
 
-   Before any L1 write it writes the claim secret, its hash, the starting L1
-   block and the L1 sender to `fee-juice-deposit-<secretHash>.json` in the
-   working directory (mode 0600), and prints a `--recover` command naming it.
-   Once the deposit lands the claim is added to the file, which is deleted
-   only after the message has synced. A hangup exits the run rather than
-   killing it mid-write. If the run dies (timeout, signal, crash), the deposit
-   may still land: run that command from the same directory, with the same
-   `AZTEC_NODE_URL` and `L1_RPC_URL`, instead of this step. It finds the
-   deposit on L1 (or, if the file already records the landed claim, takes it
-   from there), prints the claim and waits, without depositing. Keep
-   `--deployer`: without it the claim prints as `FEE_JUICE_CLAIM`, which the
-   spending-limit bridge refuses:
+   Before any L1 write it writes `fee-juice-deposit-<secretHash>.json` (mode
+   0600) in the working directory and prints a `--recover` command. If the run
+   dies, run that command from the same directory with the same
+   `AZTEC_NODE_URL` and `L1_RPC_URL` instead of repeating this step. Keep
+   `--deployer`, or the claim prints as `FEE_JUICE_CLAIM`:
 
    ```bash
    L1_RPC_URL=https://... AZTEC_NODE_URL=https://... \
@@ -182,38 +118,31 @@ testnet.
        --recover fee-juice-deposit-<secretHash>.json
    ```
 
-   `--recover <secretHash>` finds the same file in the working directory, or
-   without one takes `FEE_JUICE_CLAIM_SECRET`, `FEE_JUICE_RECOVER_FROM_BLOCK`
-   and `BRIDGE_AMOUNT`. When the deposit is not on L1, recovery from the file
-   reads the L1 sender's nonces: a transaction still pending at that RPC can
-   land, so recover again once it is mined; none pending means the deposit
-   was never sent or was dropped, and bridging anew is safe.
+   `--recover <secretHash>` finds the same file, or without one takes
+   `FEE_JUICE_CLAIM_SECRET`, `FEE_JUICE_RECOVER_FROM_BLOCK` and
+   `BRIDGE_AMOUNT`. When the deposit is not on L1, recovery reads the sender's
+   nonces: a pending transaction can still land (recover again once mined);
+   none pending means bridging anew is safe.
 
-   As soon as the L1 deposit lands it prints
-   `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM='{...}'` and the L1 to L2 message
-   hash, then waits until the message has synced and says so. Start the bridge
-   only after that, or its first deployment fails with "No L1 to L2 message
-   found". If the wait times out, **do not run this step again**: the deposit is
-   done and a second run deposits again. Resume the wait instead:
+   Once the deposit lands it prints `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM='{...}'`
+   and the message hash, then waits until the message has synced. Start the
+   bridge only after that. If the wait times out, **do not run this step
+   again**; resume it:
 
    ```bash
    AZTEC_NODE_URL=https://... npm run bridge-fee-juice -- --wait <messageHash>
    ```
 
-   One claim pays for both deployments and for top-up claims sent from the
-   deployer (step 4), so size it for all of them (see below).
+   One claim pays both deployments and any top-up claims sent from the
+   deployer; size it for all of them (see below).
 
-3. **Start the bridge** with the spending-limit configuration and
-   `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM`. It deploys the deployer, then the
-   account, and logs `Ready` without touching SponsoredFPC. Once the account is
-   deployed the claim is spent and the variable can be removed; a restart finds
-   the account on chain and needs no deployment fee. If the deployer is already
-   deployed but its balance cannot cover the account deployment, bridge a fresh
-   claim to the deployer (step 2) and restart with that one.
+3. **Start the bridge** with `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM`. It deploys
+   the deployer, then the account, and logs `Ready`. The variable can then be
+   removed. If the deployer is already deployed but its balance cannot cover
+   the account deployment, bridge a fresh claim (step 2) and restart.
 
-4. **Top up the spending-limit account** at the logged `Account address`, paying
-   from a separate payer account (bootstrapped as described in the next
-   section):
+4. **Top up the spending-limit account** at the logged `Account address` from
+   a separate payer (next section):
 
    ```bash
    read -s FEE_JUICE_PAYER_KEY; export FEE_JUICE_PAYER_KEY
@@ -225,82 +154,47 @@ testnet.
    unset FEE_JUICE_PAYER_KEY L1_PRIVATE_KEY
    ```
 
-   Or keep both in 1Password and run under `op run --env-file=topup.env --
-   npm run top-up-fee-juice`, with `op://` references in `topup.env`.
+   Or `op run --env-file=topup.env -- npm run top-up-fee-juice` with `op://`
+   references. `FEE_JUICE_PAYER_DEPLOYER=true` is refused under
+   `NODE_ENV=production`: the deployer's key is the bridge's signing key.
 
-   The account's transfers pay from that balance, not the payer's.
-   `FEE_JUICE_PAYER_DEPLOYER=true`, which pays from the deployer's leftover
-   balance, is refused under `NODE_ENV=production`: the deployer's key is the
-   bridge's signing key, and the script would load it onto the operator's
-   machine.
-
-The node admits a transaction only if its fee payer's balance covers the fee
-limit, `gasLimits x maxFeesPerGas`, while what is charged is the gas actually
-used at the base fee of inclusion. The bridge sets `maxFeesPerGas` to 10x the
-worst predicted base fee, so the deployer claim must cover the deployer's own
-fee, plus the full fee limit of the account deployment, which publishes the
-account's contract class and is the expensive one, plus the fee limit of every
-top-up claim the deployer is to send. The unspent remainder stays with the
-deployer, which cannot transfer it; it is spendable only on the deployer's own
-transactions, i.e. top-up claims.
-
-When the deployer runs low, it can be refilled like any other account:
-`npm run top-up-fee-juice` with `FEE_JUICE_RECIPIENT` set to the deployer
-address, paid by a payer that still has balance.
+The node admits a transaction only if the fee payer's balance covers
+`gasLimits x maxFeesPerGas`; the bridge sets `maxFeesPerGas` to 10x the worst
+predicted base fee. Size the deployer claim for the deployer's own fee, the
+account deployment's full fee limit (it publishes the contract class) and each
+top-up claim the deployer will send. The remainder stays with the deployer and
+is spendable only on its own transactions. Refill it with
+`npm run top-up-fee-juice` and `FEE_JUICE_RECIPIENT` set to the deployer.
 
 ### Topping up the spending-limit account
 
-`FeeJuice.claim` names its beneficiary in an argument rather than taking the
-caller, so a second account can claim on the bridge's behalf. That is what the
-top-up script does: bridge from L1 to the bridge's address, wait for the L1 to
-L2 message, then send the claim from a payer you control.
+`FeeJuice.claim` names its beneficiary, so a payer you control claims on the
+bridge's behalf: bridge from L1 to the bridge's address, wait for the message,
+send the claim from the payer. The address to fund is logged at startup as
+`[pxe-bridge] Account address: 0x...`.
 
-The bridge logs the address to fund on startup:
+The payer must already be deployed. Set exactly one of:
 
-```
-[pxe-bridge] Account address: 0x...
-```
+- `FEE_JUICE_PAYER_DEPLOYER=true`: the deployer. Refused under
+  `NODE_ENV=production`; sandbox and testnet only.
+- `FEE_JUICE_PAYER_KEY`: a separate plain Schnorr account. To deploy it
+  without SponsoredFPC, start the bridge once with the payer's key and
+  **without** `PXE_BRIDGE_SPENDING_LIMIT_ADMIN`; it logs `Account address`
+  and stops. Bridge to that address with `npm run bridge-fee-juice --
+  --recipient <Account address>`, then start again with the printed
+  `FEE_JUICE_CLAIM`. Record that address as `FEE_JUICE_PAYER_ADDRESS`; the
+  script refuses to send unless the key still derives to it (SECURITY.md,
+  "Account address pinning").
 
-The payer sends the claim and pays its fee from its own balance, so it must
-already be deployed. Set exactly one of:
+Wallet stores are created under `os.tmpdir()` and deleted on exit, SIGINT,
+SIGTERM and SIGHUP; SIGKILL or a crash leaves them.
 
-- `FEE_JUICE_PAYER_DEPLOYER=true`: the spending-limit account's deployer. Its
-  key is the bridge's signing key, read from `PXE_BRIDGE_SECRET_KEY`, so it is
-  refused under `NODE_ENV=production`; use it on sandbox and testnet only.
-- `FEE_JUICE_PAYER_KEY`: a separate plain Schnorr account at the address the
-  bridge derives from that key. To deploy it on a network without
-  SponsoredFPC, start the bridge once with the payer's key and **without**
-  `PXE_BRIDGE_SPENDING_LIMIT_ADMIN`; it logs `Account address` and stops.
-  Bridge to that address with `npm run bridge-fee-juice -- --recipient
-  <Account address>`, then start it again with the printed `FEE_JUICE_CLAIM`.
-  It deploys itself and keeps the remainder as its balance. Record that
-  address as `FEE_JUICE_PAYER_ADDRESS`: the script refuses to send unless the
-  key still derives to it, which it stops doing when an SDK upgrade changes
-  the stock SchnorrAccount class (SECURITY.md, "Account address pinning").
-
-Neither key is written to `./aztec-wallet-data`. The wallet stores are created
-under `os.tmpdir()` and deleted on exit, SIGINT, SIGTERM and SIGHUP; SIGKILL or a
-crash leaves them.
-
-Before any L1 write, the script writes the deposit to
-`fee-juice-deposit-<secretHash>.json` in the working directory (mode 0600) and
-prints its path. Once the deposit lands the claim is added to the file, which
-is deleted only after the claim transaction succeeds. If the run dies, rerun
-with `FEE_JUICE_RECOVER=<file>`: it finds the deposit on L1 (or takes the
-recorded claim from the file), waits for the message and sends the claim,
-without depositing.
-
-The script takes no arguments and refuses any, since an ignored
-`-- --recover <file>` would deposit again. Every option is an env variable.
-`FEE_JUICE_PAYER_DEPLOYER`, `FEE_JUICE_MINT` and `FEE_JUICE_PAYER_SPONSORED`
-accept only `true` or `false`. `FEE_JUICE_PAYER_SPONSORED=true` is refused
-wherever the bridge would refuse SponsoredFPC: under `NODE_ENV=production`
-unless `PXE_BRIDGE_ALLOW_SPONSORED_FPC=true`.
-
-As soon as the L1 deposit lands, the script prints
-`FEE_JUICE_RESUME_CLAIM='{...}'`. If the wait or the claim transaction fails
-after that, rerun with that variable set: it skips the deposit, waits for the
-message and sends the claim. Rerunning with neither deposits again.
+Before any L1 write the script writes `fee-juice-deposit-<secretHash>.json`
+(0600) and prints its path; the file is deleted only after the claim
+transaction succeeds. If the run dies, rerun with `FEE_JUICE_RECOVER=<file>`.
+Once the deposit lands it prints `FEE_JUICE_RESUME_CLAIM='{...}'`; if the wait
+or claim fails after that, rerun with that variable set. Rerunning with neither
+deposits again. The script takes no arguments and refuses any.
 
 ```bash
 read -s FEE_JUICE_PAYER_KEY; export FEE_JUICE_PAYER_KEY
@@ -318,64 +212,50 @@ npm run top-up-fee-juice
 | `FEE_JUICE_RECIPIENT` | Yes | -- | Aztec address to credit |
 | `FEE_JUICE_PAYER_KEY` | One of these two | -- | Secret key of a separate payer account |
 | `FEE_JUICE_PAYER_ADDRESS` | With `FEE_JUICE_PAYER_KEY` | -- | The payer's recorded address; the key must derive to it. Optional with `FEE_JUICE_PAYER_DEPLOYER`, checked the same way when set |
-| `FEE_JUICE_PAYER_DEPLOYER` | One of these two | -- | `true` pays from the spending-limit account's deployer, using the bridge's key; refused under `NODE_ENV=production` |
+| `FEE_JUICE_PAYER_DEPLOYER` | One of these two | -- | `true` pays from the deployer, using the bridge's key; refused under `NODE_ENV=production` |
 | `FEE_JUICE_RESUME_CLAIM` | No | -- | JSON printed by an earlier run; skips the L1 deposit |
-| `FEE_JUICE_RECOVER` | No | -- | Deposit file an earlier run wrote before its deposit, or its secret hash; finds that deposit on L1 instead of making one |
+| `FEE_JUICE_RECOVER` | No | -- | Deposit file an earlier run wrote, or its secret hash; finds that deposit on L1 instead of making one |
 | `FEE_JUICE_CLAIM_SECRET` | With `FEE_JUICE_RECOVER` as a hash with no file | -- | Claim secret of that deposit |
-| `FEE_JUICE_RECOVER_FROM_BLOCK` | With `FEE_JUICE_RECOVER` as a hash with no file | -- | L1 block recorded with it; the scan starts there |
-| `L1_PRIVATE_KEY` | Yes, unless resuming or recovering | -- | Ethereum key holding at least `BRIDGE_AMOUNT` of the Fee Juice ERC20; checked before any L1 write |
+| `FEE_JUICE_RECOVER_FROM_BLOCK` | With `FEE_JUICE_RECOVER` as a hash with no file | -- | L1 block the scan starts at |
+| `L1_PRIVATE_KEY` | Yes, unless resuming or recovering | -- | Ethereum key holding at least `BRIDGE_AMOUNT` of the Fee Juice ERC20 |
 | `AZTEC_NODE_URL` | No | `http://localhost:8080` | Aztec node |
 | `L1_RPC_URL` | No | `http://localhost:8545` | Ethereum RPC |
 | `L1_CHAIN_ID` | No | Anvil's | Required for any L1 other than the sandbox |
 | `BRIDGE_AMOUNT` | No | `1e18` | Fee juice in wei |
-| `FEE_JUICE_PAYER_SPONSORED` | No | -- | `true` pays via SponsoredFPC; sandbox and testnet only, refused under the same policy as `PXE_BRIDGE_ALLOW_SPONSORED_FPC` |
-| `FEE_JUICE_MINT` | No | -- | `true` mints from the L1 faucet first; sandbox only, and `BRIDGE_AMOUNT` must equal the faucet's fixed mint amount |
+| `FEE_JUICE_PAYER_SPONSORED` | No | -- | `true` pays via SponsoredFPC; same policy as `PXE_BRIDGE_ALLOW_SPONSORED_FPC` |
+| `FEE_JUICE_MINT` | No | -- | `true` mints from the L1 faucet first; sandbox only, `BRIDGE_AMOUNT` must equal the faucet's mint amount |
 
-There is nothing to set on the bridge afterwards. The balance is on chain, and
-the account finds it on its next transaction.
-
-Getting `FEE_JUICE_RECIPIENT` wrong is not recoverable: the L1 to L2 message
-commits to the recipient it was built with, and FeeJuice has no transfer, so
-juice credited to the wrong address stays there. The script checks the address
-shape before it writes to L1, which catches a truncated paste but not a
-well-formed wrong address.
+`FEE_JUICE_PAYER_DEPLOYER`, `FEE_JUICE_MINT` and `FEE_JUICE_PAYER_SPONSORED`
+accept only `true` or `false`. Nothing is set on the bridge afterwards.
+A wrong `FEE_JUICE_RECIPIENT` is not recoverable: the message commits to it
+and FeeJuice has no transfer. The script checks the address shape only.
 
 ## Account administration
 
-Admin calls on the spending-limit account. The admin is a deployed Schnorr
-account, derived from its key the way the bridge derives its own, and pays its
-own fees.
+The admin is a deployed Schnorr account that pays its own fees.
 
 Prerequisites:
 
 - The admin account is deployed and holds fee juice. To deploy it:
   1. `npm run admin -- deploy` with `SPENDING_LIMIT_ADMIN_KEY` set. It prints
-     `admin: <address>`, then stops with "SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM is required" if
-     the account is not deployed yet. Nothing is sent, and the wallet it opens
-     lives in `os.tmpdir()` and is deleted on exit.
+     `admin: <address>`, then stops with "SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM
+     is required" if not yet deployed.
   2. `npm run bridge-fee-juice -- --admin --recipient <admin address>`, with
-     `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` set to the same address (the script
-     refuses a recipient that differs from it), `L1_PRIVATE_KEY` set and no
-     `PXE_BRIDGE_SECRET_KEY`. It prints the claim as
+     `PXE_BRIDGE_SPENDING_LIMIT_ADMIN` set to the same address,
+     `L1_PRIVATE_KEY` set and no `PXE_BRIDGE_SECRET_KEY`. It prints
      `SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM`; the deposit file, `--wait` and
-     `--recover` (with `--admin`) work as in "Deploying the spending-limit
-     account in production" above.
-  3. `npm run admin -- deploy` again, with `SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM` set to the
-     printed claim JSON. This is not `FEE_JUICE_CLAIM`, the bridge's own claim.
-     `deploy` sends nothing if the admin is already deployed.
+     `--recover` (with `--admin`) work as above.
+  3. `npm run admin -- deploy` again with that claim. `deploy` sends nothing
+     if the admin is already deployed.
 
-  Never put the admin key in `PXE_BRIDGE_SECRET_KEY`, for any script or for
-  the bridge: `bridge-fee-juice` and the bridge both open a persistent wallet
-  that writes the key to `./aztec-wallet-data`, and the admin key cannot be
-  rotated. Keep the admin funded with `npm run top-up-fee-juice` and
-  `FEE_JUICE_RECIPIENT` set to the admin address: `pause` cannot be sent
-  without it.
-- The contract artifact is in `contracts/spending_limit_account/target/`, for
-  every command including `status`, which takes storage slots from it. It is
-  gitignored: download `contract-artifact` from CI or build it with
-  `aztec compile`. Commands refuse when its class ID differs from the
-  account's, except `pause` and `unpause`, which read no storage: they warn
-  and send, since `aztec compile` is not reproducible (see `SECURITY.md`).
+  Never put the admin key in `PXE_BRIDGE_SECRET_KEY`: the bridge and
+  `bridge-fee-juice` write it to `./aztec-wallet-data`, and the admin key
+  cannot be rotated. Keep the admin funded (`npm run top-up-fee-juice`,
+  `FEE_JUICE_RECIPIENT=<admin address>`): `pause` cannot be sent without it.
+- The artifact is in `contracts/spending_limit_account/target/` (download
+  `contract-artifact` from CI or build with `aztec compile`). Commands refuse
+  when its class ID differs from the account's, except `pause` and `unpause`,
+  which read no storage: they warn and send.
 
 ```bash
 npm run admin -- deploy
@@ -393,25 +273,23 @@ npm run update-allowlist -- --revoke 0x<addr>
 | --- | --- | --- | --- |
 | `SPENDING_LIMIT_ACCOUNT` | All but `deploy` | -- | Address of the spending-limit account |
 | `SPENDING_LIMIT_ADMIN_KEY` | All but `status` | -- | Secret key of the admin |
-| `SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM` | `deploy` | -- | Claim JSON from `npm run bridge-fee-juice -- --admin --recipient <admin address>`. Not needed if already deployed |
-| `PXE_BRIDGE_ALLOWLIST_SEED` | `update-allowlist` | -- | The bridge's allowlist seed. Optional for `status`, see below |
-| `PXE_BRIDGE_ALLOWLIST_RECIPIENTS` | `update-allowlist` | -- | The current set, as the bridge has it. Optional for `status` |
+| `SPENDING_LIMIT_ADMIN_FEE_JUICE_CLAIM` | `deploy` | -- | Claim JSON from `npm run bridge-fee-juice -- --admin --recipient <admin address>` |
+| `PXE_BRIDGE_ALLOWLIST_SEED` | `update-allowlist` | -- | The bridge's allowlist seed. Optional for `status` |
+| `PXE_BRIDGE_ALLOWLIST_RECIPIENTS` | `update-allowlist` | -- | The current set. Optional for `status` |
 | `AZTEC_NODE_URL` | No | `http://localhost:8080` | Aztec node |
 
-Keys, the seed and the claim are checked without echoing them and deleted from the
-process environment on read. The admin wallet's stores, which hold the admin
-key, live in `os.tmpdir()` (`wallet_data-*`, `pxe_data-*`) and are deleted on
-exit, on error and on SIGHUP/SIGINT/SIGTERM. SIGKILL or a crash leaves them.
+Keys, the seed and the claim are deleted from the process environment on read.
+The admin wallet's stores (`os.tmpdir()`) are deleted on exit, error and
+SIGHUP/SIGINT/SIGTERM; SIGKILL or a crash leaves them.
 
-Limits are in token base units, decimal, and must satisfy the contract:
-both non-zero, daily >= per-tx, each within u128. A proposal becomes
-applicable 24h after it lands and stays applicable for 24h; after that,
-`cancel-limits` and propose again. Sends print the tx hash, wait for the
-receipt, print the fee paid, and exit 1 unless it executed successfully.
-`update-allowlist` refuses before sending unless the key derives the account's
-admin and the configured set reproduces the account's `allowlist_root`.
+Limits are token base units, decimal: both non-zero, daily >= per-tx, within
+u128. A proposal becomes applicable 24h after it lands and stays applicable for
+24h; after that, `cancel-limits` and propose again. Sends print the tx hash,
+wait for the receipt and exit 1 unless it succeeded. `update-allowlist`
+refuses unless the key derives the account's admin and the configured set
+reproduces `allowlist_root`.
 
-`status` reads public storage and needs no key. Exit code bits, ORed, for cron:
+`status` needs no key. Exit code bits, ORed, for cron:
 
 | Bit | Meaning |
 | --- | --- |
@@ -421,72 +299,74 @@ admin and the configured set reproduces the account's `allowlist_root`.
 | 8 | `allowlist_root` is not the expected root: `--expect-root`, else the root of `PXE_BRIDGE_ALLOWLIST_SEED` and `PXE_BRIDGE_ALLOWLIST_RECIPIENTS` when set, else unchecked |
 | 16 | Admin fee juice below `--min-fee-juice`; unchecked without it |
 
-Codes >= 128 are interrupts, not bits: 129 SIGHUP, 130 SIGINT, 143 SIGTERM.
-Status bits stay below 32.
+Codes >= 128 are interrupts (129 SIGHUP, 130 SIGINT, 143 SIGTERM).
 
 A send is admitted only if the admin holds its declared fee limit: estimated
-gas plus 10%, at 10x the worst predicted base fee. That is about 11x the `fee`
-a send prints at unchanged base fees. Set `--min-fee-juice` above that for the
-costliest command, with room for base fees to rise.
+gas plus 10%, at 10x the worst predicted base fee, about 11x the `fee` a send
+prints. Set `--min-fee-juice` above that for the costliest command.
 
-`status` sees state at the latest block only. It cannot detect a send not yet
-included, a change undone between two runs (unpause, drain, pause), transfers a
-compromised signing key makes within the live limits and allowlist, or an
-allowlist change when no expected root is configured. Values are read without
-a public-data witness, so the node is trusted: point it at a node you run, over
-https, independent of the one the bridge uses.
-
-See `SECURITY.md` for the incident runbook.
+`status` reads the latest block from one node without a public-data witness:
+point it at a node you run, over https, independent of the bridge's. It cannot
+see a send not yet included or a change undone between runs.
 
 ## Oxide mode (`PXE_BRIDGE_SEND_MODE=oxide`)
 
-Oxide mode pays OXDAI through the Oxide sender (`src/oxide/`). It uses the
-standard Schnorr account (the approved Oxide sender `0x15ff...cb22`), not the
-spending-limit account. It serves only `aztec_createNote` with
-`sendMode: "oxide"`; a `spending_limit` request is refused with `-32602`
-`send_mode_unsupported`, and a spending-limit bridge refuses `oxide` the same
-way. The wire contract is in
+Pays OXDAI through the Oxide sender (`src/oxide/`) on the standard Schnorr
+account (the approved Oxide sender `0x15ff...cb22`). Serves only
+`aztec_createNote` with `sendMode: "oxide"`; the other mode is refused with
+`-32602` `send_mode_unsupported`. Wire contract:
 [settlement-operations.md](settlement-operations.md#sendmode-and-the-oxide-payout-proof-040-pxe-bridge84).
-
-`PXE_BRIDGE_SEND_MODE` takes `spending_limit` (also the value when unset: the
-design-A bridge, unchanged) or `oxide`; any other value refuses to start.
-
-**Variables (Oxide mode):**
+`PXE_BRIDGE_SEND_MODE` takes `spending_limit` (the default) or `oxide`.
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
-| `PXE_BRIDGE_JOURNAL` | yes | The settlement journal, bound to the standard account as in any mode |
-| `PXE_BRIDGE_OXIDE_JOURNAL` | yes | The Oxide journal: its own SQLite file, never the settlement journal's path (compared after `path.resolve`); directory 0700, files 0600 |
-| `PXE_BRIDGE_WALLET_DATA_DIRECTORY` | recommended; required by `oxide-deposit store` | Absolute path to the persistent PXE/wallet LMDB directory. Set the same path on the bridge and mount the same volume into the operator command |
-| `PXE_BRIDGE_OXIDE_L1_RPC_URL` | yes | Ethereum mainnet RPC, `http(s)`, view calls only (TeeRegistry, CertManager, OxidePortal) |
-| `PXE_BRIDGE_OXIDE_TOKEN_ARTIFACT` | yes | The OxideToken artifact `npm run build:oxide-token` writes; refused unless it is the OXDAI class `0x27df40f9...3f949` |
-| `PXE_BRIDGE_SETTLEMENT_CORRIDOR` | yes | The corridor (manifest rev 2); a request naming another corridor or network digest is `not_submitted` `corridor_mismatch` / `network_mismatch` |
-| `PXE_BRIDGE_MAY_BROADCAST_URL` / `_TOKEN` | yes | Riddler's may-broadcast endpoint, asked for each operation's v2 fingerprint |
+| `PXE_BRIDGE_JOURNAL` | yes | The settlement journal, bound to the standard account |
+| `PXE_BRIDGE_OXIDE_JOURNAL` | yes | The Oxide journal: its own SQLite file, never the settlement journal's path; directory 0700, files 0600 |
+| `PXE_BRIDGE_WALLET_DATA_DIRECTORY` | recommended; required by `oxide-deposit store` | Absolute path to the persistent PXE/wallet LMDB directory; the same path on the bridge and the operator command |
+| `PXE_BRIDGE_OXIDE_L1_RPC_URL` | yes | Ethereum mainnet RPC, `http(s)`, view calls only |
+| `PXE_BRIDGE_OXIDE_TOKEN_ARTIFACT` | yes | The OxideToken artifact from `npm run build:oxide-token`; must be the OXDAI class `0x27df40f9...3f949` |
+| `PXE_BRIDGE_SETTLEMENT_CORRIDOR` | yes | The corridor (manifest rev 2) |
+| `PXE_BRIDGE_MAY_BROADCAST_URL` / `_TOKEN` | yes | Riddler's may-broadcast endpoint |
 | `PXE_BRIDGE_OXIDE_ALLOWLIST_SEED` / `_RECIPIENTS` | yes | The private recipient allowlist ([settlement-operations.md](settlement-operations.md#oxide-mode-the-private-allowlist-xochi751-xochi775-option-a)) |
-| `PXE_BRIDGE_OXIDE_MAX_PER_TX` | no, 1,000 DAI | Off-chain per-transaction cap, base units; never above the token's 5,166 DAI note cap |
-| `PXE_BRIDGE_OXIDE_DAILY_LIMIT` | no, 10,000 DAI | Rolling-24h cap, base units, re-checked inside the may-broadcast mark |
-| `PXE_BRIDGE_ACCOUNT_ADDRESS` | production | The Oxide sender's recorded address, as for any standard account |
-| `PXE_BRIDGE_ATTESTATION_API_KEY`, `_SECRET_ARN` (dev: `_SECRET_KEY`), `_SOURCE_CHAIN_ID`, `_ENVIRONMENT`, `_RELAY_URL` / `_RELAY_TOKEN` | for OX-11 | The readiness attestation producer ([settlement-operations.md](settlement-operations.md#recipient-readiness-attestations)): without it no Membership or RootUpdate is signed over the private allowlist and no recipient binding becomes ready. Optional to start; startup logs a warning when Oxide mode runs without it |
+| `PXE_BRIDGE_OXIDE_MAX_PER_TX` | no, 1,000 DAI | Per-transaction cap, base units; never above the token's 5,166 DAI note cap |
+| `PXE_BRIDGE_OXIDE_DAILY_LIMIT` | no, 10,000 DAI | Rolling-24h cap, base units |
+| `PXE_BRIDGE_ACCOUNT_ADDRESS` | production | The Oxide sender's recorded address |
+| `PXE_BRIDGE_ATTESTATION_API_KEY`, `_SECRET_ARN` (dev: `_SECRET_KEY`), `_SOURCE_CHAIN_ID`, `_ENVIRONMENT`, `_RELAY_URL` / `_RELAY_TOKEN` | for OX-11 | The readiness attestation producer ([settlement-operations.md](settlement-operations.md#recipient-readiness-attestations)); without it no recipient binding becomes ready. Startup warns when absent |
+
+**Startup refuses** (`src/oxide/config.ts`): an unknown `PXE_BRIDGE_SEND_MODE`;
+any `PXE_BRIDGE_OXIDE_*` variable outside Oxide mode; in Oxide mode any
+spending-limit or generic-limit variable (`PXE_BRIDGE_SPENDING_LIMIT_ADMIN`,
+`_SPENDING_LIMIT_TOKEN`, `PXE_BRIDGE_ACCOUNT_DEPLOYMENT`,
+`PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM`, `PXE_BRIDGE_ALLOWLIST_RECIPIENTS`,
+`PXE_BRIDGE_MAX_AMOUNT`, `PXE_BRIDGE_DAILY_LIMIT`, `PXE_BRIDGE_COOLDOWN_*`);
+a missing required variable, one file for both journals, a non-http(s) L1
+RPC, or caps that exceed the note cap or each other.
+
+The live deployment (L1, manifest, profile, portal, enclave) is checked before
+every fresh attempt and resend, not at startup, so an outage there never stops
+`aztec_getSettlement`. A deployment that is no longer the pinned one
+(`oxide_pin_mismatch`, `enclave_refused:*`) is PERMANENT (OX-6): re-pin and
+ship a new release. See settlement-operations.md "Oxide readiness".
+
+A schema-1 Oxide journal opens with writes disabled (`unknown_schema_version`);
+start Oxide mode on a fresh file. Never delete a schema-2 journal that holds
+unresolved operations.
 
 ### Funding the Oxide sender's private OXDAI balance
 
 `npm run fund-oxide` performs the canonical Oxide deposit: approve the pinned
-DAI portal, compute the recipient commitment with Oxide's helper, call
-`OxidePortal.deposit`, wait for its L1-to-L2 message, then run the existing
-`storeOxideDeposit` utility call in the sender's PXE. The helper and portal
-surface come from `aztec-labs-eng/zkmoney-public` commit
-`8fd198412a956f214639b5782d3a86e3d47ca60e`; see
-`src/oxide/vendor/VENDORED.md` and `src/oxide/portal-deposit.ts`.
+DAI portal, compute the recipient commitment, call `OxidePortal.deposit`, wait
+for the L1-to-L2 message, then run `storeOxideDeposit` in the sender's PXE.
+Helper and portal surface: `aztec-labs-eng/zkmoney-public` commit
+`8fd198412a956f214639b5782d3a86e3d47ca60e` (`src/oxide/vendor/VENDORED.md`,
+`src/oxide/portal-deposit.ts`).
 
-Stop the Oxide bridge before the store phase: the one-shot tool opens the same
-wallet data directory. Set `PXE_BRIDGE_ACCOUNT_ADDRESS` to the recorded Oxide
-sender. The command requires the chain, token, portal, L1 sender and Aztec
-recipient explicitly, then refuses any value that differs from the shipped
-Oxide v6 pins, the recorded account or the L1 key. The amount is a canonical
-positive decimal in DAI base units, not a decimal DAI display amount.
+Stop the Oxide bridge before the store phase (same wallet data directory). Set
+`PXE_BRIDGE_ACCOUNT_ADDRESS` to the recorded sender. Every argument is
+required and must equal the shipped Oxide v6 pins; the amount is DAI base
+units.
 
-Plan first. This validates arguments and an existing state file, if any, but
-makes no network request and creates no state:
+Plan first (validates arguments and any existing state, no network, no state):
 
 ```bash
 PXE_BRIDGE_ACCOUNT_ADDRESS='<OXIDE_SENDER_AZTEC_ADDRESS>' \
@@ -501,93 +381,37 @@ npm run fund-oxide -- \
   --amount '<DAI_BASE_UNITS>'
 ```
 
-For the live operator run, provide `L1_PRIVATE_KEY`,
-`PXE_BRIDGE_SECRET_KEY`, `PXE_BRIDGE_OXIDE_L1_RPC_URL`, `AZTEC_NODE_URL` and
-`PXE_BRIDGE_OXIDE_TOKEN_ARTIFACT` from the operator secret/config store. Never
-put either key on the command line. Use the same arguments as the plan, without
-`--dry-run`; `--wallet-data-dir '<PXE_WALLET_DATA_DIRECTORY>'` names the
-bridge's durable wallet store when it is not the default.
+Live run: provide `L1_PRIVATE_KEY`, `PXE_BRIDGE_SECRET_KEY`,
+`PXE_BRIDGE_OXIDE_L1_RPC_URL`, `AZTEC_NODE_URL` and
+`PXE_BRIDGE_OXIDE_TOKEN_ARTIFACT` from the secret store, never on the command
+line; same arguments without `--dry-run`; `--wallet-data-dir` names the
+bridge's wallet store when not the default.
 
-The state path must not exist on the first run. The tool creates it as a 0600
-regular file and fsyncs it before approval or deposit. It contains the random
-shared-secret salt and signed transactions, but no private key; neither the
-salt nor the state JSON is printed. Its phases are:
-`prepared -> approved -> deposited -> message_ready -> stored`. Each change is
-an owner-only temporary file, fsync and atomic rename. The `deposited` phase is
-written with the signed raw transaction and hash **before broadcast**. A crash,
-timeout or RPC error after that point can only query or rebroadcast those exact
-bytes (same hash and nonce); no retry path calls `deposit` again.
+The state path must not exist on the first run. It is a 0600 file holding the
+salt and signed transactions, phases
+`prepared -> approved -> deposited -> message_ready -> stored`. `deposited` is
+written with the signed raw transaction **before broadcast**; after that only
+those exact bytes are ever rebroadcast. Rerun the exact command with the same
+state path after any interruption.
 
-Rerun the exact command with the same state path after any interruption. A
-not-ready message leaves the verified event key, index and credited amount in
-`deposited`; rerunning polls it and continues. `store_deposit` is considered
-complete on a duplicate only when OxideToken returns its exact
-`deposit already stored` assertion. Every other store error is fatal and the
-state remains `message_ready`.
-
-Treat the state and every backup as a secret because they contain the salt.
-With the tool stopped, back it up without loosening permissions:
+The state and every backup are secrets (they hold the salt). Back up with the
+tool stopped:
 
 ```bash
 install -m 600 '<OWNER_ONLY_STATE_PATH>' '<OWNER_ONLY_BACKUP_PATH>'
 ```
 
 To recover, restore that file with mode 0600 and rerun the identical command.
-Never edit it, choose a new state path or start another deposit to work around
-an error. If both state and backup are lost after deposit preparation or
-broadcast, stop: recover the exact known transaction and salt from controlled
-operator records. **Never submit a second L1 deposit.** Preserve the `stored`
-state as the immutable receipt.
+Never edit it, choose a new state path or start another deposit. If both are
+lost after preparation or broadcast, stop and recover the transaction and salt
+from operator records. **Never submit a second L1 deposit.** Keep the `stored`
+state as the receipt.
 
-**Startup refuses**, before a key is fetched or a node is touched
-(`src/oxide/config.ts`):
-- an unknown `PXE_BRIDGE_SEND_MODE`;
-- any `PXE_BRIDGE_OXIDE_*` variable without `PXE_BRIDGE_SEND_MODE=oxide`,
-  because a spending-limit bridge would silently ignore it;
-- in Oxide mode, any spending-limit or generic-limit variable
-  (`PXE_BRIDGE_SPENDING_LIMIT_ADMIN`, `_SPENDING_LIMIT_TOKEN`,
-  `PXE_BRIDGE_ACCOUNT_DEPLOYMENT`, `PXE_BRIDGE_DEPLOYER_FEE_JUICE_CLAIM`,
-  `PXE_BRIDGE_ALLOWLIST_RECIPIENTS`, `PXE_BRIDGE_MAX_AMOUNT`,
-  `PXE_BRIDGE_DAILY_LIMIT`, `PXE_BRIDGE_COOLDOWN_*`). Oxide caps are
-  `PXE_BRIDGE_OXIDE_MAX_PER_TX` and `_DAILY_LIMIT`;
-- a missing required variable, one file for both journals, a non-http(s) L1
-  RPC, or caps that exceed the note cap or each other.
+### Funding the sender's private OXDAI balance (split signer)
 
-After the wallet connects, `createOxideSender` refuses (and the process exits)
-only on a local defect: an artifact that is not the OXDAI class, an OXDAI
-instance not locked to it, or spend keys that do not derive the account. The
-live deployment (L1, the Oxide manifest, the zk.money profile, the portal, the
-enclave) is not asserted at startup: an outage there must not stop
-`aztec_getSettlement` or the recovery of journaled payouts. It is checked
-before every fresh attempt and every resend (a fresh attempt is refused
-`not_submitted`, a held attempt stays `prepared`), the enclave is connected on
-first sign, and `/ready` reports it. The refusal's class follows what was
-found (xochi#748 OX-6): a deployment that is no longer the pinned one --
-manifest or profile moved (`oxide_pin_mismatch`), L1 not the pinned
-chain/registry/portal (`enclave_refused:l1_not_pinned`), the fleet's PCR0
-not the pinned image or not hashing to `TeeRegistry.PCR0_HASH()`
-(`enclave_refused:pcr0_not_pinned` / `pcr0_hash_mismatch`) -- is PERMANENT:
-nothing this process retries clears it, an operator re-pins after review and
-ships a new release, and Riddler refunds the order. An unread pin
-(`oxide_pin_unverified`), a frozen portal and an attestation document that
-does not verify are transient. The same split applies at admission
-(`OxideReadiness.admit`, docs/settlement-operations.md "Oxide readiness"). `/ready` reports `initializing` until the
-sender is built.
-
-**Oxide journal schema 2.** Each row holds the operation's v2 terms
-(`sendMode: "oxide"`) and their v2 request fingerprint. A phase-1 (schema 1)
-Oxide journal, written by the unreleased `createOxideSender` callers before
-0.4.0, opens with writes disabled (`unknown_schema_version`); no release
-wrote one. Start Oxide mode on a fresh file. Never reuse a phase-1 journal,
-and never delete a schema-2 journal that holds unresolved operations: it is
-the only record of what may have been broadcast.
-
-### Funding the sender's private OXDAI balance
-
-`oxide-deposit` is deliberately split from the L1 signer. It never accepts a
-private key, signs a transaction, or broadcasts. `prepare` reads the shared
-deposit salt only from an already-open file descriptor and prints canonical
-DAI `approve` and `OxidePortal.deposit` arguments/calldata:
+`oxide-deposit` never accepts a private key, signs or broadcasts. `prepare`
+reads the salt from an open file descriptor and prints canonical DAI `approve`
+and `OxidePortal.deposit` calldata:
 
 ```bash
 exec 3</run/secrets/oxide-deposit-salt
@@ -600,15 +424,12 @@ The plan pins Ethereum chain 1, DAI
 `0x6B175474E89094C44Da98b954EedeAC495271d0F`, OXDAI
 `0x11d2bed21a36289fd6f6a6af93a546b5be7115caf957f0f700f42d56e25fe0a3`,
 rollup version `2070860440`, portal
-`0xCB99C58Fe81Ae6b2cB4835e46F7b703745879042`, and the approved private sender
-`0x15ff3aa2270843241b4405bfc8ba72ae59b68c85996cff9e5c03daf03109cb22`.
-It contains the recipient commitment, not the salt. Inspect the JSON, then use
-an operator-held L1 signer outside pxe-bridge to submit the approval and
-deposit. L1 signing and broadcasting are external operator actions; this tool
-cannot perform either one.
+`0xCB99C58Fe81Ae6b2cB4835e46F7b703745879042`, and the approved sender
+`0x15ff3aa2270843241b4405bfc8ba72ae59b68c85996cff9e5c03daf03109cb22`. It
+contains the recipient commitment, not the salt. Submit the approval and
+deposit with an operator-held L1 signer outside pxe-bridge.
 
-After the deposit transaction is successful and finalized, stop the bridge so
-the tool can take the Oxide send-journal and wallet-store locks. Use the same
+After the deposit is finalized, stop the bridge and store it with the same
 salt and the confirmed **deposit** transaction hash:
 
 ```bash
@@ -628,46 +449,32 @@ exec 3<&-
 ```
 
 `--initialize-journal` is the one-time acknowledgement for a new deposit
-journal; omit it on later calls. Put `PXE_BRIDGE_OXIDE_DEPOSIT_HWM` on an
-owner-only directory in a separate rollback/snapshot domain from the SQLite
-journal; the command refuses the journal's own directory. Restoring the
-database without its monotonic high-water mark is then detected before PXE is
-touched. Never replace or rewind either file.
+journal; omit it later. Put `PXE_BRIDGE_OXIDE_DEPOSIT_HWM` on an owner-only
+directory in a separate snapshot domain from the journal (the journal's own
+directory is refused). Never replace or rewind either file. Run from the
+shipped image (`dist/oxide/deposit-cli.js`) or a matching checkout, with the
+production wallet volume at the exact `PXE_BRIDGE_WALLET_DATA_DIRECTORY`; the
+deposit journal binds to that path, the approved account/token/deployment and
+the send-journal ID. Unset the deposit-journal and HWM variables before
+restarting the bridge. A raw `PXE_BRIDGE_SECRET_KEY` is refused.
 
-Run the command from the shipped image (the CLI is compiled at
-`dist/oxide/deposit-cli.js`) or a matching checkout, and mount the production
-wallet volume at the exact absolute `PXE_BRIDGE_WALLET_DATA_DIRECTORY` used by
-the bridge. The deposit journal binds itself to that path, the approved
-account/token/deployment, and the real Oxide send-journal ID; a different
-checkout cwd, wallet volume, or send journal is refused. The deposit-journal
-and HWM variables are operator-only: unset them before restarting the bridge.
-A raw `PXE_BRIDGE_SECRET_KEY` is refused; the store command uses the bridge's
-existing Secrets Manager reference and forbids account deployment.
-
-Before touching PXE, `store` fetches the receipt and transaction from the L1
-RPC and requires:
+Before touching PXE, `store` fetches the receipt and transaction and requires:
 
 - chain 1, a successful receipt at or below the finalized head, and the same
-  canonical block hash from receipt, transaction, and block;
+  block hash from receipt, transaction and block;
 - exactly one `Deposit` event from the pinned portal, canonical `deposit`
   calldata, the approved sender's salt-bound recipient commitment, matching
-  amount, message key, and inbox index;
-- the portal's DAI `UNDERLYING`, OXDAI `L2_TOKEN`, rollup version, and exact
-  1,000 DAI transaction cap at the receipt block;
-- no amount above 1,000 DAI and no locally admitted rolling 24-hour total
-  above 10,000 DAI (the monotonic local admission time prevents an L1 RPC from
-  choosing the cap window; the 5,166 DAI note maximum is also checked); and
+  amount, message key and inbox index;
+- the portal's DAI `UNDERLYING`, OXDAI `L2_TOKEN`, rollup version and exact
+  1,000 DAI cap at the receipt block;
+- no amount above 1,000 DAI and no local rolling 24-hour total above 10,000
+  DAI (the 5,166 DAI note maximum is also checked);
 - the event's L1-to-L2 message present in the PXE's latest message tree.
 
-The owner-only SQLite journal is keyed by transaction hash and full event
-identity. It writes `submitting` before the one `store_deposit` utility call.
-An ordinary replay of a completed row returns `already_stored`. Any replay of
-`submitting` is intentionally fail-closed and refuses a second store, whether
-the interruption happened immediately before the PXE call, after it returned,
-or during an RPC failure. Preserve both journals and inspect the PXE state.
-Oxide currently exposes aggregate `balance_of`, not a deposit-identity query;
-an unrelated credit can produce the same balance delta, so balance is never
-accepted as reconciliation evidence. Automated reconciliation requires an
-additional PXE utility view keyed by the exact inbox index/message key that
-returns the stored amount, recipient, and deposit identity. Until that exists,
-the ambiguous row must remain `submitting`.
+The journal is keyed by transaction hash and event identity and writes
+`submitting` before the one `store_deposit` call. A completed row replays as
+`already_stored`. A row left at `submitting` refuses a second store, whatever
+the interruption: preserve both journals and inspect the PXE state. Balance
+deltas are never reconciliation evidence (an unrelated credit can match);
+until a PXE view keyed by inbox index exists, the ambiguous row stays
+`submitting`.
