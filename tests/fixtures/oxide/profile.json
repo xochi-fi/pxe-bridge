@@ -22,13 +22,13 @@
             "oxide": {
                 "manifestUrl": "https://v6-prod.oxide.zk.money/v6/v6-prod/releases.json",
                 "portal": "0xCB99C58Fe81Ae6b2cB4835e46F7b703745879042",
-                "expectedGitSha": "3d8e29dc359023012a91d75538ed757dc9add937"
+                "expectedGitSha": "dab3d38be1719346b717a025fa608b65c859f760"
             },
             "assets": [
                 {
                     "symbol": "DAI",
                     "portal": "0xCB99C58Fe81Ae6b2cB4835e46F7b703745879042",
-                    "expectedGitSha": "3d8e29dc359023012a91d75538ed757dc9add937"
+                    "expectedGitSha": "dab3d38be1719346b717a025fa608b65c859f760"
                 }
             ],
             "contracts": {

@@ -5,6 +5,8 @@
  *
  * Every value here was read from the published manifest and profile and, where
  * one exists, from L1 (TeeRegistry, CertManager, OxidePortal) on 2026-11-02.
+ * `gitSha` re-pinned 2026-11-12 (3d8e29d -> dab3d38): upstream redeployed dep-v6
+ * with every other pinned value unchanged (PCR0, registry, portal, immutables).
  * A change upstream is a new deployment, not drift to absorb: the sender stops
  * and an operator re-pins after review.
  */
@@ -13,7 +15,7 @@ export const OXIDE_V6_MAINNET = {
   profileUrl: "https://cdn.zk.money/profiles/v6/current.json",
   deploymentId: "dep-v6",
   /** Oxide deployment git sha; the profile names the same one as `expectedGitSha`. */
-  gitSha: "3d8e29dc359023012a91d75538ed757dc9add937",
+  gitSha: "dab3d38be1719346b717a025fa608b65c859f760",
   l1ChainId: 1n,
   rollupVersion: 2070860440n,
   rollupAddress: "0xe37a2663cc9c119ba41572c40fab0bbb23a5402f",
