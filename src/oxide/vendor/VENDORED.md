@@ -11,7 +11,7 @@ publishes no package.
 | Source | https://github.com/aztec-labs-eng/zkmoney-public, `vendor/oxide/yarn-project/` |
 | Commit | `8fd198412a956f214639b5782d3a86e3d47ca60e` (2026-10-27) |
 | Oxide subset | `3b5e1f7c8f18e24f74d463911b319aac101f0aee` (`EXPORT-MANIFEST.json` `oxidePin`) |
-| Deployment it serves | Oxide v6 mainnet, manifest `gitSha` `3d8e29dc359023012a91d75538ed757dc9add937` (pinned in `../pins.ts`) |
+| Deployment it serves | Oxide v6 mainnet, manifest `gitSha` `dab3d38be1719346b717a025fa608b65c859f760` (pinned in `../pins.ts`; re-pinned from `3d8e29dc359023012a91d75538ed757dc9add937` on 2026-11-12: none of the vendored files changed upstream between `8fd1984` and `8f26cec`, and PCR0 is unchanged) |
 | License | MIT, Copyright (c) 2026 Aztec Labs: `LICENSE` and `NOTICE` here are upstream's, byte for byte. None of these files carries an SPDX header, so the repository's MIT license applies to all of them (upstream `NOTICE`). No Solidity (Apache-2.0) is vendored. |
 
 ## What was changed

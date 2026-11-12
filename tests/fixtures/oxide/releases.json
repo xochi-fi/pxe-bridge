@@ -4,7 +4,7 @@
         {
             "deploymentId": "dep-v6",
             "deploymentType": "oxide-app",
-            "gitSha": "3d8e29dc359023012a91d75538ed757dc9add937",
+            "gitSha": "dab3d38be1719346b717a025fa608b65c859f760",
             "deployedAt": "2026-10-26T14:17:20.299Z",
             "updatedAt": "2026-10-29T13:31:03.698Z",
             "chainId": "1",
